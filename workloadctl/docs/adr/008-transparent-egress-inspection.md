@@ -37,7 +37,11 @@ split is the value, and `policy` does not exist yet.
 - **Decision 5's method and path matching.** The only thing a terminated request
   is checked against today is the same `hosts` allowlist the spliced path used,
   applied per request instead of per connection. That is a real gain and it is
-  not the decision.
+  not the decision. Its *normalisation* half is in ahead of it, and on purpose:
+  the target is percent-decoded, dot-resolved and slash-collapsed, and the
+  normalised form is what goes upstream, so the string a `paths` rule will be
+  written against is already the string the origin acts on. An encoded `/` is
+  refused rather than read either way.
 - **Decision 2's written `reason` for a splice.** `tls = "splice"` is accepted
   as a bare value, so config review still cannot distinguish "spliced because it
   must be" from "spliced because nobody tried" — which is the exact sentence

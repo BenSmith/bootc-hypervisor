@@ -2142,5 +2142,134 @@ class TestStatusFile(unittest.TestCase):
         self.assertIn("could not write", out.getvalue())
 
 
+class TestTargetNormalisation(unittest.TestCase):
+    """Rung 3 T7. The table, and the encoded-separator cases it exists for.
+
+    Nothing here changes a disposition -- there is no `paths` key until rung 4.
+    What it fixes is the string: the one this listener acts on and the one the
+    origin acts on have to be the same string BEFORE a matcher is written
+    against either.
+    """
+
+    def norm(self, target):
+        return _mod().normalise_path(target)
+
+    def test_dot_segments_resolve(self):
+        for target, expected in (
+                ("/repos/myorg/../../secret", "/secret"),
+                ("/a/./b", "/a/b"),
+                ("/a/b/../c", "/a/c"),
+                ("/a/b/..", "/a/"),
+                ("/a/b/.", "/a/b/"),
+                ("/../../etc/passwd", "/etc/passwd"),
+                ("/..", "/"),
+                ("/", "/"),
+        ):
+            self.assertEqual(self.norm(target), expected, target)
+
+    def test_duplicate_slashes_collapse(self):
+        self.assertEqual(self.norm("/a//b///c"), "/a/b/c")
+        self.assertEqual(self.norm("//"), "/")
+
+    def test_a_trailing_slash_is_kept_because_it_names_another_resource(self):
+        self.assertEqual(self.norm("/a/"), "/a/")
+        self.assertEqual(self.norm("/a"), "/a")
+
+    def test_unreserved_encodings_decode(self):
+        self.assertEqual(self.norm("/%61%62c"), "/abc")
+        self.assertEqual(self.norm("/a%2Db%5Fc%7Ed"), "/a-b_c~d")
+
+    def test_reserved_encodings_stay_encoded_in_uppercase(self):
+        """`%3F` is not a `?` -- decoding it would move the query boundary --
+        and one spelling per path is what keeps a matcher honest."""
+        self.assertEqual(self.norm("/a%3fb"), "/a%3Fb")
+        self.assertEqual(self.norm("/a%20b"), "/a%20b")
+        self.assertEqual(self.norm("/%c3%a9"), "/%C3%A9")
+
+    def test_an_encoded_dot_decodes_and_then_resolves(self):
+        """The other end of the traversal case: the dots become dots before
+        the resolution runs, so `%2e%2e` cannot slip past it."""
+        self.assertEqual(self.norm("/a/%2e%2e/b"), "/b")
+        self.assertEqual(self.norm("/a/%2E/b"), "/a/b")
+
+    def test_an_encoded_slash_is_refused(self):
+        """The case the whole unit turns on. Origins are split on whether
+        `%2f` separates two segments, so neither reading is one this listener
+        may pick on the guest's behalf."""
+        mod = _mod()
+        for target in ("/repos/myorg%2f..%2f..%2fsecret", "/a%2Fb",
+                       "/a/%2e%2e%2fb"):
+            with self.assertRaises(mod.RequestUnreadable, msg=target) as caught:
+                self.norm(target)
+            self.assertIn("encoded slash", str(caught.exception))
+
+    def test_a_stray_percent_is_refused(self):
+        mod = _mod()
+        for target in ("/a%", "/a%zz", "/a%2"):
+            with self.assertRaises(mod.RequestUnreadable, msg=target):
+                self.norm(target)
+
+    def test_the_query_is_carried_through_untouched(self):
+        """`paths` will match the path alone. Matching the full target would
+        deny `/v1/messages?stream=true` under `paths = ["/v1/messages"]` for a
+        reason an operator cannot see in their config."""
+        self.assertEqual(self.norm("/a/../b?x=%2f&y=%2E"), "/b?x=%2f&y=%2E")
+        self.assertEqual(self.norm("/a?"), "/a?")
+
+    def test_params_are_left_inside_their_segment(self):
+        """Stripping `;params` is a legacy reading, and this listener does not
+        get to decide the origin shares it."""
+        self.assertEqual(self.norm("/a;v=1/b"), "/a;v=1/b")
+
+    def test_a_fragment_is_refused(self):
+        mod = _mod()
+        with self.assertRaises(mod.RequestUnreadable):
+            self.norm("/a#b")
+
+    def test_an_absolute_form_target_is_normalised_too(self):
+        """Otherwise the one form that moves the name out of the Host header is
+        also the one that skips the path work."""
+        mod = _mod()
+        target, authority = mod.normalise_target(
+            "GET", "http://h.example/a/../b")
+        self.assertEqual((target, authority), ("/b", "h.example"))
+
+    def test_an_absolute_form_authority_ends_before_a_query(self):
+        """A query can carry a slash of its own, and splitting the authority on
+        that one puts half the query into the name being authorised."""
+        mod = _mod()
+        target, authority = mod.normalise_target(
+            "GET", "http://h.example?next=/a/b")
+        self.assertEqual(authority, "h.example")
+        self.assertEqual(target, "/?next=/a/b")
+
+
+class TestTheNormalisedFormIsWhatGoesUpstream(_CleartextRig):
+    """The half a table cannot hold. A normalisation the origin never sees is
+    a second reading of the path, which is the defect it was written to close.
+    """
+
+    def test_the_origin_gets_the_resolved_path(self):
+        log, _, dialled = self._run(
+            ["h.example"],
+            b"GET /repos/myorg/../../secret HTTP/1.1\r\nHost: h.example\r\n"
+            b"Connection: close\r\n\r\n",
+            responses=[_OK])
+        self.assertEqual(len(dialled), 1)
+        sent = dialled[0][1]
+        self.assertTrue(sent.startswith(b"GET /secret HTTP/1.1\r\n"),
+                        sent[:60])
+        self.assertNotIn(b"..", sent.split(b"\r\n")[0])
+        self.assertIn("forward", log)
+
+    def test_an_encoded_slash_never_reaches_an_origin(self):
+        log, answer, dialled = self._run(
+            ["h.example"],
+            b"GET /a%2f..%2fb HTTP/1.1\r\nHost: h.example\r\n\r\n")
+        self.assertEqual(dialled, [])
+        self.assertTrue(answer.startswith(b"HTTP/1.1 400 "), answer[:40])
+        self.assertIn("unreadable request", log)
+
+
 if __name__ == "__main__":
     unittest.main()
