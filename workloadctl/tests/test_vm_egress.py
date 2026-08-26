@@ -2224,6 +2224,248 @@ class TestRung2Schema(unittest.TestCase):
             "tls": "splice",
             "internal": [{"host": "git.local", "reason": "the forge"}]}), [])
 
+    # --- policy ---
+
+    def test_a_single_entry_host_may_omit_both_keys(self):
+        """The shorthand survives untouched where it means what it appears to.
+        An inspected host with no path policy still enforces Host binding."""
+        self.assertEqual(self._egress({
+            "hosts": ["api.example.com"],
+            "policy": [{"host": "api.example.com"}]}), [])
+
+    def test_a_policy_host_need_not_appear_in_hosts(self):
+        """§3, and it is the composition rule seen from the other side: a
+        `hosts` entry is not a `policy` entry, but a `policy` entry allowlists
+        on its own."""
+        self.assertEqual(self._egress({
+            "policy": [{"host": "api.example.com", "methods": ["GET"],
+                        "paths": ["/v1/*"]}]}), [])
+
+    def test_a_workload_whose_whole_allowlist_is_policy_can_reach_something(self):
+        """The 'could reach nothing at all' refusal must count policy entries,
+        or the one configuration this design most wants -- every host carrying
+        method and path rules -- is the one it rejects."""
+        self.assertEqual(self._egress({
+            "egress": "filtered",
+            "policy": [{"host": "api.example.com", "methods": ["POST"],
+                        "paths": ["/v1/messages"]}]}), [])
+
+    def test_policy_is_refused_under_tls_splice(self):
+        errors = self._egress({
+            "hosts": ["api.example.com"], "tls": "splice",
+            "policy": [{"host": "api.example.com", "methods": ["GET"],
+                        "paths": ["/v1/*"]}]})
+        self.assertTrue(any("never decrypted" in e for e in errors), errors)
+
+    def test_policy_is_refused_under_open_and_beside_a_bridge(self):
+        for net in ({"egress": "open",
+                     "policy": [{"host": "a.example", "methods": ["GET"],
+                                 "paths": ["/*"]}]},
+                    {"bridge": "br0",
+                     "policy": [{"host": "a.example", "methods": ["GET"],
+                                 "paths": ["/*"]}]}):
+            errors = self._egress(net)
+            self.assertTrue(any("policy" in e for e in errors), (net, errors))
+
+    def test_a_name_in_both_splice_and_policy_is_refused(self):
+        errors = self._egress({
+            "hosts": ["a.example"],
+            "splice": [{"host": "a.example", "reason": "pins a cert"}],
+            "policy": [{"host": "a.example", "methods": ["GET"],
+                        "paths": ["/*"]}]})
+        self.assertTrue(any("could never run" in e for e in errors), errors)
+
+    # --- the widening trap ---
+
+    def test_overlapping_entries_must_state_both_keys(self):
+        """One entry omitting `paths` permits every path on that host, which
+        silently defeats every sibling that was carefully narrowed -- and the
+        diff that introduced it looks like it added a restriction."""
+        errors = self._egress({
+            "hosts": ["api.example.com"],
+            "policy": [{"host": "api.example.com", "methods": ["POST"],
+                        "paths": ["/v1/messages"]},
+                       {"host": "api.example.com", "methods": ["GET"]}]})
+        self.assertTrue(any("permits everything" in e for e in errors), errors)
+
+    def test_overlap_is_by_PATTERN_not_by_identical_host_strings(self):
+        """The half that is easy to implement wrongly. `*.example.com` and
+        `api.example.com` are two entries matching one name, so both must state
+        both keys -- and a check comparing literal `host` values passes exactly
+        the file this rule exists to catch."""
+        errors = self._egress({
+            "hosts": ["*.example.com"],
+            "policy": [{"host": "api.example.com", "methods": ["POST"],
+                        "paths": ["/v1/messages"]},
+                       {"host": "*.example.com", "methods": ["GET"]}]})
+        self.assertTrue(any("shares a host" in e for e in errors), errors)
+
+    def test_non_overlapping_entries_keep_the_shorthand(self):
+        self.assertEqual(self._egress({
+            "hosts": ["a.example", "b.example"],
+            "policy": [{"host": "a.example", "methods": ["GET"]},
+                       {"host": "b.example", "paths": ["/x/*"]}]}), [])
+
+    def test_a_duplicate_entry_is_refused(self):
+        errors = self._egress({
+            "hosts": ["a.example"],
+            "policy": [{"host": "a.example", "methods": ["GET"],
+                        "paths": ["/*"]},
+                       {"host": "a.example", "methods": ["GET"],
+                        "paths": ["/*"]}]})
+        self.assertTrue(any("appears twice" in e for e in errors), errors)
+
+    # --- the apex trap ---
+
+    def test_a_wildcard_policy_entry_over_an_allowlisted_apex_is_refused(self):
+        """A security hole, not an outage. The apex stays allowlisted and
+        inspected with NO method or path rules applied, so the operator
+        believes a restriction is in force and it is not -- and neither
+        existing rule fires, because the wildcard does match allowlisted
+        names."""
+        errors = self._egress({
+            "hosts": ["example.com", "*.example.com"],
+            "policy": [{"host": "*.example.com", "methods": ["GET"],
+                        "paths": ["/*"]}]})
+        self.assertTrue(any("does not cover the apex" in e for e in errors),
+                        errors)
+
+    def test_an_entry_for_the_apex_as_well_satisfies_it(self):
+        self.assertEqual(self._egress({
+            "hosts": ["example.com", "*.example.com"],
+            "policy": [{"host": "*.example.com", "methods": ["GET"],
+                        "paths": ["/*"]},
+                       {"host": "example.com", "methods": ["GET"],
+                        "paths": ["/*"]}]}), [])
+
+    def test_the_apex_rule_does_not_fire_on_an_unallowlisted_apex(self):
+        """`*.example.com` alone in .hosts leaves the apex unreachable, which
+        is the documented fnmatch behaviour and not this rule's business."""
+        self.assertEqual(self._egress({
+            "hosts": ["*.example.com"],
+            "policy": [{"host": "*.example.com", "methods": ["GET"],
+                        "paths": ["/*"]}]}), [])
+
+    def test_a_wildcard_splice_entry_over_an_allowlisted_apex_is_refused(self):
+        """The same trap, the other consequence: the apex is INSPECTED, so a
+        host spliced precisely because its client cannot take our CA breaks at
+        the apex only, as a TLS error rather than a policy message."""
+        errors = self._egress({
+            "hosts": ["example.com", "*.example.com"],
+            "splice": [{"host": "*.example.com", "reason": "pins a cert"}]})
+        self.assertTrue(any("does not cover the apex" in e for e in errors),
+                        errors)
+
+    # --- methods and paths ---
+
+    def test_a_lowercase_method_is_accepted_and_normalised(self):
+        from vm import vm_policy_entries
+        self.assertEqual(self._egress({
+            "hosts": ["a.example"],
+            "policy": [{"host": "a.example", "methods": ["get"],
+                        "paths": ["/*"]}]}), [])
+        entry, = vm_policy_entries({
+            "policy": [{"host": "a.example", "methods": ["get"]}]})
+        self.assertEqual(entry.methods, ("GET",))
+
+    def test_a_padded_method_is_refused_rather_than_stripped(self):
+        """Stripping is the same kindness applied to a different thing: a
+        method token cannot carry whitespace, so one that does is a typo -- and
+        the strip that hid it would leave the NEXT typo silently denying."""
+        errors = self._egress({
+            "hosts": ["a.example"],
+            "policy": [{"host": "a.example", "methods": ["GET "],
+                        "paths": ["/*"]}]})
+        self.assertTrue(any("whitespace" in e for e in errors), errors)
+
+    def test_a_word_that_is_not_a_method_is_refused(self):
+        errors = self._egress({
+            "hosts": ["a.example"],
+            "policy": [{"host": "a.example", "methods": ["FETCH"],
+                        "paths": ["/*"]}]})
+        self.assertTrue(any("not a registered HTTP method" in e
+                            for e in errors), errors)
+
+    def test_CONNECT_and_PRI_are_refused_by_name(self):
+        """Both are registered, and neither can arrive. The inspector is
+        transparent, so a guest has no CONNECT to send it; PRI is the HTTP/2
+        preface's method, and h2 on a host is [[vm.network.http2]] with a
+        written reason, never a method somebody permitted."""
+        for method in ("CONNECT", "PRI"):
+            errors = self._egress({
+                "hosts": ["a.example"],
+                "policy": [{"host": "a.example", "methods": [method],
+                            "paths": ["/*"]}]})
+            self.assertTrue(any("never sees" in e for e in errors),
+                            (method, errors))
+
+    def test_an_empty_methods_list_is_refused(self):
+        """`[]` permits nothing, which is not what anyone writing it meant --
+        the shorthand for 'any' is omitting the key."""
+        errors = self._egress({
+            "hosts": ["a.example"],
+            "policy": [{"host": "a.example", "methods": [], "paths": ["/*"]}]})
+        self.assertTrue(any("permits no method" in e for e in errors), errors)
+
+    def test_a_path_that_does_not_start_with_a_slash_is_refused(self):
+        errors = self._egress({
+            "hosts": ["a.example"],
+            "policy": [{"host": "a.example", "methods": ["GET"],
+                        "paths": ["v1/*"]}]})
+        self.assertTrue(any("does not start with" in e for e in errors), errors)
+
+    def test_a_path_carrying_a_query_is_refused(self):
+        """`paths` matches the path ALONE, deliberately, so that
+        paths = ['/v1/messages'] still permits '/v1/messages?stream=true'. A
+        pattern naming a query can therefore never match."""
+        errors = self._egress({
+            "hosts": ["a.example"],
+            "policy": [{"host": "a.example", "methods": ["GET"],
+                        "paths": ["/v1/messages?stream=true"]}]})
+        self.assertTrue(any("query" in e for e in errors), errors)
+
+    def test_a_path_written_as_a_url_is_refused(self):
+        errors = self._egress({
+            "hosts": ["a.example"],
+            "policy": [{"host": "a.example", "methods": ["GET"],
+                        "paths": ["https://a.example/v1"]}]})
+        self.assertTrue(any("looks like a URL" in e for e in errors), errors)
+
+    def test_policy_refuses_a_key_it_does_not_know(self):
+        errors = self._egress({
+            "hosts": ["a.example"],
+            "policy": [{"host": "a.example", "reason": "why not"}]})
+        self.assertTrue(any("unknown key" in e for e in errors), errors)
+
+    def test_credential_and_placeholder_name_the_rung_they_land_in(self):
+        """Named rather than reported as an unknown key, for the reason
+        VM_TLS_UNBUILT gives: an operator who wrote `credential` should be told
+        when it arrives, not sent hunting for a typo that is not there."""
+        for key in ("credential", "placeholder"):
+            errors = self._egress({
+                "hosts": ["a.example"],
+                "policy": [{"host": "a.example", key: "x"}]})
+            joined = " ".join(errors)
+            self.assertIn("rung 6", joined, (key, errors))
+            self.assertNotIn("unknown key", joined, (key, errors))
+
+    def test_resolver_none_beside_policy_is_refused(self):
+        errors = self._egress({
+            "resolver": "none",
+            "policy": [{"host": "a.example", "methods": ["GET"],
+                        "paths": ["/*"]}]})
+        self.assertTrue(any(".policy" in e and "resolver" in e
+                            for e in errors), errors)
+
+    def test_an_internal_host_named_only_by_policy_is_on_a_list(self):
+        """§3: a name in `policy` need not also appear in `hosts`. A rule that
+        consulted only `hosts` would refuse a working config on the one key
+        whose whole job is to unblock a host."""
+        self.assertEqual(self._egress({
+            "policy": [{"host": "git.local", "methods": ["GET"],
+                        "paths": ["/*"]}],
+            "internal": [{"host": "git.local", "reason": "the forge"}]}), [])
+
     # --- splice (per host; HLD §11 hatch 2) ---
 
     def test_a_splice_host_the_allowlist_covers_is_accepted(self):

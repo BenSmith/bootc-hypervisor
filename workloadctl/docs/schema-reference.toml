@@ -626,6 +626,84 @@ name = "schema-reference"
 # host   = "sum.golang.org"
 # reason = "client verifies a signed log, not the chain; cannot take our CA"
 #
+# Optional: method and path rules for an inspected host.
+# Type: array of [[vm.network.policy]] tables, each with `host` and optional
+#       `methods` and `paths`
+# Default: []
+# .hosts says WHICH hosts a guest may reach. This says WHAT it may ask them
+# for. `host` is an fnmatch pattern like .hosts; `methods` is HTTP method names
+# (compared uppercase, so "get" is fine); `paths` is fnmatch patterns matched
+# against the request target's path.
+#
+# `methods` and `paths` inside one entry are a CROSS PRODUCT: two methods and
+# two paths permit all four combinations. That is the common case.
+#
+#   [[vm.network.policy]]
+#   host    = "registry.example.com"
+#   methods = ["GET", "POST"]
+#   paths   = ["/v2/*", "/token"]
+#
+# To vary methods BY path, repeat the host — one entry per rule:
+#
+#   [[vm.network.policy]]
+#   host    = "api.example.com"
+#   methods = ["POST"]
+#   paths   = ["/v1/messages"]
+#
+#   [[vm.network.policy]]
+#   host    = "api.example.com"
+#   methods = ["GET"]
+#   paths   = ["/v1/models", "/v1/models/*"]
+#
+# HOW THIS COMPOSES WITH .hosts, WHICH IS THE THING TO GET RIGHT. A host that
+# ANY policy entry matches is governed by policy ALONE — being in .hosts
+# allowlists it and contributes no rules. A host no entry matches is allowed by
+# .hosts with no method or path constraint, as before. A policy entry
+# allowlists on its own, so a host named here need not also be in .hosts.
+#
+# The reason it works that way: if .hosts unioned in, a single wildcard written
+# for an unrelated reason ("*.github.com", for git over HTTPS) would contribute
+# "any method, any path" to every host it covers — including the one you gave a
+# path restriction — and the diff that added the wildcard would look like it
+# added access rather than removing a restriction.
+#
+# ENTRIES UNION, so reordering the file cannot change what is allowed: a
+# request is permitted if ANY entry for that host permits both its method and
+# its path. Two consequences look like bugs and are not:
+#   * There is no way to subtract. A narrower entry cannot carve an exception
+#     out of a wider one. If a host needs a hole punched in it, the wide entry
+#     is what has to change.
+#   * Host patterns union too. "*.example.com" and "api.example.com" both
+#     govern api.example.com, and the specific one does not override the
+#     general one. `workloadctl diagnose` prints the EFFECTIVE rules per host
+#     for this reason — the file does not show what a given name may do.
+#
+# An omitted `methods` means any method and an omitted `paths` means any path.
+# That shorthand is safe in a single-entry host and dangerous under union, so
+# WHERE MORE THAN ONE ENTRY MATCHES A HOST — by pattern, not by identical
+# `host` strings — every one of those entries must state BOTH keys. Otherwise
+# one entry omitting `paths` permits every path and silently defeats every
+# sibling you narrowed, while the file reads as if it were stricter.
+#
+# The apex trap is here too and is worse than in .hosts: "*.api.example.com"
+# does not constrain "api.example.com". If .hosts allowlists both an apex and
+# its wildcard and a policy entry names only the wildcard, that is an ERROR —
+# the apex would stay allowlisted and inspected with no rules applied, which is
+# a hole rather than an outage.
+#
+# `paths` matches the path ALONE; the query string is not part of it, so
+# paths = ["/v1/messages"] still permits "/v1/messages?stream=true".
+#
+# A method that is not a registered HTTP method is an ERROR, not a rule that
+# never matches — "FETCH" and "GET " are both far likelier to be typos that
+# silently deny than intents. CONNECT and PRI are refused by name: the
+# inspector is transparent and is never sent a CONNECT, and PRI is the HTTP/2
+# preface's method.
+#
+# REQUIRES egress = "filtered" and tls = "inspect" (the default). Under
+# tls = "splice" the connection is never decrypted, so there is no request for
+# these rules to govern and they are refused rather than silently ignored.
+#
 # Capture is a command, not a schema key: `workloadctl pcap <name>`. passt's own
 # --pcap has no size limit, no rotation and no runtime toggle — it writes until
 # the process exits — which is the wrong shape for a persistent setting. See

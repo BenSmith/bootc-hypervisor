@@ -785,6 +785,12 @@ def vm_inspect_policy(net: dict) -> dict:
     listener restarted onto a different `tls` reads a document that already
     says what the per-host list was.
 
+    `policy` is the [[vm.network.policy]] entries, normalised. `methods` and
+    `paths` are carried as null where the key was absent rather than as an
+    empty list, because absent means ANY and empty would mean NONE -- and JSON
+    has a word for the difference, so the document should use it rather than
+    make the reader recover it from the schema.
+
     It is here so that a FAILED upstream dial to a private address can be
     attributed. An allowlisted name that resolved into private space with no
     entry is the wildcard trap firing; one WITH an entry is a host that is
@@ -796,6 +802,10 @@ def vm_inspect_policy(net: dict) -> dict:
         "hosts": vm_allowed_hosts(net),
         "internal": vm_internal_hosts(net),
         "splice": vm_splice_hosts(net),
+        "policy": [{"host": e.host,
+                    "methods": None if e.methods is None else list(e.methods),
+                    "paths": None if e.paths is None else list(e.paths)}
+                   for e in vm_policy_entries(net)],
     }
 
 
@@ -2514,6 +2524,146 @@ def vm_resolve_policy(net: dict, uid: int, resolved=None) -> dict:
 
 
 
+# The HTTP methods a [[vm.network.policy]] entry may name. Registered tokens
+# only (IANA HTTP Method Registry), because §3 requires a method that is not one
+# to be an ERROR rather than a rule that can never match: `["FETCH"]` and
+# `["GET "]` are both far likelier to be a typo that silently denies than an
+# intent, and a denial nobody can see is the failure this layer exists to
+# prevent.
+#
+# CONNECT and PRI are registered and are deliberately NOT here. The inspector is
+# transparent -- it is reached by a redirect, never by a proxy request -- so a
+# guest has no CONNECT to send it and an entry permitting one describes a
+# request that cannot arrive. PRI is the HTTP/2 connection preface's method,
+# which is refused on a terminated host and checked as a preface on an `http2`
+# one; permitting it by name would read as a way to allow h2 through `policy`,
+# which is exactly the thing `http2` carries a written reason for.
+VM_POLICY_METHODS = frozenset((
+    "ACL", "BASELINE-CONTROL", "BIND", "CHECKIN", "CHECKOUT", "COPY", "DELETE",
+    "GET", "HEAD", "LABEL", "LINK", "LOCK", "MERGE", "MKACTIVITY",
+    "MKCALENDAR", "MKCOL", "MKREDIRECTREF", "MKWORKSPACE", "MOVE", "OPTIONS",
+    "ORDERPATCH", "PATCH", "POST", "PROPFIND", "PROPPATCH", "PUT", "REBIND",
+    "REPORT", "SEARCH", "TRACE", "UNBIND", "UNCHECKOUT", "UNLINK", "UNLOCK",
+    "UPDATE", "UPDATEREDIRECTREF", "VERSION-CONTROL",
+))
+
+VM_POLICY_METHODS_REFUSED = {
+    "CONNECT": "the inspector is transparent and is never sent a CONNECT; a "
+               "guest reaches it by a redirect it cannot see",
+    "PRI": "PRI is the HTTP/2 connection preface's method; h2 on a host is "
+           "[[vm.network.http2]], which carries a written reason",
+}
+
+
+class VmPolicyEntry(NamedTuple):
+    """One [[vm.network.policy]] entry, normalised.
+
+    `methods` and `paths` are `None` where the key was absent, NOT an empty
+    tuple, and the difference is the whole of §3's widening trap: absent means
+    "any", empty would mean "none". Collapsing the two makes a single-entry
+    host with no `paths` deny everything instead of permitting everything --
+    the failure in the safe direction, which is why it survives review.
+    """
+
+    host: str
+    methods: tuple | None
+    paths: tuple | None
+
+    def permits(self, method: str, path: str) -> bool:
+        """Whether this entry permits one method on one path.
+
+        `methods` and `paths` inside one entry are a CROSS PRODUCT: two of each
+        permit all four combinations. An absent key is "any", per the shorthand
+        §3 keeps for the single-entry case.
+        """
+        if self.methods is not None and method.upper() not in self.methods:
+            return False
+        if self.paths is not None and not any(
+                fnmatch.fnmatchcase(path, pattern) for pattern in self.paths):
+            return False
+        return True
+
+
+def vm_policy_entries(net: dict) -> list[VmPolicyEntry]:
+    """The [[vm.network.policy]] entries, normalised, in file order.
+
+    Shape-tolerant for the reason vm_internal_hosts is: validate_vm_network
+    owns the shape and the boot generator skips a workload that does not
+    validate.
+    """
+    entries: list[VmPolicyEntry] = []
+    raw = net.get("policy", [])
+    if not isinstance(raw, list):
+        return entries
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        host = item.get("host")
+        if not isinstance(host, str) or not host.strip():
+            continue
+        entries.append(VmPolicyEntry(
+            host=host.strip(),
+            methods=_normalise_policy_list(item.get("methods"), upper=True),
+            paths=_normalise_policy_list(item.get("paths"))))
+    return entries
+
+
+def _normalise_policy_list(value, *, upper: bool = False) -> tuple | None:
+    """One `methods` or `paths` value as a tuple, or None where it was absent.
+
+    None and () are different answers and the caller depends on it; see
+    VmPolicyEntry.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, list):
+        return ()
+    out = []
+    for item in value:
+        if not isinstance(item, str):
+            continue
+        # NOT stripped: validation refuses a padded token or path outright,
+        # so nothing that reaches here needs it, and a strip in one of the two
+        # places is how they come to disagree about what the file said.
+        out.append(item.upper() if upper else item)
+    return tuple(out)
+
+
+def vm_policy_governs(host: str, entries) -> list[VmPolicyEntry]:
+    """The entries governing one hostname, which may be none.
+
+    §3's composition rule lives here and is the thing to get right: a host with
+    any matching entry is governed by THOSE ENTRIES ALONE, and `hosts` is not
+    consulted for it. The careless reading -- a `hosts` entry is a `policy`
+    entry with no keys, so union them -- silently destroys the feature: one
+    wildcard written for an unrelated reason contributes "any method, any path"
+    to every host it happens to cover, and the diff that introduced it looks
+    like it ADDED access rather than removing a restriction.
+
+    Host patterns union among themselves, so `*.example.com` and
+    `api.example.com` both govern `api.example.com` and neither overrides the
+    other. That is the apex trap's sibling and it is why `diagnose` has to
+    print the EFFECTIVE rules per host rather than the file's entries.
+    """
+    return [e for e in entries if vm_hostname_match(host, (e.host,))]
+
+
+def vm_policy_permits(host: str, method: str, path: str, entries) -> bool:
+    """Whether the governing entries permit one request. Union, not precedence.
+
+    Every entry either permits something or does nothing, so REORDERING THE
+    FILE CANNOT CHANGE WHAT IS ALLOWED. Two consequences follow and both look
+    like bugs: there is no way to subtract -- a narrower entry cannot carve an
+    exception out of a wider one -- and a specific entry does not override a
+    general one.
+
+    The caller decides what an empty governing set means; this function is only
+    asked about a host some entry governs.
+    """
+    return any(e.permits(method, path)
+               for e in vm_policy_governs(host, entries))
+
+
 def _patterns_overlap(a: str, b: str) -> bool:
     """Whether two fnmatch host patterns can name a host in common.
 
@@ -2587,6 +2737,257 @@ def _validate_host_reason_entries(entries, key: str, reason_clause: str):
     return hosts, errors
 
 
+def _validate_policy_path(pattern) -> list[str]:
+    """Validate one [[vm.network.policy]] `paths` pattern."""
+    if not isinstance(pattern, str):
+        return [f"`paths` entries must be strings, got {pattern!r}"]
+    if not pattern.strip():
+        return ["`paths` entries must not be empty"]
+    if pattern != pattern.strip():
+        return [f"path {pattern!r} is padded with whitespace, which a request "
+                f"target never carries — matched as written it can never "
+                f"match, and stripped it would hide the next one"]
+    text = pattern
+    if "://" in text:
+        return [f"path {pattern!r} looks like a URL — `paths` matches the "
+                f"path alone, so drop the scheme and the host"]
+    if not text.startswith("/"):
+        return [f"path {pattern!r} does not start with '/' — `paths` is "
+                f"matched against the request target's path, which always "
+                f"does, so this pattern can never match"]
+    if "?" in text or "#" in text:
+        return [f"path {pattern!r} carries a query or fragment — `paths` "
+                f"matches the path ALONE, deliberately, so that "
+                f"paths = ['/v1/messages'] still permits "
+                f"'/v1/messages?stream=true'. A pattern that names one "
+                f"never matches"]
+    return []
+
+
+def _validate_policy_methods(item, host: str) -> tuple[tuple | None, list[str]]:
+    """Validate one entry's `methods`. Returns (normalised or None, errors)."""
+    if "methods" not in item:
+        return None, []
+    value = item["methods"]
+    if not isinstance(value, list):
+        return (), [f"[vm.network].policy: {host!r} `methods` must be an "
+                    f"array of HTTP method names, got "
+                    f"{type(value).__name__}"]
+    errors: list[str] = []
+    out: list[str] = []
+    for token in value:
+        if not isinstance(token, str):
+            errors.append(f"[vm.network].policy: {host!r} `methods` entries "
+                          f"must be strings, got {token!r}")
+            continue
+        # Compared uppercase, so `["get"]` is accepted and normalised. What is
+        # NOT accepted is `["GET "]`: stripping it would be the same kindness
+        # applied to a different thing, since a method token cannot contain
+        # whitespace and one that does is a typo -- and the strip that hid it
+        # would leave the operator's next typo silently denying instead.
+        if token != token.strip() or any(c.isspace() for c in token):
+            errors.append(
+                f"[vm.network].policy: {host!r} names the method {token!r}, "
+                f"which carries whitespace. A method token cannot, so this is "
+                f"a typo -- and accepting it by stripping would hide the next "
+                f"one")
+            continue
+        name = token.upper()
+        if name in VM_POLICY_METHODS_REFUSED:
+            errors.append(
+                f"[vm.network].policy: {host!r} names the method {token!r}, "
+                f"which this inspector never sees — "
+                f"{VM_POLICY_METHODS_REFUSED[name]}")
+            continue
+        if name not in VM_POLICY_METHODS:
+            errors.append(
+                f"[vm.network].policy: {host!r} names {token!r}, which is not "
+                f"a registered HTTP method. A method that never matches denies "
+                f"every request that would have used it, and nothing reports "
+                f"that it was a typo")
+            continue
+        out.append(name)
+    if not out and not errors:
+        errors.append(
+            f"[vm.network].policy: {host!r} has an empty `methods` list, which "
+            f"permits no method at all. Omit the key to mean any method")
+    return tuple(out), errors
+
+
+def _validate_policy(net: dict, hosts, splice_hosts, egress: str,
+                     tls) -> tuple[list[VmPolicyEntry], list[str]]:
+    """Validate [[vm.network.policy]]. Returns (entries, errors)."""
+    errors: list[str] = []
+    raw = net.get("policy", [])
+    if not isinstance(raw, list):
+        return [], [f"[vm.network].policy must be an array of "
+                    f"[[vm.network.policy]] tables, got "
+                    f"{type(raw).__name__}"]
+
+    known = {"host", "methods", "paths"}
+    # Rung 6 (ADR 007). Named rather than reported as an unknown key, for the
+    # reason VM_TLS_UNBUILT gives: an operator who wrote `credential` should be
+    # told when it arrives, not sent hunting for a typo that is not there.
+    unbuilt = {
+        "credential": "rung 6 (ADR 007), where the broker attaches it",
+        "placeholder": "rung 6 (ADR 007), beside `credential`",
+    }
+    entries: list[VmPolicyEntry] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            errors.append(
+                f"[vm.network].policy entries are tables with `host` and "
+                f"optional `methods`/`paths`, got {item!r}")
+            continue
+        for key in sorted(set(item) & set(unbuilt)):
+            errors.append(
+                f"[vm.network].policy: `{key}` is not built yet — it lands in "
+                f"{unbuilt[key]}. Accepting it now would give the request a "
+                f"disposition the config did not ask for while the file "
+                f"claimed a credential was attached")
+        unknown = sorted(set(item) - known - set(unbuilt))
+        if unknown:
+            errors.append(
+                f"[vm.network].policy: unknown key(s) {', '.join(unknown)}; an "
+                f"entry carries `host`, `methods` and `paths`")
+        if "host" not in item:
+            errors.append(f"[vm.network].policy: entry {item!r} has no `host`")
+            continue
+        problems = _validate_proxy_host(item.get("host"))
+        if problems:
+            errors.extend(f"[vm.network].policy: {p}" for p in problems)
+            continue
+        host = item["host"].strip()
+        methods, method_errors = _validate_policy_methods(item, host)
+        errors.extend(method_errors)
+        paths: tuple | None = None
+        if "paths" in item:
+            value = item["paths"]
+            if not isinstance(value, list):
+                errors.append(
+                    f"[vm.network].policy: {host!r} `paths` must be an array "
+                    f"of path patterns, got {type(value).__name__}")
+                paths = ()
+            else:
+                paths = tuple(p for p in value if isinstance(p, str))
+                for pattern in value:
+                    errors.extend(f"[vm.network].policy: {host!r} {p}"
+                                  for p in _validate_policy_path(pattern))
+                if not value:
+                    errors.append(
+                        f"[vm.network].policy: {host!r} has an empty `paths` "
+                        f"list, which permits no path at all. Omit the key to "
+                        f"mean any path")
+        entries.append(VmPolicyEntry(host=host, methods=methods, paths=paths))
+
+    if not entries:
+        return entries, errors
+
+    if tls == "splice":
+        errors.append(
+            "[vm.network].policy with tls = 'splice' — a spliced connection is "
+            "never decrypted, so there is no request for `methods` and `paths` "
+            "to be applied to and the entries would be silently inert. Use "
+            "tls = 'inspect' (the default), or drop the policy entries and "
+            "keep the name allowlist in .hosts.")
+    if egress != "filtered":
+        errors.append(
+            f"[vm.network].policy has no effect with .egress = {egress!r} — "
+            f"nothing is redirected into the egress inspector, so no request "
+            f"is ever read for it to govern. Set egress = 'filtered' to use "
+            f"it.")
+
+    # A name in both `splice` and `policy` is an error: the policy could never
+    # run, and the file states two intentions that cannot both hold.
+    for entry in entries:
+        for spliced in splice_hosts:
+            if _patterns_overlap(entry.host, spliced):
+                errors.append(
+                    f"[vm.network].policy: {entry.host!r} is also in .splice "
+                    f"({spliced!r}) — a spliced connection is never decrypted, "
+                    f"so the method and path rules could never run. Keep one: "
+                    f"splice the host and drop the policy entry, or drop the "
+                    f"splice entry and let the host be inspected")
+                break
+
+    # §3's widening trap. Where more than one entry matches a host BY PATTERN,
+    # every one of those entries must state both keys -- one entry omitting
+    # `paths` permits every path on that host and silently defeats every
+    # sibling that was carefully narrowed, while the file reads as if it were
+    # more restrictive than it is.
+    #
+    # By pattern and not by identical `host` strings, which is the half that is
+    # easy to implement wrongly: `*.example.com` and `api.example.com` are two
+    # entries matching one name, and a check comparing literal hosts passes
+    # exactly the file this rule exists to catch.
+    for i, entry in enumerate(entries):
+        siblings = [o for j, o in enumerate(entries)
+                    if j != i and _patterns_overlap(entry.host, o.host)]
+        if not siblings:
+            continue
+        missing = [k for k, v in (("methods", entry.methods),
+                                  ("paths", entry.paths)) if v is None]
+        if missing:
+            errors.append(
+                f"[vm.network].policy: {entry.host!r} shares a host with "
+                f"{siblings[0].host!r} and omits "
+                f"{' and '.join(f'`{k}`' for k in missing)}. Where entries "
+                f"overlap, an omitted key means ANY -- so this entry permits "
+                f"everything its siblings were narrowed to forbid, and the "
+                f"file looks more restrictive than it is. State both keys on "
+                f"every overlapping entry")
+
+    # A copy-paste a reader will assume does something.
+    seen: dict = {}
+    for entry in entries:
+        key = (vm_normalise_hostname(entry.host),
+               None if entry.methods is None else tuple(sorted(set(entry.methods))),
+               None if entry.paths is None else tuple(sorted(set(entry.paths))))
+        if key in seen:
+            errors.append(
+                f"[vm.network].policy: {entry.host!r} appears twice with the "
+                f"same `methods` and `paths`. Entries union, so the duplicate "
+                f"permits nothing the first does not — which a reader will "
+                f"assume it does. Drop one")
+        seen[key] = entry
+
+    return entries, errors
+
+
+def _validate_apex_coverage(hosts, entries, key: str,
+                            consequence: str) -> list[str]:
+    """§3's apex trap: an allowlisted apex that a wildcard entry leaves out.
+
+    Patterns are fnmatch, not DNS suffix matching, so `*.example.com` requires
+    something before the dot and does NOT cover the bare `example.com`. Neither
+    existing rule catches this: the wildcard entry DOES match allowlisted names,
+    just not the apex, so "an entry matching no allowlisted name is an error"
+    never fires.
+
+    `entries` is a list of host patterns. `consequence` names what the operator
+    gets instead, which differs by key and is the whole value of the message.
+    """
+    errors: list[str] = []
+    literal = [h.strip() for h in hosts if isinstance(h, str) and h.strip()]
+    named = [e for e in entries if e]
+    for apex in literal:
+        wildcard = f"*.{apex}"
+        if wildcard not in literal:
+            continue
+        if not any(vm_normalise_hostname(e) == vm_normalise_hostname(wildcard)
+                   for e in named):
+            continue
+        if any(vm_hostname_match(apex, (e,)) for e in named):
+            continue
+        errors.append(
+            f"[vm.network].{key}: {wildcard!r} does not cover the apex "
+            f"{apex!r}, which .hosts also allowlists — patterns are fnmatch, "
+            f"not DNS suffix matching, so `*.` requires a label before the "
+            f"dot. {consequence} Add an entry for {apex!r} too, or drop it "
+            f"from .hosts")
+    return errors
+
+
 def _validate_egress(net: dict) -> list[str]:
     """Validate [vm.network].egress and .allow.
 
@@ -2657,19 +3058,10 @@ def _validate_egress(net: dict) -> list[str]:
         "it is a bypass of the internal-destination drop and carries one "
         "like `allow` does")
     errors.extend(internal_errors)
-    for host in internal_hosts:
-        # A dead entry here fails in the direction nobody notices until the
-        # host is needed: the guest gets `403 <host> resolves to an internal
-        # address` on the one destination the entry existed to permit. An
-        # error, for the same reason an `allow` element that arms nothing is.
-        if not any(host == pattern or fnmatch.fnmatch(host, pattern)
-                   for pattern in hosts if isinstance(pattern, str)):
-            errors.append(
-                f"[vm.network].internal: {host!r} is on no list — nothing "
-                f"in .hosts allowlists it, so the entry excepts a "
-                f"destination the guest is refused before the exception is "
-                f"reached. Add it to .hosts, or drop this entry")
-
+    # Deferred until `policy` has been read: §3 says a name in `policy` need
+    # not also appear in `hosts`, so an `internal` entry for such a name is on
+    # a list and this rule must see both lists or it refuses a working config.
+    internal_deferred = list(internal_hosts)
     # HLD §11 hatch 2. A host here is spliced on a workload that otherwise
     # terminates, which is the remedy every non-HTTP refusal names -- so the
     # key has to exist before the messages that tell an operator to type it.
@@ -2691,6 +3083,41 @@ def _validate_egress(net: dict) -> list[str]:
                 f"belief about what is reachable that the config contradicts. "
                 f"Add it to .hosts, or drop this entry")
 
+    policy_entries, policy_errors = _validate_policy(
+        net, hosts, splice_hosts, egress, tls)
+    errors.extend(policy_errors)
+    policy_hosts = [e.host for e in policy_entries]
+
+    # §3's apex trap, for both keys that can fall into it, with the consequence
+    # each one actually produces. They are not the same failure: a spliced apex
+    # breaks as a TLS error on the host whose client cannot take the CA, while
+    # an unconstrained apex is a security hole -- the operator believes a method
+    # restriction is in force and it is not.
+    errors.extend(_validate_apex_coverage(
+        hosts, splice_hosts, "splice",
+        "So the apex is INSPECTED, and a host spliced precisely because its "
+        "client cannot take our CA breaks at the apex only, as a TLS error "
+        "rather than as a policy message."))
+    errors.extend(_validate_apex_coverage(
+        hosts, policy_hosts, "policy",
+        "So the apex is allowlisted and inspected with NO method or path rules "
+        "applied — a restriction you believe is in force and is not."))
+
+    for host in internal_deferred:
+        # A dead entry here fails in the direction nobody notices until the
+        # host is needed: the guest gets `403 <host> resolves to an internal
+        # address` on the one destination the entry existed to permit. An
+        # error, for the same reason an `allow` element that arms nothing is.
+        if not any(host == pattern or fnmatch.fnmatch(host, pattern)
+                   for pattern in hosts if isinstance(pattern, str)) \
+                and not vm_hostname_match(host, policy_hosts):
+            errors.append(
+                f"[vm.network].internal: {host!r} is on no list — nothing "
+                f"in .hosts allowlists it and no .policy entry names it, so "
+                f"the entry excepts a destination the guest is refused before "
+                f"the exception is reached. Add it to .hosts, or drop this "
+                f"entry")
+
     # ACCEPTED, NOT WARNED, under tls = "splice", and the silence is the
     # decision. Every host is spliced there, so these entries ask for something
     # that is already true -- the config's intent is satisfied, not
@@ -2698,16 +3125,21 @@ def _validate_egress(net: dict) -> list[str]:
     # in this function applies. And the mode they would fire under is HLD §11's
     # third hatch, reached in the middle of an incident by an operator whose
     # toolchain is broken: new output there is a cost with nothing to buy.
-    # NOT rejected under `tls = "splice"`, unlike `policy` will be, and the
-    # asymmetry is deliberate rather than an oversight: the internal-destination
-    # check lives on the inspector's UPSTREAM leg, which a spliced connection
-    # still has. A later pass tidying these rules for symmetry would take the
-    # exemption away from exactly the workloads that need it.
+    #
+    # `internal` gets the same acceptance under `tls = "splice"` and for a
+    # different reason, which is why the two are written out rather than
+    # merged: the internal-destination check lives on the inspector's UPSTREAM
+    # leg, which a spliced connection still has, so a spliced host can resolve
+    # into private space and still needs the exemption. `policy` is refused
+    # there, because a spliced connection is never decrypted and there is no
+    # request for it to govern. A later pass tidying the three for symmetry
+    # would take the exemption away from exactly the workloads that need it.
 
     # §5.3: `bridge` means a real LAN identity, and nothing of ours is in that
     # guest's data path — no host socket, so no uid to match on.
     if "bridge" in net:
-        for key in ("egress", "allow", "tls", "internal", "splice"):
+        for key in ("egress", "allow", "tls", "internal", "splice",
+                    "policy"):
             if key in net:
                 errors.append(
                     f"[vm.network].{key} has no effect with .bridge set — a "
@@ -2722,7 +3154,11 @@ def _validate_egress(net: dict) -> list[str]:
                 "LAN address with no host socket in the path")
         return errors
 
-    if egress == "filtered" and not allow and not hosts:
+    # `policy` counts as somewhere to go: §3 says a name in `policy` need not
+    # also appear in `hosts`, so a workload whose whole allowlist is written as
+    # policy entries reaches those hosts and nothing else, which is a coherent
+    # and rather good configuration.
+    if egress == "filtered" and not allow and not hosts and not policy_hosts:
         errors.append(
             "[vm.network].egress is 'filtered' (the default) but both .allow "
             "and .hosts are empty, so this VM could reach nothing at all. "
@@ -2760,6 +3196,8 @@ def _validate_egress(net: dict) -> list[str]:
     # that reports a confinement it does not have.
     if egress != "filtered":
         for key in ("tls", "internal", "splice"):
+            # `policy` is not in this list: _validate_policy names it itself,
+            # with a sentence about requests rather than about redirection.
             if key in net:
                 errors.append(
                     f"[vm.network].{key} has no effect with .egress = "
@@ -2786,6 +3224,8 @@ def _validate_egress(net: dict) -> list[str]:
             named.append(".internal")
         if splice_hosts:
             named.append(".splice")
+        if policy_hosts:
+            named.append(".policy")
         if any(e.host for e in allow_entries):
             # An `allow` entry written by name is in the same position: its
             # answer comes from the static map the responder serves, and
@@ -2865,7 +3305,7 @@ def vm_network_warnings(net: dict) -> list[str]:
         return warnings
     egress = net.get("egress", VM_EGRESS_DEFAULT)
 
-    for key in ("hosts", "internal", "splice"):
+    for key in ("hosts", "internal", "splice", "policy"):
         entries = net.get(key, [])
         if not isinstance(entries, list):
             continue

@@ -436,6 +436,127 @@ class TestPolicyDocument(unittest.TestCase):
 
 
 
+class TestPolicyComposition(unittest.TestCase):
+    """§3's composition rule, which is the thing to get right.
+
+    A host with any matching `policy` entry is governed by `policy` ALONE.
+    Membership in `hosts` allowlists it and contributes no rules.
+    """
+
+    def _entries(self, *items):
+        from vm import vm_policy_entries
+        return vm_policy_entries({"policy": list(items)})
+
+    def test_hosts_does_not_union_into_policy(self):
+        """The reading a careless implementation falls into, and it silently
+        destroys the feature.
+
+        Under the union reading a `hosts` entry is a `policy` entry with no
+        keys, so one wildcard written for an unrelated reason -- `*.github.com`
+        for git over HTTPS -- contributes "any method, any path" to
+        `api.github.com` and the path restriction is gone. Nothing in the file
+        looks wrong, and the diff that introduced the wildcard looks like it
+        ADDED access rather than removing a restriction.
+        """
+        from vm import vm_policy_governs, vm_policy_permits
+        entries = self._entries({"host": "api.github.com",
+                                 "methods": ["GET", "POST"],
+                                 "paths": ["/repos/myorg/*"]})
+        self.assertTrue(vm_policy_governs("api.github.com", entries))
+        self.assertFalse(
+            vm_policy_permits("api.github.com", "GET", "/user", entries))
+        self.assertTrue(vm_policy_permits(
+            "api.github.com", "GET", "/repos/myorg/thing", entries))
+
+    def test_a_host_no_entry_matches_is_governed_by_nothing(self):
+        """Step 3 of the algorithm: the caller falls back to `hosts`. The
+        matcher says only that it has no rules of its own."""
+        from vm import vm_policy_governs
+        entries = self._entries({"host": "api.example.com"})
+        self.assertEqual(vm_policy_governs("cdn.example.com", entries), [])
+
+    def test_methods_and_paths_inside_one_entry_are_a_cross_product(self):
+        from vm import vm_policy_permits
+        entries = self._entries({"host": "r.example",
+                                 "methods": ["GET", "POST"],
+                                 "paths": ["/v2/*", "/token"]})
+        for method in ("GET", "POST"):
+            for path in ("/v2/x", "/token"):
+                self.assertTrue(
+                    vm_policy_permits("r.example", method, path, entries),
+                    (method, path))
+        self.assertFalse(vm_policy_permits("r.example", "DELETE", "/token",
+                                           entries))
+        self.assertFalse(vm_policy_permits("r.example", "GET", "/other",
+                                           entries))
+
+    def test_entries_union_so_reordering_cannot_change_what_is_allowed(self):
+        """Union, not precedence, and that is what lets a reviewer approve an
+        added entry by asking whether IT is acceptable, never whether it
+        silently disabled a neighbour."""
+        from vm import vm_policy_permits
+        a = {"host": "api.example.com", "methods": ["POST"],
+             "paths": ["/v1/messages"]}
+        b = {"host": "api.example.com", "methods": ["GET"],
+             "paths": ["/v1/models", "/v1/models/*"]}
+        for order in ((a, b), (b, a)):
+            entries = self._entries(*order)
+            self.assertTrue(vm_policy_permits(
+                "api.example.com", "POST", "/v1/messages", entries))
+            self.assertTrue(vm_policy_permits(
+                "api.example.com", "GET", "/v1/models/x", entries))
+            self.assertFalse(vm_policy_permits(
+                "api.example.com", "POST", "/v1/models", entries))
+
+    def test_there_is_no_way_to_subtract(self):
+        """Looks like a bug and is not: a narrower entry cannot carve an
+        exception out of a wider one. If a host needs a hole punched in it,
+        the wide entry is what has to change."""
+        from vm import vm_policy_permits
+        entries = self._entries(
+            {"host": "a.example", "methods": ["GET"], "paths": ["/v1/*"]},
+            {"host": "a.example", "methods": ["GET"], "paths": ["/v1/public"]})
+        self.assertTrue(
+            vm_policy_permits("a.example", "GET", "/v1/admin", entries))
+
+    def test_host_patterns_union_too(self):
+        """A specific entry does NOT override a general one -- the apex trap's
+        sibling, and why `diagnose` has to print the effective rules per host
+        rather than the file's entries."""
+        from vm import vm_policy_governs, vm_policy_permits
+        entries = self._entries(
+            {"host": "*.example.com", "methods": ["GET"], "paths": ["/*"]},
+            {"host": "api.example.com", "methods": ["POST"],
+             "paths": ["/v1/messages"]})
+        self.assertEqual(len(vm_policy_governs("api.example.com", entries)), 2)
+        self.assertTrue(vm_policy_permits(
+            "api.example.com", "GET", "/anything", entries))
+
+    def test_an_absent_key_means_any_and_an_empty_one_would_mean_none(self):
+        """None and () are different answers and the difference is §3's
+        widening trap. Collapsing them makes a single-entry host with no
+        `paths` deny everything instead of permitting everything -- wrong in
+        the safe direction, which is how it survives review."""
+        from vm import vm_policy_entries, vm_policy_permits
+        entry, = vm_policy_entries({"policy": [{"host": "a.example"}]})
+        self.assertIsNone(entry.methods)
+        self.assertIsNone(entry.paths)
+        self.assertTrue(
+            vm_policy_permits("a.example", "DELETE", "/anything", [entry]))
+
+    def test_the_document_carries_absent_keys_as_null(self):
+        """JSON has a word for the difference, so the document uses it rather
+        than making the listener recover it from the schema."""
+        doc = vm_inspect_policy({"policy": [
+            {"host": "a.example"},
+            {"host": "b.example", "methods": ["GET"], "paths": ["/x"]}]})
+        self.assertEqual(doc["policy"][0],
+                         {"host": "a.example", "methods": None, "paths": None})
+        self.assertEqual(doc["policy"][1],
+                         {"host": "b.example", "methods": ["GET"],
+                          "paths": ["/x"]})
+
+
 class TestRuntimeFixture(unittest.TestCase):
     """The runtime rung's hostname-policy VM, checked without a KVM host.
 
