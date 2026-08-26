@@ -84,6 +84,7 @@ try:
         VM_SOCKET_DIR,
         VM_RESOLVE_LISTENER_BIN, VM_RESOLVE_PORT,
         vm_resolve_address, vm_uses_resolve,
+        vm_denial_dir, vm_leaf_dir,
     )
     from validation import valid_userns_mode, validate_workload_config
     from secrets_template import (
@@ -1977,7 +1978,7 @@ def generate_vm_inspect_socket(config, user_name: str, uid: int) -> str:
 
 
 def _harden_vm_sidecar(svc, name: str, *, families: str, tasks_max: int,
-                       memory_max: str) -> None:
+                       memory_max: str, extra_rw: tuple = ()) -> None:
     """The sandbox both egress sidecars run in.
 
     These two processes are the ones ADR 008 names as the cost of the design:
@@ -2000,6 +2001,17 @@ def _harden_vm_sidecar(svc, name: str, *, families: str, tasks_max: int,
     The directory is created by workload-<name>-setup.service, which both units
     Requires= and are ordered After=, so it exists by the time this applies.
 
+    `extra_rw` is how the inspector names its leaf caches, and MEASURED on a
+    KVM host 2026-08-26 is the only reason it exists: /var is inside "the whole
+    hierarchy". Without it every mint failed with EROFS on the cache directory,
+    the guest's connection was reset, and the journal said NOTHING -- the mint
+    raised an OSError from outside the minter's own try block and the
+    per-connection handler swallows OSError by design. A warm cache hid it
+    completely, so the failure was "the first request to any host fails and the
+    second succeeds", which reads as a network fault rather than a sandbox one.
+    The CA directory is deliberately NOT here: the inspector reads it and must
+    never rewrite it, which is the same split its two SELinux types make.
+
     The ExecStartPre/ExecStopPost lines that arm the cgroup exemptions are
     prefixed `+`, and systemd exempts those from the sandboxing options here --
     which is what lets nft keep working while the listener itself runs inside
@@ -2015,7 +2027,9 @@ def _harden_vm_sidecar(svc, name: str, *, families: str, tasks_max: int,
     svc.set("ProtectHome", "yes")
     svc.set("ProtectProc", "invisible")
     svc.set("PrivateTmp", "yes")
-    svc.set("ReadWritePaths", uq(f"{VM_SOCKET_DIR}/{name}"))
+    svc.set("ReadWritePaths",
+            " ".join([uq(f"{VM_SOCKET_DIR}/{name}")]
+                     + [uq(str(path)) for path in extra_rw]))
 
     # The families each one actually opens, so a code path that grew a socket
     # nobody expected fails loudly instead of reaching the network. AF_UNIX and
@@ -2151,7 +2165,9 @@ def generate_vm_inspect_service(config, user_name: str) -> str:
     # is single-digit megabytes on top of the interpreter.
     _harden_vm_sidecar(svc, name,
                        families="AF_INET AF_INET6 AF_UNIX AF_NETLINK",
-                       tasks_max=192, memory_max="512M")
+                       tasks_max=192, memory_max="512M",
+                       extra_rw=(vm_leaf_dir(workload_state_dir(name)),
+                                 vm_denial_dir(workload_state_dir(name))))
     svc.blank()
     svc.add("StandardOutput", "journal")
     svc.add("StandardError", "journal")

@@ -94,37 +94,31 @@
 ; gate, so the last rules only appear once the earlier ones are granted.
 ; tests/manual/inspect_rig.py is the run that exercises it.
 ;
-; SIX RESIDUAL DENIALS ARE DELIBERATELY NOT GRANTED
+; ONE RESIDUAL DENIAL IS DELIBERATELY NOT GRANTED
 ;
-; A green run with dontaudit disabled still logs these, and the run is green
-; WITH them denied — so each would widen the domain for nothing. The list was
-; four until a permissive harvest on 2026-08-25 measured the full used-set;
-; two more were being logged all along, and the cert_t entry understated what
-; is attempted:
+; A green run with dontaudit disabled still logs it, and the run is green WITH
+; it denied — so granting it would widen the domain for nothing. The list was
+; four, then six after a permissive harvest on 2026-08-25 measured the full
+; used-set, and is one now: rung 3 gave the domain real reasons for the other
+; five, and a reason is what the entry always turned on.
 ;
 ;   getattr, ioctl(TCGETS) on init_t:unix_stream_socket   Python probing
 ;     whether its stdout is a tty. The answer is "no" either way.
-;   getattr, open, read, search on cert_t (/etc/pki)      import machinery.
-;     NOT merely `search`: the domain attempts to open and read files under
-;     it. Still denied, still green — the listener splices TLS and never
-;     terminates it, so it has no use for a CA bundle.
-;   search on container_file_t (/var/lib/workloads)       walking past the
-;     workload state tree it must not read
-;   search on svirt_image_t                               likewise, the
-;     guest's own disks
+;   (WAS: cert_t, container_file_t and svirt_image_t. All three were granted
+;     in rung 3 -- see THE TERMINATING PLANE below. The reasoning that kept
+;     them denied was sound and its premise expired.)
 ;
 ; init_var_run_t:dir search was in this list for about an hour and does NOT
 ; belong: it is granted above, because the resolver traverses /run/systemd to
 ; reach the stub resolv.conf. It measured as "used, and the run is green
 ; anyway" only because no green run had ever resolved a hostname.
 ;
-; The last two are the boundary working. wlproxy_t is a separate domain from
-; svirt_t precisely so that the component terminating guest input cannot reach
-; the workload's disks and state; granting `search` here because it appears in
-; a log would be the first step back across that line, and nothing would fail
-; to tell anyone. Re-check them if the listener ever gains a reason to read a
-; certificate — §6 puts the CA in a subdirectory with its OWN label for this
-; reason, and that is the rule to add then, not these.
+; The boundary those two defended is NOT relaxed by their being granted: see
+; THE TERMINATING PLANE at the end of this module, which is the rule §6 said
+; to add when the listener gained a reason to read a certificate. `search` on
+; a directory is traversal and nothing else; the disks and the state files
+; themselves remain unreadable to this domain, and that is what the boundary
+; was ever about.
 
 (type wlinspect_t)
 (typeattributeset domain (wlinspect_t))
@@ -312,3 +306,105 @@
 ; silent half of the table above, reached by a route that looks correct.
 (allow wlinspect_t qemu_var_run_t (dir (add_name remove_name search write)))
 (allow wlinspect_t qemu_var_run_t (file (create getattr open read rename unlink write)))
+
+
+; THE TERMINATING PLANE (rung 3)
+;
+; Everything above this line was harvested for a listener that SPLICED TLS: it
+; read a ClientHello, dialled upstream, and copied bytes. Rung 3 terminates
+; instead -- it presents a certificate it minted, and it verifies the upstream
+; chain itself -- and that gives the domain three things it never had: a
+; private key to read, an `openssl` to run, and a trust store to consult.
+;
+; MEASURED on a bare-metal Fedora 44 host, 2026-08-26, iterating under
+; ENFORCING rather than harvesting under permissive. A permissive run measures
+; the branch that ran, and here an early denial changes which branch runs at
+; all: the listener exits 1 at startup if it cannot read the CA, so a
+; permissive harvest of the mint path is a harvest of a process that never
+; reached it.
+;
+; THE FAILURE THIS FIXES IS WORTH NAMING, because it is not shaped like a
+; permission error. Path.exists() returns False on EACCES exactly as it does on
+; ENOENT, so a denial on the traversal to the CA presents as the listener
+; reporting a file that is plainly on disk as missing, and the operator is sent
+; to look at a path that is right.
+
+; The PKI subtree's own labels. Two types because the permissions differ: the
+; CA is read-only to this domain (an inspector that could rewrite it could
+; replace the anchor the guest was SEEDED with, which no restart recovers --
+; only a re-provision), and the leaf caches are read-write because minting into
+; them is the job. lib/vm.py registers the fcontext rules; a filecon here would
+; land in the base file_contexts and be shadowed by file_contexts.local.
+(type wlinspect_ca_t)
+(roletype object_r wlinspect_ca_t)
+(typeattributeset file_type (wlinspect_ca_t))
+
+(type wlinspect_leaf_t)
+(roletype object_r wlinspect_leaf_t)
+(typeattributeset file_type (wlinspect_leaf_t))
+
+(allow wlinspect_t wlinspect_ca_t (dir (getattr open read search)))
+(allow wlinspect_t wlinspect_ca_t (file (getattr map open read)))
+
+; `create` and `rmdir` are the atomic landing, not an untidy extra: each mint
+; stages into a TemporaryDirectory inside the cache so that os.replace is a
+; same-filesystem rename and a reader never finds half a PEM. Measured
+; 2026-08-26 -- without them every mint failed with EACCES on a name that
+; looks like a leaf but is a directory.
+(allow wlinspect_t wlinspect_leaf_t (dir (add_name create getattr open read remove_name rmdir search setattr write)))
+; `setattr` is the chmod 0600 on the staged PEM -- the private key is in the
+; same file as the certificate, so the mode is part of landing it, not a
+; nicety. Measured 2026-08-26, one denial after `create` on the dir.
+(allow wlinspect_t wlinspect_leaf_t (file (create getattr map open read rename setattr unlink write)))
+
+; Traversal to reach them, and traversal is ALL of it: `search` on a directory
+; permits walking through it, not reading what is in it. /var/lib/workloads is
+; container_file_t (the blanket rule) and /var/lib/workloads/<name> and its
+; state/ are svirt_image_t (the per-workload tree rule), so the path to a
+; wlinspect_ca_t directory crosses both. No file permission on either type is
+; granted here, which is what keeps the guest's disks out of reach.
+(allow wlinspect_t container_file_t (dir (search)))
+(allow wlinspect_t svirt_image_t (dir (search)))
+
+; The system trust store, which the SPLICING listener had no use for and the
+; terminating one cannot work without: every upstream connection is verified
+; against it, and a domain that cannot read it fails EVERY host with
+; "unverifiable", which reads as the internet being down rather than as a
+; policy gap. lnk_file is not optional -- /etc/pki/tls/certs is a symlink farm.
+(allow wlinspect_t cert_t (dir (getattr open read search)))
+(allow wlinspect_t cert_t (file (getattr map open read)))
+(allow wlinspect_t cert_t (lnk_file (getattr read)))
+
+; THE MINT ITSELF. `execute` and `map` were granted above for the interpreter;
+; `execute_no_trans` is the one that lets this domain run a program without a
+; domain transition, and openssl is the first thing it has ever run. Stdlib-only
+; is what puts it here: minting shells out because binding a TLS library would
+; be a Python dependency the RPM must not declare.
+(allow wlinspect_t bin_t (file (execute_no_trans)))
+
+; THE GUEST AGENT SOCKET, which is the mint-time clock check and NOT the
+; inspection path. A leaf is backdated an hour; a guest whose clock is further
+; out than that rejects every certificate this domain mints, so the minter asks
+; qemu-guest-agent for the guest's time before signing and resyncs it if it has
+; drifted. That makes /run/workload-vm/<name>/ga.sock -- a socket QEMU created,
+; so svirt_t owns the other end -- part of the terminating path.
+;
+; `sock_file` is a class of its own: the file line above covers inspect.json
+; and the leaf PEMs and grants nothing on a socket node. `connectto` is on the
+; peer's domain rather than on the file, which is the half that is missed by
+; reading the denial for the file and stopping there.
+(allow wlinspect_t qemu_var_run_t (sock_file (getattr write)))
+(allow wlinspect_t svirt_t (unix_stream_socket (connectto)))
+(allow wlinspect_t self (unix_stream_socket (connect create getattr read shutdown write)))
+
+; SYSTEMD MOUNTS THE CACHES BEFORE THE PROCESS EXISTS. ReadWritePaths= under
+; ProtectSystem=strict is implemented as a bind mount that init_t performs
+; while setting up the unit's namespace, so the label on the directory is
+; checked against INIT_T, not against this domain -- and without this the unit
+; never starts at all: "Failed at step NAMESPACE spawning /usr/sbin/nft:
+; Permission denied", which names the ExecStartPre rather than the mount.
+;
+; Measured 2026-08-26. It did not appear until a workload was enabled whose
+; caches were labelled BEFORE its first start, which is why a rig that had run
+; once already did not show it.
+(allow init_t wlinspect_leaf_t (dir (mounton)))

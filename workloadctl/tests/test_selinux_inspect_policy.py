@@ -135,8 +135,27 @@ class TestInterpreter(unittest.TestCase):
         self.assertRegex(
             body,
             r"\(allow\s+wlinspect_t\s+bin_t\s+\(file\s+\([^)]*execute")
-        self.assertNotRegex(body, r"execute_no_trans")
         self.assertNotRegex(body, r"\(allow\s+wlinspect_t\s+base_ro_file_type\s")
+
+    def test_execute_no_trans_is_the_mint_and_nothing_else(self):
+        """Rung 3 DID need it -- for openssl, which is a different exec.
+
+        The reasoning above still holds for the interpreter: an exec that
+        causes a domain transition never checks execute_no_trans. openssl is
+        run without one, so it does, and stdlib-only is why there is an exec at
+        all -- binding a TLS library would be a Python dependency the RPM must
+        not declare. Measured under enforcing on a KVM host 2026-08-26.
+
+        This test exists so the permission stays attached to that reason: a
+        later `execute_no_trans` on some other type would be a second program
+        this domain runs, which is a thing to argue rather than to inherit.
+        """
+        granted = re.findall(
+            r"\(allow\s+wlinspect_t\s+(\S+)\s+\(file\s+\(([^)]*)\)\)\)",
+            _body())
+        self.assertEqual(
+            [t for t, perms in granted if "execute_no_trans" in perms.split()],
+            ["bin_t"])
 
 
 class TestTheUpstreamDial(unittest.TestCase):
@@ -233,18 +252,106 @@ class TestBoundary(unittest.TestCase):
 
     wlproxy_t exists apart from svirt_t so that the component terminating
     guest-controlled input cannot reach the workload's disks, volumes or state
-    directory. The inspector inherits that reasoning. A green run with
-    dontaudit disabled logs `search` denials on cert_t and container_file_t,
-    and the run is green with them denied -- so granting them because they
-    appear in a log is the first step back across the line, and nothing would
-    fail to tell anyone.
+    directory. The inspector inherits that reasoning.
+
+    Rung 3 gave the domain a private key to read and a leaf cache to write,
+    both of which live in that state directory beside the disk images — and the
+    boundary held by MOVING the material rather than by widening the domain.
+    So these tests no longer say "cert_t and container_file_t appear nowhere";
+    they say what the domain may do with them, which is traverse and nothing
+    else. Granting `svirt_image_t:file read` is the one-rule-shorter shape that
+    works, and it is what these tests exist to catch.
     """
 
-    def test_the_domain_cannot_reach_the_workload_state_tree(self):
-        self.assertNotIn("container_file_t", _body())
+    def _perms(self, target, cls):
+        """Every permission granted to wlinspect_t on one type/class, as a set."""
+        pattern = (r"\(allow wlinspect_t " + re.escape(target)
+                   + r" \(" + re.escape(cls) + r" \(([^)]*)\)\)\)")
+        found = re.findall(pattern, _body())
+        return set(" ".join(found).split())
 
-    def test_the_domain_cannot_reach_the_host_trust_store(self):
-        """§6 puts the CA in a subdirectory with its own label, so when the
-        inspector does need a certificate the rule to add is that label --
-        never cert_t, and never the state directory."""
-        self.assertNotIn("cert_t", _body())
+    def test_the_workload_state_tree_is_traversable_and_not_readable(self):
+        # /var/lib/workloads is container_file_t and the per-workload tree is
+        # svirt_image_t; the path to the CA crosses both. `search` on a dir is
+        # traversal only.
+        for target in ("container_file_t", "svirt_image_t"):
+            self.assertEqual(self._perms(target, "dir"), {"search"}, target)
+            self.assertEqual(self._perms(target, "file"), set(), target)
+
+    def test_the_trust_store_is_readable_and_not_writable(self):
+        """The terminating listener verifies every upstream chain against it.
+
+        A domain that cannot read /etc/pki fails EVERY host as unverifiable,
+        which reads as the internet being down rather than as a policy gap.
+        lnk_file is not optional: /etc/pki/tls/certs is a symlink farm.
+        """
+        self.assertTrue({"read", "open"} <= self._perms("cert_t", "file"))
+        self.assertTrue(self._perms("cert_t", "lnk_file"))
+        for cls in ("dir", "file", "lnk_file"):
+            self.assertEqual(
+                self._perms("cert_t", cls) & {"write", "create", "unlink",
+                                              "rename", "append", "setattr"},
+                set(), cls)
+
+    def test_the_ca_is_readable_and_not_writable_by_the_inspector(self):
+        """Two types, not one, and this is the difference between them.
+
+        An inspector that could rewrite the CA could replace the anchor the
+        guest was SEEDED with. Nothing recovers that but a re-provision, so the
+        one permission worth spending a whole extra type on is the absence of
+        write.
+        """
+        self.assertTrue({"read", "open"} <= self._perms("wlinspect_ca_t", "file"))
+        self.assertEqual(
+            self._perms("wlinspect_ca_t", "file") & {"write", "create",
+                                                     "unlink", "rename"},
+            set())
+        self.assertEqual(
+            self._perms("wlinspect_ca_t", "dir") & {"add_name", "remove_name",
+                                                    "write"},
+            set())
+
+    def test_the_leaf_caches_are_writable(self):
+        """Minting into them is the job, and the eviction is unlink+replace."""
+        self.assertTrue(
+            {"create", "read", "write", "rename", "setattr", "unlink"}
+            <= self._perms("wlinspect_leaf_t", "file"))
+        self.assertTrue(
+            {"add_name", "remove_name", "search", "write"}
+            <= self._perms("wlinspect_leaf_t", "dir"))
+        # create/rmdir are the atomic landing: each mint stages into a
+        # TemporaryDirectory INSIDE the cache so os.replace is a same-filesystem
+        # rename. Without them every mint fails with EACCES on a name that looks
+        # like a leaf and is a directory.
+        self.assertTrue(
+            {"create", "rmdir"} <= self._perms("wlinspect_leaf_t", "dir"))
+
+    def test_systemd_may_mount_the_caches(self):
+        """ReadWritePaths= is a bind mount init_t performs while setting up the
+        unit's namespace, so the label is checked against INIT_T. Without it the
+        unit never starts: "Failed at step NAMESPACE", naming the ExecStartPre
+        rather than the mount."""
+        self.assertIn("(allow init_t wlinspect_leaf_t (dir (mounton)))", _body())
+
+    def test_both_pki_types_are_declared_as_file_types(self):
+        """A type without the file_type attribute cannot be relabelled onto a
+        file by setfiles, so `restorecon` silently leaves the subtree
+        svirt_image_t and the inspector cannot read its own CA."""
+        for t in ("wlinspect_ca_t", "wlinspect_leaf_t"):
+            self.assertIn(f"(type {t})", _body())
+            self.assertIn(f"(typeattributeset file_type ({t}))", _body())
+
+    def test_the_pki_labels_are_not_declared_as_filecons_here(self):
+        """They are registered with semanage, in file_contexts.local.
+
+        A CIL filecon lands in the base file_contexts, and .local outranks the
+        base file WHOLESALE — so a filecon under /var/lib/workloads does not
+        lose on specificity, it is simply never consulted. The label an
+        operator asked for is not applied and nothing errors.
+        """
+        for t in ("wlinspect_ca_t", "wlinspect_leaf_t"):
+            self.assertNotIn(f"filecon", _body().split(f"(type {t})")[1])
+
+
+if __name__ == "__main__":
+    unittest.main()

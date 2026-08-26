@@ -225,6 +225,59 @@ class TestGeneratorIsIdempotent(unittest.TestCase):
                 self.mod.generate_vm_egress_ca(self.pw, "myvm")
         self.assertIn("exit 3", str(ctx.exception))
 
+    # ------------------------------------------------------------------
+    # The PKI directories and their labels.
+    #
+    # Measured 2026-08-26 on a KVM host: without this step the inspector
+    # crash-looped reporting a CA that was plainly on disk as "not there",
+    # because Path.exists() cannot tell EACCES from ENOENT and the traversal
+    # was denied. The unit tests below cannot see SELinux; what they can see is
+    # that the step runs, creates all three directories, and relabels them.
+
+    def test_the_leaf_caches_are_created_beside_the_ca(self):
+        # The minter's own mkdir cannot do this: a directory the INSPECTOR
+        # creates inherits its parent's svirt_image_t, and the domain has no
+        # relabelto -- it would create a directory it then cannot use.
+        with mock.patch.object(self.mod.shutil, "which", return_value=None):
+            self.mod.provision_vm_pki_dirs(self.pw, "myvm")
+        for name in ("ca", "leaves", "leaves-denied"):
+            d = self.state / name
+            self.assertTrue(d.is_dir(), name)
+            self.assertEqual(d.stat().st_mode & 0o777, 0o700, name)
+
+    def test_it_relabels_each_directory_with_dash_f(self):
+        # -F for the same reason apply_vm_fcontext needs it: svirt_image_t is a
+        # customizable type, so a plain restorecon skips it and exits 0 and the
+        # migration silently never happens.
+        calls = []
+        with mock.patch.object(self.mod.shutil, "which",
+                               return_value="/usr/sbin/restorecon"):
+            with mock.patch.object(self.mod.subprocess, "run",
+                                   side_effect=lambda argv, **kw: calls.append(argv)):
+                self.mod.provision_vm_pki_dirs(self.pw, "myvm")
+        self.assertEqual(len(calls), 3)
+        self.assertTrue(all(c[:2] == ["restorecon", "-RF"] for c in calls), calls)
+        self.assertEqual(
+            sorted(Path(c[2]).name for c in calls),
+            ["ca", "leaves", "leaves-denied"])
+
+    def test_a_host_without_restorecon_still_gets_its_directories(self):
+        # SELinux disabled is not a reason to refuse to provision the VM; the
+        # inspector fails loudly at startup instead, which is the better
+        # failure.
+        with mock.patch.object(self.mod.shutil, "which", return_value=None):
+            with mock.patch.object(self.mod.subprocess, "run") as run_mock:
+                self.mod.provision_vm_pki_dirs(self.pw, "myvm")
+        run_mock.assert_not_called()
+        self.assertTrue((self.state / "leaves").is_dir())
+
+    def test_it_is_idempotent(self):
+        with mock.patch.object(self.mod.shutil, "which", return_value=None):
+            self.mod.provision_vm_pki_dirs(self.pw, "myvm")
+            (self.state / "leaves" / "keep.pem").write_text("x")
+            self.mod.provision_vm_pki_dirs(self.pw, "myvm")
+        self.assertTrue((self.state / "leaves" / "keep.pem").exists())
+
 
 if __name__ == "__main__":
     unittest.main()

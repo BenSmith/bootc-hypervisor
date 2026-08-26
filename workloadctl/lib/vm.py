@@ -19,7 +19,8 @@ import time
 from pathlib import Path
 from typing import NamedTuple
 
-from workload_lib import UID_MAX, UID_MIN, parse_volume_spec
+from workload_lib import (UID_MAX, UID_MIN, parse_volume_spec,
+                          workload_root_dir)
 
 
 # --- VM constants ---
@@ -1231,6 +1232,32 @@ VM_CA_DIR_NAME = "ca"
 VM_CA_KEY_NAME = "egress-ca.key"
 VM_CA_CERT_NAME = "egress-ca.crt"
 
+# The two leaf caches live beside the CA, under the same state directory, and
+# their names are here rather than in vm_mint because the SELinux patterns
+# below have to name the same three directories the minter creates. A drift
+# between the two spellings is a mislabelled directory, which presents as the
+# inspector failing to mint and not as a naming mistake.
+VM_LEAF_DIR_NAME = "leaves"
+VM_DENIAL_DIR_NAME = "leaves-denied"
+
+# THE PKI SUBTREE HAS ITS OWN LABELS, AND THAT IS THE WHOLE POINT
+#
+# `wlinspect_t` is a separate domain from `svirt_t` so that the component
+# terminating guest input cannot reach the workload's disks, volumes or state
+# directory. Rung 3 gives the inspector a reason to read a private key and
+# write a cache, and both live in that state directory beside the disk images.
+# Granting the domain `svirt_image_t` would be one rule shorter, would work,
+# and would hand the inspector the guest's disks — so the material moves
+# instead: three directories with labels of their own, and the domain is
+# granted those.
+#
+# Two types, not one, because the permissions genuinely differ. The CA is
+# READ-ONLY to the inspector: an inspector that could rewrite it could replace
+# the anchor the guest was seeded with, which is unrecoverable without a
+# re-provision. The leaves are read-write because minting them is the job.
+VM_CA_SELINUX_TYPE = "wlinspect_ca_t"
+VM_LEAF_SELINUX_TYPE = "wlinspect_leaf_t"
+
 # Ten years. The number follows from never rotating rather than from any threat
 # estimate: a CA that expires is a CA that must be replaced, replacing it means
 # re-provisioning the guest (cloud-init runs once per instance-id), so the
@@ -1263,6 +1290,34 @@ def vm_ca_key_path(state_dir) -> Path:
 
 def vm_ca_cert_path(state_dir) -> Path:
     return vm_ca_dir(state_dir) / VM_CA_CERT_NAME
+
+
+def vm_leaf_dir(state_dir) -> Path:
+    """Where the working set of minted leaves lives."""
+    return Path(state_dir) / VM_LEAF_DIR_NAME
+
+
+def vm_denial_dir(state_dir) -> Path:
+    """Where leaves minted under a refusal live -- a sibling of the working
+    set, not a subdirectory, so a `rm -rf` of one cannot take the other."""
+    return Path(state_dir) / VM_DENIAL_DIR_NAME
+
+
+def vm_pki_fcontext_patterns(name: str) -> list[tuple[str, str]]:
+    """(pattern, type) for every directory in one workload's PKI subtree.
+
+    Registered in `file_contexts.local` beside the per-workload svirt_image_t
+    rule, and more specific than it, which is the only reason these win: within
+    ONE source most-specific-wins applies, and `.local` outranks the base file
+    wholesale. A CIL `filecon` in the policy module lands in the base file and
+    would be silently shadowed -- see shadowed_filecon_paths().
+    """
+    root = workload_root_dir(name)
+    return [
+        (f"{root}/state/{VM_CA_DIR_NAME}(/.*)?", VM_CA_SELINUX_TYPE),
+        (f"{root}/state/{VM_LEAF_DIR_NAME}(/.*)?", VM_LEAF_SELINUX_TYPE),
+        (f"{root}/state/{VM_DENIAL_DIR_NAME}(/.*)?", VM_LEAF_SELINUX_TYPE),
+    ]
 
 
 def vm_ca_subject(name: str) -> str:

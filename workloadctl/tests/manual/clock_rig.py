@@ -242,8 +242,8 @@ def offset(label, samples=3):
     return max(hi for _, hi in got)
 
 
-def mint_counts():
-    """The inspector's `mint` block, or None if it cannot be read.
+def _status():
+    """The inspector's whole status document, or None if it cannot be read.
 
     Never raises. The counters are corroboration for measurement 6, not its
     verdict -- a rig that died reading a diagnostic would lose the measurement
@@ -251,9 +251,40 @@ def mint_counts():
     """
     try:
         raw = (SOCKET_DIR / NAME / STATUS_FILE).read_text()
-        return json.loads(raw).get("mint") or {}
+        return json.loads(raw)
     except (OSError, ValueError):
         return None
+
+
+def mint_counts():
+    """The `mint` block, with the tick it was written at."""
+    doc = _status()
+    if doc is None:
+        return None
+    counts = dict(doc.get("mint") or {})
+    counts["_written_at"] = doc.get("written_at")
+    return counts
+
+
+def mint_counts_after(before):
+    """The `mint` block from a tick STRICTLY LATER than `before`'s.
+
+    The status file is rewritten on a timer, not on an event. Reading it
+    straight after the request under test returns the tick that was already
+    there, so both snapshots come from ONE write and every counter difference is
+    zero -- which reads exactly like a counter that does not work. Measured
+    2026-08-26: this is what failed the last assertion of an otherwise green
+    run, and the remedy it seemed to indict was working perfectly.
+    """
+    if before is None:
+        return None
+    deadline = time.time() + 90
+    while time.time() < deadline:
+        now = mint_counts()
+        if now is not None and now.get("_written_at") != before.get("_written_at"):
+            return now
+        time.sleep(2)
+    return None
 
 
 def toml_for():
@@ -380,18 +411,28 @@ def measure():
         return
     record("the guest agent answers at all", True, "guest-sync returned")
 
+    # MEASURED 2026-08-26, twice on one host: the no-argument form FAILS, with
+    # `child process has failed to set hardware clock to system time: hwclock:
+    # select() to /dev/rtc0 to wait for clock tick timed out`. That is now the
+    # expectation rather than an open question, and it is why the remedy uses
+    # the explicit form -- so this is recorded as an OBSERVATION, not asserted
+    # either way. Asserting the failure would make a fixed guest agent look like
+    # a regression; asserting the success would fail every run on a host where
+    # the documented behaviour holds. What DOES get asserted is measurement 5:
+    # the form the code actually uses.
     reply, err = ga("guest-set-time")
     if err:
-        record("guest-set-time (no argument) returns", False, err)
+        say(f"  [obs] guest-set-time (no argument): {err}")
     elif "error" in reply:
-        record("guest-set-time (no argument) returns", False,
-               f"error: {reply['error'].get('desc', reply['error'])}")
+        say(f"  [obs] guest-set-time (no argument) errored, as expected since "
+            f"2026-08-26: {reply['error'].get('desc', reply['error'])}")
     else:
-        record("guest-set-time (no argument) returns", True, repr(reply))
+        say(f"  [obs] guest-set-time (no argument) RETURNED: {reply!r} -- this "
+            f"host disagrees with the 2026-08-26 measurement; the explicit form "
+            f"below is still what the code uses")
         noarg = offset("after no-arg set-time")
         if noarg is not None:
-            record("the no-argument form re-anchors the guest", abs(noarg) < 2.0,
-                   f"offset {noarg:+.3f}s")
+            say(f"  [obs] the no-argument form left the guest {noarg:+.3f}s out")
 
     # 5. The untested one. This is the form a remedy would actually use, since
     #    it does not depend on the guest's RTC being right.
@@ -471,10 +512,14 @@ def measure():
                abs(healed) < 60.0,
                f"offset {healed:+.1f}s (was {skewed:+.1f}s)")
 
-    after_counts = mint_counts()
+    # A LATER tick, not the current file -- see mint_counts_after.
+    say("  waiting for a status tick ...")
+    after_counts = mint_counts_after(before_counts)
     if before_counts is None or after_counts is None:
         record("the resync is counted where diagnose can see it", False,
-               "no readable inspect-status.json")
+               "no readable inspect-status.json"
+               if before_counts is None else
+               "no status tick arrived within 90s of the request")
     else:
         moved = (after_counts.get("clock_resyncs", 0)
                  - before_counts.get("clock_resyncs", 0))

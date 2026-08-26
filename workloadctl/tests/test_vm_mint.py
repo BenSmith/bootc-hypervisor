@@ -19,8 +19,15 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+import shutil
+
 import vm
+import vm_clock
 import vm_mint
+
+
+def _rmtree(path):
+    shutil.rmtree(path, ignore_errors=True)
 from vm import LeafRefused, vm_ca_openssl_argv, vm_leaf_openssl_argv, vm_leaf_san
 
 
@@ -655,6 +662,47 @@ class TestWhatTheMinterReports(_MinterCase):
         minter.snapshot()["mints"] = 99
         self.assertEqual(minter.snapshot()["mints"], 0)
 
+
+
+class TestAnUnwritableCacheIsAMintFailure(unittest.TestCase):
+    """The shape of this failure is why it gets a test of its own.
+
+    Measured on a KVM host 2026-08-26: ProtectSystem=strict made the leaf cache
+    read-only, TemporaryDirectory raised OSError from outside the minter's own
+    handler, and the inspector's per-connection handler swallows OSError by
+    design. The guest saw a reset; the journal, the counters and the status file
+    saw nothing at all. MintFailed is logged, counted and named -- so the rule
+    is that no OSError leaves this function.
+    """
+
+    def _minter(self, state):
+        return vm_mint.Minter("wl", state, clock_check=lambda: vm_clock.CLOCK_OK)
+
+    def test_an_unwritable_cache_raises_mint_failed(self):
+        state = Path(tempfile.mkdtemp())
+        self.addCleanup(_rmtree, state)
+        minter = self._minter(state)
+        # Read-only, as ProtectSystem=strict makes it -- not deleted, which
+        # would be a different failure with a different remedy.
+        os.chmod(minter.working_set.directory, 0o500)
+        self.addCleanup(os.chmod, minter.working_set.directory, 0o700)
+        with self.assertRaises(vm_mint.MintFailed) as ctx:
+            minter.leaf("example.com", denied=False)
+        said = str(ctx.exception)
+        self.assertIn("example.com", said)
+        # The directory is in the message: the remedy is a ReadWritePaths= or a
+        # label on THAT path, and a message without it names nothing to fix.
+        self.assertIn(str(minter.working_set.directory), said)
+
+    def test_the_failure_is_counted(self):
+        state = Path(tempfile.mkdtemp())
+        self.addCleanup(_rmtree, state)
+        minter = self._minter(state)
+        os.chmod(minter.working_set.directory, 0o500)
+        self.addCleanup(os.chmod, minter.working_set.directory, 0o700)
+        with self.assertRaises(vm_mint.MintFailed):
+            minter.leaf("example.com", denied=False)
+        self.assertEqual(minter.snapshot()["failed"], 1)
 
 if __name__ == "__main__":
     unittest.main()

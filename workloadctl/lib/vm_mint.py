@@ -49,7 +49,8 @@ from pathlib import Path
 from typing import NamedTuple
 
 from vm import (
-    LeafRefused, VM_LEAF_RENEW_WITHIN_SECONDS, VM_LEAF_VALIDITY_DAYS,
+    LeafRefused, VM_DENIAL_DIR_NAME, VM_LEAF_DIR_NAME,
+    VM_LEAF_RENEW_WITHIN_SECONDS, VM_LEAF_VALIDITY_DAYS,
     vm_ca_cert_path, vm_ca_key_path, vm_leaf_openssl_argv,
     vm_normalise_hostname,
 )
@@ -93,12 +94,16 @@ MINT_BUCKET_REFILL_PER_SECOND = 1.0
 MINT_WAIT_SECONDS = 5.0
 
 # Where the persisted working set lives, under the workload's state directory
-# beside the CA that signed it.
-LEAF_DIR_NAME = "leaves"
-
-# And the denial set's, which is a sibling rather than a subdirectory so a
-# `rm -rf` of one cannot take the other with it.
-DENIAL_DIR_NAME = "leaves-denied"
+# beside the CA that signed it -- and the denial set's, a sibling rather than a
+# subdirectory so a `rm -rf` of one cannot take the other with it.
+#
+# Both names come from vm.py rather than being spelled here, because the
+# SELinux fcontext patterns registered at enable have to name the same three
+# directories this module creates. Two spellings of "leaves" is a mislabelled
+# directory, and a mislabelled directory presents as the inspector failing to
+# mint rather than as a naming mistake.
+LEAF_DIR_NAME = VM_LEAF_DIR_NAME
+DENIAL_DIR_NAME = VM_DENIAL_DIR_NAME
 
 
 class MintThrottled(Exception):
@@ -521,30 +526,47 @@ class Minter:
         argv_dir = cache.directory
 
         now = self._clock()
-        with tempfile.TemporaryDirectory(dir=argv_dir) as tmp:
-            key_path = Path(tmp) / "leaf.key"
-            cert_path = Path(tmp) / "leaf.crt"
-            argv = vm_leaf_openssl_argv(
-                name, vm_ca_key_path(self.state_dir),
-                vm_ca_cert_path(self.state_dir),
-                key_path, cert_path, now=now)
-            try:
-                result = self._runner(argv, capture_output=True, text=True,
-                                      timeout=30)
-            except (OSError, subprocess.SubprocessError) as exc:
-                self.stats["failed"] += 1
-                raise MintFailed(f"could not run openssl: {exc}") from exc
-            if result.returncode != 0:
-                self.stats["failed"] += 1
-                # Both streams: openssl splits its diagnostics across them and
-                # which half carries the cause varies by subcommand.
-                detail = ((result.stderr or "") + (result.stdout or "")).strip()
-                raise MintFailed(
-                    f"openssl refused to mint a leaf for {name!r}: {detail}")
-            staged = Path(tmp) / "leaf.pem"
-            staged.write_text(cert_path.read_text() + key_path.read_text())
-            os.chmod(staged, 0o600)
-            os.replace(staged, target)
+        # EVERY filesystem step is inside this, and the reason is measured. A
+        # cache directory the process cannot write raises OSError from the
+        # TemporaryDirectory below -- which used to be OUTSIDE any handler here,
+        # so it left as an OSError, and the inspector's per-connection handler
+        # swallows OSError by design. On a KVM host on 2026-08-26 that produced
+        # the worst failure shape this component has had: the guest's
+        # connection reset, no journal line, no counter, and a warm cache hiding
+        # it entirely -- the first request to a host failed and the second
+        # succeeded. MintFailed is logged, counted and named; an OSError
+        # escaping this function is not.
+        try:
+            with tempfile.TemporaryDirectory(dir=argv_dir) as tmp:
+                key_path = Path(tmp) / "leaf.key"
+                cert_path = Path(tmp) / "leaf.crt"
+                argv = vm_leaf_openssl_argv(
+                    name, vm_ca_key_path(self.state_dir),
+                    vm_ca_cert_path(self.state_dir),
+                    key_path, cert_path, now=now)
+                try:
+                    result = self._runner(argv, capture_output=True, text=True,
+                                          timeout=30)
+                except (OSError, subprocess.SubprocessError) as exc:
+                    self.stats["failed"] += 1
+                    raise MintFailed(f"could not run openssl: {exc}") from exc
+                if result.returncode != 0:
+                    self.stats["failed"] += 1
+                    # Both streams: openssl splits its diagnostics across them
+                    # and which half carries the cause varies by subcommand.
+                    detail = ((result.stderr or "")
+                              + (result.stdout or "")).strip()
+                    raise MintFailed(
+                        f"openssl refused to mint a leaf for {name!r}: {detail}")
+                staged = Path(tmp) / "leaf.pem"
+                staged.write_text(cert_path.read_text() + key_path.read_text())
+                os.chmod(staged, 0o600)
+                os.replace(staged, target)
+        except OSError as exc:
+            self.stats["failed"] += 1
+            raise MintFailed(
+                f"could not write a leaf for {name!r} into {argv_dir}: "
+                f"{exc}") from exc
 
         self.stats["mints"] += 1
         if denied:

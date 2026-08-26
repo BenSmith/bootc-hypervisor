@@ -344,7 +344,37 @@ class TestSidecarHardening(unittest.TestCase):
             with self.subTest(unit=which):
                 self.assertIn("ProtectSystem=strict", unit)
                 self.assertIn("PrivateTmp=yes", unit)
-                self.assertIn('ReadWritePaths="/run/workload-vm/web"', unit)
+                self.assertIn('"/run/workload-vm/web"', unit)
+
+    def test_the_inspector_can_write_its_leaf_caches(self):
+        """ProtectSystem=strict makes /var read-only too, and MEASURED on a KVM
+        host 2026-08-26 that is not a theoretical gap: every mint failed with
+        EROFS, the guest's connection was reset, and the journal said nothing.
+        A warm cache hid it, so it presented as "the first request to a host
+        fails and the second succeeds" -- a network fault's shape.
+        """
+        unit = dict(self.units())["inspect"]
+        rw = [line for line in unit.splitlines()
+              if line.startswith("ReadWritePaths=")][0]
+        self.assertIn('"/var/lib/workloads/web/state/leaves"', rw)
+        self.assertIn('"/var/lib/workloads/web/state/leaves-denied"', rw)
+
+    def test_the_inspector_may_not_write_its_own_ca(self):
+        """The same split the two SELinux types make, and for the same reason:
+        an inspector that could rewrite the CA could replace the anchor the
+        guest was SEEDED with, which no restart recovers."""
+        unit = dict(self.units())["inspect"]
+        rw = [line for line in unit.splitlines()
+              if line.startswith("ReadWritePaths=")][0]
+        self.assertNotIn("/state/ca", rw)
+
+    def test_the_responder_gets_no_extra_writable_paths(self):
+        """It mints nothing; naming the caches there would be a widening with
+        no user."""
+        unit = dict(self.units())["resolve"]
+        rw = [line for line in unit.splitlines()
+              if line.startswith("ReadWritePaths=")][0]
+        self.assertEqual(rw, 'ReadWritePaths="/run/workload-vm/web"')
 
     def test_neither_unit_carries_no_new_privileges(self):
         """It breaks the `#!` entrypoint transition from init_t with a bare

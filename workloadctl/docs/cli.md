@@ -847,6 +847,26 @@ green:
   Installing it in the guest changes nothing, which is the part that costs an
   afternoon.
 
+**When the inspector says the CA "is not there" and it plainly is.** The
+listener refuses to start under `tls = "inspect"` without
+`/var/lib/workloads/<name>/state/ca/egress-ca.crt`, and the message names the
+path. If that file exists and is readable by `_wl-<name>`, the problem is not
+the file: `Path.exists()` cannot tell a denied traversal from a missing file, so
+an SELinux label or a sandbox mount failure reads as absence. Check
+`ausearch -m avc -ts recent` for `wlinspect_t`, and that the three PKI
+directories carry their own types:
+
+```bash
+sudo ls -Zd /var/lib/workloads/<name>/state/{ca,leaves,leaves-denied}
+# ca -> wlinspect_ca_t, both caches -> wlinspect_leaf_t
+sudo semanage fcontext -l | grep '<name>/state'
+```
+
+An RPM reinstall drops the `semanage` rules (the same failure mode as the QMP
+socket's), and `restorecon -RF` on the workload tree puts them back once the
+rules are registered. A workload enabled before this version has the rules
+registered by the next `workloadctl enable <name>`.
+
 **Trust anchor check.** `ca_trust_anchors` fails when a certificate in
 `/etc/pki/ca-trust/source/anchors` is absent from the extracted TLS bundle —
 the anchor is installed but grants no trust, so pulls from a registry it signs

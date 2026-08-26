@@ -1543,9 +1543,49 @@ class TestApplyVmFcontext(unittest.TestCase):
     def test_enable_registers_svirt_image_t_for_the_subtree(self):
         calls = self._run_calls(_VM_TOML, 'test-vm', "enable")
         adds = [c for c in calls if "-a" in c]
-        self.assertEqual(len(adds), 1)
-        self.assertIn("svirt_image_t", adds[0])
-        self.assertIn("/var/lib/workloads/test-vm(/.*)?", adds[0])
+        tree = [c for c in adds if "svirt_image_t" in c]
+        self.assertEqual(len(tree), 1)
+        self.assertIn("/var/lib/workloads/test-vm(/.*)?", tree[0])
+
+    def test_enable_registers_the_pki_subtree_with_its_own_labels(self):
+        """The CA and the two leaf caches are labelled apart from the tree.
+
+        wlinspect_t is a separate domain from svirt_t so the component
+        terminating guest input cannot reach the guest's disks. Rung 3 gives it
+        a key to read and a cache to write, both under the state directory —
+        so the material gets labels of its own and the domain is granted those.
+        Granting it svirt_image_t instead is one rule shorter and hands the
+        inspector the disks.
+        """
+        calls = self._run_calls(_VM_TOML, 'test-vm', "enable")
+        adds = [c for c in calls if "-a" in c]
+        by_pattern = {c[-1]: c[c.index("-t") + 1] for c in adds}
+        self.assertEqual(
+            by_pattern.get("/var/lib/workloads/test-vm/state/ca(/.*)?"),
+            "wlinspect_ca_t")
+        # Read-only CA, read-write leaves: two types, because an inspector that
+        # could rewrite the CA could replace the anchor the guest was seeded
+        # with, and no restart recovers that.
+        for cache in ("leaves", "leaves-denied"):
+            self.assertEqual(
+                by_pattern.get(
+                    f"/var/lib/workloads/test-vm/state/{cache}(/.*)?"),
+                "wlinspect_leaf_t")
+
+    def test_a_host_with_only_the_tree_rule_still_gets_the_pki_rules(self):
+        """The upgrade case, and the reason each rule is checked on its own.
+
+        A host provisioned before rung 3 has the tree rule registered and the
+        three PKI rules not at all. A registration that returns early on the
+        first pattern already present never registers them — on exactly the
+        hosts that need it.
+        """
+        listing = ("/var/lib/workloads/test-vm(/.*)?  "
+                   "system_u:object_r:svirt_image_t:s0\n")
+        calls = self._run_calls(_VM_TOML, 'test-vm', "enable", listing=listing)
+        adds = [c for c in calls if "-a" in c]
+        self.assertEqual(len(adds), 3)
+        self.assertTrue(all("state/" in c[-1] for c in adds), adds)
 
     def test_enable_relabels_with_dash_f(self):
         # Both container_file_t and svirt_image_t are customizable types, so a
@@ -1557,15 +1597,38 @@ class TestApplyVmFcontext(unittest.TestCase):
         self.assertIn("-RF", relabels[0])
 
     def test_enable_is_idempotent_when_already_registered(self):
-        listing = "/var/lib/workloads/test-vm(/.*)?  system_u:object_r:svirt_image_t:s0\n"
+        listing = "".join(
+            f"{pattern}  system_u:object_r:{t}:s0\n" for pattern, t in (
+                ("/var/lib/workloads/test-vm(/.*)?", "svirt_image_t"),
+                ("/var/lib/workloads/test-vm/state/ca(/.*)?",
+                 "wlinspect_ca_t"),
+                ("/var/lib/workloads/test-vm/state/leaves(/.*)?",
+                 "wlinspect_leaf_t"),
+                ("/var/lib/workloads/test-vm/state/leaves-denied(/.*)?",
+                 "wlinspect_leaf_t"),
+            ))
         calls = self._run_calls(_VM_TOML, 'test-vm', "enable", listing=listing)
         self.assertEqual([c for c in calls if "-a" in c], [])
+        # And no relabel either: nothing was registered, so there is nothing
+        # for a restorecon to apply, and a full -RF of a VM tree is not free.
+        self.assertEqual([c for c in calls if c and c[0] == "restorecon"], [])
 
-    def test_disable_unregisters_the_same_pattern(self):
+    def test_disable_unregisters_every_pattern_enable_registered(self):
+        """Including the PKI rules, and the specific ones first.
+
+        A disable that removed only the tree rule would leave three orphans
+        registered against a workload that no longer exists, and the next
+        workload to reuse the name would inherit them.
+        """
         calls = self._run_calls(_VM_TOML, 'test-vm', "disable")
-        self.assertEqual(len(calls), 1)
-        self.assertIn("-d", calls[0])
-        self.assertIn("/var/lib/workloads/test-vm(/.*)?", calls[0])
+        self.assertEqual(len(calls), 4)
+        self.assertTrue(all("-d" in c for c in calls), calls)
+        self.assertEqual(calls[-1][-1], "/var/lib/workloads/test-vm(/.*)?")
+        self.assertEqual(
+            [c[-1] for c in calls[:3]],
+            ["/var/lib/workloads/test-vm/state/ca(/.*)?",
+             "/var/lib/workloads/test-vm/state/leaves(/.*)?",
+             "/var/lib/workloads/test-vm/state/leaves-denied(/.*)?"])
 
     def test_missing_semanage_is_not_a_failure(self):
         with _cfg(_VM_TOML, 'test-vm') as cfg:

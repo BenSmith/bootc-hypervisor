@@ -41,6 +41,7 @@ from vm import (VM_SOCKET_DIR, VM_DEFAULT_GUEST_USER, VM_GUEST_HOME_BASE,
                 VM_CA_ENV_VARS,
                 VM_SEED_CONTRACT_EXIT, SeedContractError, find_ovmf_vars,
                 vm_broker_env, vm_ca_env, vm_ca_cert_path, vm_ca_dir,
+                vm_denial_dir, vm_leaf_dir,
                 vm_ca_key_path, vm_ca_openssl_argv, vm_uses_inspect)
 from secrets_template import substitute_template
 
@@ -1008,6 +1009,41 @@ def generate_vm_egress_ca(pw, name: str):
     log(f"  Generated egress CA: {cert_path}")
 
 
+def provision_vm_pki_dirs(pw, name: str):
+    """Create the leaf caches beside the CA, then label the whole PKI subtree.
+
+    Two jobs that have to happen in this order and in this process.
+
+    The directories exist here rather than being left to the minter's own
+    mkdir because of the labelling below: a directory the inspector creates
+    for itself inherits its parent's type (svirt_image_t, the workload tree
+    rule), and the inspector has no `relabelto` on anything, so it would
+    create a directory it then cannot use. Creating them as root and relabelling
+    once is the only ordering where the inspector never has to.
+
+    And the relabel is needed at all because `restorecon` is userspace:
+    file_contexts.local decides what a path SHOULD be labelled, while the
+    kernel labels a newly created directory from its parent. The fcontext rules
+    are registered at enable, before this runs, so nothing has applied them to
+    a subtree that did not exist yet.
+
+    Best-effort: a host without restorecon, or with SELinux disabled, gets an
+    unlabelled subtree and an inspector that fails loudly at startup, which is
+    a better failure than refusing to provision the VM at all.
+    """
+    state_dir = workload_state_dir(name)
+    for directory in (vm_ca_dir(state_dir), vm_leaf_dir(state_dir),
+                      vm_denial_dir(state_dir)):
+        directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+        os.chown(directory, pw.pw_uid, pw.pw_gid)
+        if shutil.which("restorecon"):
+            # -F for the same reason apply_vm_fcontext needs it: svirt_image_t
+            # is in contexts/customizable_types, so a plain restorecon skips
+            # every directory currently carrying it and exits 0.
+            subprocess.run(["restorecon", "-RF", str(directory)],
+                           check=False, capture_output=True)
+
+
 def _read_vm_egress_ca(name: str) -> str:
     """The egress CA certificate in PEM, or '' if this workload has none.
 
@@ -1822,6 +1858,17 @@ def _ensure_user(name: str) -> int:
                 generate_vm_egress_ca(pw, name)
             except Exception as e:
                 log(f"  ERROR: Failed to generate egress CA for {name}: {e}")
+                return 1
+
+            # The leaf caches and the labels, after the CA so one relabel
+            # covers it. Fatal for the same reason: an inspector that cannot
+            # read its own CA fails to start, and every guest dial to 80/443
+            # then times out with nothing in the guest to say why.
+            try:
+                provision_vm_pki_dirs(pw, name)
+            except Exception as e:
+                log(f"  ERROR: Failed to prepare the egress PKI directories "
+                    f"for {name}: {e}")
                 return 1
 
         try:

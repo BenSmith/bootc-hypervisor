@@ -44,7 +44,7 @@ from workloadctl_core import (
     UsageError, WorkloadConfig, WorkloadManager, WorkloadUserNotFound,
 )
 from substrate import LifecycleError
-from vm import VM_SEED_CONTRACT_EXIT
+from vm import VM_SEED_CONTRACT_EXIT, vm_pki_fcontext_patterns
 
 
 REQUIRED_EXECUTABLES = ["podman", "systemctl", "loginctl", "systemd-sysusers", "restorecon", "semodule"]
@@ -790,23 +790,43 @@ def apply_vm_fcontext(config: WorkloadConfig, action: str):
     pattern = vm_fcontext_pattern(config.name)
 
     if action == "disable":
+        # The PKI rules first: they are more specific than the tree rule, so
+        # removing the general one first would leave three orphans matching
+        # nothing registered above them.
+        for pki_pattern, _ in vm_pki_fcontext_patterns(config.name):
+            subprocess.run(["semanage", "fcontext", "-d", pki_pattern],
+                           check=False, capture_output=True)
         subprocess.run(["semanage", "fcontext", "-d", pattern],
                        check=False, capture_output=True)
         return
 
     listed = subprocess.run(["semanage", "fcontext", "-l"],
                             capture_output=True, text=True)
-    if listed.returncode == 0 and pattern in listed.stdout:
-        return  # already registered
+    known = listed.stdout if listed.returncode == 0 else ""
 
-    result = subprocess.run(
-        ["semanage", "fcontext", "-a", "-t", VM_IMAGE_SELINUX_TYPE, pattern],
-        capture_output=True, text=True)
-    if result.returncode != 0:
-        warn(f"  WARNING: could not register the SELinux fcontext rule for "
-             f"'{config.name}': {result.stderr.strip()}")
-        return
-    info(f"  Registered SELinux fcontext: {pattern} -> {VM_IMAGE_SELINUX_TYPE}")
+    wanted = [(pattern, VM_IMAGE_SELINUX_TYPE)] + vm_pki_fcontext_patterns(
+        config.name)
+    registered_any = False
+    for one, selinux_type in wanted:
+        # Each rule is checked on its own rather than short-circuiting on the
+        # tree rule. An upgrade onto a host provisioned before the PKI subtree
+        # had labels of its own has the tree rule already and the three PKI
+        # rules not at all, and a check that returns early on the first hit
+        # never registers them -- on exactly the hosts that need it.
+        if one in known:
+            continue
+        result = subprocess.run(
+            ["semanage", "fcontext", "-a", "-t", selinux_type, one],
+            capture_output=True, text=True)
+        if result.returncode != 0:
+            warn(f"  WARNING: could not register the SELinux fcontext rule for "
+                 f"'{config.name}': {result.stderr.strip()}")
+            return
+        info(f"  Registered SELinux fcontext: {one} -> {selinux_type}")
+        registered_any = True
+
+    if not registered_any:
+        return  # everything already registered; the tree is already labelled
 
     # Relabel now rather than waiting for the next start. -F is REQUIRED: both
     # container_file_t and svirt_image_t are in contexts/customizable_types, and
