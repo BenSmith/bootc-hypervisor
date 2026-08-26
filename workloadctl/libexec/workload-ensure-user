@@ -1008,6 +1008,18 @@ def generate_vm_egress_ca(pw, name: str):
     log(f"  Generated egress CA: {cert_path}")
 
 
+def _read_vm_egress_ca(name: str) -> str:
+    """The egress CA certificate in PEM, or '' if this workload has none.
+
+    '' is an ordinary answer, not an error: an egress = "open" workload never
+    gets a CA, and generate_vm_egress_ca only runs for filtered ones.
+    """
+    try:
+        return vm_ca_cert_path(workload_state_dir(name)).read_text()
+    except OSError:
+        return ""
+
+
 def _read_vm_host_private_key(pw) -> str:
     """Return the PEM of the VM host private key, or '' if not generated yet."""
     priv = Path(pw.pw_dir) / ".ssh" / "vm_host_ed25519_key"
@@ -1079,7 +1091,8 @@ def _render_default_user_data(name: str, guest_user: str, pubkey: str,
                               mounts: list, has_data_disk: bool,
                               host_private_key: str = "",
                               host_public_key: str = "",
-                              guest_env: dict | None = None) -> str:
+                              guest_env: dict | None = None,
+                              ca_cert: str = "") -> str:
     """Render the built-in #cloud-config when no user_data_file is set.
 
     Stays in a simple, controlled subset of YAML so we never need a YAML
@@ -1134,8 +1147,23 @@ def _render_default_user_data(name: str, guest_user: str, pubkey: str,
     # Only the built-in cloud-config gets this. A workload supplying its own
     # user_data_file owns its guest configuration entirely, and this is
     # documented there rather than merged into a file we do not parse.
-    if guest_env:
+    #
+    # THE CA IS SEEDED FOR EVERY FILTERED VM, WHATEVER `tls` SAYS, and it goes
+    # in by TWO routes because they reach different clients. `ca_certs.trusted`
+    # below installs it into the guest's system trust store, which §5 measured
+    # as covering almost everything; the write_files entry puts the same PEM at
+    # a fixed path, which is what the five environment variables above name for
+    # the runtimes that carry their own root list and never consult the system
+    # store. Either alone leaves a measured population of clients failing.
+    if guest_env or ca_cert:
         lines.append("write_files:")
+    if ca_cert:
+        lines.append(f"  - path: {VM_CA_BUNDLE_PATH}")
+        lines.append("    permissions: '0644'")
+        lines.append("    content: |")
+        for certline in ca_cert.splitlines():
+            lines.append(f"      {certline}")
+    if guest_env:
         lines.append("  - path: /etc/environment")
         lines.append("    append: true")
         lines.append("    content: |")
@@ -1152,6 +1180,15 @@ def _render_default_user_data(name: str, guest_user: str, pubkey: str,
         lines.append("    content: |")
         for key, value in guest_env.items():
             lines.append(f"      export {key}={value}")
+    # cc_ca_certs, present in Fedora 44 Cloud-Base. This is the half that
+    # reaches clients using the system store, and it is why a guest usually
+    # works without any of the environment variables at all.
+    if ca_cert:
+        lines.append("ca_certs:")
+        lines.append("  trusted:")
+        lines.append("    - |")
+        for certline in ca_cert.splitlines():
+            lines.append(f"      {certline}")
     if mounts:
         lines.append("mounts:")
         for tag, mp, fstype, opts in mounts:
@@ -1497,6 +1534,17 @@ def build_cloud_init_iso(pw, config: dict, name: str, config_path: Path | None =
             host_private_key=host_private_key,
             host_public_key=host_public_key,
             guest_env={**vm_ca_env(config), **vm_broker_env(config)},
+            # Unconditional for a filtered VM, NOT gated on tls = "inspect".
+            # The seed is fingerprinted over its rendered text and the
+            # cloud-init instance-id rotates with it, so gating would make an
+            # emergency switch to tls = "splice" drop the CA, rotate the id,
+            # and re-run every per-instance module -- users, runcmd, bootstrap
+            # -- on the next boot, in the middle of the incident the switch
+            # exists for. Switching back would do it a second time. The cost of
+            # not gating is a PEM in the seed of a workload not currently
+            # presenting anything under it, and that key is per-workload and
+            # trusted by exactly one guest.
+            ca_cert=_read_vm_egress_ca(name) if vm_uses_inspect(config) else "",
         )
 
     # Pin the guest host key on the host (S1). Both provisioning paths have now

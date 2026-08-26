@@ -1289,8 +1289,10 @@ def vm_ca_openssl_argv(name: str, key_path, cert_path, *, now: float) -> list[st
 
 
 # Whether there is a bundle at VM_CA_BUNDLE_PATH for those variables to name.
-# Rung 3 mints the CA, writes the bundle into the seed, and flips this to True;
-# until then nothing writes the file and vm_ca_env() returns {}.
+# TRUE SINCE RUNG 3 T3, which is the commit that mints the CA into the seed.
+# The paragraphs below are kept as written rather than trimmed: they are the
+# reason this flag exists at all, and they are the argument against anyone
+# splitting the three changes it binds together back apart.
 #
 # THIS IS NOT CAUTION, IT IS THE DIFFERENCE BETWEEN WORKING AND BROKEN. Every
 # one of those five variables REPLACES the runtime's default trust store rather
@@ -1308,7 +1310,13 @@ def vm_ca_openssl_argv(name: str, key_path, cert_path, *, now: float) -> list[st
 # environment block at rung 2 and regains it at rung 3, which is a seed
 # migration for those workloads. A guest that cannot verify certificates is
 # worse than a guest re-seeded twice.
-VM_CA_BUNDLE_AVAILABLE = False
+#
+# THREE THINGS MOVE TOGETHER OR NONE OF THEM DO: this flag, the write_files
+# entry in _render_default_user_data that puts the PEM at VM_CA_BUNDLE_PATH,
+# and the seed contract in build_cloud_init_iso. Flipping this alone points
+# five variables at a file nothing writes, which is the total outage described
+# above -- so it is not a "safe" partial step, it is the worst of the three.
+VM_CA_BUNDLE_AVAILABLE = True
 
 
 def vm_ca_env(config: dict) -> dict[str, str]:

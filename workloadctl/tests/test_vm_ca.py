@@ -228,3 +228,57 @@ class TestGeneratorIsIdempotent(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestTheCaReachesTheSeed(unittest.TestCase):
+    """The built-in cloud-config carries the CA by BOTH routes.
+
+    Either alone leaves a measured population of clients failing: the system
+    trust store covers almost everything, and the runtimes that carry their own
+    root list (upstream Node, certifi) consult only the file the five
+    environment variables name. So `ca_certs.trusted` and the write_files entry
+    are not redundant, and a test asserting one would pass against a seed that
+    breaks half the guest.
+    """
+
+    PEM = "-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n"
+
+    def setUp(self):
+        self.mod = load_script("libexec/workload-ensure-user")
+
+    def _render(self, **kw):
+        return self.mod._render_default_user_data(
+            name="myvm", guest_user="fedora", pubkey="ssh-ed25519 AAAA u@h",
+            mounts=[], has_data_disk=False, **kw)
+
+    def test_the_bundle_is_written_where_the_env_vars_point(self):
+        from vm import VM_CA_BUNDLE_PATH
+        out = self._render(ca_cert=self.PEM)
+        self.assertIn(f"  - path: {VM_CA_BUNDLE_PATH}", out)
+        self.assertIn("-----BEGIN CERTIFICATE-----", out)
+
+    def test_it_also_goes_into_the_system_trust_store(self):
+        out = self._render(ca_cert=self.PEM)
+        self.assertIn("ca_certs:", out)
+        self.assertIn("  trusted:", out)
+
+    def test_write_files_is_emitted_once_when_both_halves_want_it(self):
+        # The env block and the CA bundle are two entries under ONE write_files
+        # key. Two `write_files:` keys is not a cloud-config -- the second
+        # silently replaces the first, and the loser is whichever half the
+        # renderer emitted earlier.
+        out = self._render(ca_cert=self.PEM, guest_env={"SSL_CERT_FILE": "/x"})
+        self.assertEqual(out.count("write_files:"), 1)
+
+    def test_a_workload_with_no_ca_gets_neither_block(self):
+        # egress = "open": no inspector, so nothing to trust.
+        out = self._render(ca_cert="")
+        self.assertNotIn("ca_certs:", out)
+
+    def test_the_env_block_still_stands_on_its_own(self):
+        # Guarding the write_files header on `guest_env or ca_cert` is easy to
+        # get wrong in the direction that drops the env block for a workload
+        # with no CA.
+        out = self._render(guest_env={"WORKLOAD_BROKER_URL": "http://x"})
+        self.assertIn("write_files:", out)
+        self.assertIn("/etc/environment", out)

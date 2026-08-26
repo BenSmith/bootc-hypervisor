@@ -191,14 +191,29 @@ class TestBuildCloudInitIsoTemplateMode(unittest.TestCase):
         return types.SimpleNamespace(returncode=0, stderr="", stdout="")
 
     def _run_build(self, config: dict, name: str = "myvm",
-                   inject_host_key: bool = True):
+                   inject_host_key: bool = True, inject_ca: bool = True):
         # A custom seed must install the workload's SSH host key or
         # build_cloud_init_iso fails the S1 (c) contract. Unless a test is
         # exercising that failure (inject_host_key=False), append a reference to
         # the magic var so the rendered user-data carries the host key. The
         # value is a multi-line PEM; the tests never parse the YAML, so a
         # trailing block is harmless — it only has to satisfy the substring pin.
+        # The CA contract is the same shape as the host-key one and lives in
+        # the same place for the same reason: from rung 3 T3 a custom seed on a
+        # filtered VM must install the egress CA bundle, so without this every
+        # test in this class fails on the CA check before reaching its own
+        # subject. Tests exercising THAT failure pass inject_ca=False.
         udf = config.get("vm", {}).get("cloud_init", {}).get("user_data_file")
+        if udf and inject_ca:
+            path = Path(udf)
+            if not path.is_absolute():
+                path = self.config_dir / udf
+            if path.exists():
+                body = path.read_text()
+                if self.mod.VM_CA_BUNDLE_PATH not in body:
+                    path.write_text(
+                        body + f"\n# egress CA bundle: "
+                               f"{self.mod.VM_CA_BUNDLE_PATH}\n")
         if udf and inject_host_key:
             path = Path(udf)
             if not path.is_absolute():
@@ -385,8 +400,13 @@ class TestBuildCloudInitIsoTemplateMode(unittest.TestCase):
 
     def test_user_data_written_0600(self):
         ud = self.config_dir / "user-data"
+        # Written here rather than by _run_build, which these two bypass by
+        # calling build_cloud_init_iso directly. Their subject is the seed
+        # DIRECTORY, not egress -- but a VM with no [vm.network] block is
+        # filtered by default, so the CA contract applies to them anyway.
         ud.write_text("#cloud-config\nhostname: test\n"
                       "ssh_deletekeys: false\n"
+                      f"# egress CA bundle: {self.mod.VM_CA_BUNDLE_PATH}\n"
                       "host_key: ${WORKLOADCTL_VM_HOST_KEY}\n")
         cfg = {"vm": {"cloud_init": {"user_data_file": "user-data"}}}
         import shutil as _shutil
@@ -409,8 +429,13 @@ class TestBuildCloudInitIsoTemplateMode(unittest.TestCase):
 
     def test_seed_dir_removed_after_iso_build(self):
         ud = self.config_dir / "user-data"
+        # Written here rather than by _run_build, which these two bypass by
+        # calling build_cloud_init_iso directly. Their subject is the seed
+        # DIRECTORY, not egress -- but a VM with no [vm.network] block is
+        # filtered by default, so the CA contract applies to them anyway.
         ud.write_text("#cloud-config\nhostname: test\n"
                       "ssh_deletekeys: false\n"
+                      f"# egress CA bundle: {self.mod.VM_CA_BUNDLE_PATH}\n"
                       "host_key: ${WORKLOADCTL_VM_HOST_KEY}\n")
         cfg = {"vm": {"cloud_init": {"user_data_file": "user-data"}}}
         import shutil as _shutil
@@ -591,21 +616,40 @@ class TestBuildCloudInitIsoTemplateMode(unittest.TestCase):
         self._run_build(cfg)
         self.assertNotIn("proxy", self._read_user_data())
 
-    def test_ca_contract_does_not_fire_before_the_ca_exists(self):
-        """VM_CA_BUNDLE_AVAILABLE gates the CA half of the contract.
+    def test_ca_contract_fires_now_that_the_ca_exists(self):
+        """The inverse of what this asserted through rung 2.
 
-        Rung 3 mints the bundle and flips the flag. Until then the built-in seed
-        writes no bundle either, so refusing a custom seed for omitting one
-        would enforce a rule against the template path alone. This test is what
-        will fail when the flag flips -- deliberately, because the contract, the
-        default seed and this assertion have to move in one commit.
+        It used to assert VM_CA_BUNDLE_AVAILABLE was False and that a custom
+        seed omitting the bundle was accepted -- deliberately written as the
+        test that would fail when the flag flipped, because the flag, the
+        write_files entry in the default seed and this contract have to move in
+        one commit. Rung 3 T3 is that commit, so the assertion inverts rather
+        than being deleted: a custom seed for a filtered VM that installs no
+        anchor is now REFUSED, which is the whole point of the flag having
+        existed.
         """
-        self.assertFalse(self.mod.VM_CA_BUNDLE_AVAILABLE)
+        self.assertTrue(self.mod.VM_CA_BUNDLE_AVAILABLE)
         self._seed()
         cfg = {"vm": {"cloud_init": {"user_data_file": "user-data"},
                       "network": self._FILTERED_NET}}
-        self._run_build(cfg)
-        self.assertNotIn(self.mod.VM_CA_BUNDLE_PATH, self._read_user_data())
+        with self.assertRaises(self.mod.SeedContractError) as ctx:
+            self._run_build(cfg, inject_ca=False)
+        # The message has to name both remedies: write the bundle, or declare
+        # seed_provides = ["ca"]. An operator hitting this has a real config in
+        # front of them and needs to know which one applies.
+        self.assertIn(self.mod.VM_CA_BUNDLE_PATH, str(ctx.exception))
+        self.assertIn("seed_provides", str(ctx.exception))
+
+    def test_a_custom_seed_declaring_ca_is_accepted(self):
+        """seed_provides = ["ca"] is the opt-out for a guest image that already
+        carries the anchor -- the escape hatch that keeps the contract above
+        from being a wall."""
+        self.assertTrue(self.mod.VM_CA_BUNDLE_AVAILABLE)
+        self._seed()
+        cfg = {"vm": {"cloud_init": {"user_data_file": "user-data",
+                                     "seed_provides": ["ca"]},
+                      "network": self._FILTERED_NET}}
+        self._run_build(cfg, inject_ca=False)
 
     def test_open_egress_seed_is_accepted(self):
         """An unfiltered VM is outside the contract entirely -- the common case
