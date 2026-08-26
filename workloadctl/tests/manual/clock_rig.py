@@ -19,6 +19,24 @@ measurements already exist (detail doc §6, §16 item 5):
   pause    a 127.668 s vCPU stop moved the guest by 127.670 s and it never
            came back. The backdate covers exactly ONE HOUR of this.
 
+TWO REMEDIES, AND THE RIG MEASURES BOTH
+
+The guest-side one is `ptp_kvm`: the seed points chrony at a paravirtual clock
+that reads the host's over a KVM hypercall, so it needs no network (which is
+what makes it usable at all here) and nothing CONFIGURED on the host.
+Measurement 3 proves it repairs the very pause measurement 4 shows is otherwise
+permanent -- on a host that can offer it at all. It needs the host's own
+clocksource to be the TSC, since that is the only case in which KVM answers the
+clock-pairing hypercall; on a host running hpet or acpi_pm the module refuses to
+load in every guest and measurement 3 skips, saying so.
+
+The host-side one is the mint-path check, and it exists because the guest-side
+one is not guaranteed to be there: a custom [vm.cloud_init].user_data_file
+replaces the built-in seed outright, so a guest seeded from one carries no
+ptp_kvm wiring unless its author copied it. Measurements 4 to 7 are about THAT
+guest, which the rig becomes by stopping chronyd after measurement 3 rather
+than by contriving a second workload.
+
 Past the backdate every freshly-minted leaf has a notBefore in the guest's
 future, so validation fails on EVERY request to a new name while `diagnose`
 reports a healthy VM -- §6's rotation trap arriving through the clock.
@@ -34,11 +52,11 @@ WHAT THIS RIG DECIDES
 §16 item 5 says in as many words that rung 3 has to choose a remedy, and names
 `guest-set-time` as the obvious one while recording that it is UNPROVEN here:
 the no-argument form was issued once and did not return, and the
-explicit-nanoseconds form is untested. Those two are measurements 4 and 5
+explicit-nanoseconds form is untested. Those two are measurements 5 and 6
 below, and they are the whole reason this rig is not just a re-run of the
 pause.
 
-Measurement 6 is the one that closes the loop, and it arrived after T5 wired the
+Measurement 7 is the one that closes the loop, and it arrived after T5 wired the
 remedy in: everything above measures a clock, and 6 measures what the clock was
 on the critical path OF. A guest pushed two hours behind -- past the leaf's
 1-hour notBefore backdate, so a stale clock CANNOT validate a fresh leaf by
@@ -71,18 +89,23 @@ DNS_ALLOW = "1.1.1.1:53"
 NAME = "wlrc-clock"
 
 # What the guest is allowed to reach over HTTPS, and therefore what measurement
-# 6 dials. Two names, because that measurement needs a name it has NEVER minted
+# 7 dials. Two names, because that measurement needs a name it has NEVER minted
 # for -- a cache HIT does not run the clock check, so re-dialling the first one
 # would prove nothing and look like a pass.
 REACHABLE_HOSTS = ["example.com", "example.org"]
 
-# How far back measurement 6 pushes the guest's clock. Past the leaf's 1-hour
+# How far back measurement 7 pushes the guest's clock. Past the leaf's 1-hour
 # notBefore backdate, which is the whole point: inside the backdate a stale
 # clock validates anyway and the assertion cannot fail for the right reason.
-# Two hours, set with the explicit-nanoseconds guest-set-time measurement 5
+# Two hours, set with the explicit-nanoseconds guest-set-time measurement 6
 # proves works -- a rig that reached this by PAUSING for two hours is a rig
 # nobody runs.
 SKEW_SECONDS = 7200
+# ptp_kvm's guest-side init issues KVM_HC_CLOCK_PAIRING, and KVM answers
+# EOPNOTSUPP unless the HOST's clocksource is the TSC. So this file decides
+# whether measurement 3 can run at all, on a host the rig does not control.
+HOST_CLOCKSOURCE = Path(
+    "/sys/devices/system/clocksource/clocksource0/current_clocksource")
 SOCKET_DIR = Path("/run/workload-vm")
 STATUS_FILE = "inspect-status.json"
 
@@ -245,7 +268,7 @@ def offset(label, samples=3):
 def _status():
     """The inspector's whole status document, or None if it cannot be read.
 
-    Never raises. The counters are corroboration for measurement 6, not its
+    Never raises. The counters are corroboration for measurement 7, not its
     verdict -- a rig that died reading a diagnostic would lose the measurement
     the diagnostic was describing.
     """
@@ -306,7 +329,7 @@ def toml_for():
         # nothing. See the module docstring.
         'egress = "filtered"',
         # `hosts` is what turns the INSPECTOR on, and the inspector is what
-        # mints. Without it measurement 6 has no mint path to drive and the rig
+        # mints. Without it measurement 7 has no mint path to drive and the rig
         # measures the clock without ever measuring what the clock breaks.
         f'hosts = {json.dumps(REACHABLE_HOSTS)}',
         "",
@@ -357,16 +380,37 @@ def teardown():
 
 
 def measure():
-    # 1. NTP is dead. Recorded rather than assumed: it is the premise the whole
-    #    question rests on, and it is invisible from the host because chronyd
-    #    stays `active` while never synchronising.
-    say("== 1. is NTP actually dead in there ==")
-    r = guest("chronyc tracking 2>&1 | head -4 || echo 'no chronyc'")
-    say("    " + r.stdout.strip().replace("\n", "\n    "))
-    dead = ("Reach" not in r.stdout) or ("1970" in r.stdout) or \
-           ("Stratum" in r.stdout and "Stratum         : 0" in r.stdout)
-    record("ntp is dead in a filtered guest", dead, r.stdout.strip().split("\n")[0]
-           if r.stdout.strip() else "no output")
+    # 1. The NETWORK time path is dead. It is the premise the whole question
+    #    rests on, and it is invisible from the host because chronyd stays
+    #    `active` while no server it is configured with is reachable.
+    #
+    #    This used to read `chronyc tracking` and look for an unsynchronised
+    #    clock. It cannot any more, and the reason is the point of measurement
+    #    3: every seed now gives the guest a PHC refclock, so a healthy filtered
+    #    guest IS synchronised -- from the host, over a hypercall, with no
+    #    packets. The claim being made here was always about the servers, so it
+    #    is now made against the servers: every `^` line is an NTP source and
+    #    every one of them must be unreachable.
+    say("== 1. is the NTP *network* path actually dead in there ==")
+    # ZERO SOURCES IS THE ANSWER, NOT A BROKEN READING. In a filtered guest the
+    # `pool` line never resolves, so chrony ends up with no sources at all --
+    # and chronyc then prints NOTHING, not even the column headers. An earlier
+    # version of this measurement required at least one `^` line before it would
+    # believe the reading, and failed every run for it (2026-08-26), indicting a
+    # filter that was doing exactly its job. No server source at all is the
+    # strongest form of the claim, so it passes.
+    #
+    # The sentinel is what keeps that from being a free pass: it proves chronyc
+    # ran and said nothing, rather than chronyc being absent.
+    r = guest("command -v chronyc >/dev/null && chronyc -n sources; echo __END__")
+    say("    " + (r.stdout.strip().replace("\n", "\n    ") or "(no output)"))
+    ran = "__END__" in r.stdout
+    servers = [ln.split() for ln in r.stdout.splitlines() if ln.startswith("^")]
+    reachable = [ln for ln in servers if len(ln) > 4 and ln[4] != "0"]
+    record("no ntp server is reachable from a filtered guest",
+           ran and not reachable,
+           f"{len(servers)} server source(s), {len(reachable)} reachable"
+           if ran else "chronyc did not run; the reading proves nothing")
 
     # 2. Baseline.
     say("== 2. baseline offset ==")
@@ -376,9 +420,123 @@ def measure():
         return
     record("baseline offset readable", True, f"{base:+.3f}s")
 
-    # 3. The pause. This is the operation `backup --consistency crash`
+    # 3. THE GUEST-SIDE REMEDY, which is the half that needs no agent and no
+    #    host involvement. The seed loads ptp_kvm, names the device by the
+    #    driver's clock_name, points chrony at it and sets `makestep 1 -1`; the
+    #    guest then reads the host's clock over a KVM hypercall. Nothing is
+    #    configured on the host for this -- if it works, it works because
+    #    `-machine accel=kvm -cpu host` already implies it.
+    #
+    #    The assertion is the whole reason it was added: the SAME pause that
+    #    measurement 4 shows is permanent must, here, repair itself.
+    say("== 3. the guest's own paravirtual clock ==")
+    # THE HOST GATE, and it is not a formality. ptp_kvm's guest-side init issues
+    # KVM_HC_CLOCK_PAIRING, and KVM answers EOPNOTSUPP unless the HOST's own
+    # clocksource is the TSC -- so on a host running hpet or acpi_pm the module
+    # refuses to load in every guest, with `modprobe: ERROR: could not insert
+    # 'ptp_kvm': Operation not supported` and nothing else to go on. Measured
+    # 2026-08-26 on a development host whose available_clocksource is
+    # `hpet acpi_pm` with no tsc at all: every piece of the seed was correct and
+    # the device still never appeared.
+    #
+    # So this is a SKIP, not a failure: the seed's chrony edit is guarded on the
+    # device existing precisely so such a host keeps its stock time
+    # configuration, and measurements 4 to 7 are exactly the guest this host
+    # produces anyway.
+    host_clocksource = HOST_CLOCKSOURCE.read_text().strip() \
+        if HOST_CLOCKSOURCE.exists() else "unknown"
+    ptp_possible = host_clocksource == "tsc"
+    say(f"    host clocksource: {host_clocksource}")
+
+    r = guest("test -e /dev/ptp_kvm && echo present || echo missing")
+    present = r.stdout.strip() == "present"
+    if ptp_possible:
+        record("the guest has /dev/ptp_kvm", present, r.stdout.strip())
+    else:
+        say(f"  [obs] /dev/ptp_kvm is {r.stdout.strip()}, and cannot be "
+            f"otherwise: this host's clocksource is {host_clocksource!r}, not "
+            f"'tsc', so KVM refuses the clock-pairing hypercall")
+
+    # Whether the guest was left ALONE is assertable on any host, and it is the
+    # half that would hurt: chronyd treats a refclock it cannot open as fatal,
+    # so a seed that appended unconditionally would leave this guest -- the
+    # common case on such a host -- with no time service at all.
+    r = guest("grep -c '^makestep 1 -1' /etc/chrony.conf 2>&1 || echo 0")
+    steps = r.stdout.strip().splitlines()[0]
+    if ptp_possible:
+        # `makestep 1 -1` is the load-bearing line, not the refclock: Fedora
+        # ships `makestep 1.0 3`, which steps three times and then slews at
+        # ~83 us/s forever -- months to walk off a two-hour jump. A guest with
+        # the refclock and the stock makestep looks configured and repairs
+        # nothing.
+        record("chrony may step at any time, not just at startup",
+               steps == "1", f"makestep 1 -1 lines: {steps}")
+        r = guest("chronyc -n sources 2>&1 || echo 'no chronyc'")
+        refclocks = [ln for ln in r.stdout.splitlines() if ln.startswith("#")]
+        selected = [ln for ln in refclocks if ln[:2] in ("#*", "#+")]
+        record("chrony is using it as a refclock", bool(selected),
+               (selected or refclocks or ["no refclock line at all"])[0].strip())
+    else:
+        record("a host without ptp_kvm leaves the guest's chrony untouched",
+               steps == "0" and not present,
+               f"makestep 1 -1 lines: {steps}, device {'present' if present else 'absent'}")
+        record("and its chronyd is still running",
+               guest("systemctl is-active chronyd").stdout.strip() == "active",
+               "chronyd active")
+        say("  -- skipping 3b (self-repair): this host cannot offer the clock. "
+            "Measurements 4 to 7, the host-side remedy, run as normal.")
+
+    if ptp_possible:
+        say(f"== 3b. the same pause, with the guest-side remedy ON ==")
+        t_stop = time.time()
+        qmp(["stop"])
+        time.sleep(PAUSE_SECONDS)
+        qmp(["cont"])
+        paused = time.time() - t_stop
+        say(f"    paused {paused:.3f}s wall")
+        # chrony polls the refclock every 4 s; give it a wide margin and report the
+        # time it actually took, since that number is the operator-facing one.
+        deadline, healed_at, healed_off = time.time() + 180, None, None
+        while time.time() < deadline:
+            o = offset_once()
+            if o is not None and abs(o[1]) < 5.0:
+                healed_at, healed_off = time.time() - t_stop - paused, o[1]
+                break
+            time.sleep(4)
+        record("the guest repairs the pause by itself", healed_at is not None,
+               f"back to {healed_off:+.3f}s after {healed_at:.0f}s"
+               if healed_at is not None else
+               f"still out after 180s (last {o[1]:+.1f}s)" if o else "unreachable")
+
+        # EVERYTHING BELOW MEASURES A GUEST WITHOUT THAT REMEDY, and that is a
+        # configuration we support rather than a contrivance: a custom
+        # [vm.cloud_init].user_data_file replaces the built-in seed outright, so a
+        # guest seeded from one carries no ptp_kvm wiring unless its author copied
+        # it. The host-side check is what covers those, and it is what measurements
+        # 4 to 7 are about. Stopping chronyd is the smallest way to become one.
+        say("== 3c. disabling the guest-side remedy for the rest of the rig ==")
+        # sudo: `workloadctl exec` logs in as the guest user, not root. The
+        # seed gives that account NOPASSWD sudo; without it this reads
+        # "Access denied" and the rig proceeds against a guest it believes it
+        # disabled -- measured 2026-08-26.
+        r = guest("sudo systemctl stop chronyd 2>&1; "
+                  "systemctl is-active chronyd 2>&1 || true")
+        record("the guest-side remedy can be turned off",
+               "inactive" in r.stdout or "failed" in r.stdout, r.stdout.strip())
+        base = offset("baseline (guest-side remedy off)")
+        if base is None:
+            record("baseline offset readable (remedy off)", False, "no reading")
+            return
+
+    else:
+        # Nothing to disable: this host never gave the guest a refclock, so it
+        # already IS the guest measurements 4 to 7 are about. `base` from
+        # measurement 2 still stands.
+        say("== 3c. skipped: there was no guest-side remedy to disable ==")
+
+    # 4. The pause. This is the operation `backup --consistency crash`
     #    performs, against the same socket, in the same order.
-    say(f"== 3. stopping vCPUs for {PAUSE_SECONDS}s (this is what backup does) ==")
+    say(f"== 4. stopping vCPUs for {PAUSE_SECONDS}s (this is what backup does) ==")
     t_stop = time.time()
     qmp(["stop"])
     time.sleep(PAUSE_SECONDS)
@@ -399,14 +557,14 @@ def measure():
     record("nothing puts it back on its own", abs(step) > 1.0,
            f"still {after:+.3f}s behind after resume")
 
-    # 4. The unknown: does the no-argument form return? Recorded either way --
+    # 5. The unknown: does the no-argument form return? Recorded either way --
     #    §16 says it was issued once and did not return, and one observation is
     #    not a result.
-    say("== 4. guest-set-time, NO ARGUMENT (reads the host RTC) ==")
+    say("== 5. guest-set-time, NO ARGUMENT (reads the host RTC) ==")
     ping, err = ga("guest-sync", {"id": 1})
     if err:
         record("the guest agent answers at all", False, err)
-        say("    -> no agent: measurements 4 and 5 cannot run. Is "
+        say("    -> no agent: measurements 5 and 6 cannot run. Is "
             "qemu-guest-agent installed in the base image?")
         return
     record("the guest agent answers at all", True, "guest-sync returned")
@@ -418,7 +576,7 @@ def measure():
     # the explicit form -- so this is recorded as an OBSERVATION, not asserted
     # either way. Asserting the failure would make a fixed guest agent look like
     # a regression; asserting the success would fail every run on a host where
-    # the documented behaviour holds. What DOES get asserted is measurement 5:
+    # the documented behaviour holds. What DOES get asserted is measurement 6:
     # the form the code actually uses.
     reply, err = ga("guest-set-time")
     if err:
@@ -434,9 +592,9 @@ def measure():
         if noarg is not None:
             say(f"  [obs] the no-argument form left the guest {noarg:+.3f}s out")
 
-    # 5. The untested one. This is the form a remedy would actually use, since
+    # 6. The untested one. This is the form a remedy would actually use, since
     #    it does not depend on the guest's RTC being right.
-    say("== 5. guest-set-time, EXPLICIT nanoseconds ==")
+    say("== 6. guest-set-time, EXPLICIT nanoseconds ==")
     now_ns = int(time.time() * 1_000_000_000)
     reply, err = ga("guest-set-time", {"time": now_ns})
     if err:
@@ -455,7 +613,7 @@ def measure():
     record("the explicit form re-anchors the guest", abs(fixed) < 2.0,
            f"offset {fixed:+.3f}s (was {after:+.3f}s)")
 
-    # 6. THE ONE THAT CLOSES THE LOOP. Everything above measures a clock; this
+    # 7. THE ONE THAT CLOSES THE LOOP. Everything above measures a clock; this
     #    measures what the clock was on the critical path OF. Rung 3 T5 wired
     #    the mint-time check in, so a guest whose clock is behind is repaired
     #    ON A CACHE MISS, before the leaf it is about to be handed is signed.
@@ -463,13 +621,13 @@ def measure():
     #    The skew is SET rather than paused for, and it has to exceed the
     #    1-hour notBefore backdate or the assertion cannot fail for the right
     #    reason: inside the backdate a stale guest validates a fresh leaf
-    #    anyway. Two hours, using the explicit-nanoseconds form measurement 5
+    #    anyway. Two hours, using the explicit-nanoseconds form measurement 6
     #    just proved works.
     #
     #    And it dials a name this guest has NEVER dialled. A cache hit does not
     #    run the clock check -- re-dialling the first name would pass while
     #    proving nothing.
-    say(f"== 6. a guest {SKEW_SECONDS}s behind still gets a usable leaf ==")
+    say(f"== 7. a guest {SKEW_SECONDS}s behind still gets a usable leaf ==")
     first, second = REACHABLE_HOSTS[0], REACHABLE_HOSTS[1]
 
     warm = guest(f"curl -sS -o /dev/null -w '%{{http_code}}' "

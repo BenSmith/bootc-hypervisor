@@ -1216,6 +1216,72 @@ When the agent doesn't answer (not installed, not started, guest still booting) 
 
 The neighbour-table source is passive: it can only report a guest the host has spoken to recently, so a healthy but long-idle VM on a custom bridge falls out of it. That is precisely the gap the guest agent closes — without it, `exec` on such a VM can fail to find an address while the VM is up and serving traffic. The serial console works regardless.
 
+### The guest's clock
+
+A VM whose vCPUs are paused does not notice. It resumes with a clock that is
+behind by exactly the length of the pause, permanently — nothing inside puts it
+back on its own. The pause is not exotic: `workloadctl backup --consistency
+crash` takes one, so does `workloadctl incant <vm> stop`, and so does the host
+suspending or hibernating.
+
+Ordinary NTP does not repair this, for two independent reasons. In a filtered
+guest it is dead by construction — this design closed the UDP path it needs. And
+even where it works, a stock `chrony.conf` says `makestep 1.0 3`: step during
+the first three updates, slew forever after. Slewing is capped near 83 µs/s, so
+a two-hour jump takes months to walk off.
+
+It matters most on a **filtered** VM, because the egress inspector mints
+certificates backdated an hour. A guest rewound further than that rejects every
+newly minted leaf — while leaves already cached keep validating. So the guest
+still reaches the hosts it visits regularly and fails only on new names, and
+every figure on the host side reads healthy. That is the shape to recognise.
+
+Two mechanisms repair it, and they cover each other's gaps:
+
+- **In the guest — `ptp_kvm`.** The seed loads the `ptp_kvm` module, gives the
+  device a stable name (`/dev/ptp_kvm`, selected on the driver's `clock_name`
+  because `/dev/ptpN` is allocation-ordered), points chrony at it as a refclock
+  and sets `makestep 1 -1` so chrony may step at any time. The guest then reads
+  the host's clock over a KVM hypercall: no network, so it works inside the
+  filter, and **nothing is required on the host** — no QEMU flag, no device, no
+  time server to run. Correction lands on chrony's own four-second poll.
+- **On the host — the mint-path check.** Before signing a leaf on a cache miss,
+  workloadctl compares the guest's clock to its own over the guest agent and
+  resyncs if they differ by more than five minutes. This one needs no guest
+  configuration at all, but it does need `qemu-guest-agent` running in the
+  guest, and it only fires when a certificate is actually minted.
+
+The built-in cloud-config carries the `ptp_kvm` wiring for every VM. **A custom
+`[vm.cloud_init].user_data_file` replaces that outright**, so it must carry the
+wiring itself — copy the block from `workloads/vm-base/cloud-init/user-data`.
+Nothing refuses a seed that omits it, unlike the CA bundle and the volume
+mounts: a guest without it is degraded rather than broken, since the host-side
+check still repairs it.
+
+To check a running guest:
+
+```bash
+workloadctl exec myvm -- chronyc sources    # expect a 'PHC0' source, marked '#*'
+workloadctl exec myvm -- ls -l /dev/ptp_kvm
+```
+
+**The host has to be able to offer it**, and one condition is easy to miss: the
+*host's own* clocksource must be the TSC. `ptp_kvm` works by issuing a KVM
+clock-pairing hypercall, and KVM answers `EOPNOTSUPP` for anything else — so on
+a host running `hpet` or `acpi_pm` the module refuses to load in every guest,
+with `modprobe: ERROR: could not insert 'ptp_kvm': Operation not supported` and
+nothing further to go on. Check with:
+
+```bash
+cat /sys/devices/system/clocksource/clocksource0/current_clocksource
+```
+
+A guest on such a host simply keeps its stock time configuration — the seed's
+chrony edit is conditional on the device existing, because chronyd treats a
+refclock it cannot open as fatal and an unconditional edit would leave that
+guest with no time service at all. Those guests are covered by the host-side
+check alone, which is one of the reasons it exists.
+
 ### virtiofs Volumes
 
 Share host directories into the VM:

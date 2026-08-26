@@ -156,7 +156,11 @@ _SCRATCH_VM_CLOUD_IMAGE_CHECKSUM = (
     "sha256:28680fe5b371a5a82ebf43a31926e086a168e59949d03969c5093e7071f90b7f"
 )
 
-_SCRATCH_VM_USER_DATA = """\
+# Raw, and with the leading newline trimmed rather than backslash-continued:
+# the seed contains a `printf '%s\n'`, and in a non-raw literal that backslash
+# would be read here instead of by the guest's shell. Byte-identical to
+# workloads/vm-base/cloud-init/user-data, which tests/test_catalog.py asserts.
+_SCRATCH_VM_USER_DATA = r"""
 #cloud-config
 # Starter cloud-init for a workloadctl VM. Substitution happens at seed-build
 # time (see docs/workloads.md "Bootstrapping a VM with cloud-init"):
@@ -200,6 +204,14 @@ write_files:
     permissions: '0644'
     owner: root:root
     content: ${WORKLOADCTL_VM_HOST_PUBKEY}
+  - path: /etc/modules-load.d/ptp-kvm.conf
+    permissions: '0644'
+    content: |
+      ptp_kvm
+  - path: /etc/udev/rules.d/70-ptp-kvm.rules
+    permissions: '0644'
+    content: |
+      SUBSYSTEM=="ptp", ATTR{clock_name}=="KVM virtual PTP", SYMLINK+="ptp_kvm"
 
 # --- One thing this file must carry that the built-in seed would have -------
 #
@@ -265,7 +277,36 @@ write_files:
 
 # runcmd:
 #   - echo "first boot" > /etc/motd
-"""
+
+# --- The paravirtual clock, which a custom seed does NOT get for free --------
+#
+# A vCPU pause -- `backup --consistency crash`, a host suspend, `incant stop` --
+# is lost by the guest exactly and permanently, and NTP will not put it back: a
+# stock chrony steps only during its first three updates and slews forever
+# after, at a rate that needs months to walk off a two-hour jump. In a filtered
+# guest NTP is dead anyway, since this design closed the UDP path it needs.
+#
+# ptp_kvm costs nothing and needs no network: the guest reads the host's clock
+# over a KVM hypercall. Nothing is required on the host side. The three pieces
+# below are the module, a stable name for the device (/dev/ptpN is allocation-
+# ordered, so select on the driver's clock_name), and `makestep 1 -1` -- the
+# line that actually fixes the bug, by letting chrony step at any time rather
+# than only at startup.
+#
+# The host repairs a skewed guest too, on the egress inspector's mint path, but
+# only if the guest runs qemu-guest-agent and only when a certificate is minted.
+# Keep both: they cover each other's blind spot.
+runcmd:
+  - |
+    udevadm control --reload-rules || true
+    if modprobe ptp_kvm 2>/dev/null; then
+      for _ in 1 2 3 4 5; do [ -e /dev/ptp_kvm ] && break; sleep 1; done
+    fi
+    if [ -e /dev/ptp_kvm ] && ! grep -qF '# workloadctl: paravirtual clock' /etc/chrony.conf; then
+      printf '%s\n' '# workloadctl: paravirtual clock' 'refclock PHC /dev/ptp_kvm poll 2 dpoll -2 offset 0' 'makestep 1 -1' >> /etc/chrony.conf
+      systemctl restart chronyd || true
+    fi
+"""[1:]
 
 
 def _scratch_vm(name: str, manager: WorkloadManager) -> None:

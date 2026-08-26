@@ -36,6 +36,20 @@ users:
 ssh_deletekeys: false
 
 write_files:
+  # The paravirtual clock (ptp_kvm). A vCPU pause -- a crash-consistent
+  # backup, a host suspend -- is lost by the guest permanently, and a stock
+  # chrony only steps during its first three updates, so it never walks the
+  # jump off. These two files plus the runcmd block below let the guest read
+  # the host's clock over a KVM hypercall, with no network and nothing needed
+  # on the host side.
+  - path: /etc/modules-load.d/ptp-kvm.conf
+    permissions: '0644'
+    content: |
+      ptp_kvm
+  - path: /etc/udev/rules.d/70-ptp-kvm.rules
+    permissions: '0644'
+    content: |
+      SUBSYSTEM=="ptp", ATTR{clock_name}=="KVM virtual PTP", SYMLINK+="ptp_kvm"
   # SSH host key (S1). The CLI pins the guest host key
   # (StrictHostKeyChecking=yes), so this custom seed MUST install it or
   # provisioning fails. base64 keeps the multi-line PEM on one line (same reason
@@ -621,6 +635,18 @@ mounts:
   - [LABEL=workloaddata, /var/lib/workloads/forgejo/data, ext4, "defaults,nofail", 0, 2]
 
 runcmd:
+  # Wire up the paravirtual clock written above. Conditional because
+  # chronyd treats a refclock it cannot open as fatal: a host without
+  # ptp_kvm would end up with no time service at all.
+  - |
+    udevadm control --reload-rules || true
+    if modprobe ptp_kvm 2>/dev/null; then
+      for _ in 1 2 3 4 5; do [ -e /dev/ptp_kvm ] && break; sleep 1; done
+    fi
+    if [ -e /dev/ptp_kvm ] && ! grep -qF '# workloadctl: paravirtual clock' /etc/chrony.conf; then
+      printf '%s\n' '# workloadctl: paravirtual clock' 'refclock PHC /dev/ptp_kvm poll 2 dpoll -2 offset 0' 'makestep 1 -1' >> /etc/chrony.conf
+      systemctl restart chronyd || true
+    fi
   # Launch the bootstrap as its own transient systemd unit instead of running
   # it directly under runcmd. cloud-init 25.3 (Fedora 44 cloud image) runs
   # runcmd inside the single-process cloud-init-main.service (Type=notify,

@@ -42,7 +42,9 @@ from vm import (VM_SOCKET_DIR, VM_DEFAULT_GUEST_USER, VM_GUEST_HOME_BASE,
                 VM_SEED_CONTRACT_EXIT, SeedContractError, find_ovmf_vars,
                 vm_broker_env, vm_ca_env, vm_ca_cert_path, vm_ca_dir,
                 vm_denial_dir, vm_leaf_dir,
-                vm_ca_key_path, vm_ca_openssl_argv, vm_uses_inspect)
+                vm_ca_key_path, vm_ca_openssl_argv,
+                vm_ptp_kvm_runcmd_lines, vm_ptp_kvm_seed_files,
+                vm_uses_inspect)
 from secrets_template import substitute_template
 
 
@@ -1191,8 +1193,15 @@ def _render_default_user_data(name: str, guest_user: str, pubkey: str,
     # a fixed path, which is what the five environment variables above name for
     # the runtimes that carry their own root list and never consult the system
     # store. Either alone leaves a measured population of clients failing.
-    if guest_env or ca_cert:
-        lines.append("write_files:")
+    # write_files is unconditional now: every built-in seed carries the two
+    # files that give the guest a paravirtual clock (see vm.py's ptp_kvm block).
+    lines.append("write_files:")
+    for path, permissions, content in vm_ptp_kvm_seed_files():
+        lines.append(f"  - path: {path}")
+        lines.append(f"    permissions: '{permissions}'")
+        lines.append("    content: |")
+        for contentline in content.splitlines():
+            lines.append(f"      {contentline}")
     if ca_cert:
         lines.append(f"  - path: {VM_CA_BUNDLE_PATH}")
         lines.append("    permissions: '0644'")
@@ -1231,6 +1240,10 @@ def _render_default_user_data(name: str, guest_user: str, pubkey: str,
             lines.append(
                 f"  - [{tag!r}, {mp!r}, {fstype!r}, {opts!r}, '0', '0']"
             )
+    # runcmd is assembled from independent blocks and emitted once, below.
+    # Each block is a single `- |` shell fragment, so a failure in one does not
+    # decide whether the next one runs.
+    runcmd_blocks = [vm_ptp_kvm_runcmd_lines()]
     if has_data_disk:
         # Mount /dev/vdb at /data on first boot, formatting it only if it has no
         # filesystem yet. Formatting and mounting are separate steps on purpose:
@@ -1240,17 +1253,19 @@ def _render_default_user_data(name: str, guest_user: str, pubkey: str,
         # (as this once did) meant a restored data disk was attached and never
         # mounted — the disk was there, /data was empty, and nothing said why.
         # Each step is guarded independently so the whole block is idempotent.
-        lines += [
-            "runcmd:",
-            "  - |",
-            "    if [ -b /dev/vdb ]; then",
-            "      blkid /dev/vdb | grep -q TYPE || mkfs.ext4 -L workload-data /dev/vdb",
-            "      mkdir -p /data",
-            "      grep -q '^LABEL=workload-data ' /etc/fstab ||"
+        runcmd_blocks.append([
+            "if [ -b /dev/vdb ]; then",
+            "  blkid /dev/vdb | grep -q TYPE || mkfs.ext4 -L workload-data /dev/vdb",
+            "  mkdir -p /data",
+            "  grep -q '^LABEL=workload-data ' /etc/fstab ||"
             " echo 'LABEL=workload-data /data ext4 defaults 0 2' >> /etc/fstab",
-            "      mountpoint -q /data || mount /data",
-            "    fi",
-        ]
+            "  mountpoint -q /data || mount /data",
+            "fi",
+        ])
+    lines.append("runcmd:")
+    for block in runcmd_blocks:
+        lines.append("  - |")
+        lines += [f"    {shline}" for shline in block]
     lines += [
         "package_update: false",
         "package_upgrade: false",

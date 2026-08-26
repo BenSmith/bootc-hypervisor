@@ -66,8 +66,11 @@ class TestRenderDefaultUserData(unittest.TestCase):
         self.assertIn("ssh-ed25519 AAAA fedora@build", out)
         self.assertIn("sudo: ALL=(ALL) NOPASSWD:ALL", out)
         self.assertNotIn("mounts:", out)
-        self.assertNotIn("runcmd:", out)
         self.assertNotIn("mkfs", out)
+        # runcmd IS present even here: every built-in seed carries the ptp_kvm
+        # block. What must be absent is the data-disk block.
+        self.assertIn("runcmd:", out)
+        self.assertNotIn("/dev/vdb", out)
 
     def test_with_mounts(self):
         mounts = [

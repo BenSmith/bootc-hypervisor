@@ -32,6 +32,19 @@ So the check lives at the mint, on a cache miss only: compare the guest's clock
 to the host's, and past a threshold resync before signing. It covers every path
 that can ever pause a vCPU without knowing what any of them are.
 
+THE GUEST HAS A HALF OF THIS TOO, AND IT IS NOT A SUBSTITUTE
+
+Every seed workloadctl renders wires the guest to `ptp_kvm`: it reads the host's
+realtime clock over a KVM hypercall, needs nothing on the host side and sends no
+packets, so unlike NTP it survives the egress filter. The two halves fail in
+opposite directions, which is why both ship. This one repairs a guest that was
+never configured for anything and does not know it was paused -- but only on a
+mint cache miss, and only if the guest runs qemu-guest-agent. That one repairs
+the guest on its own four-second poll with no agent and no host involvement --
+but only if the guest was seeded with it, which a custom
+[vm.cloud_init].user_data_file may not have been. See vm.py's ptp_kvm block for
+what the seed carries and tests/test_vm_ptp_kvm.py for what each piece is for.
+
 TWO FACTS ABOUT THE PROTOCOL THAT COST MEASUREMENT TO LEARN
 
 - `guest-set-time` with NO ARGUMENT does not work on these guests and does not
