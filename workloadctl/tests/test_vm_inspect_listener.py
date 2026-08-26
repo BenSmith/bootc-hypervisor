@@ -1967,11 +1967,19 @@ class TestCounters(unittest.TestCase):
         is indistinguishable from a refusal that never happened to fire."""
         import re
         mod = _mod()
-        source = LISTENER_FILE.read_text()
+        # The tuple's own definition is removed before scanning, or every entry
+        # in it would count as its own use and the guard would assert nothing.
+        source = re.sub(r"DROP_REASONS = \([^)]*\)", "",
+                        LISTENER_FILE.read_text())
         named = {arg.strip() for arg in
                  re.findall(r"record_drop\(\s*([^,)]+)", source)
                  if arg.strip().startswith("DROP_")}
-        named |= {m for m in re.findall(r"return (DROP_\w+)", source)}
+        named |= set(re.findall(r"return (DROP_\w+)", source))
+        # A reason chosen well before the call site that spends it -- the
+        # terminated plane decides a refusal, then delivers it through a
+        # completed handshake -- reaches record_drop through a variable, so the
+        # tuple it was built into is where its name actually appears.
+        named |= set(re.findall(r"\(\s*(DROP_\w+),", source))
         self.assertEqual({getattr(mod, n) for n in named},
                          set(mod.DROP_REASONS))
 

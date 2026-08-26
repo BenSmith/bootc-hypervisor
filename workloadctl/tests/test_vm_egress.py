@@ -2103,30 +2103,48 @@ class TestRung2Schema(unittest.TestCase):
 
     # --- tls ---
 
-    def test_tls_inspect_names_the_rung_rather_than_listing_valid_values(self):
+    def test_an_unbuilt_mode_names_the_rung_rather_than_listing_valid_values(self):
         """The refusal has to say WHEN, not just "no".
 
-        `inspect` is the word for a property -- the connection is decrypted and
-        the request is read. A key that accepted it and spliced would be a
+        A mode named in VM_TLS_UNBUILT is a word for a PROPERTY that has not
+        landed. A key that accepted it and did something weaker would be a
         config claiming a property it does not have, and an "unknown value"
-        error would read as a typo rather than as work that has not landed.
+        error would read as a typo rather than as work that is coming.
+
+        The map is empty since `inspect` was built, so this exercises the branch
+        through a mode injected for the test -- the alternative is a guard that
+        stops running the moment it has nothing to guard, and comes back wrong
+        the next time a mode is written down before it works.
         """
-        errors = self._egress({"hosts": ["github.com"], "tls": "inspect"})
+        from unittest import mock
+        import vm
+        with mock.patch.object(vm, "VM_TLS_UNBUILT",
+                               {"tunnel": "rung 9, with the thing it needs"}):
+            errors = self._egress({"hosts": ["github.com"], "tls": "tunnel"})
         self.assertTrue(errors)
         message = " ".join(errors)
-        self.assertIn("rung 3", message)
+        self.assertIn("rung 9", message)
         self.assertNotIn("must be one of", message)
 
     def test_an_unknown_tls_value_still_lists_what_is_valid(self):
         errors = self._egress({"hosts": ["github.com"], "tls": "terminate"})
         self.assertTrue(any("must be one of" in e for e in errors), errors)
 
-    def test_tls_splice_is_accepted_and_is_the_default(self):
+    def test_inspect_is_the_default_and_splice_is_still_accepted(self):
+        """The default terminates, and the weaker mode did not become a typo.
+
+        `splice` stays a supported answer, not a deprecated one: a guest that
+        cannot be re-seeded to trust the workload's CA has no other way to reach
+        anything, and the property it gives -- one name checked per connection
+        -- is weaker rather than wrong.
+        """
         from vm import VM_TLS_DEFAULT, VM_TLS_MODES
-        self.assertEqual(VM_TLS_DEFAULT, "splice")
+        self.assertEqual(VM_TLS_DEFAULT, "inspect")
         self.assertIn(VM_TLS_DEFAULT, VM_TLS_MODES)
-        self.assertEqual(self._egress({"hosts": ["github.com"],
-                                       "tls": "splice"}), [])
+        self.assertIn("splice", VM_TLS_MODES)
+        for mode in VM_TLS_MODES:
+            self.assertEqual(self._egress({"hosts": ["github.com"],
+                                           "tls": mode}), [], mode)
         self.assertEqual(self._egress({"hosts": ["github.com"]}), [])
 
     def test_tls_is_refused_under_open_rather_than_ignored(self):

@@ -1,30 +1,44 @@
 # ADR 008: VM egress is inspected transparently, and terminated by default
 
-**Status:** **Accepted. Partly implemented** — the transparent path is in, the
-termination is not. Originally recorded ahead of the work, because
+**Status:** **Accepted. Partly implemented** — the transparent path and the
+termination are both in; the policy the termination exists to carry is not.
+Originally recorded ahead of the work, because
 `007-per-workload-credential-broker.md` is an accepted decision that assumes
 this one, and an accepted record resting on an undecided premise is the wrong
 order.
 
-**Date:** 2026-08-16. Status updated 2026-08-25.
+**Date:** 2026-08-16. Status updated 2026-08-26.
 
 **What has shipped.** Decisions 1, 6, 7, 8, 9 and 10: the uid-keyed transparent
 redirect on 80 and 443 with no guest-side proxy variables, both address
 families, tinyproxy removed and the allowlist owned by the inspector, the
 nftables guard on the listener range, the synthesising per-workload DNS
 responder, and the internal-destination refusal with its declared exemption.
-The inspector reads the name and either forwards or refuses: on 443 by peeking
-at the ClientHello and splicing byte-exact, on 80 by parsing and re-emitting
-each request and authorising every one of them separately.
+The inspector reads the name and either forwards or refuses on both planes,
+parsing and re-emitting each request and authorising every one of them
+separately.
 
-**What has not.** Decisions 2, 3, 4 and 5 — the termination itself, and
-therefore the CA, its lifetime, and the method/path policy and `Host`-binding
-that only a terminated session can carry. `VM_TLS_MODES` is `("splice",)`: the
-one mode the schema accepts today is the one this record calls the *exemption*,
-so the default it names as the decision is not yet the default in effect. Until
-that lands, `Given up` describes a cost this design has chosen to pay and has
-not yet paid, and the CDN-fronting and ECH properties under `Consequences` are
-the argument for the work rather than a description of the host.
+Since 2026-08-26, decisions 3 and 4 as well, and the termination in decision 2:
+`VM_TLS_MODES` is `("inspect", "splice")` and `VM_TLS_DEFAULT` is `"inspect"`,
+so the default this record names is now the default in effect. Each workload has
+its own CA, made once and never rotated, living in its state directory under its
+own uid. The `Host`-binding half of decision 5 is in — a request naming any host
+but the one the session's certificate was minted for is answered `421`.
+
+**What has not.** The POLICY, which is what termination was for:
+
+- **Decision 5's method and path matching.** The only thing a terminated request
+  is checked against today is the same `hosts` allowlist the spliced path used,
+  applied per request instead of per connection. That is a real gain and it is
+  not the decision.
+- **Decision 2's written `reason` for a splice.** `tls = "splice"` is accepted
+  as a bare value, so config review still cannot distinguish "spliced because it
+  must be" from "spliced because nobody tried" — which is the exact sentence
+  decision 2 gives as its justification.
+
+Until those land, `Given up` describes a cost this design has chosen to pay and
+has paid only in part, and the per-path properties under `Consequences` are the
+argument for the remaining work rather than a description of the host.
 
 This split is deliberate rather than a stall: the transparent path is what makes
 the guest's cooperation irrelevant, and it is worth having on its own before a

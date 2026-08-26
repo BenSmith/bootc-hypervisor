@@ -11,14 +11,41 @@ plane authorises EVERY REQUEST on a connection by its Host header, through the
 same matcher, and relays only the ones that pass -- a name on no list gets a
 real 403 naming it, which is an answer 443 cannot give.
 
-NOTHING IS DECRYPTED
+TWO TLS MODES, AND THE PEEK IS THE SAME PEEK
 
-There is no CA until rung 3, so `tls = "splice"` is the only mode and the peek
-is deliberately non-committal: the bytes read to find the name are the bytes
+`tls = "splice"` decrypts nothing: the bytes read to find the name are the bytes
 replayed upstream, verbatim, headers included. A ClientHello reconstructed from
 a parse is a different ClientHello — different extension order, different
 GREASE, a different JA3 — so the raw buffer is what travels and the parse is
 only ever consulted for a decision.
+
+`tls = "inspect"` (the default since rung 3) TERMINATES. The same peek takes the
+same decision, and then this process completes the guest's handshake itself with
+a leaf minted by the workload's own CA, opens a separately verified session to
+the origin, and authorises every REQUEST inside on the same matcher the
+cleartext plane uses. The allowlist means the same thing on both planes only
+under termination: spliced, a name is checked once at the front of a connection
+whose contents nothing can see.
+
+WHY THE INSPECT PEEK USES MSG_PEEK AND THE SPLICE PEEK DOES NOT
+
+A terminated connection's ClientHello must still be there for the TLS engine to
+consume — Python's ssl wraps a SOCKET and cannot be handed bytes already read
+off one. So the inspect path peeks: the same reader, with MSG_PEEK|MSG_WAITALL,
+leaving every byte in the kernel receive buffer for wrap_socket to find. That
+bounds a hello at what the receive buffer holds rather than at what we are
+willing to read, which is why CLIENTHELLO_MAX (16 KiB) matters twice over — it
+is comfortably inside a default rmem, and a hello larger than the buffer would
+peek forever without progressing. The no-progress guard below is what turns that
+into a refusal instead of a spin.
+
+BUMP-THEN-ANSWER
+
+Every refusal a terminated connection carries is delivered THROUGH a completed
+handshake, denials included: mint, complete the guest's handshake, then answer
+403 or 502 in plain HTTP. Failing the handshake instead gives the guest an
+opaque certificate error indistinguishable from the host being down, and the one
+place a reason can reach a guest inside a TLS session is a response body.
 
 WHERE THE POLICY COMES FROM
 
@@ -88,6 +115,7 @@ import os
 import selectors
 import signal
 import socket
+import ssl
 import sys
 import threading
 import time
@@ -97,10 +125,14 @@ sys.dont_write_bytecode = True
 
 from vm import (
     VM_INSPECT_ORIG_CLEARTEXT, VM_INSPECT_ORIG_TLS, VM_INSPECT_PORT_CLEARTEXT, VM_INSPECT_PORT_TLS,
-    VM_TLS_DEFAULT, vm_hostname_control_character, vm_hostname_match,
+    VM_TLS_DEFAULT, LeafRefused, vm_ca_cert_path, vm_ca_key_path,
+    vm_hostname_control_character, vm_hostname_match,
     vm_inspect_policy_path, vm_inspect_status_path, vm_normalise_hostname,
 )
+from vm_clock import vm_resync_guest_clock_if_skewed
+from vm_mint import MintFailed, MintThrottled, Minter
 from vm_status import STATUS_TOP_N, BoundedCounts, write_status
+from workload_lib import workload_state_dir
 
 
 # --- concurrency and timeout, module-local ---
@@ -166,6 +198,21 @@ CLIENTHELLO_MAX = 16384
 # How often the accept loop wakes to look for a stop, in seconds. select() is a
 # blocking call that a SIGTERM cannot make return (PEP 475 retries it), so the
 # loop polls on a short interval and checks the stop flag.
+# What the inspector offers upstream, and what it offers the guest. One
+# protocol, from configuration, on both legs -- never mirrored from what the
+# guest asked for. Mirroring would make the inspector sniff the guest's ALPN and
+# then have to speak whatever came back, which at this rung means h2 it does not
+# parse; §6 requires the upstream leg up BEFORE the guest's handshake completes
+# precisely so there is nothing to mirror.
+UPSTREAM_ALPN = ("http/1.1",)
+
+# How many MSG_PEEK attempts a single ClientHello read may make before it is
+# refused. MSG_WAITALL is advisory under a socket timeout -- Linux returns a
+# short read rather than raising -- so a peer dribbling one byte per timeout
+# would otherwise hold a ceiling slot for attempts * CONNECTION_TIMEOUT. An
+# honest hello needs one attempt, occasionally two.
+PEEK_ATTEMPTS_MAX = 16
+
 _ACCEPT_POLL = 0.1
 
 
@@ -433,8 +480,14 @@ def parse_client_hello(msg: bytes) -> ClientHello:
     return ClientHello(name, tuple(seen))
 
 
-def read_client_hello(conn, max_bytes=CLIENTHELLO_MAX):
+def read_client_hello(conn, max_bytes=CLIENTHELLO_MAX, *, peek=False):
     """Read until a whole ClientHello is in hand. Returns (raw, hello).
+
+    `peek` leaves every byte where it was. The splice path consumes the hello
+    because it replays it upstream itself; the inspect path must not, because
+    the bytes have to still be in the kernel receive buffer when ssl's
+    wrap_socket runs the handshake. See the module docstring on the bound that
+    imposes.
 
     `raw` is every byte read off the socket, record headers included and
     unmodified — that is what gets replayed upstream, and it is returned rather
@@ -453,12 +506,13 @@ def read_client_hello(conn, max_bytes=CLIENTHELLO_MAX):
     body = b""       # handshake bytes, record framing stripped
     want = None      # the handshake message length, once its header is in hand
     while True:
-        raw = _recv_at_least(conn, raw, pos + 5, max_bytes)
+        raw = _recv_at_least(conn, raw, pos + 5, max_bytes, peek=peek)
         if raw[pos] != TLS_HANDSHAKE:
             raise HelloUnreadable(
                 f"record type 0x{raw[pos]:02x} is not a TLS handshake record")
         length = int.from_bytes(raw[pos + 3:pos + 5], "big")
-        raw = _recv_at_least(conn, raw, pos + 5 + length, max_bytes)
+        raw = _recv_at_least(conn, raw, pos + 5 + length, max_bytes,
+                             peek=peek)
         body += raw[pos + 5:pos + 5 + length]
         pos += 5 + length
         if want is None and len(body) >= 4:
@@ -470,19 +524,39 @@ def read_client_hello(conn, max_bytes=CLIENTHELLO_MAX):
             return raw, parse_client_hello(body[4:4 + want])
 
 
-def _recv_at_least(conn, raw, n, max_bytes):
-    """Read until `raw` holds at least n bytes, or fail closed."""
+def _recv_at_least(conn, raw, n, max_bytes, *, peek=False):
+    """Read until `raw` holds at least n bytes, or fail closed.
+
+    In `peek` mode every call re-reads the queue from its start with
+    MSG_PEEK|MSG_WAITALL, so `raw` is REPLACED rather than appended to and the
+    socket is left exactly as it was found. A peek that comes back no longer
+    than what we already had is refused rather than retried forever: it means
+    the hello is larger than the receive buffer can hold, and no number of
+    further attempts changes that.
+    """
+    attempts = 0
     while len(raw) < n:
         if n > max_bytes:
             raise HelloUnreadable(
                 f"a ClientHello over {max_bytes} bytes is not one we read")
         try:
-            chunk = conn.recv(RELAY_CHUNK)
+            if peek:
+                chunk = conn.recv(n, socket.MSG_PEEK | socket.MSG_WAITALL)
+            else:
+                chunk = conn.recv(RELAY_CHUNK)
         except OSError as exc:
             raise HelloUnreadable(f"read failed: {exc}") from None
         if not chunk:
             raise HelloUnreadable("the connection closed mid-ClientHello")
-        raw += chunk
+        if peek:
+            attempts += 1
+            if len(chunk) <= len(raw) or attempts > PEEK_ATTEMPTS_MAX:
+                raise HelloUnreadable(
+                    "the ClientHello did not arrive whole in the receive "
+                    "buffer")
+            raw = chunk
+        else:
+            raw += chunk
     return raw
 
 
@@ -615,10 +689,25 @@ class _Stream:
     whose independent authorisation is the point of this unit.
     """
 
-    def __init__(self, sock):
+    def __init__(self, sock, prefill=b""):
         self.sock = sock
-        self._buf = b""
+        # `prefill` is bytes already taken off this socket before the stream
+        # existed -- the one non-blocking read the terminated plane makes after
+        # an upstream handshake, looking for a TLS 1.3 alert. On the ordinary
+        # path it comes back empty; when it does not, the bytes are the origin's
+        # and must be read in order, not dropped.
+        self._buf = prefill
         self.eof = False
+
+    def take_buffered(self):
+        """Everything read past the last message, removed from this stream.
+
+        Used where a connection stops being a sequence of messages -- after a
+        101 -- so the bytes already pulled off the socket join the byte stream
+        rather than being stranded in a buffer nothing will read again.
+        """
+        out, self._buf = self._buf, b""
+        return out
 
     def _fill(self, timeout=None):
         """One recv, appended to the buffer. False at a clean EOF.
@@ -822,7 +911,27 @@ def _get_all(headers, name):
     return [v for n, v in headers if n == name]
 
 
-def normalise_target(method, target):
+class Scheme(NamedTuple):
+    """Which plane a request is being read on, for the two parsers that care.
+
+    The request parser is shared by the cleartext plane and the terminated TLS
+    one, and two of its refusals are plane-specific: the absolute-form scheme it
+    accepts, and the port an authority may name. Both are refusals about
+    reaching a destination neither end is on, so both have to know which port
+    this end IS -- hard-coding 80 in a parser the terminated plane also uses
+    would refuse `Host: example.com:443` as a misdirected request when it is the
+    ordinary spelling there.
+    """
+
+    name: str
+    port: int
+
+
+SCHEME_HTTP = Scheme("http", VM_INSPECT_ORIG_CLEARTEXT)
+SCHEME_HTTPS = Scheme("https", VM_INSPECT_ORIG_TLS)
+
+
+def normalise_target(method, target, scheme=SCHEME_HTTP):
     """(origin-form target, authority or None) for a request target, or raise.
 
     Absolute-form is legal HTTP/1.1 and moves the authorising name OUT of the
@@ -841,11 +950,11 @@ def normalise_target(method, target):
     if target == "*":
         raise RequestUnreadable(
             "an asterisk-form target names no resource to authorise")
-    scheme, sep, rest = target.partition("://")
-    if not sep or scheme.lower() != "http":
+    got, sep, rest = target.partition("://")
+    if not sep or got.lower() != scheme.name:
         raise RequestUnreadable(
-            f"request target {target!r} is neither origin-form nor an http "
-            "absolute-form URI")
+            f"request target {target!r} is neither origin-form nor an "
+            f"{scheme.name} absolute-form URI")
     slash = rest.find("/")
     authority, path = (rest[:slash], rest[slash:]) if slash != -1 else (rest, "/")
     if "@" in authority:
@@ -864,7 +973,7 @@ class Authority(NamedTuple):
     port: str          # "" when the authority carried none
 
 
-def host_from_authority(authority):
+def host_from_authority(authority, scheme=SCHEME_HTTP):
     """The name and port in an authority, or raise."""
     if authority.startswith("["):
         end = authority.find("]")
@@ -887,17 +996,48 @@ def host_from_authority(authority):
     host = vm_normalise_hostname(host)
     if not host:
         raise RequestUnreadable(f"authority {authority!r} names no host")
-    # This plane is reached by a redirect keyed on `tcp dport 80` and it dials
-    # port 80, so an authority naming any other port describes a destination
+    # A plane is reached by a redirect keyed on one dport and it dials that
+    # same port, so an authority naming any other port describes a destination
     # that is not the one either end is on. Refused rather than ignored: the
     # alternative is authorising and dialling one thing while telling the
     # origin another, which is how a vhost decision gets made on a port nobody
     # connected to.
-    if port not in ("", str(VM_INSPECT_ORIG_CLEARTEXT)):
+    if port not in ("", str(scheme.port)):
         raise RequestUnreadable(
             f"authority {authority!r} names port {port!r}, but this plane "
-            f"only ever reaches port {VM_INSPECT_ORIG_CLEARTEXT}")
+            f"only ever reaches port {scheme.port}")
     return Authority(host, port)
+
+
+def redirect_host(location, scheme=SCHEME_HTTP):
+    """The host a Location header names, or None when it names none.
+
+    A relative Location -- the common case -- names no host and is not a
+    redirect off this origin, so it is None rather than a refusal. So is
+    anything this cannot read: the only thing built on the answer is a log line,
+    and a parse failure there must never become a failed response.
+
+    Any scheme is read, not just this plane's: a redirect from http to https is
+    ordinary, and the name is the question, not the scheme it is reached over.
+    """
+    text = location.strip()
+    got, sep, rest = text.partition("://")
+    if not sep or not got or "/" in got:
+        return None
+    authority = rest.split("/", 1)[0]
+    if not authority:
+        return None
+    # Port-agnostic on purpose: `host_from_authority` refuses a port this plane
+    # does not reach, which is right for a request being authorised and wrong
+    # for a name being reported. Strip it first.
+    try:
+        return host_from_authority(authority, Scheme(got.lower(), 0)).host
+    except RequestUnreadable:
+        head = authority.rsplit(":", 1)[0]
+        try:
+            return host_from_authority(head, Scheme(got.lower(), 0)).host
+        except RequestUnreadable:
+            return None
 
 
 def request_framing(headers):
@@ -934,7 +1074,7 @@ def request_framing(headers):
     return Framing("none")
 
 
-def parse_request(head):
+def parse_request(head, scheme=SCHEME_HTTP):
     """A Request from a request head, normalised and framed, or raise."""
     start, headers = _split_head(head)
     parts = start.split(" ")
@@ -946,7 +1086,7 @@ def parse_request(head):
         raise RequestUnreadable(f"{version!r} is not a version we relay")
     if not method or any(c not in _TOKEN_CHARS for c in method):
         raise RequestUnreadable(f"method {method!r} is not a token")
-    target, authority = normalise_target(method, target)
+    target, authority = normalise_target(method, target, scheme)
     if authority is None:
         hosts = _get_all(headers, "host")
         if len(hosts) != 1:
@@ -957,7 +1097,7 @@ def parse_request(head):
     # The port is dropped from what we emit: it is either absent or the port we
     # are on, so the canonical spelling is the bare name -- and the name is
     # what was authorised.
-    host = host_from_authority(authority.strip().lower()).host
+    host = host_from_authority(authority.strip().lower(), scheme).host
     connection = ",".join(_get_all(headers, "connection")).lower()
     tokens = {t.strip() for t in connection.split(",")}
     wants_close = "close" in tokens or (
@@ -1146,6 +1286,11 @@ DROP_INTERNAL = "internal destination"
 DROP_CEILING = "connection ceiling reached"
 DROP_RELAY_FAILED = "relay failed"
 DROP_TIMED_OUT = "timed out"
+DROP_UNVERIFIED = "upstream certificate unverified"
+DROP_CLIENT_CERT = "upstream wants a client certificate"
+DROP_MISDIRECTED = "host does not match the server name"
+DROP_THROTTLED = "mint rationed"
+DROP_MINT_FAILED = "could not mint a leaf"
 
 DROP_REASONS = (
     DROP_NOT_ALLOWLISTED,
@@ -1156,6 +1301,11 @@ DROP_REASONS = (
     DROP_CEILING,
     DROP_RELAY_FAILED,
     DROP_TIMED_OUT,
+    DROP_UNVERIFIED,
+    DROP_CLIENT_CERT,
+    DROP_MISDIRECTED,
+    DROP_THROTTLED,
+    DROP_MINT_FAILED,
 )
 
 # Where a drop whose reason is not in DROP_REASONS is counted. Emitted only when
@@ -1212,11 +1362,27 @@ class Counters:
 
     `drop_reasons` reconciles with `dropped` exactly -- every drop lands in one
     reason, DROP_UNCLASSIFIED included.
+
+    `terminated` is the third connection figure and joins `spliced` on its own
+    footing: one hello, one name, one completed handshake, after which the
+    REQUESTS inside it are counted by `forwarded` exactly as the cleartext
+    plane's are. A workload reading terminated=1 forwarded=40 had one HTTPS
+    connection carrying forty authorised requests, which is the reading `spliced`
+    can never produce.
+
+    `bumped` IS NOT A DISPOSITION and is reported outside that map on purpose.
+    A bump is a refusal DELIVERED THROUGH a completed handshake, so it is
+    already counted in `dropped` under its own reason; the figure says how the
+    guest was told, not what was decided. Putting it in `dispositions` would
+    break the one property that map has -- every connection or request in
+    exactly one bucket -- to record something that is not a decision.
     """
 
     def __init__(self, policy=None, top_n=STATUS_TOP_N):
         self._lock = threading.Lock()
-        self.dispositions = {"spliced": 0, "forwarded": 0, "dropped": 0}
+        self.dispositions = {"spliced": 0, "terminated": 0, "forwarded": 0,
+                             "dropped": 0}
+        self.bumped = 0
         # Pre-seeded from DROP_REASONS rather than grown on first use. A reason
         # absent from the file and a reason reading zero are the same fact and
         # must look the same, or an operator reads "no key" as "not measured".
@@ -1261,6 +1427,20 @@ class Counters:
         with self._lock:
             self.dispositions["spliced"] += 1
 
+    def record_termination(self) -> None:
+        """One connection whose guest handshake we completed and then served."""
+        with self._lock:
+            self.dispositions["terminated"] += 1
+
+    def record_bump(self) -> None:
+        """One handshake completed solely to deliver a refusal legibly.
+
+        Always paired with a `record_drop` naming the reason; see the class
+        docstring for why the two are not one call.
+        """
+        with self._lock:
+            self.bumped += 1
+
     def record_forward(self) -> None:
         with self._lock:
             self.dispositions["forwarded"] += 1
@@ -1293,6 +1473,7 @@ class Counters:
                 "dispositions": dict(self.dispositions),
                 "drop_reasons": reasons,
                 "ech": {"seen": self.ech_seen, "alarm": self.ech_alarm},
+                "bumped": self.bumped,
                 "internal_refusals": self.internal_refusals.snapshot(),
                 "internal_refusals_total": self.internal_refusals.total,
                 "concurrency": {"open": open_now, "refused": refused},
@@ -1354,7 +1535,7 @@ class Listener:
     """Accept on the inherited listeners and act on each connection by plane."""
 
     def __init__(self, sockets, out=None, limit=MAX_CONNECTIONS, policy=None,
-                 status_path=None):
+                 status_path=None, minter=None):
         self._sockets = list(sockets)
         self._out = out if out is not None else sys.stdout
         self._ceiling = Ceiling(limit)
@@ -1367,9 +1548,28 @@ class Listener:
         # An empty policy is a legal configuration and NOT a default: main()
         # will not construct a Listener without one. The fallback exists so the
         # rung-1 tests that only exercise the shape need not invent a policy.
+        # `splice`, NOT VM_TLS_DEFAULT. This fallback is a test convenience,
+        # and the product default terminates -- which needs a CA, a minter and a
+        # state directory none of the shape tests have. Naming the weaker mode
+        # here is the honest version of that: a Listener built with no policy is
+        # explicitly not exercising the default, rather than exercising it with
+        # half its machinery missing.
         self._policy = policy if policy is not None else Policy(
-            tls=VM_TLS_DEFAULT, hosts=())
+            tls="splice", hosts=())
         self.counters = Counters(self._policy)
+        # None under `tls = "splice"`, and main() refuses to start without one
+        # under `tls = "inspect"`. Not defaulted here: a Listener that
+        # terminated with no minter would have no leaf to present and would
+        # fail every guest handshake while reporting itself healthy.
+        self._minter = minter
+        # One context for every upstream leg, built once. FULL verification
+        # against the host's own trust store, with no configuration key of ours
+        # -- a knob that turned this off would be a knob that turns the
+        # inspector into an attacker with a friendly name. A host behind a
+        # private root fails here until the operator adds that root to the
+        # HOST's anchors, and the 502 says so.
+        self._upstream_ctx = ssl.create_default_context()
+        self._upstream_ctx.set_alpn_protocols(list(UPSTREAM_ALPN))
 
     def stop(self):
         """Ask the accept loop to end; called from the SIGTERM handler."""
@@ -1468,17 +1668,33 @@ class Listener:
             self._ceiling.release()
 
     def _serve_tls(self, conn, where):
-        """Peek, match, and either splice byte-exact or close.
+        """Peek, match, and then act by mode.
 
-        The three outcomes are logged with THREE distinct reasons, not two:
-        a hello that could not be read, a name that is on no list, and an
-        upstream that could not be reached fail the guest's connection
-        identically, and an operator who cannot tell them apart cannot tell a
-        policy decision from a broken resolver from something speaking a
-        non-TLS protocol at the TLS port.
+        The peek and the decision are the same on both modes and are taken here,
+        once. What differs is everything after: `splice` replays the guest's own
+        bytes at the origin and never sees inside; `inspect` completes the
+        guest's handshake itself and authorises each request in it.
+
+        The outcomes are logged with DISTINCT reasons, never merged: a hello
+        that could not be read, a name that is on no list, and an upstream that
+        could not be reached fail the guest's connection identically, and an
+        operator who cannot tell them apart cannot tell a policy decision from a
+        broken resolver from something speaking a non-TLS protocol at the TLS
+        port.
         """
+        inspect = self._policy.tls == "inspect"
+        if inspect and self._minter is None:
+            # Unreachable through main(), which refuses to start in this state.
+            # Kept anyway and LOUD: a Listener that terminated without a minter
+            # would fail every guest handshake with an opaque certificate error,
+            # which is the one failure this whole path exists to avoid, and a
+            # test that constructed one would otherwise get it silently.
+            self.counters.record_drop(DROP_MINT_FAILED)
+            self._log(f"drop {where} reason='could not mint a leaf: this "
+                      f"listener has no minter'")
+            return
         try:
-            raw, hello = read_client_hello(conn)
+            raw, hello = read_client_hello(conn, peek=inspect)
         except HelloUnreadable as exc:
             self.counters.record_unreadable_hello()
             self.counters.record_drop(DROP_NO_NAME)
@@ -1496,6 +1712,9 @@ class Listener:
         host = vm_normalise_hostname(hello.server_name)
         allowed = vm_hostname_match(host, self._policy.hosts)
         self.counters.record_hello(hello, allowed)
+        if inspect:
+            self._serve_tls_inspect(conn, where, host, allowed)
+            return
         if not allowed:
             self.counters.record_drop(DROP_NOT_ALLOWLISTED, host)
             self._log(f"drop {where} host={host} reason='not allowlisted'")
@@ -1524,6 +1743,245 @@ class Listener:
             self._relay(conn, upstream)
         finally:
             upstream.close()
+
+    def _serve_tls_inspect(self, conn, where, host, allowed):
+        """Terminate one connection: decide, dial, mint, handshake, serve.
+
+        THE ORDER IS THE DESIGN. The upstream leg is established BEFORE the
+        guest's handshake completes, so nothing here ever sniffs the guest to
+        learn what to say upstream -- the protocol offered on both legs comes
+        from UPSTREAM_ALPN, which is configuration. And the mint comes after the
+        dial, so a host that cannot be reached or cannot be verified costs a
+        leaf only because the REFUSAL is delivered through one.
+
+        EVERY OUTCOME IS BUMPED, denials included. A guest told "no" by a failed
+        handshake is told nothing it can distinguish from the host being down;
+        told "no" by a 403 through a chain it trusts, it has the name, the
+        reason, and something to put in a log. That is the whole argument for
+        holding a CA at all, and it applies with more force to the refusals than
+        to the successes.
+        """
+        upstream = None
+        refusal = None            # (drop reason, status, phrase, body text)
+        if not allowed:
+            refusal = (DROP_NOT_ALLOWLISTED, 403, "Forbidden",
+                       f"{host} is not on this workload's egress allowlist")
+        else:
+            try:
+                upstream = self._dial_upstream_tls(host)
+            except ssl.SSLError as exc:
+                reason, text = self._upstream_tls_failure(host, exc)
+                refusal = (reason, 502, "Bad Gateway", text)
+            except OSError as exc:
+                reason = self._dial_failure_reason(host)
+                refusal = (reason, 502, "Bad Gateway",
+                           f"{host} could not be reached: {exc}")
+        leaf = None
+        try:
+            # `denied` picks the CACHE, not the disposition: an allowlisted host
+            # that was merely unreachable keeps its leaf in the working set,
+            # because the next connection to it is expected to succeed and
+            # should not pay for a mint. Only a name policy refused goes in the
+            # denial set, which is the set a flood can fill.
+            leaf = self._minter.leaf(host, denied=not allowed)
+        except MintThrottled:
+            # Nothing legible can be delivered without a leaf, so this is the
+            # one outcome that closes on the guest. It is reachable only after
+            # the bucket has been emptied, which honest traffic does not do.
+            self.counters.record_drop(DROP_THROTTLED, host)
+            self._log(f"drop {where} host={host} reason='mint rationed: the "
+                      f"leaf bucket is empty'")
+            return
+        except (LeafRefused, MintFailed) as exc:
+            self.counters.record_drop(DROP_MINT_FAILED, host)
+            self._log(f"drop {where} host={host} "
+                      f"reason='could not mint a leaf: {exc}'")
+            return
+        finally:
+            # The upstream leg is open by now on the allowed path, and every
+            # arm above returns. Closed here rather than in each of them, or a
+            # mint failure leaks a host socket owned by the workload uid.
+            if leaf is None and upstream is not None:
+                upstream.sock.close()
+        if leaf is None:
+            return
+        try:
+            tls_conn = self._wrap_guest(conn, leaf)
+        except (ssl.SSLError, OSError) as exc:
+            # The guest rejected the leaf, or went away mid-handshake. The most
+            # common real cause is a guest that never got the CA -- an existing
+            # instance whose seed predates it, which cloud-init will not revisit.
+            self.counters.record_drop(DROP_RELAY_FAILED, host)
+            self._log(f"drop {where} host={host} reason='the guest did not "
+                      f"complete the handshake: {exc}. A guest provisioned "
+                      f"before this workload had a CA does not trust it and "
+                      f"must be re-seeded'")
+            if upstream is not None:
+                upstream.sock.close()
+            return
+        # wrap_socket DETACHES the socket it was given: `conn` has no fd from
+        # here, so _serve's own close is a no-op and this is the only thing that
+        # closes the guest's connection. Missing it leaks one fd per terminated
+        # connection in a process the guest can open connections to at will.
+        try:
+            if refusal is not None:
+                reason, status, phrase, text = refusal
+                self.counters.record_drop(reason, host)
+                self.counters.record_bump()
+                self._log(f"bump {where} host={host} status={status} "
+                          f"reason='{reason}: {text}'")
+                self._bump_answer(tls_conn, status, phrase, text)
+                return
+            self.counters.record_termination()
+            self._log(f"terminate {where} host={host}")
+            self._serve_terminated(tls_conn, where, host, upstream)
+        finally:
+            try:
+                tls_conn.close()
+            except OSError:
+                pass
+
+    def _bump_answer(self, tls_conn, status, phrase, text):
+        """Deliver a refusal inside a handshake we just completed.
+
+        The guest's request is read first and thrown away. Not for anything in
+        it -- the decision was taken from the server name before this socket was
+        ever wrapped -- but because a client that is mid-send when the answer
+        arrives and the connection closes reports a broken pipe instead of
+        showing the status, and the whole point of bumping was to be legible.
+        Bounded by the socket's own timeout, and failure to read one changes
+        nothing: the answer goes out either way.
+        """
+        try:
+            _Stream(tls_conn).read_head()
+        except (RequestUnreadable, OSError):
+            pass
+        self._answer(tls_conn, status, phrase, text, close=True)
+
+    def _wrap_guest(self, conn, leaf):
+        """Complete the guest's handshake as the origin it dialled.
+
+        A context per connection rather than one cached per name: the expensive
+        half of this is the mint, which the working set already avoids, and a
+        cache of live SSLContexts keyed by name would have to be invalidated by
+        the same renewal the leaf cache handles -- two evictions that must agree
+        about one certificate.
+        """
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        ctx.load_cert_chain(str(leaf.path))
+        ctx.set_alpn_protocols(list(UPSTREAM_ALPN))
+        return ctx.wrap_socket(conn, server_side=True)
+
+    def _dial_upstream_tls(self, host):
+        """A verified TLS session to an allowlisted name, as a _Stream.
+
+        Dials the NAME (§7.4), like every other upstream here. Verification is
+        full and against the HOST's trust store; see __init__ on why there is no
+        key to turn it off.
+        """
+        sock = socket.create_connection(
+            (host, VM_INSPECT_ORIG_TLS), timeout=CONNECTION_TIMEOUT)
+        try:
+            ssock = self._upstream_ctx.wrap_socket(sock, server_hostname=host)
+        except BaseException:
+            sock.close()
+            raise
+        try:
+            early = self._early_upstream_bytes(ssock)
+        except BaseException:
+            ssock.close()
+            raise
+        ssock.settimeout(RELAY_IDLE_TIMEOUT)
+        return _Stream(ssock, prefill=early)
+
+    def _early_upstream_bytes(self, ssock):
+        """One non-blocking read straight after the upstream handshake.
+
+        THIS IS THE CLIENT-CERTIFICATE PROBE, and it is an optimisation rather
+        than a guarantee. Under TLS 1.3 a server that REQUIRES a client
+        certificate still completes the handshake and only then sends
+        `certificate_required` -- so the failure arrives on the first read, and
+        by taking that read here, before a single request byte has been
+        forwarded, the request never reaches the origin. The alert is normally
+        already buffered by the time the handshake returns; when it is not, this
+        comes back empty and the first real read raises it instead, which the
+        relay path handles as a failed exchange. Both are correct; only one
+        keeps the request out of the origin.
+
+        Anything that is not an alert is DATA, which an origin has no business
+        sending before a request. It is kept rather than dropped -- see
+        _Stream's prefill -- because the alternative is a stream read out of
+        order for a case nobody has a reason to be sure about.
+        """
+        previous = ssock.gettimeout()
+        ssock.settimeout(0)
+        try:
+            return ssock.recv(RELAY_CHUNK)
+        except (ssl.SSLWantReadError, BlockingIOError):
+            return b""
+        finally:
+            ssock.settimeout(previous)
+
+    def _upstream_tls_failure(self, host, exc):
+        """(drop reason, the sentence the guest is given) for a failed leg.
+
+        THE 502 BODY IS THE ONLY PLACE A REASON REACHES THE GUEST, so it names
+        the host and what went wrong and nothing else about the certificate.
+
+        THREE CASES, ONE OF THEM DISTINGUISHABLE. A TLS 1.3 server that requires
+        a client certificate is named exactly. A TLS 1.2 one sends
+        `handshake_failure`, which it shares with "no common cipher" and half a
+        dozen others -- so that arm names the possibility rather than asserting
+        it. A server for which the certificate is OPTIONAL is invisible at every
+        layer here; the symptom is a host that starts answering 401 or 403 only
+        under termination, and `diagnose` is where that sentence belongs.
+        """
+        code = getattr(exc, "reason", "") or ""
+        if "CERTIFICATE_REQUIRED" in code:
+            return (DROP_CLIENT_CERT,
+                    f"{host} requires a client certificate, which this "
+                    f"inspector cannot present on the guest's behalf. Set "
+                    f"tls = \"splice\" for this workload so the guest's own "
+                    f"handshake reaches {host}.")
+        if isinstance(exc, ssl.SSLCertVerificationError):
+            detail = getattr(exc, "verify_message", None) or str(exc)
+            return (DROP_UNVERIFIED,
+                    f"{host}'s certificate could not be verified: {detail}. If "
+                    f"{host} is behind a private root CA, that root must be "
+                    f"added to THIS HOST's trust anchors -- the guest's copy "
+                    f"is not consulted, because the guest is not the party "
+                    f"verifying {host}.")
+        if code == "SSLV3_ALERT_HANDSHAKE_FAILURE":
+            return (DROP_UNVERIFIED,
+                    f"{host} refused the handshake ({exc}). Under TLS 1.2 that "
+                    f"is also the alert a server sends when it requires a "
+                    f"client certificate, and the two are not distinguishable "
+                    f"here; if {host} uses client certificates it must be "
+                    f"spliced.")
+        return (DROP_UNVERIFIED, f"the TLS session to {host} failed: {exc}")
+
+    def _serve_terminated(self, tls_conn, where, host, upstream):
+        """Authorise every request inside one terminated session.
+
+        The same loop the cleartext plane runs, with the upstream already open
+        and the name PINNED to the server name the handshake was completed for.
+        Pinning is not belt-and-braces: this session's certificate was minted
+        for one name, and a request inside it naming another is asking to be
+        relayed down a connection its Host header did not authorise. It gets a
+        421, which is the answer HTTP already has for exactly this and which
+        every client knows to retry elsewhere.
+        """
+        client = _Stream(tls_conn)
+        upstreams = {host: upstream}
+        try:
+            first = True
+            while self._serve_one_request(client, tls_conn, where, upstreams,
+                                          first, scheme=SCHEME_HTTPS,
+                                          pinned_host=host):
+                first = False
+        finally:
+            for up in upstreams.values():
+                up.sock.close()
 
     def _dial_failure_reason(self, host: str) -> str:
         """Why an upstream dial to an ALLOWLISTED name failed, as far as this
@@ -1600,8 +2058,15 @@ class Listener:
             for up in upstreams.values():
                 up.sock.close()
 
-    def _serve_one_request(self, client, conn, where, upstreams, first):
+    def _serve_one_request(self, client, conn, where, upstreams, first, *,
+                           scheme=SCHEME_HTTP, pinned_host=None):
         """One request, start to finish. True to stay on the connection.
+
+        `scheme` says which plane this is, for the two parser refusals that
+        differ by it. `pinned_host`, on the terminated plane, is the server name
+        the session's certificate was minted for: a request naming any other
+        host is answered 421 rather than relayed, because the connection it
+        would be relayed down is not the one its Host header authorises.
 
         `first` says which of the two timeouts bounds the wait for this
         request's first byte. On the first request it is the decision timeout:
@@ -1639,7 +2104,7 @@ class Listener:
         if not head:
             return False                # the guest closed between requests
         try:
-            req = parse_request(head)
+            req = parse_request(head, scheme)
         except RequestUnreadable as exc:
             # No 403 here and no host in the line: this is not a policy
             # decision, and reporting it as one would put a name we could not
@@ -1648,6 +2113,19 @@ class Listener:
             self._log(f"drop {where} reason='unreadable request: {exc}'")
             self._answer(conn, 400, "Bad Request", str(exc), close=True)
             return False
+        if pinned_host is not None and req.host != pinned_host:
+            # Not a policy refusal and deliberately not counted as one: the name
+            # may well be allowlisted. What it is not is the name THIS session
+            # was established for, and 421 is the answer HTTP already has for
+            # that -- the client reopens to the right origin and is checked
+            # there on its own merits.
+            self.counters.record_drop(DROP_MISDIRECTED, req.host)
+            self._log(f"drop {where} host={req.host} reason='host does not "
+                      f"match the server name {pinned_host}'")
+            return self._refuse(
+                client, conn, req, 421, "Misdirected Request",
+                f"this session was established for {pinned_host}, not "
+                f"{req.host}")
         if not vm_hostname_match(req.host, self._policy.hosts):
             # A denial IS speakable on 80, unlike 443 -- there is no session to
             # be inside, so the guest gets a real answer naming the host rather
@@ -1662,8 +2140,10 @@ class Listener:
         # and is not put in the map for the next one to find.
         transient = req.version == "HTTP/1.0"
         try:
-            up = self._upstream_for(req.host, upstreams,
-                                    reusable=not transient)
+            up = self._upstream_for(
+                req.host, upstreams, reusable=not transient,
+                dial=self._dial_upstream_tls if pinned_host is not None
+                else self._dial_upstream_cleartext)
         except OSError as exc:
             reason = self._dial_failure_reason(req.host)
             self.counters.record_drop(reason, req.host)
@@ -1699,7 +2179,7 @@ class Listener:
             copy_body(client, up.sock, req.framing)
             self.counters.record_forward()
             self._log(f"forward {where} host={req.host} method={req.method}")
-            return self._relay_response(up, conn, req)
+            return self._relay_response(up, conn, req, where)
         except (RequestUnreadable, OSError) as exc:
             self.counters.record_drop(DROP_RELAY_FAILED, req.host)
             self._log(f"drop {where} host={req.host} "
@@ -1716,8 +2196,15 @@ class Listener:
                 except OSError:
                     pass
 
-    def _upstream_for(self, host, upstreams, reusable=True):
+    def _upstream_for(self, host, upstreams, reusable=True, dial=None):
         """The connection to an authorised name, opened once and reused.
+
+        `dial` is what OPENS one, and it is the whole of the difference between
+        the two planes here: cleartext dials port 80, the terminated plane dials
+        443 and verifies. A redial is a real possibility on both -- an origin
+        that answers `Connection: close`, an HTTP/1.0 exchange -- so the
+        terminated plane passes the same verifying dial it used at the front of
+        the connection rather than a socket it captured once.
 
         Dialled by NAME (§7.4), like the TLS plane: the address the guest aimed
         at is this inspector's own listener, so resolving the authorised name
@@ -1738,10 +2225,7 @@ class Listener:
         """
         up = upstreams.pop(host, None)
         if up is None:
-            sock = socket.create_connection(
-                (host, VM_INSPECT_ORIG_CLEARTEXT), timeout=CONNECTION_TIMEOUT)
-            sock.settimeout(RELAY_IDLE_TIMEOUT)
-            up = _Stream(sock)
+            up = (dial or self._dial_upstream_cleartext)(host)
         if not reusable:
             # Not cached at all. rebuild_request sends `Connection: close`
             # upstream for an HTTP/1.0 request, deliberately -- speaking 1.1 on
@@ -1765,7 +2249,14 @@ class Listener:
                 pass
         return up
 
-    def _relay_response(self, up, conn, req):
+    def _dial_upstream_cleartext(self, host):
+        """A plain connection to an authorised name, as a _Stream."""
+        sock = socket.create_connection(
+            (host, VM_INSPECT_ORIG_CLEARTEXT), timeout=CONNECTION_TIMEOUT)
+        sock.settimeout(RELAY_IDLE_TIMEOUT)
+        return _Stream(sock)
+
+    def _relay_response(self, up, conn, req, where=""):
         """Relay one response. True if the connection may carry another.
 
         The head goes across verbatim, which is not the rule the REQUEST
@@ -1791,6 +2282,28 @@ class Listener:
             status = int(fields[1])
             framing = response_framing(status, req.method, headers)
             conn.sendall(head)
+            if status == 101:
+                # THE REQUEST WAS POLICED; THE STREAM IS NOT. An `Upgrade:` is
+                # an ordinary HTTP request and was authorised as one -- and
+                # after the origin accepts it, what flows is whatever protocol
+                # the two of them agreed on, which this does not parse and does
+                # not pretend to. Narrower than it sounds: an upgraded
+                # connection cannot carry further HTTP requests, so unlike the
+                # keep-alive case there is no per-request re-authorisation being
+                # lost. Logged all the same, because "policy stopped applying
+                # here" is not something an operator should have to infer from
+                # a byte count.
+                self._log(f"upgrade {where} host={req.host} "
+                          f"reason='switched protocols; per-request policy no "
+                          f"longer applies to this connection'")
+                # Anything either side read past the message boundary belongs to
+                # the tunnel and goes across before the relay starts, or the
+                # stream is delivered out of order.
+                pending_up = up.take_buffered()
+                if pending_up:
+                    conn.sendall(pending_up)
+                return self._relay_upgraded(conn, up.sock)
+            self._note_redirect(status, headers, req, where)
             if 100 <= status < 200:
                 # Interim; the real response follows -- but not indefinitely.
                 # Every other guest- or peer-driven loop in this file carries a
@@ -1815,6 +2328,29 @@ class Listener:
             t.strip() for v in _get_all(headers, "connection")
             for t in v.lower().split(",")}
         return not closing and not req.wants_close
+
+    def _relay_upgraded(self, conn, up_sock):
+        """Move an upgraded connection's bytes both ways, then end it."""
+        self._relay(conn, up_sock)
+        return False
+
+    def _note_redirect(self, status, headers, req, where):
+        """Log a redirect that leaves the allowlist. Decides nothing.
+
+        THIS IS THE ONLY POINT IN THE SYSTEM WHERE BOTH NAMES ARE KNOWN
+        TOGETHER. The guest follows a redirect by opening a NEW connection,
+        which is redirected, resolved by our responder and checked on its own
+        merits -- so the refusal, when it comes, names the target and has no way
+        to say what sent the guest there. Without this line a 403 for a CDN host
+        is unattributable to the site the operator actually configured.
+        """
+        if not 300 <= status < 400:
+            return
+        for value in _get_all(headers, "location"):
+            target = redirect_host(value)
+            if target and not vm_hostname_match(target, self._policy.hosts):
+                self._log(f"note {where} host={req.host} reason='redirected to "
+                          f"{target}, which is not allowlisted'")
 
     def _refuse(self, client, conn, req, status, reason, text):
         """Answer a request we will not relay. True if the connection lives.
@@ -1867,16 +2403,29 @@ class Listener:
         """
         for s in (client, upstream):
             s.settimeout(RELAY_IDLE_TIMEOUT)
+        peer = {client: upstream, upstream: client}
         sel = selectors.DefaultSelector()
-        sel.register(client, selectors.EVENT_READ, upstream)
-        sel.register(upstream, selectors.EVENT_READ, client)
+        sel.register(client, selectors.EVENT_READ)
+        sel.register(upstream, selectors.EVENT_READ)
         try:
             while True:
-                events = sel.select(timeout=RELAY_IDLE_TIMEOUT)
-                if not events:
-                    return                      # idle: nothing either way
-                for key, _ in events:
-                    data = key.fileobj.recv(RELAY_CHUNK)
+                # BYTES INSIDE A TLS ENGINE ARE INVISIBLE TO select(). A record
+                # that has been read off the kernel and decrypted leaves nothing
+                # for the kernel to report, so a relay that only ever selected
+                # would sit idle holding a complete frame until the idle timeout
+                # cut it. Reachable only on the terminated plane, where a
+                # `101` hands an upgraded TLS connection to this loop.
+                buffered = [s for s in (client, upstream)
+                            if getattr(s, "pending", None) and s.pending()]
+                if buffered:
+                    ready = buffered
+                else:
+                    events = sel.select(timeout=RELAY_IDLE_TIMEOUT)
+                    if not events:
+                        return                  # idle: nothing either way
+                    ready = [key.fileobj for key, _ in events]
+                for sock in ready:
+                    data = sock.recv(RELAY_CHUNK)
                     if not data:
                         # A close in either direction ends the whole splice.
                         # Half-close forwarding would be more faithful to TCP,
@@ -1884,7 +2433,7 @@ class Listener:
                         # direction the guest has already abandoned; the
                         # ceiling is the reason to prefer the simpler end.
                         return
-                    key.data.sendall(data)
+                    peer[sock].sendall(data)
         finally:
             sel.close()
 
@@ -1901,8 +2450,14 @@ class Listener:
 
     def status(self) -> dict:
         """This listener's counters, as they would be written right now."""
-        return self.counters.snapshot(open_now=self._ceiling.held,
+        snap = self.counters.snapshot(open_now=self._ceiling.held,
                                       refused=self.rejected)
+        if self._minter is not None:
+            # The minter's own figures, verbatim. `hits` against `mints` is what
+            # says whether the working set is doing its job, and `clock_resyncs`
+            # is the only place a guest whose clock we repaired shows up at all.
+            snap["mint"] = dict(self._minter.stats)
+        return snap
 
     def write_status(self):
         """Replace the status file, or log why it could not be replaced.
@@ -1939,6 +2494,33 @@ class Listener:
         print(line, file=self._out, flush=True)
 
 
+def build_minter(name, policy):
+    """A Minter for a terminating workload, or None. Raises if it cannot.
+
+    The CA is checked HERE rather than at the first mint. It is made by
+    `workload-vm-inspect up` before this process is ever socket-activated, so
+    its absence is a provisioning failure, and a provisioning failure that
+    surfaces as one refused connection an hour after boot is a provisioning
+    failure nobody attributes.
+    """
+    if policy.tls != "inspect":
+        return None
+    state_dir = workload_state_dir(name)
+    cert = vm_ca_cert_path(state_dir)
+    key = vm_ca_key_path(state_dir)
+    for path in (cert, key):
+        if not os.path.exists(path):
+            raise FileNotFoundError(
+                f"tls = 'inspect' terminates, which needs this workload's "
+                f"egress CA, and {path} is not there")
+    # The clock check is the T2 remedy, and it is passed explicitly because
+    # Minter refuses to be built without one. It runs on a mint MISS only, so a
+    # guest cannot make the guest agent be dialled more often than it can make
+    # us mint.
+    return Minter(name, state_dir,
+                  clock_check=lambda: vm_resync_guest_clock_if_skewed(name))
+
+
 def main(argv=None):
     argv = sys.argv if argv is None else argv
     if len(argv) != 2:
@@ -1954,11 +2536,20 @@ def main(argv=None):
         print(f"error: could not read {policy_path}: {exc}", file=sys.stderr)
         return 1
     try:
+        minter = build_minter(argv[1], policy)
+    except FileNotFoundError as exc:
+        # Before the sockets, like the policy read, and for the same reason: a
+        # listener that accepted connections it could mint no leaf for would
+        # fail every guest handshake with an opaque certificate error while
+        # reporting itself up.
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    try:
         sockets = inherited_listening_sockets()
     except NotSocketActivated as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
-    listener = Listener(sockets, policy=policy,
+    listener = Listener(sockets, policy=policy, minter=minter,
                         status_path=vm_inspect_status_path(argv[1]))
     print(f"policy loaded from {policy_path}: {policy.summary}", flush=True)
     signal.signal(signal.SIGTERM, lambda *_args: listener.stop())

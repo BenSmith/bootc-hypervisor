@@ -347,9 +347,11 @@ name = "schema-reference"
 # WHERE THE NAME COMES FROM, per plane:
 #   HTTP  — the Host header, read before anything is forwarded. A match is
 #           forwarded upstream; a miss is answered 403 to the guest.
-#   HTTPS — the SNI in the ClientHello. A match is SPLICED: the same bytes are
-#           replayed upstream unmodified, nothing is decrypted and no CA is
-#           involved. See .tls below.
+#   HTTPS — the SNI in the ClientHello. What happens to a match depends on
+#           .tls below: under "inspect" (the default) the connection is
+#           terminated and every request inside it is authorised by its Host
+#           header, exactly as on the HTTP plane; under "splice" the same bytes
+#           are replayed upstream unmodified and nothing is decrypted.
 # Either way enforcement is at the NAME and never at an address, which is what
 # resolving the list to addresses at rule-install time could not do — that races
 # DNS, breaks on CDN churn, and opens everything sharing an address.
@@ -392,17 +394,38 @@ name = "schema-reference"
 # valid config would be worse than a line of output.
 #
 # Optional: what happens to this VM's redirected TLS connections.
-# Type: string, one of "splice"
-# Default: "splice"
+# Type: string, one of "inspect", "splice"
+# Default: "inspect"
+#  "inspect" — the inspector completes the guest's handshake itself, using a
+#              leaf signed by THIS WORKLOAD's own egress CA, and opens a
+#              separately verified session to the origin. Every request inside
+#              is authorised by its Host header, so the allowlist means the same
+#              thing on 443 as it does on 80. A refused name gets a real 403
+#              through a chain the guest trusts, not a closed connection.
+#
+#              THE GUEST MUST TRUST THAT CA, and it reaches the guest through
+#              the seed, which cloud-init applies ONCE PER INSTANCE-ID. A VM
+#              provisioned before this workload had a CA does not gain the trust
+#              by upgrading: it gets certificate errors on every HTTPS request
+#              until it is re-seeded. The CA is per workload and never shared,
+#              so it can impersonate sites only to the one guest that trusts it.
+#
+#              Two things it cannot do, both by construction: a host that
+#              requires a CLIENT certificate cannot be terminated (the inspector
+#              has none to present) and answers 502 naming the host; and a host
+#              whose certificate this HOST cannot verify answers 502 as well --
+#              a private root has to be added to the host's anchors, not the
+#              guest's.
+#
 #   "splice" — the inspector reads the SNI out of the ClientHello, matches it
 #              against .hosts, and replays those exact bytes upstream. Nothing
-#              is decrypted, there is no CA, and the guest needs no trust
-#              store change. Enforcement is at the NAME.
-# "inspect" — decrypt, read the request, apply per-path policy — is REFUSED
-# with an error naming the release it arrives in, rather than accepted and
-# quietly spliced. A config asking for inspection is asking for a property,
-# and a key that took the word without providing it would be a config claiming
-# a confinement it does not have.
+#              is decrypted, no CA is involved, and the guest needs no trust
+#              store change. A weaker property, not a deprecated one: the name
+#              is checked ONCE, at the front of a connection whose contents
+#              nothing can see, and a refusal is a closed connection the guest
+#              cannot tell from the host being down. The answer for a guest that
+#              cannot be re-seeded, and for a host that needs client
+#              certificates.
 #
 # REQUIRES egress = "filtered", and is refused with .bridge set: nothing is
 # redirected into an inspector in either case, so there is no intercepted
@@ -718,7 +741,10 @@ name = "schema-reference"
 # egress = "filtered"               # or "open"; must be stated (see above)
 # hosts  = ["example.com", "*.example.com"]   # names; needs egress "filtered".
 #                                   # Both: the wildcard excludes the apex.
-# tls    = "splice"                 # SNI-matched, not decrypted (the default)
+# tls    = "inspect"                # terminate and authorise each request
+#                                   # (the default; the guest must trust the
+#                                   # workload's CA). "splice" is SNI-matched
+#                                   # and decrypts nothing.
 # broker = true                     # path to a host-side credential broker
 #                                   # Scalars first: the table below ends the
 #                                   # [vm.network] section (see above).

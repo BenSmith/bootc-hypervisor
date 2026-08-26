@@ -405,17 +405,38 @@ def parse_vm_port(spec: str) -> tuple[str | None, int, int, str]:
 VM_EGRESS_MODES = ("filtered", "open")
 VM_EGRESS_DEFAULT = "filtered"
 
-# What a filtered workload's redirected TLS connections get. `splice` is the
-# whole of rung 2: the inspector reads the ClientHello's SNI, matches it against
-# `hosts`, and then replays those exact bytes upstream — nothing is decrypted
-# and no CA exists. `inspect` is named here rather than merely absent from the
-# accepted set, so the refusal can say WHEN it arrives instead of listing valid
-# values: a config asking for inspection is asking for a property, and a key
-# that accepted the word and quietly spliced would be a config claiming a
-# property it does not have.
-VM_TLS_MODES = ("splice",)
-VM_TLS_DEFAULT = "splice"
-VM_TLS_UNBUILT = {"inspect": "rung 3, with the CA the guest has to trust"}
+# What a filtered workload's redirected TLS connections get.
+#
+# `splice` reads the ClientHello's SNI, matches it against `hosts`, and replays
+# those exact bytes upstream. Nothing is decrypted; the guest's handshake is
+# with the origin, and this host never holds a key to it.
+#
+# `inspect` terminates. The inspector completes the guest's handshake itself
+# with a leaf minted by this workload's own CA, opens a separately verified
+# session to the origin, and authorises every REQUEST inside. It is the default
+# because the property the allowlist claims -- that the guest reaches these
+# hosts and no others -- is only true per request under termination: under
+# `splice` a name is checked once, at the front of a connection whose contents
+# nothing can see.
+#
+# THE DEFAULT MOVED, AND IT IS NOT A FREE CHANGE. A terminated guest must trust
+# the workload's CA, which reaches it through the seed, which cloud-init applies
+# once per instance-id. An EXISTING filtered guest does not gain that trust by
+# upgrading the RPM: it gets certificate errors on every HTTPS request until it
+# is re-seeded. `tls = "splice"` is the one-line answer for a guest that cannot
+# be, and is still fully supported -- it is a weaker property, not a deprecated
+# one.
+VM_TLS_MODES = ("splice", "inspect")
+VM_TLS_DEFAULT = "inspect"
+
+# Modes named but not built, mapped to when they arrive. Empty since rung 3 T5
+# emptied it, and KEPT: the refusal it drives says WHEN a mode lands instead of
+# listing valid values, which is the difference between "you asked for a
+# property that is coming" and "you made a typo". A future mode belongs here
+# from the moment it is written down, not from the moment it works, because a
+# key that accepted the word and quietly did something weaker would be a config
+# claiming a property it does not have.
+VM_TLS_UNBUILT: dict[str, str] = {}
 
 # Parents anyone can register a label under, where a wildcard in a host list
 # authorises a name the *guest* chooses. Warning-only, deliberately: the list
