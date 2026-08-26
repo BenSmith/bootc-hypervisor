@@ -643,7 +643,7 @@ runcmd:
     if modprobe ptp_kvm 2>/dev/null; then
       for _ in 1 2 3 4 5; do [ -e /dev/ptp_kvm ] && break; sleep 1; done
     fi
-    if [ -e /dev/ptp_kvm ] && ! grep -qF '# workloadctl: paravirtual clock' /etc/chrony.conf; then
+    if [ -e /dev/ptp_kvm ] && [ -f /etc/chrony.conf ] && ! grep -qF '# workloadctl: paravirtual clock' /etc/chrony.conf; then
       printf '%s\n' '# workloadctl: paravirtual clock' 'refclock PHC /dev/ptp_kvm poll 2 dpoll -2 offset 0' 'makestep 1 -1' >> /etc/chrony.conf
       systemctl restart chronyd || true
     fi

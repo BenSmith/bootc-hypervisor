@@ -116,8 +116,16 @@ def _connect(name: str) -> QMPClient | None:
     None rather than an exception for every failure mode, because from a
     caller's side "no agent" and "agent broken" have the same disposition and
     neither is an error: a guest whose image lacks qemu-guest-agent is a
-    supported configuration that simply cannot be repaired this way. That it is
-    unrepairable is reported by `diagnose`, not by failing a mint.
+    supported configuration that simply cannot be repaired this way.
+
+    THAT IT IS UNREPAIRABLE IS REPORTED, and reported is what makes never
+    failing a mint the right call -- but be precise about where, because the
+    obvious answer is wrong today. The minter counts it as
+    `clock_unavailable` and the inspector writes that into its status document
+    (`mint.clock_unavailable` in /run/workload-vm/<name>/inspect-status.json).
+    `workloadctl diagnose` does not read that document yet; it gains a reader
+    at rung 5, and until then the figure is there to be read and nothing
+    prints it for you.
     """
     sock_path = vm_guest_agent_socket(name)
     if not sock_path.exists():
@@ -185,7 +193,8 @@ def vm_set_guest_time(name: str, *, now: float | None = None) -> bool:
 
 
 # What a resync attempt concluded. Strings rather than booleans because three
-# outcomes matter separately to a caller and to `diagnose`: the clock was fine,
+# outcomes matter separately to a caller and to the status document: the
+# clock was fine,
 # it was wrong and is now right, and there is no agent to ask (which is the
 # state that silently keeps the old broken behaviour).
 CLOCK_OK = "ok"

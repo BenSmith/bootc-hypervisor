@@ -205,6 +205,36 @@ class TestBackupResyncsAfterResuming(unittest.TestCase):
             backup_mod._resync_after_pause(mock.Mock(name_="x"), quiet=True)
         self.assertEqual(resync.call_count, 1)
 
+    def test_it_uses_its_own_threshold_and_not_the_mint_paths(self):
+        """The mint path's five minutes would skip the pause this exists for.
+
+        VM_CLOCK_SKEW_THRESHOLD_SECONDS answers a different question -- is an
+        arbitrary guest far enough out to be worth a round trip on a
+        connection someone is waiting for. Here the pause is ours and its
+        length is whatever the copy took, which for an ordinary disk is well
+        under five minutes. Left on the default, this call did nothing on the
+        overwhelming majority of the backups it was written for, while its
+        comment claimed the window had been narrowed to a round trip.
+        """
+        with mock.patch.object(backup_mod, "vm_resync_guest_clock_if_skewed",
+                               return_value=vm_clock.CLOCK_OK) as resync:
+            backup_mod._resync_after_pause(mock.Mock(name_="x"), quiet=True)
+        threshold = resync.call_args.kwargs["threshold"]
+        self.assertLess(threshold, vm_clock.VM_CLOCK_SKEW_THRESHOLD_SECONDS)
+        self.assertEqual(threshold,
+                         backup_mod.BACKUP_RESYNC_THRESHOLD_SECONDS)
+
+    def test_a_two_minute_pause_is_repaired_rather_than_tolerated(self):
+        """The end-to-end shape of the number above, through the real check."""
+        with mock.patch.object(vm_clock, "vm_guest_clock_offset",
+                               return_value=-120.0), \
+             mock.patch.object(vm_clock, "vm_set_guest_time",
+                               return_value=True) as setter:
+            outcome = vm_clock.vm_resync_guest_clock_if_skewed(
+                "wl", threshold=backup_mod.BACKUP_RESYNC_THRESHOLD_SECONDS)
+        self.assertEqual(outcome, vm_clock.CLOCK_RESYNCED)
+        self.assertEqual(setter.call_count, 1)
+
     def test_it_runs_after_cont_and_not_before(self):
         # Ordering is the whole point: resyncing a still-paused guest sets a
         # clock that the resume then leaves exactly as wrong as it was.

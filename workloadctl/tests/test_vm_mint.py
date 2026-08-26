@@ -24,6 +24,7 @@ import shutil
 import vm
 import vm_clock
 import vm_mint
+from tests import REPO_ROOT
 
 
 def _rmtree(path):
@@ -404,6 +405,50 @@ class TestMinting(_MinterCase):
         with self.assertRaises(LeafRefused):
             minter.leaf("evil.com,DNS:victim.example", denied=False)
         self.assertEqual(ran, [])
+
+    def test_a_refused_name_is_counted_as_refused_and_not_as_a_failure(self):
+        """The two are different facts and only one is guest-chosen.
+
+        `refused` says a guest asked for a name this design will never mint
+        for; `failed` says minting broke. Both reach the listener as one drop
+        reason (DROP_MINT_FAILED), which is right for someone reading drops
+        and is the reason the split has to survive here -- for one rung
+        nothing anywhere incremented `refused`, so it was a figure
+        structurally incapable of moving, sitting at 0 on a workload being
+        driven at exactly the boundary it describes.
+        """
+        minter = self.minter(runner=lambda *a, **k: self.fail("openssl ran"))
+        with self.assertRaises(LeafRefused):
+            minter.leaf("evil.com,DNS:victim.example", denied=True)
+        self.assertEqual(minter.stats["refused"], 1)
+        self.assertEqual(minter.stats["failed"], 0)
+        self.assertEqual(minter.stats["mints"], 0)
+
+    def test_no_counter_is_left_that_nothing_can_ever_move(self):
+        """Every key in `stats` is named somewhere OTHER than its declaration.
+
+        A counter with no writer reads 0 forever and is indistinguishable from
+        the thing it counts never happening -- the worst shape a security
+        figure can have, because 0 is what a healthy workload shows too.
+        `refused` was exactly that for one rung: declared in the initialiser
+        and named nowhere else in the module.
+
+        Structural, and deliberately crude: it asserts the quoted name occurs
+        outside the `self.stats = {...}` literal, which is where a `_bump` call
+        or a mapping like _CLOCK_STATS puts it. Prose in this module spells
+        counter names in backticks, so a comment does not satisfy it.
+        """
+        source = (REPO_ROOT / "lib" / "vm_mint.py").read_text()
+        head, _, rest = source.partition("self.stats = {")
+        declaration, _, tail = rest.partition("}")
+        elsewhere = head + tail
+        for counter in self.minter().stats:
+            with self.subTest(counter=counter):
+                self.assertIn(f'"{counter}"', declaration)
+                self.assertIn(
+                    f'"{counter}"', elsewhere,
+                    f"{counter} is declared and then never written: it can "
+                    f"only ever read 0")
 
     def test_an_openssl_failure_carries_openssls_words(self):
         failed = subprocess.CompletedProcess([], 1, stdout="", stderr="boom")

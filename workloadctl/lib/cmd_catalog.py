@@ -259,7 +259,9 @@ write_files:
 #     content: |
 #       home-fedora /home/fedora virtiofs defaults,nofail 0 0
 #
-# runcmd:
+# runcmd (add these as items to the `runcmd:` list AT THE END OF THIS FILE --
+# a second `runcmd:` key here would not merge with it, it would replace it, and
+# the paravirtual clock below would silently stop being wired):
 #    Seed the skeleton dotfiles into the share before mounting over them, or
 #    the first login lands in a home with no .bashrc. cp -n never clobbers the
 #    authorized_keys workloadctl already seeded into a home-mounted share.
@@ -322,7 +324,10 @@ write_files:
 # needs none of this. The CA is still minted and still seeded either way, so
 # switching between the two never rotates the instance-id.
 
-# runcmd:
+# An example of your own, for the `runcmd:` list at the end of this file. Add
+# it as an item there rather than opening a second `runcmd:` key, which YAML
+# resolves by keeping one of the two -- and the one it keeps is not the one
+# that wires the clock:
 #   - echo "first boot" > /etc/motd
 
 # --- The paravirtual clock, which a custom seed does NOT get for free --------
@@ -349,7 +354,7 @@ runcmd:
     if modprobe ptp_kvm 2>/dev/null; then
       for _ in 1 2 3 4 5; do [ -e /dev/ptp_kvm ] && break; sleep 1; done
     fi
-    if [ -e /dev/ptp_kvm ] && ! grep -qF '# workloadctl: paravirtual clock' /etc/chrony.conf; then
+    if [ -e /dev/ptp_kvm ] && [ -f /etc/chrony.conf ] && ! grep -qF '# workloadctl: paravirtual clock' /etc/chrony.conf; then
       printf '%s\n' '# workloadctl: paravirtual clock' 'refclock PHC /dev/ptp_kvm poll 2 dpoll -2 offset 0' 'makestep 1 -1' >> /etc/chrony.conf
       systemctl restart chronyd || true
     fi

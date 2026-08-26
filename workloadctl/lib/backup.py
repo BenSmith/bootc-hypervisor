@@ -147,13 +147,25 @@ def backup_vm_crash(config, output: Path, *, quiet: bool) -> int:
             # This narrows the window on the one path we own from "until the
             # next mint" to "one guest-agent round trip", and that is all.
             #
+            # ITS OWN THRESHOLD, not the mint path's five minutes. That number
+            # answers "is this guest far enough out to be worth a round trip
+            # on a connection someone is waiting for", asked of a guest whose
+            # history is unknown. Here the history is known -- WE stopped the
+            # vCPUs a moment ago -- and a crash-consistent backup of an
+            # ordinary disk finishes well inside five minutes, so the mint
+            # path's threshold would skip exactly the pause this call exists
+            # for and leave the guest a minute or two behind for nothing.
+            #
             # After `cont`, inside the same finally, so a copy that raised
             # still resumes and still resyncs. Never fatal: the archive is
             # already written, and failing a completed backup over a clock is
             # a worse outcome than a slow clock. It is also entirely normal
             # for this to do nothing -- a guest whose image has no
-            # qemu-guest-agent has no channel to ask, which `diagnose`
-            # reports and this does not.
+            # qemu-guest-agent has no channel to ask. That is counted where
+            # the mint path counts it (`mint.clock_unavailable` in the
+            # inspector's status document) and not here; this call is silent
+            # about it on purpose, since a backup is not the place to learn
+            # about a guest's agent.
             try:
                 _resync_after_pause(config, quiet=quiet)
             except Exception as exc:  # never fail a completed backup
@@ -168,9 +180,18 @@ def backup_vm_crash(config, output: Path, *, quiet: bool) -> int:
     return size
 
 
+# How far out a guest we just unpaused has to be before this puts it back. A
+# second, because the only thing that moved it was us: below that the reading
+# is dominated by the two round trips it took to measure, and above it the
+# guest is behind by an amount it will never recover on its own.
+BACKUP_RESYNC_THRESHOLD_SECONDS = 1.0
+
+
 def _resync_after_pause(config, *, quiet: bool) -> None:
     """Best-effort `guest-set-time` for a VM whose vCPUs we just resumed."""
-    if vm_resync_guest_clock_if_skewed(config.name) == CLOCK_RESYNCED and not quiet:
+    outcome = vm_resync_guest_clock_if_skewed(
+        config.name, threshold=BACKUP_RESYNC_THRESHOLD_SECONDS)
+    if outcome == CLOCK_RESYNCED and not quiet:
         info(f"  Reset the guest clock for '{config.name}' after the pause.")
 
 

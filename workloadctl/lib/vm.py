@@ -1306,7 +1306,13 @@ def vm_ptp_kvm_runcmd_lines() -> list[str]:
         f"  for _ in 1 2 3 4 5; do [ -e {VM_PTP_KVM_DEVICE} ] && break;"
         f" sleep 1; done",
         "fi",
-        f"if [ -e {VM_PTP_KVM_DEVICE} ] &&"
+        # `-f` before the grep, and it is not belt-and-braces: grep on a
+        # missing file exits 2, which `!` turns into true, so without it a
+        # guest whose image ships no chrony at all gets a /etc/chrony.conf
+        # CREATED here holding a refclock and nothing else -- a config file
+        # for a service that is not installed, which reads to the next person
+        # as a chrony that is configured and broken rather than absent.
+        f"if [ -e {VM_PTP_KVM_DEVICE} ] && [ -f {VM_PTP_KVM_CHRONY_PATH} ] &&"
         f" ! grep -qF '{VM_PTP_KVM_CHRONY_MARKER}' {VM_PTP_KVM_CHRONY_PATH}; then",
         f"  printf '%s\\n' '{VM_PTP_KVM_CHRONY_MARKER}'"
         f" 'refclock PHC {VM_PTP_KVM_DEVICE} poll 2 dpoll -2 offset 0'"

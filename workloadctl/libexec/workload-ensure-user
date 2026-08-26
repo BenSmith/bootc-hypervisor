@@ -1548,9 +1548,10 @@ def build_cloud_init_iso(pw, config: dict, name: str, config_path: Path | None =
         # quietly wrong:
         #
         #   - no CA bundle under egress = "filtered" means every guest tool
-        #     that verifies certificates rejects the inspector's spliced
-        #     connections once rung 3 presents one, and reads as a broken
-        #     upstream rather than a missing anchor;
+        #     that verifies certificates rejects the leaf the inspector
+        #     presents -- which under the default tls = "inspect" is every
+        #     HTTPS request the guest makes -- and reads as a broken upstream
+        #     rather than as a missing anchor;
         #   - an unmounted volume leaves the guest writing to the system disk
         #     at the path the operator believes is persistent, and a
         #     generational rollback then discards it.

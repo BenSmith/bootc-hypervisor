@@ -431,9 +431,12 @@ class Minter:
             "hits": 0, "denied_hits": 0,
             "throttled": 0, "refused": 0, "failed": 0,
             # Four outcomes, not one. `clock_unavailable` is the one that
-            # matters to `diagnose`: it means this guest has no agent to ask,
-            # so the mint-time clock remedy is INERT here -- the failure it
-            # exists to prevent is still possible and nothing else says so.
+            # matters: it means this guest has no agent to ask, so the
+            # mint-time clock remedy is INERT here -- the failure it exists to
+            # prevent is still possible and nothing else says so. It is read
+            # from the inspector's status document (`mint.clock_unavailable`),
+            # which is where every figure in here surfaces; `diagnose` does not
+            # read that document at all yet, and gains a reader at rung 5.
             "clock_resyncs": 0, "clock_unavailable": 0, "clock_failed": 0,
         }
         self._lock = threading.Lock()
@@ -498,7 +501,20 @@ class Minter:
         if outcome in _CLOCK_STATS:
             self._bump(_CLOCK_STATS[outcome])
 
-        leaf = self._mint(name, cache, denied=denied)
+        try:
+            leaf = self._mint(name, cache, denied=denied)
+        except LeafRefused:
+            # COUNTED HERE OR NOWHERE. `refused` and `failed` are two different
+            # facts -- a name this design will never mint for, against a mint
+            # that broke -- and only the first is guest-chosen. Left uncounted,
+            # `refused` was a figure structurally incapable of moving: nothing
+            # in this module raised it, so it read 0 on a workload being
+            # driven at the one boundary that exists to hold a guest off.
+            # The listener's own drop counter merges both under
+            # DROP_MINT_FAILED, which is right for an operator reading drops
+            # and wrong for anyone asking which of the two happened.
+            self._bump("refused")
+            raise
         cache.put(leaf)
         return leaf
 

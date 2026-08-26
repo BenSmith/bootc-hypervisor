@@ -28,9 +28,25 @@ from vm import (
 BUNDLES = REPO_ROOT / "workloads"
 
 
+def _uncommented(text):
+    """`text` with its comment lines removed.
+
+    THE SAME BLINDNESS THE SEED CONTRACTS HAD. A shipped seed is what an
+    operator copies, and vm-base carries one recipe LIVE (this one) beside
+    another COMMENTED OUT (the egress CA, which must not install an empty
+    anchor in an `egress = "open"` bundle) -- so the two are one editing
+    mistake apart, and a substring assertion over the raw text cannot tell
+    them apart. libexec/workload-ensure-user strips comments for exactly this
+    reason before its own substring pins; a gate written to catch drift in
+    those seeds has to see them the way cloud-init does.
+    """
+    return "\n".join(line for line in text.splitlines()
+                      if not line.lstrip().startswith("#"))
+
+
 def _seeds():
-    """Every shipped bundle seed, as (bundle name, text)."""
-    return [(p.parent.parent.name, p.read_text())
+    """Every shipped bundle seed, as (bundle name, LIVE text)."""
+    return [(p.parent.parent.name, _uncommented(p.read_text()))
             for p in sorted(BUNDLES.glob("*/cloud-init/user-data"))]
 
 
@@ -126,6 +142,20 @@ class TestTheChronyEditIsConditional(unittest.TestCase):
         self.assertIn(f"[ -e {VM_PTP_KVM_DEVICE} ]", script)
         self.assertLess(script.index(f"[ -e {VM_PTP_KVM_DEVICE} ]"),
                         script.index("refclock PHC"))
+
+    def test_it_never_creates_a_chrony_conf_that_was_not_there(self):
+        """`grep` on a missing file exits 2, which `!` reads as "not present".
+
+        Without a `-f` test in front of it, a guest image that ships no chrony
+        at all gets /etc/chrony.conf CREATED here holding a refclock and a
+        makestep and nothing else -- a config file for a daemon that is not
+        installed, which the next person reads as a chrony that is configured
+        and broken rather than one that is absent.
+        """
+        script = "\n".join(vm_ptp_kvm_runcmd_lines())
+        self.assertIn(f"[ -f {VM_PTP_KVM_CHRONY_PATH} ]", script)
+        self.assertLess(script.index(f"[ -f {VM_PTP_KVM_CHRONY_PATH} ]"),
+                        script.index(f">> {VM_PTP_KVM_CHRONY_PATH}"))
 
     def test_the_append_is_idempotent(self):
         """runcmd replays whenever the seed's text changes the instance id.
@@ -223,6 +253,27 @@ class TestTheShippedSeedsCarryIt(unittest.TestCase):
                 self.assertIn(f"refclock PHC {VM_PTP_KVM_DEVICE}", text)
                 self.assertIn("makestep 1 -1", text)
                 self.assertIn(f"[ -e {VM_PTP_KVM_DEVICE} ]", text)
+
+    def test_each_shipped_seed_carries_THE_block_and_not_a_variant(self):
+        """Line-for-line against vm_ptp_kvm_runcmd_lines(), not substrings.
+
+        The assertions above establish that a seed mentions each piece; they
+        do not establish that it runs the same shell. A guard added to the
+        generated block -- the `-f /etc/chrony.conf` that stops a chrony-less
+        guest getting a config file for a daemon it does not have -- reaches
+        the built-in seed for free and reaches these copies only if somebody
+        remembers. That is drift with no failing test, in files whose whole
+        purpose is to be copied.
+        """
+        wanted = [line.strip() for line in vm_ptp_kvm_runcmd_lines()]
+        for name, text in _seeds():
+            with self.subTest(bundle=name):
+                present = {line.strip() for line in text.splitlines()}
+                missing = [line for line in wanted if line not in present]
+                self.assertEqual(
+                    missing, [],
+                    f"{name}'s copy of the clock block has drifted from "
+                    f"vm.vm_ptp_kvm_runcmd_lines()")
 
 
 class TestTheHostSidePremise(unittest.TestCase):
