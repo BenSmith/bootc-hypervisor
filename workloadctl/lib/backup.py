@@ -22,6 +22,7 @@ from secrets_template import auto_detect_credentials
 from service_runtime import restart_workload_service
 from substrate import BackupError
 from vm import VM_SOCKET_DIR
+from vm_clock import CLOCK_RESYNCED, vm_resync_guest_clock_if_skewed
 from workload_lib import CREDSTORE_DIR, mount_points, workload_config_path
 
 
@@ -134,6 +135,30 @@ def backup_vm_crash(config, output: Path, *, quiet: bool) -> int:
                     f"Warning: Failed to resume vCPUs for '{config.name}': {exc}. "
                     f"The VM may remain paused — check with 'workloadctl status {config.name}'.",
                 )
+            # Put the guest's clock back, because we are what moved it. A vCPU
+            # pause is lost by the guest exactly and permanently -- measured
+            # twice, see lib/vm_clock.py -- and this is the ONE place in the
+            # tree that pauses on its own initiative, so it is the one place
+            # worth repairing at the source.
+            #
+            # NOT THE REMEDY, and the distinction matters: a host that suspends
+            # rewinds the same guest with no hook available, so what actually
+            # covers a skewed guest is the check on the certificate mint path.
+            # This narrows the window on the one path we own from "until the
+            # next mint" to "one guest-agent round trip", and that is all.
+            #
+            # After `cont`, inside the same finally, so a copy that raised
+            # still resumes and still resyncs. Never fatal: the archive is
+            # already written, and failing a completed backup over a clock is
+            # a worse outcome than a slow clock. It is also entirely normal
+            # for this to do nothing -- a guest whose image has no
+            # qemu-guest-agent has no channel to ask, which `diagnose`
+            # reports and this does not.
+            try:
+                _resync_after_pause(config, quiet=quiet)
+            except Exception as exc:  # never fail a completed backup
+                if not quiet:
+                    warn(f"  Could not resync the clock for '{config.name}': {exc}")
     finally:
         qmp.close()
 
@@ -141,6 +166,12 @@ def backup_vm_crash(config, output: Path, *, quiet: bool) -> int:
     if not quiet:
         print_backup_size(output, size)
     return size
+
+
+def _resync_after_pause(config, *, quiet: bool) -> None:
+    """Best-effort `guest-set-time` for a VM whose vCPUs we just resumed."""
+    if vm_resync_guest_clock_if_skewed(config.name) == CLOCK_RESYNCED and not quiet:
+        info(f"  Reset the guest clock for '{config.name}' after the pause.")
 
 
 def _ignore_mount_points(root: Path, *, quiet: bool):

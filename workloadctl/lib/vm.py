@@ -1357,6 +1357,136 @@ def vm_ca_env(config: dict) -> dict[str, str]:
     return {var: VM_CA_BUNDLE_PATH for var in VM_CA_ENV_VARS}
 
 
+# --- Leaves ---
+#
+# What the CA above signs, one per exact name the guest asks for.
+
+# Thirty days. Short because nothing renews these -- the working-set cache
+# re-mints inside 24 h of expiry and that is the whole rotation story -- and
+# because a leaf that leaked is a leaf valid for one host, for a month, signed
+# by a CA one guest trusts. Long enough that a VM which runs for a fortnight
+# never re-mints its working set.
+VM_LEAF_VALIDITY_DAYS = 30
+
+# Re-mint once a leaf is inside this of notAfter. A day, so a long-running
+# connection opened just under the wire still outlives its certificate by an
+# order of magnitude.
+VM_LEAF_RENEW_WITHIN_SECONDS = 86400
+
+
+class LeafRefused(ValueError):
+    """A name that will not be minted for, with the reason in the message.
+
+    Raised BEFORE openssl is reached, which is the point: every character of
+    the name below travels into an `-addext` argument, and `subjectAltName`
+    takes a comma-separated list. A name carrying a comma would add extensions
+    of the guest's choosing to a certificate the host signs. Nothing downstream
+    of here re-checks, so this function is the boundary.
+    """
+
+
+# The longest a DNS name may be, and the longest one label may be (RFC 1035).
+VM_LEAF_NAME_MAX = 253
+VM_LEAF_LABEL_MAX = 63
+
+_LEAF_LABEL_CHARS = frozenset(
+    "abcdefghijklmnopqrstuvwxyz0123456789-_")
+
+
+def vm_leaf_san(name: str) -> str:
+    """The subjectAltName value for one name, or raise LeafRefused.
+
+    ALLOWLIST, NOT DENYLIST. The obvious spelling of this check is to reject
+    the characters that hurt -- comma, newline, `=` -- and it is the wrong
+    shape: the set of characters that mean something to openssl's extension
+    parser is openssl's to change, and a name is guest-chosen input reaching a
+    subprocess argument. So the check names what is permitted and refuses the
+    rest, which is a rule that cannot rot.
+
+    An IP literal becomes an `IP:` SAN rather than a `DNS:` one. A `DNS:`
+    entry holding an address does not match when a client connects to that
+    address -- so minting one would produce a certificate that verifies
+    nowhere, and the failure would present as an unexplained handshake error
+    rather than as a refusal.
+
+    `_` is permitted in a label though RFC 1035 forbids it: it is common in
+    real service names, and every client this design faces resolves and
+    validates such names. Refusing them would break traffic the allowlist
+    authorised, which is the failure this whole rung exists to avoid.
+    """
+    name = vm_normalise_hostname(name)
+    if not name:
+        raise LeafRefused("empty name")
+
+    try:
+        return f"IP:{ipaddress.ip_address(name)}"
+    except ValueError:
+        pass
+
+    if len(name) > VM_LEAF_NAME_MAX:
+        raise LeafRefused(f"name longer than {VM_LEAF_NAME_MAX} characters")
+    labels = name.split(".")
+    for label in labels:
+        if not label:
+            raise LeafRefused(f"empty label in {name!r}")
+        if len(label) > VM_LEAF_LABEL_MAX:
+            raise LeafRefused(f"label longer than {VM_LEAF_LABEL_MAX} "
+                              f"characters in {name!r}")
+        bad = set(label) - _LEAF_LABEL_CHARS
+        if bad:
+            raise LeafRefused(
+                f"character {sorted(bad)[0]!r} not permitted in a name")
+    return f"DNS:{name}"
+
+
+def vm_leaf_openssl_argv(name: str, ca_key_path, ca_cert_path,
+                         key_path, cert_path, *, now: float) -> list[str]:
+    """One `openssl req -x509 -CA` invocation that mints a leaf for `name`.
+
+    A single process, not a CSR and a sign: `req -x509` takes `-CA`/`-CAkey`
+    since OpenSSL 3.0 and does both, which halves the cost of the thing the
+    token bucket exists to ration.
+
+    THE SAN IS CRITICAL, AND THAT IS LOAD-BEARING. The subject is empty (there
+    is no meaningful CN for a name the host does not own), and RFC 5280 says a
+    certificate with an empty subject MUST mark subjectAltName critical.
+    Measured 2026-08-26: without the flag, Python's ssl rejects the chain with
+    `Subject empty and Subject Alt Name extension not critical` -- a verify
+    failure whose message names neither the SAN value nor the CA, so it reads
+    like a trust problem and sends a reader to the anchor.
+
+    THE SAN CARRIES THE EXACT NAME, NEVER THE ALLOWLIST PATTERN THAT MATCHED.
+    A `*.example.com` entry authorises the guest to reach names under it; a
+    leaf minted for `*.example.com` would be a certificate the guest could use
+    against any of them, including ones a later narrowing of the list removes.
+    One name asked for, one name signed.
+
+    notBefore is backdated by the same hour the CA is, for the same reason and
+    with the same caveat -- see VM_CA_BACKDATE_SECONDS, and the mint-time clock
+    check that is the actual remedy for a paused guest.
+    """
+    not_before = time.strftime(
+        "%Y%m%d%H%M%SZ", time.gmtime(now - VM_CA_BACKDATE_SECONDS))
+    return [
+        "openssl", "req", "-x509",
+        "-CA", str(ca_cert_path),
+        "-CAkey", str(ca_key_path),
+        "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256",
+        "-noenc",
+        "-keyout", str(key_path),
+        "-out", str(cert_path),
+        "-days", str(VM_LEAF_VALIDITY_DAYS),
+        "-not_before", not_before,
+        "-subj", "/",
+        "-addext", f"subjectAltName=critical,{vm_leaf_san(name)}",
+        "-addext", "basicConstraints=critical,CA:FALSE",
+        "-addext", "keyUsage=critical,digitalSignature,keyEncipherment",
+        "-addext", "extendedKeyUsage=serverAuth",
+        "-addext", "subjectKeyIdentifier=hash",
+        "-addext", "authorityKeyIdentifier=keyid",
+    ]
+
+
 # --- The credential broker endpoint ---
 #
 # A host-side service that holds a provider API key and forwards to exactly one

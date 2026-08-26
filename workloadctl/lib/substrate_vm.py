@@ -18,7 +18,6 @@ from __future__ import annotations
 import json
 import os
 import pwd
-import random
 import shlex
 import shutil
 import subprocess
@@ -44,6 +43,7 @@ from vm import (
     vm_mac_address,
     vm_management_address,
 )
+from vm_clock import GUEST_AGENT_TIMEOUT, guest_agent_sync
 from vm_metrics import get_vm_qmp_metrics
 from workload_lib import workload_service_units
 from workloadctl_core import WorkloadUserNotFound, format_size
@@ -127,40 +127,9 @@ def _vm_ssh_command(
     return cmd
 
 
-# How long to wait for qemu-guest-agent to answer. Every VM is wired with the
-# agent channel (see generate_vm_service), but a guest that hasn't installed or
-# started qemu-ga never opens its end — QEMU still accepts our connection, so a
-# missing agent looks exactly like a slow one and can only be told apart by
-# waiting. `exec` and `shell` sit behind this, so the budget is small: agent
-# present means a local unix-socket round trip (milliseconds), and agent absent
-# costs this once before falling through to the host-side sources.
-GUEST_AGENT_TIMEOUT = 1.5
-
-
-def _guest_agent_sync(qga: QMPClient, max_messages: int = 8) -> None:
-    """Handshake that guarantees the next reply we read is the one we asked for.
-
-    The channel is a stream that outlives any single client. If a previous
-    lookup timed out after sending a command but before reading its reply — the
-    GUEST_AGENT_TIMEOUT case, so not hypothetical — that reply is still queued
-    in the port when the next connection opens, and a naive read would take it
-    as the answer to a question it never asked. guest-sync carries a nonce, so
-    anything ahead of the matching reply is provably stale and discarded.
-
-    Raises (like any other agent failure) when the nonce never comes back; the
-    caller treats that as "no agent" and falls through.
-    """
-    token = random.randint(1, 2**31)
-    reply = qga.execute("guest-sync", {"id": token})
-    for _ in range(max_messages):
-        if reply.get("return") == token:
-            return
-        message = qga.next_message()
-        if message is None:
-            break
-        reply = message
-    raise ConnectionError("guest agent did not echo the sync token")
-
+# The guest-agent timeout and the nonce handshake live in vm_clock, which owns
+# the agent channel for the whole tree -- it grew a second caller at rung 3 (the
+# mint-time clock check) and a duplicated client was the alternative.
 
 def _vm_guest_agent_addresses(name: str, mac: str) -> list[str]:
     """Addresses reported by qemu-guest-agent, best first; [] if unavailable.
@@ -198,7 +167,7 @@ def _vm_guest_agent_addresses(name: str, mac: str) -> list[str]:
         # No negotiate(): the guest agent protocol shares QMP's newline-JSON
         # framing but has no greeting and no qmp_capabilities — reading for one
         # would block until the recv timeout on every call.
-        _guest_agent_sync(qga)
+        guest_agent_sync(qga)
         reply = qga.execute("guest-network-get-interfaces")
         interfaces = reply.get("return") or []
     except Exception:
