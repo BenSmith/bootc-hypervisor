@@ -375,7 +375,7 @@ Verified by breaking the splice on purpose — replaying the buffer without its
 record header — which fails the four handshake assertions and leaves the other
 eleven green.
 
-## clock_rig.py — what a vCPU pause does to a guest's clock
+## clock_rig.py — what a vCPU pause does to a guest's clock, and whether a wrong clock costs the guest its egress
 
 ```bash
 sudo python3 tests/manual/clock_rig.py       # --keep leaves the guest up
@@ -383,9 +383,11 @@ sudo python3 tests/manual/clock_rig.py       # --keep leaves the guest up
 
 Needs root, `/dev/kvm`, the workloadctl RPM and the same
 `/var/lib/broker-rig/base.qcow2` the other VM rigs use. Boots **one** throwaway
-filtered VM workload, measures its clock across a QMP `stop`/`cont`, and tries
-both forms of the guest agent's `guest-set-time`. Ten minutes end to end, most
-of it the 120-second pause and cloud-init's first boot.
+filtered VM workload **with its egress inspector on**, measures its clock
+across a QMP `stop`/`cont`, tries both forms of the guest agent's
+`guest-set-time`, and then drives a real HTTPS request from a guest whose clock
+is deliberately wrong. Ten minutes end to end, most of it the 120-second pause
+and cloud-init's first boot.
 
 **Why it exists.** Rung 3 mints 30-day leaves for the guest to validate, which
 puts the guest's clock on the critical path for all of its traffic. Drift is a
@@ -423,3 +425,22 @@ inside the measurement's own bracket. That is the remedy rung 3 adopts.
 The one FAIL is the no-argument form and is the *finding*, not a defect in the
 rig: it is asserted rather than skipped so that a future QEMU or image making it
 work shows up as a rig that started passing.
+
+**Measurement 6 closes the loop, and it needed T5 to exist.** Everything above
+measures a clock; 6 measures what the clock was on the critical path *of*. It
+pushes the guest **two hours** back — past the `notBefore` backdate, so a stale
+clock cannot validate a fresh leaf by accident — and then asks it for a name it
+has never asked for, which is the only kind that reaches the minter: a cache hit
+runs no clock check, so re-dialling a warm name would pass while proving
+nothing. The request should succeed, because the mint path repairs the guest
+before signing.
+
+Two corroborating assertions matter as much as that one. The guest's offset must
+come back, and `clock_resyncs` in `inspect-status.json` must move — without
+both, the same green is produced by a backdate quietly widened to cover two
+hours. A third reads `clock_unavailable`: a guest with no `qemu-guest-agent` is
+a supported configuration in which this whole remedy is *inert*, and every other
+line on this rig still passes in that state.
+
+This arm needs the host to have real internet, unlike the rest of the rig — it
+dials two names on the workload's allowlist.

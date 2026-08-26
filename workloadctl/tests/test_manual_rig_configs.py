@@ -51,10 +51,24 @@ def _rigs():
         # blows up on the unittest argv. Selecting by source text keeps this
         # from importing anything that was never meant to be imported.
         src = path.read_text()
-        if "def toml_for(" not in src or "ARMS = " not in src:
+        if "def toml_for(" not in src:
             continue
         mod = _load(path)
-        yield path.name, mod
+        # ARMS is not universal. A rig that deploys ONE workload has a
+        # zero-argument toml_for and no arms at all, and selecting on `ARMS =`
+        # as well silently left clock_rig.py uncovered until 2026-08-26 -- the
+        # same decay one level up again, this time in the guard against it.
+        # A single unnamed arm stands in, so every caller below is one loop.
+        yield path.name, mod, getattr(mod, "ARMS", None) or [None]
+
+
+def _generate(mod, arm):
+    """The config text for one arm, or for a rig that has none."""
+    return mod.toml_for() if arm is None else mod.toml_for(arm)
+
+
+def _arm_name(arm):
+    return "(only)" if arm is None else arm.name
 
 
 class TestGeneratedConfigs(unittest.TestCase):
@@ -64,38 +78,39 @@ class TestGeneratedConfigs(unittest.TestCase):
         self.assertTrue(list(_rigs()))
 
     def test_every_generated_config_parses(self):
-        for name, mod in _rigs():
-            for arm in mod.ARMS:
-                with self.subTest(rig=name, arm=arm.name):
+        for name, mod, arms in _rigs():
+            for arm in arms:
+                with self.subTest(rig=name, arm=_arm_name(arm)):
                     try:
-                        tomllib.loads(mod.toml_for(arm))
+                        tomllib.loads(_generate(mod, arm))
                     except tomllib.TOMLDecodeError as exc:
-                        self.fail(f"{name} arm {arm.name}: {exc}")
+                        self.fail(f"{name} arm {_arm_name(arm)}: {exc}")
 
     def test_every_generated_network_section_validates(self):
         """The half that catches a retired spelling: parsing is not enough,
         because `allow = ["1.1.1.1:53"]` is perfectly good TOML and a refused
         config all the same."""
         from vm import _validate_egress
-        for name, mod in _rigs():
-            for arm in mod.ARMS:
-                with self.subTest(rig=name, arm=arm.name):
-                    doc = tomllib.loads(mod.toml_for(arm))
+        for name, mod, arms in _rigs():
+            for arm in arms:
+                with self.subTest(rig=name, arm=_arm_name(arm)):
+                    doc = tomllib.loads(_generate(mod, arm))
                     net = (doc.get("vm") or {}).get("network")
                     if net is None:
                         continue
                     errors = _validate_egress(net)
-                    self.assertEqual(errors, [], f"{name} arm {arm.name}: {errors}")
+                    self.assertEqual(
+                        errors, [], f"{name} arm {_arm_name(arm)}: {errors}")
 
     def test_network_scalars_precede_the_allow_table(self):
         """The ordering trap, asserted on the generated TEXT rather than on the
         parsed document -- because a scalar written below [[vm.network.allow]]
         parses fine and lands in the allow entry, which is exactly the mistake
         that is hard to see by reading."""
-        for name, mod in _rigs():
-            for arm in mod.ARMS:
-                with self.subTest(rig=name, arm=arm.name):
-                    text = mod.toml_for(arm)
+        for name, mod, arms in _rigs():
+            for arm in arms:
+                with self.subTest(rig=name, arm=_arm_name(arm)):
+                    text = _generate(mod, arm)
                     if "[[vm.network.allow]]" not in text:
                         continue
                     tail = text.split("[[vm.network.allow]]", 1)[1]
@@ -103,7 +118,8 @@ class TestGeneratedConfigs(unittest.TestCase):
                         key = line.split("=")[0].strip()
                         if key in ("egress", "hosts", "resolver", "ports",
                                    "bridge", "tls"):
-                            self.fail(f"{name} arm {arm.name}: `{key}` is "
+                            self.fail(f"{name} arm {_arm_name(arm)}: "
+                                      f"`{key}` is "
                                       f"written below [[vm.network.allow]] and "
                                       f"belongs to the allow entry, not to "
                                       f"[vm.network]")
