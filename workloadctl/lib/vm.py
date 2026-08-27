@@ -745,6 +745,27 @@ def vm_inspect_policy_path(name: str) -> str:
 VM_INSPECT_STATUS_FILE = "inspect-status.json"
 VM_RESOLVE_STATUS_FILE = "resolve-status.json"
 
+# The `drop_reasons` keys `workloadctl diagnose` reads back out of the
+# inspector's status document.
+#
+# SECOND DEFINITIONS OF STRINGS THE LISTENER OWNS, and stated here for the
+# reason VM_BROKER_LISTEN_ADDR is: `libexec/workload-vm-inspect-listener` is an
+# extension-less entrypoint, so nothing in lib/ can import it. A reader either
+# restates the key or matches on a substring -- and a substring is worse, since
+# `not HTTP` is a prefix of `not HTTP (policy entry)` and `host does not match
+# the server name` is a prefix of its allowlisted twin. Both splits exist
+# BECAUSE the two halves need different operator responses, so a reader that
+# merges them by prefix reports the opposite of what the split was for.
+#
+# tests/test_vm_inspect_diagnose.py pins each of these against the listener's
+# own constant. That pin is what makes restating them safe: a rename over there
+# fails a test here, rather than turning a figure into a permanent zero that
+# reads exactly like a refusal that never fired.
+VM_DROP_MISDIRECTED = "host does not match the server name"
+VM_DROP_MISDIRECTED_LISTED = "host does not match the server name (allowlisted)"
+VM_DROP_NOT_HTTP = "not HTTP"
+VM_DROP_NOT_HTTP_POLICY = "not HTTP (policy entry)"
+
 
 def vm_inspect_status_path(name: str) -> str:
     """Where one workload's inspector writes its counters.

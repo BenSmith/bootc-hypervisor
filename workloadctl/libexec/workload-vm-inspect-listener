@@ -1955,6 +1955,17 @@ DROP_REASONS = (
 # answers. A count alone says a mismatch happened; §4 needs to know between
 # what.
 #
+# `not permitted by policy` is absent too, and unlike the two above that is a
+# decision rather than a consequence. Its keys look bounded by the file -- a
+# `policy` entry allowlists its own host -- but a WILDCARD entry bounds nothing,
+# and a guest under `*.example.com` invents subdomains as freely as it invents
+# anything else. That alone would settle it. What settles it twice is that the
+# figure would not help if it were free: an operator whose request was refused
+# needs the METHOD and the PATH to know which of their `methods`/`paths` lines
+# to change, and a per-host count carries neither. That question belongs to the
+# per-request record, which has all three, and half-answering it here would put
+# the more findable of the two answers in the operator's way.
+#
 # Every one of these is a BOUNDED top-N with a counted overflow, because the
 # keys are guest-chosen: unbounded, a guest inflating the report damages the
 # host's Prometheus label cardinality rather than its own workload.

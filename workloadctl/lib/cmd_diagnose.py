@@ -61,10 +61,13 @@ from vm import (
     NFT_SET_INSPECT_SELF6, VM_INSPECT_PORT_CLEARTEXT,
     VM_INSPECT_PORT_TLS, VM_INSPECT_ORIG_CLEARTEXT, VM_INSPECT_ORIG_TLS,
     VM_TLS_DEFAULT,
-    vm_inspect_address, vm_uses_inspect,
+    vm_inspect_address, vm_inspect_status_path, vm_uses_inspect,
+    VM_DROP_MISDIRECTED, VM_DROP_MISDIRECTED_LISTED,
+    VM_DROP_NOT_HTTP, VM_DROP_NOT_HTTP_POLICY,
     VM_RESOLVE_PORT, vm_resolve_address, vm_resolve_policy_path,
     vm_uses_resolve,
 )
+from vm_status import OTHER_KEY
 from podman import PodmanError
 from workloadctl_core import WorkloadManager, require_root
 from substrate import service_active
@@ -1219,9 +1222,137 @@ def _host_has_v6_route() -> bool:
     return result.returncode == 0 and bool(result.stdout.strip())
 
 
+def _inspect_status(name: str) -> dict | None:
+    """One workload's inspector counters, or None when there are none to read.
+
+    None for every ordinary reason and without distinguishing them: the
+    inspector is socket-activated, so a VM whose guest has dialled nothing has
+    never written this file, and a VM that has never started has no runtime
+    directory at all. Neither is a fault, and a diagnostic that invented a
+    failure out of a missing diagnostic would fire on every healthy workload
+    between boot and the guest's first connection.
+
+    Malformed JSON lands in the same None. A reader arriving mid-write cannot
+    see a partial file -- vm_status.write_status replaces atomically -- so the
+    only way to get here is a bug in the writer, and the honest report for that
+    is silence on this line rather than a traceback over the twenty other
+    checks that were about to run.
+    """
+    try:
+        with open(vm_inspect_status_path(name)) as fh:
+            doc = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    return doc if isinstance(doc, dict) else None
+
+
+def _named_hosts(counts) -> str:
+    """A per-host map rendered for an operator, busiest first.
+
+    `(other)` is spelled out rather than printed as a hostname, because it is
+    the one key in the map that is not one: it counts EVENTS from hosts past
+    the cap, not a host called `(other)`, and an operator who reads it as a
+    name goes looking for a VM that dialled it.
+    """
+    if not isinstance(counts, dict):
+        return ""
+    named = [(host, n) for host, n in counts.items()
+             if host != OTHER_KEY and isinstance(n, int)]
+    named.sort(key=lambda pair: (-pair[1], pair[0]))
+    parts = [f"{host} ({n})" for host, n in named]
+    overflow = counts.get(OTHER_KEY)
+    if isinstance(overflow, int) and overflow:
+        parts.append(f"plus {overflow} more from hosts past the per-host cap")
+    return ", ".join(parts)
+
+
+def _binding_fragments(status) -> list[str]:
+    """The name-to-`Host` binding rejections, as two readings and never one.
+
+    A request inside a terminated session whose `Host` header names something
+    other than the name the session's certificate was minted for is refused
+    with a 421 either way. WHY it happened is the operator's whole question,
+    and the two answers want opposite responses:
+
+      * The name is on no list of this workload's. A guest reused a session it
+        was legitimately given to reach a name it was never given -- which is
+        the attack the binding exists to close. There is nothing to fix in the
+        config; the refusal worked, and the figure is evidence.
+      * The name IS allowlisted. That is ordinary connection coalescing: a
+        client noticed two allowlisted names resolving to one address and
+        reused the connection, which no client asks permission for. It retries
+        on its own connection and nothing is lost.
+
+    Merged into one number, every coalescing client reads as an intrusion,
+    which is how an alarm stops being read at all. So they are reported as two
+    sentences with two dispositions, and the allowlisted one names the hosts --
+    WHICH PAIR was coalesced is the entire content of that reading, and a bare
+    count cannot carry it.
+    """
+    reasons = status.get("drop_reasons") or {}
+    per_host = status.get("per_host") or {}
+    out = []
+    unlisted = reasons.get(VM_DROP_MISDIRECTED)
+    if isinstance(unlisted, int) and unlisted:
+        out.append(
+            f"{unlisted} request(s) inside an authorised session named a host "
+            f"on NO list for this workload and were refused (421) — a guest "
+            f"reusing a session it was given to reach a name it was not. "
+            f"Nothing here is misconfigured: read this as evidence, not as a "
+            f"setting to change")
+    listed = reasons.get(VM_DROP_MISDIRECTED_LISTED)
+    if isinstance(listed, int) and listed:
+        hosts = _named_hosts(per_host.get(VM_DROP_MISDIRECTED_LISTED))
+        where = f" ({hosts})" if hosts else ""
+        out.append(
+            f"{listed} request(s) reused one session across two allowlisted "
+            f"names{where} and were refused (421) — ordinary connection "
+            f"coalescing, retried by the client on a connection of its own. "
+            f"Benign unless that pairing is a surprise")
+    return out
+
+
+def _not_http_fragments(status) -> list[str]:
+    """Hosts that turned out not to speak HTTP, split by whether policy named them.
+
+    This is the operator's splice list and the only place it exists: whether a
+    host speaks HTTP over 443 is not knowable from the file, only from a
+    connection, which is why it is a runtime report and not a validation rule.
+
+    The split is the whole value. Plain `not HTTP` is one line from working --
+    give the host a [[vm.network.splice]] entry and it is spliced by name. A
+    host a [[vm.network.policy]] entry names is two lines, and the second is a
+    DELETION: `validate` refuses a host that is in both `splice` and `policy`,
+    so the entry whose methods and paths can never run has to go with it. That
+    second case is surfaced harder because the config states an intention the
+    wire has already contradicted, and nothing at startup could have said so.
+    """
+    per_host = status.get("per_host") or {}
+    totals = status.get("per_host_totals") or {}
+    out = []
+    plain = totals.get(VM_DROP_NOT_HTTP)
+    if isinstance(plain, int) and plain:
+        hosts = _named_hosts(per_host.get(VM_DROP_NOT_HTTP))
+        out.append(
+            f"{plain} connection(s) were closed because the host did not speak "
+            f"HTTP ({hosts}) — if that is what those hosts really are, each "
+            f"needs a [[vm.network.splice]] entry to pass through inspected by "
+            f"name instead")
+    governed = totals.get(VM_DROP_NOT_HTTP_POLICY)
+    if isinstance(governed, int) and governed:
+        hosts = _named_hosts(per_host.get(VM_DROP_NOT_HTTP_POLICY))
+        out.append(
+            f"{governed} connection(s) were closed for not speaking HTTP on "
+            f"hosts a [[vm.network.policy]] entry names ({hosts}) — those "
+            f"method and path rules CAN NEVER RUN. Splicing such a host means "
+            f"deleting its policy entry too: a host in both `splice` and "
+            f"`policy` is a validate error")
+    return out
+
+
 def vm_inspect_check(config, *, elements4=PROBE, elements6=PROBE,
-                     socket_active=PROBE, v6_route=PROBE, self_dials=PROBE
-                     ) -> tuple[str, bool, str] | None:
+                     socket_active=PROBE, v6_route=PROBE, self_dials=PROBE,
+                     status=PROBE) -> tuple[str, bool, str] | None:
     """Report whether a VM's egress is actually being redirected to its inspector.
 
     Returns None for workloads the redirect does not apply to (not a VM,
@@ -1344,6 +1475,31 @@ def vm_inspect_check(config, *, elements4=PROBE, elements6=PROBE,
                  f"own listener on a port nothing serves — if the guest "
                  f"expects a service there, it needs a [vm.network].allow "
                  f"entry for the real address, not the listener's")
+
+    # The two figures rung 4's policy work landed (the name-to-Host binding
+    # rejections, and the hosts that turned out not to speak HTTP), read out of
+    # the inspector's own status document.
+    #
+    # STILL A PASSING LINE, however loud the wording. Every one of these
+    # refusals is the inspector working: the request was refused, the guest was
+    # told, and nothing about this workload's configuration is broken by a
+    # guest behaving badly. A red line here would send an operator hunting for
+    # a setting to change, and in the binding case there is none -- the setting
+    # already worked. What the line owes them is the sentence, not a verdict.
+    #
+    # Only these two figures, and not a general rendering of the document: the
+    # rest of it (minting rate, clock resyncs, the CA fingerprint, the DNS
+    # counters in the responder's file beside it) gains its reader with
+    # `doctor`'s aggregation and the exporter surface, where one producer and
+    # no second definition of any figure is the property being built. These two
+    # land with the policy they measure because their whole value is an
+    # operator's next move, and a figure nothing prints is a figure nobody has.
+    if status is PROBE:
+        status = _inspect_status(config.name)
+    if status:
+        for fragment in (_binding_fragments(status)
+                         + _not_http_fragments(status)):
+            tail += f"; {fragment}"
 
     # The TLS mode is named because the two are different security postures
     # with the same green line: `inspect` authorises every request and holds
