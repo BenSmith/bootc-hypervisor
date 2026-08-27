@@ -253,6 +253,13 @@ Then the paths that don't work, which are the point:
   those checks the key would mean *exempt from policy* rather than *speaks h2*,
   reachable by writing different first bytes.
 
+  Where `splice` works it is the better choice of the two. Both leave
+  enforcement at the SNI and both take a written reason, and `splice` gives the
+  host back end-to-end TLS and needs no CA inside the guest — where a relayed
+  h2 session has its `:authority` HPACK-encoded and unread, which is true
+  fronting open on that host. Reach for `http2` when the host *requires* h2,
+  not for what it costs less of.
+
 There is no earlier, DNS-shaped refusal to add to that list, and it is worth
 saying so because the shape invites the assumption. The responder synthesises
 **unconditionally**: every name it is asked about that is not in its static map

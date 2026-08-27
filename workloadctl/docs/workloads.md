@@ -1439,15 +1439,25 @@ How it fits together:
   SNI in the ClientHello and then, under the default `tls = "inspect"`,
   **terminated**: the inspector completes the guest's handshake with a leaf from
   this workload's own CA, verifies the origin against the *host's* anchors on a
-  separate session, and authorises every request inside by its `Host` header. A
-  refused name gets a real `403` through a chain the guest trusts. This host
-  holds the plaintext, and the guest must trust that CA — the seed installs it,
-  once per instance-id. `tls = "splice"` keeps the older, weaker property:
-  byte-for-byte replay, nothing decrypted, no CA, and the name checked once per
-  connection. See `[vm.network].tls`.
+  separate session, and authorises every request inside by its `Host` header —
+  and, where a `[[vm.network.policy]]` entry names that host, by its **method
+  and path** as well. A refused name gets a real `403` through a chain the guest
+  trusts. This host holds the plaintext, and the guest must trust that CA — the
+  seed installs it, once per instance-id. `tls = "splice"` keeps the older,
+  weaker property for the **whole workload**: byte-for-byte replay, nothing
+  decrypted, no CA, and the name checked once per connection.
+  `[[vm.network.splice]]` is that same trade for **one host at a time**. See
+  `[vm.network].tls`.
 - A connection carrying **no readable name** is dropped rather than guessed at —
   a literal dialled with no `Host` header, or a non-TLS byte stream on 443, has
   nothing to match a pattern against.
+- Inside a terminated session, first bytes that are **not a parseable HTTP/1.1
+  request** are closed rather than relayed. The `http/1.1` ALPN offer is not the
+  enforcement and never was: a client offering only `h2` completes that
+  handshake with nothing negotiated and no alert, so what binds is the refusal,
+  not the offer. A host that genuinely speaks something else over 443 needs a
+  `[[vm.network.splice]]` entry — or `[[vm.network.http2]]`, if what it speaks
+  is h2.
 - Only **80 and 443** are redirected. Anything else belongs in `allow`.
 
 **`hosts` still requires `egress = "filtered"`**, and `validate` rejects the pair
@@ -1479,11 +1489,16 @@ is reached and `fedoraproject.org` is refused. This is worth knowing because the
 refusal is a 403 — identical to the one an unlisted host gets, so it reads as a
 policy decision rather than a pattern that didn't reach as far as intended.
 
-**Unlisted names do not resolve.** Under a filtered workload the guest's only
-nameserver is this workload's synthesising responder, which answers for the
-names policy knows about. That is a second, earlier refusal than the
-inspector's 403, and it is why a guest probing for an unlisted host sees a
-lookup failure rather than a connection that gets as far as being denied.
+**Unlisted names still resolve**, and expecting otherwise is the natural
+mistake to make about this shape. Under a filtered workload the guest's only
+nameserver is this workload's synthesising responder, and it synthesises
+**unconditionally**: every name it is asked about that is not in its static map
+is answered with the inspector's address, listed or not. It reads the lists only
+to *count* — a lookup for a name on none of them is the tunnelling signature and
+is recorded as one. So there is no earlier, DNS-shaped refusal: the guest always
+resolves, always connects, and always learns its answer from the inspector's
+`403`. A responder that refused unlisted names would hand the guest a cheap
+oracle for which names are on the list.
 
 **The inspector will not open a connection to an internal address.** Hostname
 policy is checked against the name; the address it resolves to was, for a while,
@@ -1530,6 +1545,109 @@ Two consequences to know:
   name) and a port, and the allow rules are evaluated ahead of these drops. That
   grant is not inspector-specific — it is the same scoped grant the guest's own
   direct path gets, which is the honest description of what it opens.
+
+#### What a guest may ask for, not only who it may reach
+
+`hosts` says **which** hosts a guest may reach. `[[vm.network.policy]]` says
+**what** it may ask them for — method and path, on every request inside a
+terminated session:
+
+```toml
+hosts = ["registry.example.com", "*.fedoraproject.org"]
+
+[[vm.network.policy]]
+host    = "registry.example.com"
+methods = ["GET", "HEAD"]
+paths   = ["/v2/*", "/token"]
+```
+
+`host` is an fnmatch pattern like a `hosts` entry, `methods` are compared
+uppercase, and `paths` are fnmatch patterns matched against the normalised
+request target. **Omitting a key means any** — any method, any path. Writing it
+as an empty list is a validation error rather than a host nothing may be asked
+of: `methods = []` permits no method at all, which is a workload that cannot
+work, and it is far likelier to be a key that was meant to be filled in.
+
+**A host any policy entry matches is governed by those entries alone.** `hosts`
+is not consulted for it. This is the one rule to get right, because the wrong
+reading — a `hosts` entry behaving like a policy entry with no keys — makes a
+single wildcard written for an unrelated reason nullify every restriction on
+every host it covers, in a diff that looks like it *added* access. The
+consequence in the other direction is convenient: a policy entry allowlists its
+own host, so `hosts` may be empty when policy covers everything.
+
+**Entries union, so file order cannot change what is allowed.** There is no
+precedence and no way to subtract. Two things that look like bugs follow: a
+narrower entry cannot carve an exception out of a wider one, and a specific
+entry does not override a general one. To vary methods by path, repeat the host
+— one entry per rule.
+
+**Where more than one entry matches a host by pattern, each of them must state
+both `methods` and `paths`.** The shorthand survives for the single-entry case
+only. Without that rule a `*.example.com` entry with no keys silently widens
+every specific entry beneath it, and `validate` refuses it rather than leaving
+it to be discovered.
+
+**The apex trap, which `validate` also refuses.** `*.example.com` does not
+govern `example.com` any more than it covers it in `hosts` — so an apex that
+`hosts` allowlists, with the only policy entry naming it being the wildcard
+below it, would be inspected with **no** method or path rules applied at all.
+That is a restriction you believe is in force and is not, so it is an error.
+Note that the wildcard does not have to appear in `hosts` for this to bite: a
+policy entry allowlists its own host, so the natural way to write the trap
+never mentions it there.
+
+#### Splicing one host, and HTTP/2 on one host
+
+Not every host on 443 speaks HTTP, and not every host will take this workload's
+CA. Two per-host escape hatches cover that, and both carry a written `reason`:
+
+```toml
+[[vm.network.splice]]
+host   = "sum.golang.org"
+reason = "client verifies a signed log, not the chain; cannot take our CA"
+
+[[vm.network.http2]]
+host   = "grpc.example.com"
+reason = "gRPC; requires h2, and :authority goes unchecked as a result"
+```
+
+`splice` gives that one host the `tls = "splice"` property — byte-for-byte
+replay, nothing decrypted, no CA needed in the guest, the name checked once per
+connection — while every other host stays terminated and inspected. A host in
+both `splice` and `policy` is a validation error: method and path rules cannot
+run on bytes nobody reads.
+
+`http2` is the opt-out from the `http/1.1` ALPN offer every terminated host
+gets. A listed host is offered h2 on both legs and relayed at **frame level**
+with `:authority` HPACK-encoded and unread, which leaves true fronting open on
+it — so `http2` on a host with a matching `policy` entry is an error too, not a
+no-op. The key means *speaks h2*, not *exempt*: the guest's connection must
+present the 24-byte preface and parse as frames to the end, and the origin must
+actually **select** h2, or the connection is refused with a `502` naming both
+ways out. An ALPN offer binds nobody — an origin speaking only HTTP/1.1
+completes that handshake having selected nothing at all.
+
+**Where `splice` works it is the better choice.** Both leave enforcement at the
+SNI and both take a written reason, and `splice` additionally gives the host
+back end-to-end TLS and needs no CA in the guest. `http2` exists for hosts that
+require h2, not because it enforces more.
+
+#### Two figures the file could never have told you
+
+Whether a host speaks HTTP over 443, and whether a guest is reusing sessions
+across names, are answerable only from a connection. `workloadctl diagnose`
+reports both:
+
+- **Connections closed for not speaking HTTP, per host.** This is the splice
+  list, and it is the only place that list exists. It comes in two halves: a
+  host a `policy` entry names is surfaced harder, because those method and path
+  rules can never run — splicing it means **deleting** the policy entry too.
+- **Requests refused `421` for naming a host other than the session's.** Split
+  by whether that host is allowlisted, because the two want opposite responses:
+  an unlisted name is a guest reusing a session to reach somewhere it was never
+  given, and nothing is misconfigured; an allowlisted one is ordinary connection
+  coalescing, which the client retries on a connection of its own.
 
 `workloadctl diagnose <name>` reports whether the redirect is actually armed —
 the socket can be bound while the guest has no path to it, and every other
