@@ -1,14 +1,15 @@
 # ADR 008: VM egress is inspected transparently, and terminated by default
 
-**Status:** **Accepted. Implemented in tree, unverified on hardware** — the
+**Status:** **Accepted. Implemented in tree and verified on hardware** — the
 transparent path, the termination, and the policy the termination exists to
-carry are all in; none of the policy work has run on a KVM host.
+carry are all in, and all of them have now run on a KVM host under enforcing.
 Originally recorded ahead of the work, because
 `007-per-workload-credential-broker.md` is an accepted decision that assumes
 this one, and an accepted record resting on an undecided premise is the wrong
 order.
 
-**Date:** 2026-08-16. Status updated 2026-08-27.
+**Date:** 2026-08-16. Status updated 2026-08-27, twice: once when the policy
+work landed in the tree, and again when it ran on a machine.
 
 **What has shipped.** Decisions 1, 6, 7, 8, 9 and 10: the uid-keyed transparent
 redirect on 80 and 443 with no guest-side proxy variables, both address
@@ -30,8 +31,8 @@ Decision 1's non-HTTP arm is in as well: a terminated connection whose first
 bytes do not begin a request line is closed rather than answered, since an HTTP
 response written into a protocol that is not HTTP is worse than silence.
 
-**Built, and not yet run on hardware.** Decision 5's method and path matching,
-as `[[vm.network.policy]]`, with the three keys the rest of it needed:
+**Built, and since verified on hardware.** Decision 5's method and path
+matching, as `[[vm.network.policy]]`, with the three keys the rest of it needed:
 
 - **`[[vm.network.policy]]`** — `methods` and `paths` per host, a cross product
   inside one entry, entries unioning so file order cannot change what is
@@ -61,9 +62,25 @@ lines of remedy rather than one, because `validate` refuses `splice` and
 `policy` on the same host. `workloadctl diagnose` prints both, along with the
 `Host`-binding count split into its two readings.
 
-None of this has run on a KVM host yet. Every claim above is a claim about the
-tree and its unit gates; the runtime rung and the enforcing-host pass are the
-things that turn it into a claim about a machine.
+All of this has now run on a KVM host. Until 2026-08-27 every claim above was a
+claim about the tree and its unit gates; two things turned it into a claim about
+a machine, and it is worth recording that neither was the unit suite, which was
+green throughout.
+
+`tests/manual/policy_rig.py` drives the per-host keys and the split counters
+against one real listener with real origins (42 assertions, four consecutive
+greens, break-verified by emptying each list in turn). It exists because the
+four rigs that preceded it touched no rung-4 code at all — `splice_rig`'s own
+listener log read `splice=0 http2=0 policy=0` on every run since the policy work
+landed. A tier that no rig reaches is unexercised however many rigs pass.
+
+The runtime rung then ran in gate mode — the real bootc image, not a locally
+built RPM — and the VM half of it went green: the redirect, the responder, the
+listener, virtiofs, restart and host-key handling, and both egress-isolation
+checks. The one failure it found was a test asserting a refusal this design does
+not make, since synthesis is unconditional; the responder was right and the
+assertion was wrong. It had never executed anywhere before, because dev mode
+skips the VM modules.
 
 **What has not.** Decision 2's written `reason` for a WHOLE-WORKLOAD splice.
 `tls = "splice"` is still accepted as a bare value, so config review cannot
@@ -71,8 +88,8 @@ distinguish "spliced because it must be" from "spliced because nobody tried" on
 the mode — only on the per-host entries.
 
 Until that lands, `Given up` describes a cost this design has chosen to pay and
-has paid nearly in full, and the per-path properties under `Consequences` are a
-description of the tree awaiting a description of the host.
+has paid nearly in full. The per-path properties under `Consequences` are no
+longer a description of the tree alone.
 
 This split is deliberate rather than a stall: the transparent path is what makes
 the guest's cooperation irrelevant, and it is worth having on its own before a
