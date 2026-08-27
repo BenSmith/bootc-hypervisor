@@ -228,6 +228,40 @@ def ga(command, arguments=None, timeout=GA_TIMEOUT):
         s.close()
 
 
+# CHRONYC CANNOT WRITE TO AN SSH EXEC CHANNEL, AND SELINUX IS WHY. Measured
+# 2026-08-27 in the guest, with the audit log naming it:
+#
+#   avc: denied { write } for comm="chronyc" path="pipe:[12398]" dev="pipefs"
+#     scontext=unconfined_u:unconfined_r:chronyc_t:s0-s0:c0.c1023
+#     tcontext=system_u:system_r:sshd_session_t:s0-s0:c0.c1023 tclass=fifo_file
+#
+# /usr/bin/chronyc is chronyc_exec_t, so it transitions to chronyc_t, which
+# stock Fedora policy does not let read or write sshd_session_t's pipes -- the
+# stdin/stdout/stderr of a non-tty `ssh <host> <command>`. `setenforce 0` makes
+# the whole table appear and `setenforce 1` silences it again, which is the
+# control that settles it. It is the GUEST's policy, not ours, and not the
+# transport: writes of the same size from any other program cross the same
+# channel intact.
+#
+# The workaround is one `| cat`, and the shape is the explanation: chronyc may
+# write to a pipe bash created, and unconfined cat may write to sshd's. A file
+# works for the same reason. Redirections do NOT -- `1>&2`, `exec 3>&1`, a
+# subshell, setsid and stdbuf all still have chronyc touching sshd's pipe.
+#
+# WHY THIS MATTERS MORE THAN THE WORKAROUND: a rig that reads chronyc directly
+# does not fail, it reads EMPTY -- which parses as "no sources", "no refclock",
+# and any other absence the caller happens to be looking for. Both readings
+# below were making claims about output that never arrived (2026-08-27): the
+# refclock assertion failed on a guest whose refclock was live and selected,
+# and the NTP-path assertion passed by counting zero of the two server sources
+# the guest actually had.
+
+def chronyc(argv):
+    """Read chronyc through a pipe, because reading it directly reads nothing."""
+    return guest(f"command -v chronyc >/dev/null && chronyc {argv} 2>&1 | cat; "
+                 f"echo __END__")
+
+
 # --- the measurement ---
 
 def offset_once():
@@ -402,7 +436,7 @@ def measure():
     #
     # The sentinel is what keeps that from being a free pass: it proves chronyc
     # ran and said nothing, rather than chronyc being absent.
-    r = guest("command -v chronyc >/dev/null && chronyc -n sources; echo __END__")
+    r = chronyc("-n sources")
     say("    " + (r.stdout.strip().replace("\n", "\n    ") or "(no output)"))
     ran = "__END__" in r.stdout
     servers = [ln.split() for ln in r.stdout.splitlines() if ln.startswith("^")]
@@ -471,9 +505,19 @@ def measure():
         # nothing.
         record("chrony may step at any time, not just at startup",
                steps == "1", f"makestep 1 -1 lines: {steps}")
-        r = guest("chronyc -n sources 2>&1 || echo 'no chronyc'")
-        refclocks = [ln for ln in r.stdout.splitlines() if ln.startswith("#")]
-        selected = [ln for ln in refclocks if ln[:2] in ("#*", "#+")]
+        # Selection is not instant, and sampling it once turns a healthy guest
+        # into a red run: chronyd logs `Selected source PHC0` about 12 s after
+        # it starts, and until then the refclock reads `#?` -- present, polling,
+        # not yet trusted. Poll for the selection rather than race it.
+        deadline, refclocks, selected = time.time() + 90, [], []
+        while time.time() < deadline:
+            r = chronyc("-n sources")
+            refclocks = [ln for ln in r.stdout.splitlines()
+                         if ln.startswith("#")]
+            selected = [ln for ln in refclocks if ln[:2] in ("#*", "#+")]
+            if selected:
+                break
+            time.sleep(5)
         record("chrony is using it as a refclock", bool(selected),
                (selected or refclocks or ["no refclock line at all"])[0].strip())
     else:
