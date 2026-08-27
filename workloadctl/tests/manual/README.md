@@ -375,6 +375,88 @@ Verified by breaking the splice on purpose — replaying the buffer without its
 record header — which fails the four handshake assertions and leaves the other
 eleven green.
 
+## policy_rig.py — does rung 4 enforce what it claims, against the installed listener?
+
+Rung 4's T1, T3, tiers 4–5, T6, T7 and T9, and the halves of them the unit
+suite cannot reach. Needs root and the installed RPM; **no KVM and no VM** — a
+throwaway network namespace, one real TLS origin answering to six names, and
+the real listener process started the way the socket unit starts it.
+
+```bash
+sudo python3 tests/manual/policy_rig.py
+```
+
+**Why it exists when every figure below has a unit test.** The unit suite
+proves the *decision*; it drives the request over a socket pair it owns. What
+it cannot do is show that the decision is reached by the process systemd
+starts, from the document on disk, with a real TLS stack on both sides — the
+same gap rung 2 and rung 3 each found the hard way.
+
+**One listener, two dispositions, told apart by whose key ends the session.**
+`tls = "inspect"` with a `[[vm.network.splice]]` entry produces two different
+outcomes on one process, and the only honest way to say which happened is the
+certificate the client is holding when the handshake finishes: the spliced host
+hands back the origin's own DER, the inspected host a leaf this workload's CA
+signed. Either one alone proves nothing — a listener that spliced everything
+and a listener that terminated everything each pass half of the pair.
+
+**"Reached nobody" is measured in requests, not connections.** §6 establishes
+the upstream leg *before* the guest's handshake completes, precisely so nothing
+sniffs the guest to decide what to say upstream — so by the time a request can
+be refused on policy, the origin has already been dialled. The first version of
+this rig asserted the connection count and reported that design as a leak. What
+must never arrive is the *request*, and that is what every refusal here checks.
+
+**Both halves of the h2 bypass.** A host in `[[vm.network.http2]]` that speaks
+h2 relays its preface to an origin that selected h2. The same host sent an
+HTTP/1.1 request is refused — without that check the key would mean "exempt
+from policy" rather than "speaks h2", reachable by writing different first
+bytes. And a *second* host is listed whose origin answers `http/1.1` anyway:
+an ALPN offer binds nobody, and a server that speaks only HTTP/1.1 completes
+the handshake selecting nothing, with no alert of any kind.
+
+**The four split counters, read off a file a real process wrote.**
+`tests/test_vm_inspect_diagnose.py` pins each key string against the listener's
+own constant, so a rename cannot rot them. What no unit test can say is whether
+anything ever *increments* them: a counter that is declared, exported, pinned
+and never written reads 0, and 0 is a legal value every test passes. These are
+the same figures after the refusals above actually happened, plus the
+reconciliation `sum(drop_reasons) == dispositions.dropped`.
+
+**The counter key is not the log line**, and assuming it was got this rig
+wrong twice. The log interpolates the server name inside the reason — `host
+does not match the server name plain.wlpol.test (allowlisted)` — so the
+counter's key is not a substring of it. Matching the log on the allowlisted key
+never fires; matching it on the shorter key matches *both* halves, which made
+the sibling assertion pass vacuously on a listener that had merged them. The
+split is asserted where it is authoritative, in the status document.
+
+**The trust store is the rig's, and the trust decision is still the
+listener's.** Every upstream leg is verified fully against the host's anchors
+with no configuration key to weaken it — deliberately, since such a key would
+turn the inspector into an attacker with a friendly name. So the rig points
+`SSL_CERT_FILE` at a file naming its own origin alone. Without it every
+terminated host answers 502 `upstream certificate unverified` and every policy
+assertion silently measures that instead of policy, which is how the first
+run read.
+
+It writes `/run/workload-vm/wlpol/inspect.json` and this workload's CA under
+`/var/lib/workloads/wlpol/`, and refuses to start if either exists. The six
+test names resolve through `/etc/netns/wlpol/hosts`, which `ip netns exec`
+binds over `/etc/hosts` inside the namespace alone — editing the host's own
+would leave six entries pointing at a listener that is gone. Teardown removes
+all of it.
+
+Last green 2026-08-27, 42 assertions, four consecutive runs on a bare-metal
+Fedora 44 host under enforcing, against the installed RPM.
+
+Verified by emptying each rung-4 list in the policy document in turn, on a
+throwaway copy so the product is never touched. Emptying `splice` fails 2 of
+the 42 (the origin's own certificate stops coming back); emptying `http2` fails
+8, including the HTTP/1.1 request that the entry is what refuses — without the
+entry it is relayed and answered 200; emptying `policy` fails 8. Each break
+lands on the assertions written for it and leaves the rest green.
+
 ## clock_rig.py — what a vCPU pause does to a guest's clock, and whether a wrong clock costs the guest its egress
 
 ```bash
