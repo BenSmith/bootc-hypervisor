@@ -335,9 +335,9 @@ write_files:
 # a second `runcmd:` key -- see below):
 #   - update-ca-trust extract
 #
-# `tls = "splice"` on the workload is the one-line answer for a guest that
-# cannot be given the anchor — a weaker property, not a deprecated one, and it
-# needs none of this. The CA is still minted and still seeded either way, so
+# `tls = "splice"` on the workload (with the `tls_reason` it requires) is the
+# answer for a guest that cannot be given the anchor — a weaker property, not a
+# deprecated one, and it needs none of this. The CA is still minted and still seeded either way, so
 # switching between the two never rotates the instance-id.
 
 # An example of your own, for the `runcmd:` list at the end of this file. Add

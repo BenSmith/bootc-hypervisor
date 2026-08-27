@@ -82,14 +82,23 @@ not make, since synthesis is unconditional; the responder was right and the
 assertion was wrong. It had never executed anywhere before, because dev mode
 skips the VM modules.
 
-**What has not.** Decision 2's written `reason` for a WHOLE-WORKLOAD splice.
-`tls = "splice"` is still accepted as a bare value, so config review cannot
-distinguish "spliced because it must be" from "spliced because nobody tried" on
-the mode — only on the per-host entries.
+**And the last piece of it.** Decision 2's written `reason` for a
+WHOLE-WORKLOAD splice, which outlived the per-host form by three rungs.
+`tls = "splice"` now requires `tls_reason` beside it, and `validate` refuses the
+reason without the mode as well. The asymmetry it removes was the wrong way
+round: every narrow bypass had to say why, while the widest one — every host the
+workload reaches, not a named one — was the only one an operator could open in
+silence. The refusal names `[[vm.network.splice]]` before it names the reason,
+because an operator reaching for the mode is usually fixing one host and would
+otherwise be asked to justify splicing everything else as well.
 
-Until that lands, `Given up` describes a cost this design has chosen to pay and
-has paid nearly in full. The per-path properties under `Consequences` are no
-longer a description of the tree alone.
+Nothing reads `tls_reason` at runtime, and that is the point: the audience is
+the person deciding months later whether a bypass is still needed, who is not
+the person who opened it.
+
+`Given up` now describes a cost this design has chosen to pay and has paid in
+full. The per-path properties under `Consequences` are no longer a description
+of the tree alone.
 
 This split is deliberate rather than a stall: the transparent path is what makes
 the guest's cooperation irrelevant, and it is worth having on its own before a

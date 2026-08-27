@@ -1445,7 +1445,9 @@ How it fits together:
   trusts. This host holds the plaintext, and the guest must trust that CA — the
   seed installs it, once per instance-id. `tls = "splice"` keeps the older,
   weaker property for the **whole workload**: byte-for-byte replay, nothing
-  decrypted, no CA, and the name checked once per connection.
+  decrypted, no CA, and the name checked once per connection. It requires a
+  `tls_reason` beside it, as every narrower bypass in the section requires
+  one — it is the widest of them, and was the last to ask.
   `[[vm.network.splice]]` is that same trade for **one host at a time**. See
   `[vm.network].tls`.
 - A connection carrying **no readable name** is dropped rather than guessed at —

@@ -341,7 +341,11 @@ installs **once per instance-id** (an existing VM gets certificate errors until
 re-seeded); this host holds the plaintext; a host requiring a client certificate
 or not speaking HTTP over 443 is refused. `tls = "splice"` is the older, weaker
 property and stays fully supported — the same bytes replayed upstream, nothing
-decrypted, no CA, and the name checked once per connection.
+decrypted, no CA, and the name checked once per connection. It requires a
+`tls_reason`: it is the widest bypass in the section and was the last to be
+made say why, and `validate` refuses the reason without the mode as well,
+because a recorded splice that is not happening misdescribes the workload in
+the safe direction, which is the one nobody re-checks.
 
 Three per-host keys sit under that default, and **two of the three are holes**
 — which is the thing to carry away from them, because each reads like a

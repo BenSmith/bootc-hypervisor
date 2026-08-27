@@ -2160,9 +2160,87 @@ class TestRung2Schema(unittest.TestCase):
         self.assertIn(VM_TLS_DEFAULT, VM_TLS_MODES)
         self.assertIn("splice", VM_TLS_MODES)
         for mode in VM_TLS_MODES:
-            self.assertEqual(self._egress({"hosts": ["github.com"],
-                                           "tls": mode}), [], mode)
+            # `splice` carries its reason here because it is now required to;
+            # what this test asserts is that the mode is still ACCEPTED, and
+            # the reason is the price of it rather than a second refusal.
+            net = {"hosts": ["github.com"], "tls": mode}
+            if mode == "splice":
+                net["tls_reason"] = "the guest cannot be re-seeded"
+            self.assertEqual(self._egress(net), [], mode)
         self.assertEqual(self._egress({"hosts": ["github.com"]}), [])
+
+    def test_a_whole_workload_splice_must_say_why(self):
+        """ADR 008 decision 2, on the hatch that was exempt from it longest.
+
+        Splicing is a named exemption carrying a written reason, never a
+        default and never implicit. `[[vm.network.splice]]` has enforced that
+        per host since rung 4 T1; `tls = "splice"` did not, which left the
+        WIDEST bypass in the schema -- every host, not a named one -- as the
+        only one an operator could open without saying anything.
+        """
+        errors = self._egress({"hosts": ["github.com"], "tls": "splice"})
+        self.assertTrue(any("tls_reason" in e for e in errors), errors)
+
+    def test_the_refusal_names_the_narrower_hatch_too(self):
+        """Both ways out, because for most workloads the reason is not needed.
+
+        An operator reaching for whole-workload splice is usually fixing ONE
+        host that does not survive termination. A refusal that only demanded a
+        sentence would collect a justification for splicing everything else as
+        well -- so it names [[vm.network.splice]] first and the reason second.
+        """
+        errors = [e for e in self._egress({"hosts": ["github.com"],
+                                           "tls": "splice"})
+                  if "tls_reason" in e]
+        self.assertEqual(len(errors), 1, errors)
+        self.assertIn("[[vm.network.splice]]", errors[0])
+        self.assertIn("tls = 'inspect'", errors[0])
+
+    def test_a_blank_reason_is_not_a_reason(self):
+        """Whitespace satisfies `in net` and satisfies nobody reading it.
+        The other four reason-carrying keys strip before judging; so does
+        this one, or the requirement is one character wide."""
+        for reason in ("", "   ", "\n", True, 7, ["because"]):
+            errors = self._egress({"hosts": ["github.com"], "tls": "splice",
+                                   "tls_reason": reason})
+            self.assertTrue(any("tls_reason" in e for e in errors),
+                            (reason, errors))
+
+    def test_a_reason_without_the_mode_is_refused(self):
+        """The key claims a WEAKER confinement than the workload has.
+
+        Inert would be the wrong reading: a reviewer who sees tls_reason
+        believes nothing on this workload is terminated, and goes looking for
+        an exposure that is not there. It is also what a half-finished edit
+        looks like -- the reason typed, the mode forgotten.
+        """
+        for net in ({"hosts": ["github.com"], "tls": "inspect",
+                     "tls_reason": "leftover"},
+                    {"hosts": ["github.com"], "tls_reason": "leftover"}):
+            errors = self._egress(net)
+            self.assertTrue(any("tls_reason" in e and "inspect" in e
+                                for e in errors), (net, errors))
+
+    def test_a_mistyped_mode_is_reported_alone(self):
+        """`tls = "splic"` is a typo, and a second error demanding a written
+        justification for a mode the operator did not ask for is noise on top
+        of the one line they need."""
+        errors = self._egress({"hosts": ["github.com"], "tls": "splic"})
+        self.assertEqual([e for e in errors if "tls_reason" in e], [])
+        self.assertTrue(any("must be one of" in e for e in errors), errors)
+
+    def test_tls_reason_below_an_allow_table_names_the_ordering_trap(self):
+        """A [vm.network] scalar written under [[vm.network.allow]] belongs to
+        the allow entry, and the file looks right. tls_reason is a scalar an
+        operator types beside `tls` in the middle of an incident, so it has to
+        be in the set that gets the "move it up" hint rather than a bare
+        unknown-key error."""
+        from vm import VM_NETWORK_SCALARS, parse_vm_allow
+        self.assertIn("tls_reason", VM_NETWORK_SCALARS)
+        with self.assertRaises(ValueError) as caught:
+            parse_vm_allow({"address": "10.0.0.1:22", "reason": "ssh",
+                            "tls_reason": "the guest cannot be re-seeded"})
+        self.assertIn("belongs to [vm.network]", str(caught.exception))
 
     def test_tls_is_refused_under_open_rather_than_ignored(self):
         errors = self._egress({"egress": "open", "tls": "splice"})
@@ -2222,6 +2300,7 @@ class TestRung2Schema(unittest.TestCase):
         self.assertEqual(self._egress({
             "hosts": ["git.local"],
             "tls": "splice",
+            "tls_reason": "the guest cannot be re-seeded",
             "internal": [{"host": "git.local", "reason": "the forge"}]}), [])
 
     # --- policy ---
@@ -2624,6 +2703,7 @@ class TestRung2Schema(unittest.TestCase):
         self.assertEqual(self._egress({
             "hosts": ["sum.golang.org"],
             "tls": "splice",
+            "tls_reason": "the guest cannot be re-seeded",
             "splice": [{"host": "sum.golang.org", "reason": "a signed log"}]}),
             [])
 
@@ -2730,6 +2810,7 @@ class TestRung2Schema(unittest.TestCase):
         self.assertEqual(self._egress({
             "hosts": ["grpc.example.com"],
             "tls": "splice",
+            "tls_reason": "the guest cannot be re-seeded",
             "http2": [{"host": "grpc.example.com", "reason": "gRPC"}]}),
             [])
 

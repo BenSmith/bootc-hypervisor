@@ -431,7 +431,9 @@ name = "schema-reference"
 #              database wire protocol, a tunnel, HTTP/2 -- has its connection
 #              CLOSED. Under "splice" those bytes went through untouched. The
 #              journal names it (`reason='not HTTP'`); the guest sees only a
-#              close. `tls = "splice"` on the workload is the answer.
+#              close. A [[vm.network.splice]] entry for that host is the
+#              answer; tls = "splice" is the answer only if EVERY host is
+#              like it.
 #
 #   "splice" — the inspector reads the SNI out of the ClientHello, matches it
 #              against .hosts, and replays those exact bytes upstream. Nothing
@@ -443,10 +445,25 @@ name = "schema-reference"
 #              cannot be re-seeded, and for a host that needs client
 #              certificates.
 #
+#              REQUIRES .tls_reason. This is the widest bypass in the schema
+#              -- every host, not a named one -- and .allow, .internal,
+#              .splice and .http2 have each carried a written reason since
+#              they existed. Reach for [[vm.network.splice]] first: if one
+#              host is the problem, exempting it leaves the other names
+#              authorised per request instead of per connection.
+#
 # REQUIRES egress = "filtered", and is refused with .bridge set: nothing is
 # redirected into an inspector in either case, so there is no intercepted
 # connection for the key to describe.
 # tls = "splice"
+#
+# Required with tls = "splice", and refused without it — a reason recording a
+# splice that is not happening sends a reviewer looking for an exposure that is
+# not there. Free text; nothing reads it at runtime. It is here because the
+# person deciding whether a bypass is still needed is not the person who opened
+# it, and months later "this guest's image cannot be rebuilt" and "we never
+# tried terminating" are the same line without it.
+# tls_reason = "appliance image; its trust store cannot be modified"
 #
 # Optional: give this VM a path to a host-side credential broker, so software
 # inside it can call an API it holds no key for. The host rewrites one advertised
@@ -523,8 +540,9 @@ name = "schema-reference"
 # given its own resolver is a coherent thing to want.
 #
 # WHERE IT GOES IN THE FILE. Every [vm.network] scalar -- egress, hosts,
-# resolver, ports, bridge, tls, broker -- must be written ABOVE this table and
-# the [[vm.network.internal]] one below it, because the first array-of-tables
+# resolver, ports, bridge, tls, tls_reason, broker -- must be written ABOVE
+# this table and the [[vm.network.internal]] one below it, because the first
+# array-of-tables
 # ends the [vm.network] section. A scalar written after it is read by TOML as
 # part of that ENTRY, not of [vm.network]: not a typo, not a missing key, just
 # a key that quietly belongs to the wrong table in a file that looks fine.

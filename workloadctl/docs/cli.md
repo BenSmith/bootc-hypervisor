@@ -838,8 +838,9 @@ green:
   the session completes, the guest is simply unauthenticated, and the host
   starts answering its own `401`/`403` — only under termination, while it worked
   under `splice` and works from anywhere else. Nothing failed, so nothing counts
-  it. If a host regresses that way after a workload starts terminating, set
-  `tls = "splice"` on the workload.
+  it. If a host regresses that way after a workload starts terminating, give it
+  a `[[vm.network.splice]]` entry; `tls = "splice"` (which needs a
+  `tls_reason`) gives up the other hosts too.
 - *A private root that only the guest trusts.* Verification of the origin now
   happens on **this host's** anchors, not the guest's, so an internal service
   signed by a private root answers `502` until that root is installed in

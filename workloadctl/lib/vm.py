@@ -424,9 +424,19 @@ VM_EGRESS_DEFAULT = "filtered"
 # the workload's CA, which reaches it through the seed, which cloud-init applies
 # once per instance-id. An EXISTING filtered guest does not gain that trust by
 # upgrading the RPM: it gets certificate errors on every HTTPS request until it
-# is re-seeded. `tls = "splice"` is the one-line answer for a guest that cannot
-# be, and is still fully supported -- it is a weaker property, not a deprecated
-# one.
+# is re-seeded. `tls = "splice"` is the answer for a guest that cannot be, and
+# is still fully supported -- it is a weaker property, not a deprecated one.
+#
+# IT COSTS A SENTENCE. `splice` here is the widest bypass in this schema: every
+# host, not a named one, and the three narrower hatches beside it (.allow,
+# .internal, .splice, .http2) have each carried a written `reason` since they
+# existed. So this one requires `tls_reason`, for the reason those do -- the
+# person deciding whether a bypass is still needed is not the person who opened
+# it, and "spliced because this guest cannot hold the CA" and "spliced because
+# nobody tried" are the same two words in a config without it. The key is a
+# sibling scalar rather than a table because `tls` is a mode, not a list: a
+# polymorphic `tls` that was sometimes a string and sometimes a table would
+# make the commonest line in the section the one hardest to read.
 VM_TLS_MODES = ("splice", "inspect")
 VM_TLS_DEFAULT = "inspect"
 
@@ -822,6 +832,12 @@ def vm_inspect_policy(net: dict) -> dict:
     entry is the wildcard trap firing; one WITH an entry is a host that is
     simply down. Those are the same OSError without this list, and telling them
     apart is the whole value of the internal-refusal counter.
+
+    NO `reason` OF ANY KIND IS CARRIED -- not the per-host ones, not
+    `tls_reason`. A reason is written for a person reviewing the config, and
+    the listener decides nothing by it; putting it in the document would give
+    a guest-facing process a field it must never echo and would invite a
+    future reader to treat one as data rather than as prose.
     """
     return {
         "tls": net.get("tls", VM_TLS_DEFAULT),
@@ -2268,7 +2284,7 @@ def vm_allow_reserved_reason(
 # The [vm.network] keys that are scalars rather than sub-tables. Used only to
 # recognise one written in the wrong place; see parse_vm_allow.
 VM_NETWORK_SCALARS = frozenset({
-    "bridge", "ports", "resolver", "egress", "hosts", "tls",
+    "bridge", "ports", "resolver", "egress", "hosts", "tls", "tls_reason",
 })
 
 
@@ -3167,6 +3183,45 @@ def _validate_egress(net: dict) -> list[str]:
                 f"[vm.network].tls must be one of "
                 f"{', '.join(repr(m) for m in VM_TLS_MODES)}, got {tls!r}")
 
+    # ADR 008 decision 2: splicing is a named exemption carrying a written
+    # reason, never a default and never implicit. The per-host hatch has
+    # enforced that since rung 4; the whole-workload one did not, which left
+    # the WIDEST bypass in the schema as the only one an operator could open
+    # silently. Checked here rather than in _validate_host_reason_entries
+    # because there is no host to hang it on -- the exemption is the workload.
+    #
+    # Ordered so a bad mode is reported alone: `tls = "splic"` is a typo, and
+    # a second error telling the operator to justify a mode they did not ask
+    # for is noise on top of the one line they need.
+    tls_reason = net.get("tls_reason")
+    has_reason = isinstance(tls_reason, str) and bool(tls_reason.strip())
+    if tls == "splice" and not has_reason:
+        errors.append(
+            "[vm.network].tls = 'splice' has no `tls_reason` — this is the "
+            "widest bypass in this schema: it splices EVERY host the workload "
+            "reaches, not a named one, and .allow, .internal, .splice and "
+            ".http2 have each carried a written reason since they existed. "
+            "Without one, nothing in this file distinguishes a workload "
+            "spliced because its guest cannot be re-seeded with the CA from "
+            "one spliced because nobody tried. Add "
+            "tls_reason = \"why this guest cannot be terminated\" beside it, "
+            "or leave the workload on the default tls = 'inspect' and exempt "
+            "only the hosts that need it with [[vm.network.splice]] entries, "
+            "which is the narrower hatch and the one to reach for first.")
+    elif tls_reason is not None and tls != "splice":
+        # Not merely inert: the key asserts the workload is spliced whole, and
+        # it is not. Refused in the direction the rest of this function
+        # refuses -- a config that describes a confinement other than the one
+        # it has, here by claiming a WEAKER one than is in force, which sends
+        # a reviewer looking for an exposure that is not there.
+        effective = tls if tls is not None else VM_TLS_DEFAULT
+        errors.append(
+            f"[vm.network].tls_reason is set but .tls is {effective!r} — the "
+            f"key records why a WHOLE workload skips termination, and this "
+            f"one does not skip it. Set tls = 'splice' if that was the "
+            f"intent, or drop tls_reason and put the justification on the "
+            f"[[vm.network.splice]] entries that carry `reason` per host.")
+
     internal_hosts, internal_errors = _validate_host_reason_entries(
         net.get("internal", []), "internal",
         "it is a bypass of the internal-destination drop and carries one "
@@ -3312,8 +3367,8 @@ def _validate_egress(net: dict) -> list[str]:
     # §5.3: `bridge` means a real LAN identity, and nothing of ours is in that
     # guest's data path — no host socket, so no uid to match on.
     if "bridge" in net:
-        for key in ("egress", "allow", "tls", "internal", "splice",
-                    "http2", "policy"):
+        for key in ("egress", "allow", "tls", "tls_reason", "internal",
+                    "splice", "http2", "policy"):
             if key in net:
                 errors.append(
                     f"[vm.network].{key} has no effect with .bridge set — a "
@@ -3369,7 +3424,7 @@ def _validate_egress(net: dict) -> list[str]:
     # same reason .hosts is: a key accepted and then not applied is a config
     # that reports a confinement it does not have.
     if egress != "filtered":
-        for key in ("tls", "internal", "splice", "http2"):
+        for key in ("tls", "tls_reason", "internal", "splice", "http2"):
             # `policy` is not in this list: _validate_policy names it itself,
             # with a sentence about requests rather than about redirection.
             if key in net:
