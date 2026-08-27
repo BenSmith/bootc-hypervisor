@@ -718,12 +718,32 @@ class TestAnUnwritableCacheIsAMintFailure(unittest.TestCase):
     design. The guest saw a reset; the journal, the counters and the status file
     saw nothing at all. MintFailed is logged, counted and named -- so the rule
     is that no OSError leaves this function.
+
+    TWO BREAKAGES, and the reason is the RPM builder. A mode-0o500 directory is
+    the faithful reproduction of the production shape, but DAC does not apply to
+    uid 0 -- as root the temp directory is created anyway, the mint runs on to
+    openssl, and the test asserted a message this path never produced. The RPM
+    test phase and the Forgejo host executor both run as root, so the faithful
+    case is skipped there and a uid-independent one (the cache path is not a
+    directory at all) carries the contract instead: same handler, same OSError,
+    same named-directory message.
     """
 
     def _minter(self, state):
         return vm_mint.Minter("wl", state, clock_check=lambda: vm_clock.CLOCK_OK)
 
-    def test_an_unwritable_cache_raises_mint_failed(self):
+    def _broken_minter(self):
+        """A minter whose leaf cache cannot be written by ANY uid."""
+        state = Path(tempfile.mkdtemp())
+        self.addCleanup(_rmtree, state)
+        minter = self._minter(state)
+        cache = minter.working_set.directory
+        _rmtree(cache)
+        cache.write_text("not a directory\n")
+        return minter
+
+    @unittest.skipIf(os.geteuid() == 0, "uid 0 writes into a 0o500 directory")
+    def test_a_read_only_cache_raises_mint_failed(self):
         state = Path(tempfile.mkdtemp())
         self.addCleanup(_rmtree, state)
         minter = self._minter(state)
@@ -739,18 +759,20 @@ class TestAnUnwritableCacheIsAMintFailure(unittest.TestCase):
         # label on THAT path, and a message without it names nothing to fix.
         self.assertIn(str(minter.working_set.directory), said)
 
+    def test_an_unwritable_cache_raises_mint_failed(self):
+        minter = self._broken_minter()
+        with self.assertRaises(vm_mint.MintFailed) as ctx:
+            minter.leaf("example.com", denied=False)
+        said = str(ctx.exception)
+        self.assertIn("example.com", said)
+        self.assertIn(str(minter.working_set.directory), said)
+
     def test_the_failure_is_counted(self):
-        state = Path(tempfile.mkdtemp())
-        self.addCleanup(_rmtree, state)
-        minter = self._minter(state)
-        os.chmod(minter.working_set.directory, 0o500)
-        self.addCleanup(os.chmod, minter.working_set.directory, 0o700)
+        minter = self._broken_minter()
         with self.assertRaises(vm_mint.MintFailed):
             minter.leaf("example.com", denied=False)
         self.assertEqual(minter.snapshot()["failed"], 1)
 
-if __name__ == "__main__":
-    unittest.main()
 
 
 class TestTheCountersAreWrittenUnderTheLockTheyAreReadWith(unittest.TestCase):
@@ -819,3 +841,8 @@ class TestTheCountersAreWrittenUnderTheLockTheyAreReadWith(unittest.TestCase):
             writes, ["self.stats[name] += 1"],
             "every counter write must go through Minter._bump, which is the "
             "only place that takes the lock `snapshot` reads with")
+
+
+if __name__ == "__main__":
+    unittest.main()
+
