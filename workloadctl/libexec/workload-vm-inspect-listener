@@ -207,6 +207,34 @@ CLIENTHELLO_MAX = 16384
 # precisely so there is nothing to mirror.
 UPSTREAM_ALPN = ("http/1.1",)
 
+# What a host named in [[vm.network.http2]] is offered instead, on BOTH legs.
+#
+# THIS OFFER BINDS NOBODY, and every reader of this path has to know it.
+# Measured on Python 3.14 / OpenSSL 3.5.7: a server offering `http/1.1` alone
+# facing a client offering `h2` alone COMPLETES the handshake, with
+# selected_alpn_protocol() returning None on both sides -- no
+# no_application_protocol alert, no failure of any kind. So the offer above
+# selects what a COOPERATING client speaks, and the guest this design exists
+# for writes its own bytes. What actually binds a terminated host to HTTP/1.1
+# is the non-HTTP refusal in _is_http, and what binds an `http2` host to h2 is
+# the preface check in _serve_h2 -- not either of these tuples. Deleting a
+# refusal because "the ALPN already says so" reopens the whole plane.
+ALPN_H2 = ("h2",)
+
+# The HTTP/2 connection preface (RFC 9113 §3.4): the exact 24 bytes every h2
+# client sends before its first frame, chosen by the RFC to be something an
+# HTTP/1.1 server cannot mistake for a request.
+H2_PREFACE = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
+
+# A frame header is 9 bytes: 24-bit length, 8-bit type, 8-bit flags, 32-bit
+# stream id.
+H2_FRAME_HEADER = 9
+
+# The frame type every connection must open with after the preface, on stream
+# 0 (RFC 9113 §3.4: "The server connection preface consists of a potentially
+# empty SETTINGS frame ... the client sends ... a SETTINGS frame").
+H2_FRAME_SETTINGS = 0x4
+
 # How many MSG_PEEK attempts a single ClientHello read may make before it is
 # refused. MSG_WAITALL is advisory under a socket timeout -- Linux returns a
 # short read rather than raising -- so a peer dribbling one byte per timeout
@@ -296,13 +324,14 @@ class Policy(NamedTuple):
     hosts: tuple
     internal: tuple = ()
     splice: tuple = ()
+    http2: tuple = ()
     policy: tuple = ()
 
     @property
     def summary(self) -> str:
         return (f"tls={self.tls} hosts={len(self.hosts)} "
                 f"internal={len(self.internal)} splice={len(self.splice)} "
-                f"policy={len(self.policy)}")
+                f"http2={len(self.http2)} policy={len(self.policy)}")
 
     def admits(self, host: str) -> bool:
         """Whether this name is on a list at all -- the CONNECTION question.
@@ -345,6 +374,19 @@ class Policy(NamedTuple):
         """
         return self.tls == "splice" or vm_hostname_match(host, self.splice)
 
+    def speaks_h2(self, host: str) -> bool:
+        """Whether this host is offered h2 and relayed at the frame level.
+
+        Asked only of a host that is being TERMINATED, and it does not ask
+        about the mode: under `tls = "splice"` no ALPN of ours is offered on
+        any connection, so a listener that consulted this there would be
+        answering a question nothing had asked. Validation accepts `http2`
+        entries under that mode for the same reason it accepts `splice` ones --
+        they ask for something already true -- so this list is populated and
+        inert, and the one caller reaches it only past a `splices()` check.
+        """
+        return vm_hostname_match(host, self.http2)
+
 
 def load_policy(path):
     """Read the policy document, or raise.
@@ -377,6 +419,12 @@ def load_policy(path):
     # vm_hostname_match normalises both sides at the point of comparison.
     # Normalising a pattern early is harmless today and would silently stop
     # being so the moment a pattern could carry something a hostname cannot.
+    http2 = doc.get("http2") or []
+    if not isinstance(http2, list):
+        raise ValueError(f"{path}: 'http2' is not a list")
+    # Unnormalised, like `splice` and for the same reason: these are fnmatch
+    # PATTERNS, and vm_hostname_match normalises both sides where they are
+    # compared.
     entries = doc.get("policy") or []
     if not isinstance(entries, list):
         raise ValueError(f"{path}: 'policy' is not a list")
@@ -398,7 +446,8 @@ def load_policy(path):
             paths=None if paths is None else tuple(paths)))
     return Policy(tls=doc.get("tls") or VM_TLS_DEFAULT, hosts=tuple(hosts),
                   internal=tuple(vm_normalise_hostname(h) for h in internal),
-                  splice=tuple(splice), policy=tuple(policy))
+                  splice=tuple(splice), http2=tuple(http2),
+                  policy=tuple(policy))
 
 
 # --- the ClientHello peek ---
@@ -1405,6 +1454,96 @@ def is_http_request_start(start):
     return None if len(start) < HTTP_METHOD_MAX else False
 
 
+class NotH2(Exception):
+    """A connection on an [[vm.network.http2]] host is not speaking h2."""
+
+
+class H2Framing:
+    """Whether a guest's byte stream continues to look like HTTP/2 framing.
+
+    WHAT THIS IS FOR, and it is one thing. `[[vm.network.http2]]` names a host
+    whose stream is relayed without being decoded, so without this the key
+    means EXEMPT rather than SPEAKS H2: a guest reaches a full policy opt-out
+    on any host an operator listed for performance, by writing different first
+    bytes. That is the same shape as the non-HTTP fallback HLD §8 removed, and
+    it was missed the first time for the same reason -- the entry reads as
+    naming a protocol when what it names is a hole.
+
+    WHAT ACTUALLY BINDS, stated plainly because the ratio is not obvious and a
+    later reader will otherwise trust this further than it goes:
+
+    - The PREFACE does nearly all of the work. Twenty-four fixed bytes, checked
+      before this class is fed anything, and every protocol that is not h2 --
+      HTTP/1.1, a database wire protocol, a raw tunnel -- fails on byte one.
+    - The FIRST FRAME must be SETTINGS on stream 0, which RFC 9113 §3.4
+      requires and which no non-h2 sender produces by accident.
+    - Continuous framing catches very little on its own, and pretending
+      otherwise would be the mistake. The length field is 24 arbitrary bits, so
+      almost ANY byte string parses as a sequence of frames: `GET /secr` reads
+      as a frame announcing a 4.6MB payload, and there is nothing to object to
+      until the connection ends short of it. So mid-session the guarantee is
+      ALIGNMENT AT CLOSE, not refusal in flight -- the connection is counted
+      and named, and the bytes have already been relayed. This is not a
+      conformance checker and must not be described as one; closing that
+      residual means decoding frames properly, which is §16's work.
+
+    Nothing is decoded, nothing is rewritten, stream ids are untouched and the
+    dynamic table stays end-to-end -- so §16's HPACK decoder lands on top of
+    this rather than replacing it, and the relay stays exactly what §8 says it
+    is.
+    """
+
+    def __init__(self):
+        self._header = bytearray()
+        self._payload = 0
+        self._first = True
+
+    def feed(self, data: bytes) -> None:
+        """Account for bytes going guest -> origin. Raises NotH2."""
+        i, n = 0, len(data)
+        while i < n:
+            if self._payload:
+                take = min(self._payload, n - i)
+                self._payload -= take
+                i += take
+                continue
+            take = min(H2_FRAME_HEADER - len(self._header), n - i)
+            self._header += data[i:i + take]
+            i += take
+            if len(self._header) < H2_FRAME_HEADER:
+                return                  # a header split across two reads
+            length = int.from_bytes(self._header[:3], "big")
+            kind = self._header[3]
+            # The top bit is reserved and receivers must ignore it, so it is
+            # masked off rather than refused -- a sender setting it is not
+            # something this may fail a connection over.
+            stream = int.from_bytes(self._header[5:9], "big") & 0x7FFFFFFF
+            self._header.clear()
+            if self._first:
+                self._first = False
+                if kind != H2_FRAME_SETTINGS or stream != 0:
+                    raise NotH2(
+                        f"the first frame after the preface is type {kind:#04x} "
+                        f"on stream {stream}, and RFC 9113 requires SETTINGS on "
+                        f"stream 0")
+                if length % 6:
+                    raise NotH2(
+                        f"the opening SETTINGS frame is {length} bytes, which "
+                        f"is not a whole number of 6-byte settings")
+            self._payload = length
+
+    @property
+    def aligned(self) -> bool:
+        """Whether the stream ended on a frame boundary.
+
+        A peer that stops mid-frame was either not framing at all or was cut
+        off; either way the connection did not end where h2 says it should, and
+        a relay that only ever checked the first frame would carry anything at
+        all after it.
+        """
+        return not self._payload and not self._header
+
+
 # Protocol names we will not carry an upgrade to. An `h2c` upgrade moves the
 # rest of the connection onto HTTP/2, whose requests are HPACK-compressed
 # frames this relay cannot read -- so forwarding one would hand the guest a
@@ -1681,6 +1820,7 @@ DROP_THROTTLED = "mint rationed"
 DROP_MINT_FAILED = "could not mint a leaf"
 DROP_NOT_HTTP = "not HTTP"
 DROP_NOT_PERMITTED = "not permitted by policy"
+DROP_NOT_H2 = "not HTTP/2"
 
 DROP_REASONS = (
     DROP_NOT_ALLOWLISTED,
@@ -1697,6 +1837,7 @@ DROP_REASONS = (
     DROP_THROTTLED,
     DROP_MINT_FAILED,
     DROP_NOT_HTTP,
+    DROP_NOT_H2,
     DROP_NOT_PERMITTED,
 )
 
@@ -1706,7 +1847,9 @@ DROP_REASONS = (
 # [[vm.network.internal]] entry for, the host whose private root has to go into
 # this host's anchors, the host that needs client certificates and therefore
 # `tls = "splice"`, and the host that is not speaking HTTP and therefore needs
-# the same. A per-host figure for `not allowlisted` is deliberately absent --
+# the same. `not HTTP/2` joins them and is read the same way with one word
+# changed: the operator put that host in [[vm.network.http2]] and it did not
+# speak h2, so either the entry is wrong or the host needs splicing. A per-host figure for `not allowlisted` is deliberately absent --
 # the guest picks those names, there is no bound on how many it invents, and
 # the answer is already the allowlist itself rather than a list to read.
 #
@@ -1718,6 +1861,7 @@ PER_HOST_REASONS = (
     DROP_UNVERIFIED,
     DROP_CLIENT_CERT,
     DROP_NOT_HTTP,
+    DROP_NOT_H2,
 )
 
 # Where a drop whose reason is not in DROP_REASONS is counted. Emitted only when
@@ -2004,6 +2148,13 @@ class Listener:
         # HOST's anchors, and the 502 says so.
         self._upstream_ctx = ssl.create_default_context()
         self._upstream_ctx.set_alpn_protocols(list(UPSTREAM_ALPN))
+        # A SECOND context rather than one whose ALPN is set per dial: the
+        # protocol list belongs to the context and contexts are shared across
+        # connections here, so mutating one before a handshake would race every
+        # other connection using it -- silently, and in the direction that
+        # gives a host the offer another host asked for.
+        self._upstream_ctx_h2 = ssl.create_default_context()
+        self._upstream_ctx_h2.set_alpn_protocols(list(ALPN_H2))
 
     def stop(self):
         """Ask the accept loop to end; called from the SIGTERM handler."""
@@ -2225,12 +2376,20 @@ class Listener:
         """
         upstream = None
         refusal = None            # (drop reason, status, phrase, body text)
+        # THE OFFER IS CHOSEN FROM CONFIGURATION, BEFORE EITHER HANDSHAKE, and
+        # §6 is why there is no alternative: the upstream leg must be up before
+        # a leaf is minted, so nothing here can sniff the guest and then speak
+        # whatever came back. With the non-HTTP fallback gone there is also
+        # nothing to sniff -- the only thing that ever needed a protocol
+        # discovered after the fact was the relay path §8 deleted.
+        h2 = self._policy.speaks_h2(host)
         if not allowed:
             refusal = (DROP_NOT_ALLOWLISTED, 403, "Forbidden",
                        f"{host} is not on this workload's egress allowlist")
         else:
             try:
-                upstream = self._dial_upstream_tls(host)
+                upstream = self._dial_upstream_tls(
+                    host, ALPN_H2 if h2 else UPSTREAM_ALPN)
             except ssl.SSLError as exc:
                 reason, text = self._upstream_tls_failure(host, exc)
                 refusal = (reason, 502, "Bad Gateway", text)
@@ -2268,7 +2427,16 @@ class Listener:
         if leaf is None:
             return
         try:
-            tls_conn = self._wrap_guest(conn, leaf)
+            # `http/1.1` WHENEVER THERE IS A REFUSAL TO DELIVER, even on an
+            # http2 host. Every refusal below is an HTTP/1.1 response written
+            # into this session, so offering h2 for it would advertise a
+            # protocol the next thing we send is not -- and buy nothing, since
+            # the connection ends with that answer. The offer costs a
+            # cooperating h2 client one fallback and gets it a readable 502
+            # instead of a protocol error.
+            tls_conn = self._wrap_guest(
+                conn, leaf,
+                ALPN_H2 if (h2 and refusal is None) else UPSTREAM_ALPN)
         except (ssl.SSLError, OSError) as exc:
             # The guest rejected the leaf, or went away mid-handshake. The most
             # common real cause is a guest that never got the CA -- an existing
@@ -2315,8 +2483,12 @@ class Listener:
                 self._bump_answer(tls_conn, status, phrase, text)
                 return
             self.counters.record_termination()
-            self._log(f"terminate {where} host={host}")
-            self._serve_terminated(tls_conn, where, host, upstream)
+            self._log(f"terminate {where} host={host}"
+                      f"{' h2' if h2 else ''}")
+            if h2:
+                self._serve_h2(tls_conn, where, host, upstream)
+            else:
+                self._serve_terminated(tls_conn, where, host, upstream)
         finally:
             try:
                 tls_conn.close()
@@ -2340,7 +2512,7 @@ class Listener:
             pass
         self._answer(tls_conn, status, phrase, text, close=True)
 
-    def _wrap_guest(self, conn, leaf):
+    def _wrap_guest(self, conn, leaf, alpn=UPSTREAM_ALPN):
         """Complete the guest's handshake as the origin it dialled.
 
         A context per connection rather than one cached per name: the expensive
@@ -2351,10 +2523,10 @@ class Listener:
         """
         ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         ctx.load_cert_chain(str(leaf.path))
-        ctx.set_alpn_protocols(list(UPSTREAM_ALPN))
+        ctx.set_alpn_protocols(list(alpn))
         return ctx.wrap_socket(conn, server_side=True)
 
-    def _dial_upstream_tls(self, host):
+    def _dial_upstream_tls(self, host, alpn=UPSTREAM_ALPN):
         """A verified TLS session to an allowlisted name, as a _Stream.
 
         Dials the NAME (§7.4), like every other upstream here. Verification is
@@ -2364,7 +2536,9 @@ class Listener:
         sock = socket.create_connection(
             (host, VM_INSPECT_ORIG_TLS), timeout=CONNECTION_TIMEOUT)
         try:
-            ssock = self._upstream_ctx.wrap_socket(sock, server_hostname=host)
+            ctx = (self._upstream_ctx_h2 if alpn == ALPN_H2
+                   else self._upstream_ctx)
+            ssock = ctx.wrap_socket(sock, server_hostname=host)
         except BaseException:
             sock.close()
             raise
@@ -2441,6 +2615,108 @@ class Listener:
                     f"here; if {host} uses client certificates it must be "
                     f"spliced.")
         return (DROP_UNVERIFIED, f"the TLS session to {host} failed: {exc}")
+
+    def _serve_h2(self, tls_conn, where, host, upstream):
+        """Relay one h2 session at the frame level, refusing what is not h2.
+
+        THE POINT OF THE CHECK IS WHAT THE KEY MEANS. Without it
+        [[vm.network.http2]] names a byte relay -- no Host binding, no `paths`,
+        no `methods`, and nothing establishing that the bytes are h2 at all --
+        so a guest reaches a full policy opt-out on any host somebody listed
+        for performance. With it the key means what it says: this host speaks
+        h2, and the cost is that `:authority` goes unread. That is still a
+        bypass (true fronting stays open here), which is why validation makes
+        it carry a written `reason` and refuses it beside a `policy` entry.
+
+        NOTHING IS DECODED. The preface is checked, frame headers are counted,
+        and every byte is passed through unaltered -- stream ids untouched, the
+        HPACK dynamic table end to end. §16's decoder is an increment on this,
+        not a rewrite of it, because frame-header parsing is the half of that
+        decoder which lands here.
+
+        THE REMEDY IS THE ONE THE NON-HTTP REFUSAL NAMES, deliberately, because
+        it is the same situation one key along: a session this design cannot
+        police. `splice` gives the host back its end-to-end TLS and needs no CA
+        in the guest.
+        """
+        # The upstream leg is THIS function's to close from here, exactly as
+        # it is _serve_terminated's on the other branch. Missing it leaks one
+        # verified TLS socket owned by the workload uid per h2 connection, in a
+        # process a guest can open connections to at will -- and every
+        # assertion about frames and counters passes while it does, because
+        # nothing in the exchange is wrong.
+        try:
+            client = _Stream(tls_conn)
+            tls_conn.settimeout(CONNECTION_TIMEOUT)
+            try:
+                preface = client.read_exactly(len(H2_PREFACE))
+            except (RequestUnreadable, OSError) as exc:
+                self.counters.record_drop(DROP_NOT_H2, host)
+                self._log(f"drop {where} host={host} reason='not HTTP/2: the "
+                          f"connection preface never arrived ({exc}); drop the "
+                          f"[[vm.network.http2]] entry for {host}, or splice it'")
+                return
+            if preface != H2_PREFACE:
+                self.counters.record_drop(DROP_NOT_H2, host)
+                self._log(f"drop {where} host={host} reason='not HTTP/2: "
+                          f"{preface[:8]!r} is not the connection preface, and "
+                          f"{host} is in [[vm.network.http2]]. Either it does not "
+                          f"speak h2 -- drop the entry -- or it speaks something "
+                          f"this cannot police, and needs splicing'")
+                return
+            framing = H2Framing()
+            # Everything the preface read pulled in past its own 24 bytes. It is
+            # already frames, so it is fed to the scanner and forwarded with the
+            # preface -- dropping it would lose the guest's opening SETTINGS, which
+            # is the frame the scanner exists to check.
+            surplus = client.take_buffered()
+            try:
+                framing.feed(surplus)
+            except NotH2 as exc:
+                self._drop_not_h2(where, host, exc)
+                return
+            try:
+                upstream.sock.sendall(preface + surplus)
+                # And anything the ORIGIN sent before we asked. On h2 a server
+                # opens with its own SETTINGS immediately, so the client-certificate
+                # probe in _early_upstream_bytes routinely catches it; stranded in
+                # that buffer it would stall the session rather than break it,
+                # which is the harder failure to read.
+                early = upstream.take_buffered()
+                if early:
+                    tls_conn.sendall(early)
+            except OSError as exc:
+                self.counters.record_drop(DROP_RELAY_FAILED, host)
+                self._log(f"drop {where} host={host} "
+                          f"reason='relay failed: {exc}'")
+                return
+            try:
+                self._relay(tls_conn, upstream.sock,
+                            on_client_bytes=framing.feed)
+            except NotH2 as exc:
+                self._drop_not_h2(where, host, exc)
+                return
+            except OSError as exc:
+                self.counters.record_drop(DROP_RELAY_FAILED, host)
+                self._log(f"drop {where} host={host} "
+                          f"reason='relay failed: {exc}'")
+                return
+            if not framing.aligned:
+                # Counted, and the session is over either way -- but silence
+                # here would make a stream that stopped framing halfway
+                # indistinguishable from one that ended, which is the case
+                # worth seeing.
+                self._drop_not_h2(
+                    where, host,
+                    NotH2("the connection ended part-way through a frame"))
+        finally:
+            upstream.sock.close()
+
+    def _drop_not_h2(self, where, host, exc):
+        self.counters.record_drop(DROP_NOT_H2, host)
+        self._log(f"drop {where} host={host} reason='not HTTP/2: {exc}. "
+                  f"{host} is in [[vm.network.http2]] and this session did not "
+                  f"speak h2; drop the entry, or splice the host'")
 
     def _serve_terminated(self, tls_conn, where, host, upstream):
         """Authorise every request inside one terminated session.
@@ -2958,12 +3234,23 @@ class Listener:
         except OSError:
             pass
 
-    def _relay(self, client, upstream):
+    def _relay(self, client, upstream, on_client_bytes=None):
         """Move bytes both ways until either side closes or goes idle.
 
         Both sockets are moved off the handshake timeout onto the idle one
         first: up to here the numbers bounded a decision, and from here they
         bound a tunnel.
+
+        `on_client_bytes`, when given, sees every byte read from `client`
+        BEFORE it is forwarded, and may raise to end the relay. That ordering
+        is what lets a check refuse a chunk without the origin seeing it; note
+        that the h2 framing check can only make use of it for what it can spot
+        WITHIN a chunk, which is less than it looks (see H2Framing). Only the
+        guest's
+        direction is offered, and that is a decision rather than an omission:
+        the origin is a name this workload allowlisted, reached over a fully
+        verified session, so checking its framing could only break a working
+        host on our own parser's opinion.
         """
         for s in (client, upstream):
             s.settimeout(RELAY_IDLE_TIMEOUT)
@@ -2990,6 +3277,10 @@ class Listener:
                     ready = [key.fileobj for key, _ in events]
                 for sock in ready:
                     data = sock.recv(RELAY_CHUNK)
+                    if data and on_client_bytes is not None and sock is client:
+                        # Before the forward, so a stream this refuses does not
+                        # reach the origin at all.
+                        on_client_bytes(data)
                     if not data:
                         # A close in either direction ends the whole splice.
                         # Half-close forwarding would be more faithful to TCP,

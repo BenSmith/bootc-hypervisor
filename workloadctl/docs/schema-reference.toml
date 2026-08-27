@@ -704,6 +704,47 @@ name = "schema-reference"
 # tls = "splice" the connection is never decrypted, so there is no request for
 # these rules to govern and they are refused rather than silently ignored.
 #
+# Optional: allowlisted hosts that keep HTTP/2.
+# Type: array of [[vm.network.http2]] tables, each with `host` and `reason`
+# Default: []
+# Every terminated host is offered `http/1.1` alone, and this is the opt-out.
+# The downgrade is what makes everything else work without an HPACK decoder:
+# an HTTP/1.1 request line and headers are plain text, so .policy's `methods`
+# and `paths` and the Host binding apply to every inspected host rather than
+# to some subset. Most clients take it silently — but not all traffic can, and
+# a host listed here is offered `h2` on both legs and relayed at the frame
+# level instead.
+#
+# READ THIS AS A HOLE, NOT AS A PROTOCOL SETTING, which is the mistake the key
+# invites. An h2 stream's request headers are HPACK-compressed frames nothing
+# here decodes, so a host listed here is enforced by its NAME alone — exactly
+# like a spliced one. No Host binding, no `methods`, no `paths`. That is why it
+# carries a `reason`.
+#
+# PREFER .splice WHERE IT WORKS. Both leave enforcement at the server name, and
+# splice additionally gives the host back its end-to-end TLS and needs no CA in
+# the guest — so it is strictly the better trade unless you specifically want
+# the connection terminated and logged. This key exists so that an HPACK
+# decoder has somewhere to land later, at which point it stops being a bypass.
+#
+# A connection here must actually SPEAK h2: it must open with the HTTP/2
+# connection preface and continue to parse as frames, or it is refused with the
+# same message and the same remedy as a host that is not speaking HTTP at all.
+# Without that the entry would mean "exempt from policy" rather than "speaks
+# h2", reachable by writing different first bytes.
+#
+# `host` is an fnmatch pattern like .hosts, with the same apex trap. An entry
+# matching no allowlisted name is an ERROR. So is an entry for a host that also
+# has a .policy entry (the rules could never run) or a .splice entry (a spliced
+# connection is never terminated, so no ALPN of ours is offered on it).
+#
+# REQUIRES egress = "filtered". Entries are accepted and inert under
+# tls = "splice", where nothing is terminated at all.
+#
+# [[vm.network.http2]]
+# host   = "grpc.example.com"
+# reason = "gRPC; requires h2, and :authority goes unchecked as a result"
+#
 # Capture is a command, not a schema key: `workloadctl pcap <name>`. passt's own
 # --pcap has no size limit, no rotation and no runtime toggle — it writes until
 # the process exits — which is the wrong shape for a persistent setting. See

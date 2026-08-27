@@ -427,6 +427,28 @@ class TestPolicyDocument(unittest.TestCase):
         self.assertEqual(vm_inspect_policy({})["tls"], VM_TLS_DEFAULT)
         self.assertEqual(vm_inspect_policy({"tls": "splice"})["tls"], "splice")
 
+    def test_the_http2_list_is_carried_even_under_tls_splice(self):
+        """The document describes the FILE, not the file filtered through the
+        mode. A listener restarted onto `inspect` reads a document that already
+        says what the per-host lists were -- and a document that dropped them
+        under `splice` would make the restart a re-generate, which is not what
+        the recovery contract says."""
+        from vm import vm_http2_hosts
+        net = {"hosts": ["grpc.example.com"], "tls": "splice",
+               "http2": [{"host": "grpc.example.com", "reason": "gRPC"}]}
+        self.assertEqual(vm_inspect_policy(net)["http2"], ["grpc.example.com"])
+        self.assertEqual(vm_http2_hosts(net), ["grpc.example.com"])
+
+    def test_http2_hosts_are_not_added_to_the_allowlist(self):
+        """`http2` decides a PROTOCOL for a name already on a list, the way
+        `splice` decides a disposition for one. Adding it to `hosts` would make
+        it a second, quieter way to authorise a name -- and validation refuses
+        an entry that names no allowlisted host precisely so that it never has
+        to be."""
+        net = {"hosts": ["grpc.example.com"],
+               "http2": [{"host": "grpc.example.com", "reason": "gRPC"}]}
+        self.assertEqual(vm_inspect_policy(net)["hosts"], ["grpc.example.com"])
+
     def test_the_policy_path_is_in_the_workloads_runtime_dir(self):
         """The same directory the retired proxy's config was written into, and for the same
         reason: /run does not exist when the boot generator runs, so writing at

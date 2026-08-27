@@ -595,6 +595,24 @@ class TestPolicyLoading(unittest.TestCase):
         self.assertIsNone(entry.paths)
         self.assertTrue(entry.permits("DELETE", "/anything"))
 
+    def test_the_document_carries_the_http2_list_through(self):
+        """Both halves against each other. A listener that dropped this on load
+        offers `http/1.1` to a host the operator listed for h2, which fails as
+        that one host being broken rather than as a key being ignored."""
+        mod = _mod()
+        path = self._write(json.dumps(vm_inspect_policy({
+            "hosts": ["grpc.example.com"],
+            "http2": [{"host": "grpc.example.com", "reason": "gRPC"}]})))
+        policy = mod.load_policy(path)
+        self.assertEqual(policy.http2, ("grpc.example.com",))
+        self.assertTrue(policy.speaks_h2("grpc.example.com"))
+
+    def test_a_malformed_http2_list_is_an_error(self):
+        mod = _mod()
+        path = self._write(json.dumps({"hosts": [], "http2": "grpc.example"}))
+        with self.assertRaises(ValueError):
+            mod.load_policy(path)
+
     def test_a_malformed_policy_entry_is_an_error(self):
         mod = _mod()
         with self.assertRaises(ValueError):
@@ -878,6 +896,160 @@ class TestPerHostSplice(unittest.TestCase):
             "tls": "splice", "hosts": ["sum.golang.org"],
             "splice": [{"host": "sum.golang.org", "reason": "a log"}]})
         self.assertEqual(doc["splice"], ["sum.golang.org"])
+
+
+class TestHttp2Framing(unittest.TestCase):
+    """The check that makes [[vm.network.http2]] mean SPEAKS H2, not EXEMPT.
+
+    Without it a listed host is a byte relay -- no Host binding, no `paths`, no
+    `methods`, and nothing establishing the bytes are h2 -- so a guest reaches
+    a full policy opt-out on any host somebody added for performance, by
+    writing different first bytes. That is the shape HLD §8 reversed itself to
+    remove, surviving one key along.
+    """
+
+    @staticmethod
+    def _frame(kind, stream=0, payload=b"", flags=0):
+        return (len(payload).to_bytes(3, "big") + bytes([kind, flags])
+                + stream.to_bytes(4, "big") + payload)
+
+    def test_the_preface_is_the_exact_rfc_bytes(self):
+        """Pinned as a literal rather than rebuilt from parts. It is 24 fixed
+        bytes chosen so an HTTP/1.1 server cannot mistake them for a request,
+        and a version this file computed could be wrong in a way that only
+        showed up against a real client."""
+        mod = _mod()
+        self.assertEqual(mod.H2_PREFACE,
+                         b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n")
+        self.assertEqual(len(mod.H2_PREFACE), 24)
+
+    def test_a_settings_frame_on_stream_zero_opens_a_connection(self):
+        mod = _mod()
+        framing = mod.H2Framing()
+        framing.feed(self._frame(0x4, payload=b"\x00\x03\x00\x00\x00\x64"))
+        self.assertTrue(framing.aligned)
+
+    def test_an_empty_settings_frame_opens_a_connection(self):
+        """RFC 9113 §3.4: the client's opening SETTINGS MAY be empty, and a
+        check requiring a payload would refuse conforming clients."""
+        mod = _mod()
+        framing = mod.H2Framing()
+        framing.feed(self._frame(0x4))
+        self.assertTrue(framing.aligned)
+
+    def test_a_first_frame_that_is_not_settings_is_refused(self):
+        """This is one of the two checks with real teeth. A guest that sent the
+        preface and then whatever it liked would otherwise be relayed, because
+        the length field is 24 arbitrary bits and nearly any byte string parses
+        as frames."""
+        mod = _mod()
+        framing = mod.H2Framing()
+        with self.assertRaises(mod.NotH2):
+            framing.feed(self._frame(0x1, stream=1, payload=b"headers"))
+
+    def test_a_first_settings_frame_off_stream_zero_is_refused(self):
+        mod = _mod()
+        framing = mod.H2Framing()
+        with self.assertRaises(mod.NotH2):
+            framing.feed(self._frame(0x4, stream=1))
+
+    def test_an_opening_settings_frame_of_a_ragged_length_is_refused(self):
+        """Settings are 6 bytes each (RFC 9113 §6.5), so a length that is not a
+        multiple of six is not a SETTINGS frame whatever the type byte says."""
+        mod = _mod()
+        framing = mod.H2Framing()
+        with self.assertRaises(mod.NotH2):
+            framing.feed(self._frame(0x4, payload=b"\x00\x03\x00"))
+
+    def test_a_frame_header_split_across_reads_is_reassembled(self):
+        """The scanner is fed whatever recv returned, not whole frames. A
+        version that parsed each chunk independently would refuse every real
+        connection whose opening SETTINGS straddled a segment boundary --
+        intermittently, and under load first."""
+        mod = _mod()
+        framing = mod.H2Framing()
+        frame = self._frame(0x4, payload=b"\x00\x03\x00\x00\x00\x64")
+        for i in range(1, len(frame)):
+            scanner = mod.H2Framing()
+            scanner.feed(frame[:i])
+            scanner.feed(frame[i:])
+            self.assertTrue(scanner.aligned, i)
+        framing.feed(frame)
+        self.assertTrue(framing.aligned)
+
+    def test_several_frames_in_one_read_stay_aligned(self):
+        mod = _mod()
+        framing = mod.H2Framing()
+        framing.feed(self._frame(0x4)
+                     + self._frame(0x1, stream=1, payload=b"hpack")
+                     + self._frame(0x0, stream=1, payload=b"body"))
+        self.assertTrue(framing.aligned)
+
+    def test_a_stream_that_stops_part_way_through_a_frame_is_not_aligned(self):
+        """The one thing continuous framing actually catches. A relay checking
+        only the first frame would carry anything at all after it."""
+        mod = _mod()
+        framing = mod.H2Framing()
+        framing.feed(self._frame(0x4) + b"\x00\x00\x40\x00\x00\x00\x00")
+        self.assertFalse(framing.aligned)
+
+    def test_the_reserved_bit_of_a_stream_id_is_ignored_not_refused(self):
+        """RFC 9113 §4.1: receivers must ignore it. Refusing a sender that sets
+        it would fail a conforming connection over a bit nothing reads."""
+        mod = _mod()
+        framing = mod.H2Framing()
+        framing.feed(b"\x00\x00\x00\x04\x00\x80\x00\x00\x00")
+        self.assertTrue(framing.aligned)
+
+    def test_an_http11_request_never_reaches_the_framing_check(self):
+        """The preface does nearly all the work, and this says why the framing
+        scanner is not asked to be a conformance checker: everything that is
+        not h2 fails on byte one, before any of it runs."""
+        mod = _mod()
+        self.assertNotEqual(b"GET / HTTP/1.1\r\n"[:len(mod.H2_PREFACE)],
+                            mod.H2_PREFACE)
+
+
+class TestHttp2AlpnSelection(unittest.TestCase):
+    """Which protocol each leg offers, chosen from configuration alone.
+
+    §6 requires the upstream leg up BEFORE a leaf is minted, so nothing here
+    can sniff the guest and then speak what came back. And the offer BINDS
+    NOBODY -- a server offering http/1.1 alone facing a client offering h2
+    alone completes the handshake with no protocol negotiated and no alert -- so
+    these tests pin what is configured, and the refusals in TestHttp2Framing
+    and the non-HTTP check are what make it stick.
+    """
+
+    def _policy(self, mod, **kw):
+        return mod.Policy(tls="inspect", hosts=("a.example", "grpc.example"),
+                          **kw)
+
+    def test_speaks_h2_is_the_list_and_not_the_mode(self):
+        mod = _mod()
+        policy = self._policy(mod, http2=("grpc.example",))
+        self.assertTrue(policy.speaks_h2("grpc.example"))
+        self.assertFalse(policy.speaks_h2("a.example"))
+
+    def test_speaks_h2_matches_by_pattern_and_normalises_the_name(self):
+        mod = _mod()
+        policy = mod.Policy(tls="inspect", hosts=("*.example",),
+                            http2=("*.grpc.example",))
+        self.assertTrue(policy.speaks_h2("a.GRPC.example."))
+        self.assertFalse(policy.speaks_h2("grpc.example"),
+                         "fnmatch, not DNS suffix matching: the apex trap")
+
+    def test_the_two_contexts_offer_different_protocols(self):
+        """One context per offer rather than one whose ALPN is set per dial:
+        contexts are shared across connections, so mutating one before a
+        handshake races every other connection using it -- silently, and in the
+        direction that gives a host the offer another host asked for."""
+        mod = _mod()
+        listener = mod.Listener([], io.StringIO(),
+                                policy=self._policy(mod, http2=("grpc.example",)))
+        self.assertIsNot(listener._upstream_ctx, listener._upstream_ctx_h2)
+        self.assertEqual(mod.UPSTREAM_ALPN, ("http/1.1",))
+        self.assertEqual(mod.ALPN_H2, ("h2",))
 
 
 class TestLogInjection(unittest.TestCase):
