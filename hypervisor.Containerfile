@@ -2,8 +2,13 @@ ARG BASE_IMAGE=ghcr.io/bensmith/fedora-bootc-minimal:latest
 
 FROM fedora:latest AS rpm-builder
 COPY workloadctl/ /workloadctl/
+# openssl is the CLI, not the library: the test suite mints a CA and its leaves
+# by shelling out to it (tests/test_vm_ca.py, test_vm_mint.py and three others),
+# and the fedora base image ships openssl-libs without it. Absent, `just test`
+# fails here with FileNotFoundError rather than in the PR gate, whose runner
+# happens to have it.
 RUN dnf install -y --nodocs --setopt=install_weak_deps=False \
-        rpm-build python3 just systemd-rpm-macros python3-rpm-macros && \
+        rpm-build python3 just systemd-rpm-macros python3-rpm-macros openssl && \
     dnf clean all && \
     cd /workloadctl && \
     rm -rf rpmbuild && \

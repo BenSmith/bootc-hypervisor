@@ -36,6 +36,12 @@ Recommends:     udica
 # managed bridge: passt serves the guest DHCP and DNS itself.
 Requires:       passt
 Requires:       nftables
+# The `openssl` command line, not just the library. Nothing here links against
+# libcrypto -- lib/vm.py builds argv for the per-workload CA and its leaves and
+# `workload-ensure-user` mints the CA at first boot, so a host without the CLI
+# fails a VM start rather than a build. cmd_secret shells out to it as well.
+# openssl-libs arrives with half the base system; the CLI does not.
+Requires:       openssl
 # There is deliberately NO proxy dependency here. Through rung 1 this was a hard
 # `Requires: tinyproxy`, because a VM declaring [vm.network].hosts was filtered
 # default-deny with its own proxy as the only route out. Rung 2 replaced that
