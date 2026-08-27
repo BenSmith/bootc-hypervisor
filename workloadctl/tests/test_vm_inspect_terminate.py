@@ -154,6 +154,23 @@ class _Origin:
             except (ssl.SSLError, OSError):
                 pass
             finally:
+                # Half-closed and drained before closing, and it is not
+                # tidiness. In the client-certificate case the origin's alert
+                # is raised on its FIRST read -- which can happen before the
+                # listener's request has even arrived -- and a full close then
+                # discards those bytes and answers them with an RST. The reset
+                # raced the alert, and the listener classified a
+                # `client certificate` refusal as `relay failed` about half the
+                # time. A FIN plus a drain lets the alert be what the listener
+                # reads, so the fixture stops deciding which branch is under
+                # test.
+                try:
+                    raw.shutdown(socket.SHUT_WR)
+                    raw.settimeout(1.0)
+                    while raw.recv(65536):
+                        pass
+                except (OSError, ValueError):
+                    pass
                 conn.close()
 
     def close(self):
@@ -693,6 +710,55 @@ class TestUpgradesAreRelayedAfterThePolicyCheck(TerminationCase):
                       "ever answer 101")
         self.assertIn(b"Connection: upgrade", upstream)
 
+    def test_a_policy_entry_decides_which_endpoint_may_be_upgraded(self):
+        """Rung 4 T8, §8. `Upgrade:` is an ordinary HTTP request -- method,
+        path and Host are all plain text -- so `paths` still decides WHICH
+        endpoint may be upgraded, which §8 calls most of its value.
+
+        The origin is the same one that answers 101 to anything, so a listener
+        that let the request through would produce a 101 here. It never sees
+        the request at all: the refusal happens before the upstream is dialled,
+        which is what keeps the un-policed stream from existing.
+        """
+        mod = _mod()
+        origin = _Origin(
+            self.origin_pem,
+            response=b"HTTP/1.1 101 Switching Protocols\r\n"
+                     b"Upgrade: websocket\r\nConnection: Upgrade\r\n\r\n")
+        self.addCleanup(origin.close)
+        listener, out = self._listener(
+            mod, origin, entries=(("localhost", None, ("/ws/allowed",)),))
+        response, error = self._exchange(
+            listener, origin,
+            request=b"GET /ws/other HTTP/1.1\r\nHost: localhost\r\n"
+                    b"Upgrade: websocket\r\nConnection: Upgrade\r\n"
+                    b"Connection: close\r\n\r\n")
+        self.assertIsNone(error)
+        self.assertIn(b"403 Forbidden", response)
+        self.assertNotIn(b"101", response)
+        self.assertEqual(origin.requests, [])
+        self.assertNotIn("policy no longer applies", out.getvalue())
+        self.assertEqual(
+            listener.status()["drop_reasons"]["not permitted by policy"], 1)
+
+    def test_the_permitted_endpoint_still_upgrades(self):
+        """The other half of the same rule, or the test above would pass on a
+        listener that refused every upgrade."""
+        mod = _mod()
+        origin = _Origin(
+            self.origin_pem,
+            response=b"HTTP/1.1 101 Switching Protocols\r\n"
+                     b"Upgrade: websocket\r\nConnection: Upgrade\r\n\r\n")
+        self.addCleanup(origin.close)
+        listener, out = self._listener(
+            mod, origin, entries=(("localhost", None, ("/ws/allowed",)),))
+        response, error = self._exchange(
+            listener, origin,
+            request=b"GET /ws/allowed HTTP/1.1\r\nHost: localhost\r\n"
+                    b"Upgrade: websocket\r\nConnection: Upgrade\r\n\r\n")
+        self.assertIn(b"101 Switching Protocols", response)
+        self.assertIn("policy no longer applies", out.getvalue())
+
     def test_the_guests_pipelined_bytes_survive_the_upgrade(self):
         """Bytes sent behind the upgrade request belong to the tunnel.
 
@@ -753,8 +819,8 @@ class TestARedirectOffTheAllowlistIsNamedWhereBothNamesAreKnown(
     already been bitten by once.
     """
 
-    def _redirecting_origin(self, location):
-        body = (f"HTTP/1.1 302 Found\r\nLocation: {location}\r\n"
+    def _redirecting_origin(self, location, status=302, reason="Found"):
+        body = (f"HTTP/1.1 {status} {reason}\r\nLocation: {location}\r\n"
                 f"Content-Length: 0\r\nConnection: close\r\n\r\n").encode()
         origin = _Origin(self.origin_pem, response=body)
         self.addCleanup(origin.close)
@@ -790,6 +856,106 @@ class TestARedirectOffTheAllowlistIsNamedWhereBothNamesAreKnown(
         mod = _mod()
         self.assertEqual(mod.redirect_host("https://cdn.elsewhere:8443/x"),
                          "cdn.elsewhere")
+
+    # --- rung 4 T8: the target its own policy entry will refuse ---
+
+    def _policy_listener(self, mod, origin, methods=None, paths=("/ok/*",)):
+        return self._listener(
+            mod, origin, hosts=("localhost",),
+            entries=(("other.example", methods, paths),))
+
+    def test_a_target_its_policy_entry_refuses_names_both_hosts(self):
+        """The half rung 3 could not have. The target IS allowlisted, so the
+        `not allowlisted` note stays silent, and the guest's next connection
+        ends in a 403 naming a host and a path with nothing tying either back
+        to the site that sent it there."""
+        mod = _mod()
+        origin = self._redirecting_origin("https://other.example/blocked")
+        listener, out = self._policy_listener(mod, origin)
+        self._exchange(listener, origin)
+        line = out.getvalue()
+        self.assertIn("host=localhost", line)
+        self.assertIn("other.example/blocked", line)
+        self.assertIn("[[vm.network.policy]]", line)
+        self.assertNotIn("not allowlisted", line)
+
+    def test_a_target_its_policy_entry_permits_is_silent(self):
+        mod = _mod()
+        origin = self._redirecting_origin("https://other.example/ok/x")
+        listener, out = self._policy_listener(mod, origin)
+        self._exchange(listener, origin)
+        self.assertNotIn("redirected to", out.getvalue())
+
+    def test_an_allowlisted_target_no_entry_governs_is_silent(self):
+        """`hosts` alone permits every path on it, so there is no verdict to
+        predict and a note would send the operator to a file with nothing in
+        it to change."""
+        mod = _mod()
+        origin = self._redirecting_origin("https://other.example/blocked")
+        listener, out = self._listener(
+            mod, origin, hosts=("localhost", "other.example"))
+        self._exchange(listener, origin)
+        self.assertNotIn("redirected to", out.getvalue())
+
+    def test_a_307_is_read_with_the_method_the_guest_used(self):
+        """307 preserves the method, so the POST is the request the guest is
+        about to repeat and `methods = ["GET"]` is what will refuse it."""
+        mod = _mod()
+        origin = self._redirecting_origin("https://other.example/ok/x",
+                                          307, "Temporary Redirect")
+        listener, out = self._policy_listener(mod, origin, methods=("GET",))
+        self._exchange(
+            listener, origin,
+            request=b"POST /p HTTP/1.1\r\nHost: localhost\r\n"
+                    b"Content-Length: 0\r\nConnection: close\r\n\r\n")
+        self.assertIn("[[vm.network.policy]]", out.getvalue())
+
+    def test_a_302_says_nothing_when_either_reading_permits(self):
+        """301 and 302 have two live readings -- the RFC preserves the method,
+        every real client rewrites a non-GET to GET -- so a note is emitted
+        only when the entry refuses BOTH. Silent here because the GET reading
+        is permitted, and a note claiming otherwise would send an operator to
+        edit a rule that was never going to fire."""
+        mod = _mod()
+        origin = self._redirecting_origin("https://other.example/ok/x")
+        listener, out = self._policy_listener(mod, origin, methods=("GET",))
+        self._exchange(
+            listener, origin,
+            request=b"POST /p HTTP/1.1\r\nHost: localhost\r\n"
+                    b"Content-Length: 0\r\nConnection: close\r\n\r\n")
+        self.assertNotIn("redirected to", out.getvalue())
+
+    def test_a_304_predicts_nothing(self):
+        """A Location on a 300/304/305 does not describe a request the guest
+        is about to repeat."""
+        mod = _mod()
+        origin = self._redirecting_origin("https://other.example/blocked",
+                                          304, "Not Modified")
+        listener, out = self._policy_listener(mod, origin)
+        self._exchange(listener, origin)
+        self.assertNotIn("[[vm.network.policy]]", out.getvalue())
+
+    def test_the_path_is_normalised_the_way_the_request_side_will(self):
+        """The note predicts a verdict the guest's NEXT connection will get,
+        so it has to be judged on the same string that connection is. A path
+        normalised differently here produces a note that contradicts the 403
+        it exists to explain."""
+        mod = _mod()
+        self.assertEqual(mod.redirect_target("https://h/a/../b"), ("h", "/b"))
+        self.assertEqual(mod.redirect_target("https://h/p?q=1/2"), ("h", "/p"))
+        self.assertEqual(mod.redirect_target("https://h/p#f/g"), ("h", "/p"))
+        self.assertEqual(mod.redirect_target("https://h"), ("h", "/"))
+        self.assertEqual(mod.redirect_target("https://h?q=1"), ("h", "/"))
+        self.assertEqual(mod.redirect_target("https://h:8443/x"), ("h", "/x"))
+        self.assertEqual(mod.redirect_target("/next"), (None, None))
+
+    def test_a_path_that_cannot_be_normalised_predicts_nothing(self):
+        """None is not "no refusal": an encoded slash has two readings and the
+        request side declines to pick one, so there is no string to judge."""
+        mod = _mod()
+        host, path = mod.redirect_target("https://h/a%2fb")
+        self.assertEqual(host, "h")
+        self.assertIsNone(path)
 
 
 class TestTheStartRefusesWhatItCannotDo(unittest.TestCase):

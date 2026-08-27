@@ -1351,8 +1351,8 @@ def host_from_authority(authority, scheme=SCHEME_HTTP):
     return Authority(host, port)
 
 
-def redirect_host(location, scheme=SCHEME_HTTP):
-    """The host a Location header names, or None when it names none.
+def redirect_target(location, scheme=SCHEME_HTTP):
+    """(host, path) a Location header names, or (None, None) for neither.
 
     A relative Location -- the common case -- names no host and is not a
     redirect off this origin, so it is None rather than a refusal. So is
@@ -1361,25 +1361,57 @@ def redirect_host(location, scheme=SCHEME_HTTP):
 
     Any scheme is read, not just this plane's: a redirect from http to https is
     ordinary, and the name is the question, not the scheme it is reached over.
+
+    The path comes back NORMALISED BY THE REQUEST PARSER'S OWN FUNCTION, and
+    that is the point of returning it at all. What is built on it is a
+    prediction of the verdict the guest's next connection will get, so it has
+    to be the same string that connection will be judged on; a path normalised
+    differently here would produce a note that disagrees with the 403 it is
+    meant to explain. A path this cannot normalise comes back None -- there is
+    then no prediction to make, which is not the same as predicting no refusal.
     """
     text = location.strip()
     got, sep, rest = text.partition("://")
     if not sep or not got or "/" in got:
-        return None
-    authority = rest.split("/", 1)[0]
+        return None, None
+    # The authority ends at the FIRST of these three, not at the first slash --
+    # the same cut `normalise_target` makes and for the same reason: a query or
+    # a fragment can carry a slash, and splitting on that one puts half the
+    # query into the name.
+    cut = min((i for i in (rest.find("/"), rest.find("?"), rest.find("#"))
+               if i != -1), default=-1)
+    if cut == -1:
+        authority, path = rest, "/"
+    elif rest[cut] == "/":
+        authority, path = rest[:cut], rest[cut:]
+    else:
+        # A query or fragment with no path before it: the resource is the root.
+        # The query is dropped either way, because `paths` matches the path
+        # alone -- the same rule the request side applies.
+        authority, path = rest[:cut], "/"
     if not authority:
-        return None
+        return None, None
     # Port-agnostic on purpose: `host_from_authority` refuses a port this plane
     # does not reach, which is right for a request being authorised and wrong
     # for a name being reported. Strip it first.
     try:
-        return host_from_authority(authority, Scheme(got.lower(), 0)).host
+        host = host_from_authority(authority, Scheme(got.lower(), 0)).host
     except RequestUnreadable:
         head = authority.rsplit(":", 1)[0]
         try:
-            return host_from_authority(head, Scheme(got.lower(), 0)).host
+            host = host_from_authority(head, Scheme(got.lower(), 0)).host
         except RequestUnreadable:
-            return None
+            return None, None
+    path = path.split("#", 1)[0].split("?", 1)[0]
+    try:
+        return host, normalise_path(path)
+    except RequestUnreadable:
+        return host, None
+
+
+def redirect_host(location, scheme=SCHEME_HTTP):
+    """The host a Location header names, or None when it names none."""
+    return redirect_target(location, scheme)[0]
 
 
 def _is_count(text):
@@ -3308,13 +3340,59 @@ class Listener:
         if not 300 <= status < 400:
             return
         for value in _get_all(headers, "location"):
-            target = redirect_host(value)
+            target, path = redirect_target(value)
+            if not target:
+                continue
             # `admits`, not a `hosts` match: a redirect to a host named only
             # by a `policy` entry is allowlisted, and a note saying otherwise
             # would send the operator to add a name that is already there.
-            if target and not self._policy.admits(target):
+            if not self._policy.admits(target):
                 self._log(f"note {where} host={req.host} reason='redirected to "
                           f"{target}, which is not allowlisted'")
+            elif path is not None and self._policy.governs(target):
+                self._note_policy_redirect(status, target, path, req, where)
+
+    def _note_policy_redirect(self, status, target, path, req, where):
+        """Log a redirect an allowlisted target's own policy will refuse.
+
+        The second half of the same diagnosability problem, and the half rung 3
+        could not have: the operator allowlisted the target, so the note above
+        stays silent, and the guest's next connection ends in
+        `not permitted by policy` naming a host and a path with nothing
+        connecting either to the site that sent it there. This is still the
+        only point where both names are known together.
+
+        WHICH METHOD THE GUEST WILL USE IS NOT OURS TO DECIDE, so where the
+        readings differ this says nothing rather than guessing. 307 and 308
+        preserve the method (RFC 9110 §15.4.8-9). 303 mandates GET. 301 and 302
+        are the awkward pair: the RFC preserves the method and essentially every
+        real client rewrites a non-GET to GET, so both are live readings and the
+        note is emitted only if the entry refuses BOTH. Over-accepting in the
+        silent direction on purpose -- a missing note costs an operator the
+        search they would have done anyway, and a wrong one sends them to edit
+        a rule that was never going to fire.
+
+        A SAME-HOST redirect gets nothing from here, and that is not an
+        oversight: a relative Location names no host, and a 403 for a path on
+        the host the operator configured already names the host they configured.
+        Nothing is unattributable, so there is nothing to attribute.
+        """
+        if status in (307, 308):
+            methods = (req.method,)
+        elif status == 303:
+            methods = ("GET",)
+        elif status in (301, 302):
+            methods = (req.method, "GET")
+        else:
+            # 300, 304, 305: a Location here does not describe a request the
+            # guest is about to repeat, so there is no verdict to predict.
+            return
+        if any(self._policy.permits(target, method, path)
+               for method in set(methods)):
+            return
+        self._log(f"note {where} host={req.host} reason='redirected to "
+                  f"{target}{path}, which its [[vm.network.policy]] entry does "
+                  f"not permit'")
 
     def _binding_reason(self, host):
         """Which of the two §4 binding figures a mismatched name lands in.
