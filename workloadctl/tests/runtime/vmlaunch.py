@@ -370,7 +370,40 @@ def _render_bib_config(pubkey: str) -> str:
     `workloadctl install`/`enable`. The NOPASSWD drop-in is required because
     VMTarget drives sudo non-interactively (`sudo -n`). The filesystem block
     sizes the root fs at build time for the workload-image pulls (see
-    _GATE_ROOT_MINSIZE)."""
+    _GATE_ROOT_MINSIZE).
+
+THE KEY GOES IN /etc, NOT IN THE USER'S HOME, AND THAT IS NOT A STYLE
+    CHOICE. Measured 2026-08-27: BIB writes the baked user's home as
+
+        system_u:object_r:var_t:s0  /var/home/wlrt/.ssh/authorized_keys
+
+    sshd_t cannot read var_t, so sshd silently declines the offered key and
+    falls through to password auth. The guest boots perfectly — multi-user
+    reached, `Started sshd.service`, a login prompt on ttyS0 — and every
+    runtime test then errors identically 240s later with `guest did not become
+    SSH-ready`, pointing at the harness, the port-forward, or the image. The
+    console tail in that error shows a healthy boot and says nothing about
+    SELinux, because the denial is inside the guest's audit log, which nothing
+    can reach without the ssh that just failed.
+
+    RELABELLING THE HOME CANNOT FIX IT, and the attempt is worth recording
+    because it looks like the obvious answer. A `Z /var/home/wlrt - - - -`
+    tmpfiles rule ran, succeeded, and changed nothing: in this policy
+    `/var/home -> /home` is COMMENTED OUT of file_contexts.subs_dist while
+    `/home -> /var/home` substitutes the other way, so matchpathcon answers
+    var_t for the home tree and `Z` faithfully restored the label it already
+    had. A real host works only because whatever created its .ssh stamped
+    ssh_home_t at creation time — on a deployed host /var/home/<user> is var_t
+    too, and `restorecon -R /var/home` there would BREAK ssh rather than repair
+    it. Nothing about the home path is a label the policy will hand back.
+
+    /etc sidesteps the whole question: BIB labels what it writes there etc_t
+    (the sudoers drop-in above has always proved this), sshd_t reads etc_t, and
+    AuthorizedKeysFile keeps `.ssh/authorized_keys` as the second entry so an
+    ordinary home-based key still works. `00-` wins because sshd takes the
+    first value it is given. Confirmed by staging both files into one overlay
+    by hand and booting the same disk: `Permission denied (publickey,...)`
+    became a shell, under Enforcing, with sudo -n working."""
     return (
         "[[customizations.user]]\n"
         'name = "wlrt"\n'
@@ -381,6 +414,19 @@ def _render_bib_config(pubkey: str) -> str:
         'path = "/etc/sudoers.d/wlrt-nopasswd"\n'
         'mode = "0440"\n'
         'data = "%wheel ALL=(ALL) NOPASSWD:ALL\\n"\n'
+        "\n"        "[[customizations.directories]]\n"
+        'path = "/etc/ssh/authorized_keys.d"\n'
+        'mode = "0755"\n'
+        "\n"
+        "[[customizations.files]]\n"
+        'path = "/etc/ssh/authorized_keys.d/wlrt"\n'
+        'mode = "0644"\n'
+        f'data = "{pubkey}\\n"\n'
+        "\n"
+        "[[customizations.files]]\n"
+        'path = "/etc/ssh/sshd_config.d/00-wlrt-authorized-keys.conf"\n'
+        'mode = "0644"\n'
+        'data = "AuthorizedKeysFile /etc/ssh/authorized_keys.d/%u .ssh/authorized_keys\\n"\n'
         "\n"
         "[[customizations.filesystem]]\n"
         'mountpoint = "/"\n'
