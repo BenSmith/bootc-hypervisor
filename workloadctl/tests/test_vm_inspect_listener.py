@@ -549,6 +549,31 @@ class TestPolicyLoading(unittest.TestCase):
         self.assertEqual(policy.hosts, ("example.com",))
         self.assertEqual(policy.tls, "splice")
 
+    def test_every_key_the_helper_writes_is_a_key_the_listener_reads(self):
+        """The forward half of the sentence above, which the per-key tests
+        below do not cover.
+
+        Each of those asserts that a key the LISTENER reads survives the trip,
+        so a helper that stopped writing one fails. Nothing asserted the other
+        direction: `load_policy` reads by `doc.get(...)` and ignores what it
+        does not know, so a key added to vm_inspect_policy and never wired into
+        the listener loads clean and authorises nothing -- silently, across two
+        processes, which is the seam a unit gate is least likely to see.
+
+        Policy._fields is the source of truth for the reader, the way
+        DROP_REASONS and PER_HOST_REASONS are for the counters. A key added to
+        the document with no field behind it fails here, and the fix is to
+        decide deliberately whether the listener should be reading it.
+        """
+        mod = _mod()
+        doc = vm_inspect_policy({
+            "hosts": ["example.com"],
+            "internal": [{"host": "nas.example.com", "reason": "nas"}],
+            "splice": [{"host": "pinned.example.com", "reason": "pinned"}],
+            "http2": [{"host": "grpc.example.com", "reason": "gRPC"}],
+            "policy": [{"host": "api.example.com", "methods": ["GET"]}]})
+        self.assertEqual(set(doc), set(mod.Policy._fields))
+
     def test_the_document_carries_the_internal_list_through(self):
         """The listener's copy of [[vm.network.internal]] authorises nothing --
         it is what tells a wildcard-trap refusal apart from a host that is
@@ -2632,11 +2657,21 @@ class TestCounters(unittest.TestCase):
     def test_the_lists_key_names_every_list_the_policy_holds(self):
         """The drift guard for the three above: a list added to Policy and not
         to `lists` is reported by nothing, and every existing assertion here
-        still passes. `tls` is the mode rather than a list, so it is the one
-        key with no field behind it."""
+        still passes.
+
+        Derived from which fields HOLD a list rather than from Policy._fields
+        whole, so that a future scalar on Policy -- a timeout, a limit -- is
+        not dragged into a key that says `lists` on the tin. `tls` is named
+        separately for that reason: it is the mode the lists are read under,
+        which an operator needs beside them, and it is the one key here with no
+        list behind it.
+        """
         mod, listener, _ = self._listener()
-        fields = set(mod.Policy._fields)
-        self.assertEqual(set(listener.status()["lists"]), fields)
+        policy = listener._policy
+        lists = {f for f in mod.Policy._fields
+                 if isinstance(getattr(policy, f), tuple)}
+        self.assertIn("policy", lists)      # the derivation found something
+        self.assertEqual(set(listener.status()["lists"]), lists | {"tls"})
 
     def test_concurrency_reports_live_and_refused_together(self):
         """One number cannot separate a guest storming the listener from a

@@ -184,6 +184,15 @@ class Policy:
     depend on when it asked.
     """
 
+    # Every key this reader takes from vm_resolve_policy's document, named so
+    # the two halves can be tested against each other rather than each against
+    # a literal. The failure it exists to catch is silent and crosses two
+    # processes: __init__ reads by document.get(), so a key added to the writer
+    # and never wired in here loads clean and changes nothing -- which for
+    # `policy` meant every legitimate lookup on a policy-only workload counting
+    # as the tunnelling signature, with no traffic broken to point at it.
+    DOCUMENT_KEYS = ("address", "address6", "ttl", "static", "hosts", "policy")
+
     def __init__(self, document):
         self.address = document["address"]
         self.address6 = document["address6"]

@@ -3229,9 +3229,20 @@ def _validate_egress(net: dict) -> list[str]:
         # host is needed: the guest gets `403 <host> resolves to an internal
         # address` on the one destination the entry existed to permit. An
         # error, for the same reason an `allow` element that arms nothing is.
-        if not any(host == pattern or fnmatch.fnmatch(host, pattern)
+        #
+        # _patterns_overlap on BOTH halves, which is the same comparison the
+        # `splice` and `http2` dead-entry rules make and for the same reason.
+        # The obvious reading -- match the entry's `host` as a NAME against the
+        # allowlist patterns -- gets the wildcard case backwards: an
+        # `*.nas.example` entry justified by an allowlisted `a.nas.example` is
+        # live, and a one-directional check calls it dead and refuses the
+        # config. Wrong in the accepting direction leaves a dead entry
+        # standing; wrong the other way refuses a config that works, which is
+        # the expensive mistake for a rule whose whole job is to catch a typo.
+        if not any(_patterns_overlap(host, pattern)
                    for pattern in hosts if isinstance(pattern, str)) \
-                and not vm_hostname_match(host, policy_hosts):
+                and not any(_patterns_overlap(host, pattern)
+                            for pattern in policy_hosts):
             errors.append(
                 f"[vm.network].internal: {host!r} is on no list — nothing "
                 f"in .hosts allowlists it and no .policy entry names it, so "

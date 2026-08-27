@@ -269,6 +269,16 @@ class TestPolicyDocument(unittest.TestCase):
     def test_a_workload_with_no_policy_carries_an_empty_list(self):
         self.assertEqual(vm_resolve_policy({}, UID)["policy"], [])
 
+    def test_every_key_the_writer_emits_is_a_key_the_responder_reads(self):
+        """The seam, tested in the direction nothing was testing it. The
+        responder reads by document.get(), so a key added here and never wired
+        into Policy.__init__ loads clean and changes nothing -- which is
+        exactly how `policy` went missing, with no traffic broken to point at
+        it and the tunnelling counter loud on a correct config."""
+        mod = _module()
+        self.assertEqual(set(vm_resolve_policy({}, UID)),
+                         set(mod.Policy.DOCUMENT_KEYS))
+
     def test_the_two_keys_stay_apart(self):
         """A `hosts` name must not appear under `policy`. Merging them would
         make the document unable to say which key authorised a name, which is

@@ -23,6 +23,8 @@ from vm import (
     vm_inspect_link_delete_commands, vm_inspect_map_elements,
     vm_inspect_policy, vm_inspect_policy_path, vm_inspect_self_elements,
     vm_allowed_hosts, vm_runtime_dir, VM_TLS_DEFAULT,
+    vm_http2_hosts, vm_policy_entries, vm_policy_governs,
+    vm_policy_permits,
 )
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -433,7 +435,6 @@ class TestPolicyDocument(unittest.TestCase):
         says what the per-host lists were -- and a document that dropped them
         under `splice` would make the restart a re-generate, which is not what
         the recovery contract says."""
-        from vm import vm_http2_hosts
         net = {"hosts": ["grpc.example.com"], "tls": "splice",
                "http2": [{"host": "grpc.example.com", "reason": "gRPC"}]}
         self.assertEqual(vm_inspect_policy(net)["http2"], ["grpc.example.com"])
@@ -466,7 +467,6 @@ class TestPolicyComposition(unittest.TestCase):
     """
 
     def _entries(self, *items):
-        from vm import vm_policy_entries
         return vm_policy_entries({"policy": list(items)})
 
     def test_hosts_does_not_union_into_policy(self):
@@ -480,7 +480,6 @@ class TestPolicyComposition(unittest.TestCase):
         looks wrong, and the diff that introduced the wildcard looks like it
         ADDED access rather than removing a restriction.
         """
-        from vm import vm_policy_governs, vm_policy_permits
         entries = self._entries({"host": "api.github.com",
                                  "methods": ["GET", "POST"],
                                  "paths": ["/repos/myorg/*"]})
@@ -493,12 +492,10 @@ class TestPolicyComposition(unittest.TestCase):
     def test_a_host_no_entry_matches_is_governed_by_nothing(self):
         """Step 3 of the algorithm: the caller falls back to `hosts`. The
         matcher says only that it has no rules of its own."""
-        from vm import vm_policy_governs
         entries = self._entries({"host": "api.example.com"})
         self.assertEqual(vm_policy_governs("cdn.example.com", entries), [])
 
     def test_methods_and_paths_inside_one_entry_are_a_cross_product(self):
-        from vm import vm_policy_permits
         entries = self._entries({"host": "r.example",
                                  "methods": ["GET", "POST"],
                                  "paths": ["/v2/*", "/token"]})
@@ -516,7 +513,6 @@ class TestPolicyComposition(unittest.TestCase):
         """Union, not precedence, and that is what lets a reviewer approve an
         added entry by asking whether IT is acceptable, never whether it
         silently disabled a neighbour."""
-        from vm import vm_policy_permits
         a = {"host": "api.example.com", "methods": ["POST"],
              "paths": ["/v1/messages"]}
         b = {"host": "api.example.com", "methods": ["GET"],
@@ -534,7 +530,6 @@ class TestPolicyComposition(unittest.TestCase):
         """Looks like a bug and is not: a narrower entry cannot carve an
         exception out of a wider one. If a host needs a hole punched in it,
         the wide entry is what has to change."""
-        from vm import vm_policy_permits
         entries = self._entries(
             {"host": "a.example", "methods": ["GET"], "paths": ["/v1/*"]},
             {"host": "a.example", "methods": ["GET"], "paths": ["/v1/public"]})
@@ -545,7 +540,6 @@ class TestPolicyComposition(unittest.TestCase):
         """A specific entry does NOT override a general one -- the apex trap's
         sibling, and why `diagnose` has to print the effective rules per host
         rather than the file's entries."""
-        from vm import vm_policy_governs, vm_policy_permits
         entries = self._entries(
             {"host": "*.example.com", "methods": ["GET"], "paths": ["/*"]},
             {"host": "api.example.com", "methods": ["POST"],
@@ -559,7 +553,6 @@ class TestPolicyComposition(unittest.TestCase):
         widening trap. Collapsing them makes a single-entry host with no
         `paths` deny everything instead of permitting everything -- wrong in
         the safe direction, which is how it survives review."""
-        from vm import vm_policy_entries, vm_policy_permits
         entry, = vm_policy_entries({"policy": [{"host": "a.example"}]})
         self.assertIsNone(entry.methods)
         self.assertIsNone(entry.paths)

@@ -2466,6 +2466,40 @@ class TestRung2Schema(unittest.TestCase):
                         "paths": ["/*"]}],
             "internal": [{"host": "git.local", "reason": "the forge"}]}), [])
 
+    def test_a_wildcard_internal_entry_over_an_exact_allowlist_is_accepted(self):
+        """The overlap test runs BOTH ways round here too, and this rule spent
+        two rungs testing only the easy one. `*.nas.example` covers an
+        allowlisted `a.nas.example`, so the entry is live -- and a check that
+        read the entry's `host` as a NAME against the allowlist patterns calls
+        it dead and refuses a working config. Same shape, same words, as
+        test_a_wildcard_splice_entry_over_an_exact_allowlist_is_accepted."""
+        self.assertEqual(self._egress({
+            "hosts": ["a.nas.example"],
+            "internal": [{"host": "*.nas.example", "reason": "lab range"}]}),
+            [])
+
+    def test_a_wildcard_internal_entry_over_a_policy_named_host_is_accepted(self):
+        """And across the two lists, which is where this branch reopened the
+        rule: `policy` allowlists its own host, so a wildcard `internal` entry
+        justified by a policy-named name is live for exactly the reason it
+        would be if the name were in `hosts`."""
+        self.assertEqual(self._egress({
+            "hosts": [],
+            "policy": [{"host": "a.nas.example", "methods": ["GET"],
+                        "paths": ["/*"]}],
+            "internal": [{"host": "*.nas.example", "reason": "lab range"}]}),
+            [])
+
+    def test_an_internal_entry_matching_nothing_at_all_is_still_refused(self):
+        """The accepting direction must not swallow the rule. A dead entry
+        here fails where nobody looks until the host is needed -- the guest
+        gets `403 <host> resolves to an internal address` on the one
+        destination the entry existed to permit."""
+        errors = self._egress({
+            "hosts": ["other.example"],
+            "internal": [{"host": "nas.example", "reason": "lab range"}]})
+        self.assertTrue(any("is on no list" in e for e in errors), errors)
+
     # --- splice (per host; HLD §11 hatch 2) ---
 
     def test_a_splice_host_the_allowlist_covers_is_accepted(self):
