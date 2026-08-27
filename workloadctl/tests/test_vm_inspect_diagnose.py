@@ -147,6 +147,22 @@ class TestTheNonHttpFigureIsTheSpliceList(unittest.TestCase):
         self.assertEqual(_not_http_fragments({"per_host_totals": {
             VM_DROP_NOT_HTTP: 0, VM_DROP_NOT_HTTP_POLICY: 0}}), [])
 
+    def test_a_total_with_no_map_behind_it_drops_the_list_not_the_line(self):
+        """Both halves render the hosts in parentheses, and an absent map made
+        one of them print `()` -- an empty parenthesis exactly where the
+        operator is looking for the name. The sibling figure already guarded
+        this; the two disagreed, which is the whole reason it is pinned.
+
+        It takes a document whose two halves disagree to get here, so the
+        honest output is the sentence without the list rather than a blank
+        where the list was promised.
+        """
+        for reason in (VM_DROP_NOT_HTTP, VM_DROP_NOT_HTTP_POLICY):
+            with self.subTest(reason=reason):
+                (line,) = _not_http_fragments({"per_host_totals": {reason: 3}})
+                self.assertNotIn("()", line)
+                self.assertIn("3 connection(s)", line)
+
     def test_the_plain_half_names_splice_and_the_host(self):
         (line,) = _not_http_fragments({
             "per_host_totals": {VM_DROP_NOT_HTTP: 4},

@@ -3052,8 +3052,8 @@ def _validate_policy(net: dict, splice_hosts, http2_hosts, egress: str,
     return entries, errors
 
 
-def _validate_apex_coverage(hosts, entries, key: str,
-                            consequence: str) -> list[str]:
+def _validate_apex_coverage(hosts, entries, key: str, consequence: str, *,
+                            self_allowlisting: bool = False) -> list[str]:
     """§3's apex trap: an allowlisted apex that a wildcard entry leaves out.
 
     Patterns are fnmatch, not DNS suffix matching, so `*.example.com` requires
@@ -3064,16 +3064,32 @@ def _validate_apex_coverage(hosts, entries, key: str,
 
     `entries` is a list of host patterns. `consequence` names what the operator
     gets instead, which differs by key and is the whole value of the message.
+
+    THE WILDCARD IS LOOKED FOR IN THE ENTRIES, NOT IN `.hosts`, and getting
+    that backwards left the rule firing on the one spelling nobody writes.
+    Requiring `*.apex` to appear in `.hosts` too catches only the REDUNDANT
+    form -- a `policy` entry allowlists its own host, so the natural way to
+    write the trap is `hosts = ["example.com"]` beside a lone `*.example.com`
+    entry, with the wildcard nowhere in `.hosts` because it does not need to
+    be. That shape was silent, on the one key that has no dead-entry rule to
+    catch it instead.
+
+    `self_allowlisting` says whether an entry naming something `.hosts` does
+    not cover means anything on its own. It does for `policy` (§3) and it does
+    not for `splice` and `http2`, where such an entry is ALREADY refused as
+    dead -- so there the apex message is suppressed rather than stacked on top
+    of one that says a different thing about the same line.
     """
     errors: list[str] = []
     literal = [h.strip() for h in hosts if isinstance(h, str) and h.strip()]
     named = [e for e in entries if e]
     for apex in literal:
         wildcard = f"*.{apex}"
-        if wildcard not in literal:
-            continue
         if not any(vm_normalise_hostname(e) == vm_normalise_hostname(wildcard)
                    for e in named):
+            continue
+        if not self_allowlisting and not any(
+                _patterns_overlap(wildcard, pattern) for pattern in literal):
             continue
         if any(vm_hostname_match(apex, (e,)) for e in named):
             continue
@@ -3237,7 +3253,8 @@ def _validate_egress(net: dict) -> list[str]:
     errors.extend(_validate_apex_coverage(
         hosts, policy_hosts, "policy",
         "So the apex is allowlisted and inspected with NO method or path rules "
-        "applied — a restriction you believe is in force and is not."))
+        "applied — a restriction you believe is in force and is not.",
+        self_allowlisting=True))
     errors.extend(_validate_apex_coverage(
         hosts, http2_hosts, "http2",
         "So the apex is offered `http/1.1` alone while the names under it keep "

@@ -1,13 +1,14 @@
 # ADR 008: VM egress is inspected transparently, and terminated by default
 
-**Status:** **Accepted. Partly implemented** — the transparent path and the
-termination are both in; the policy the termination exists to carry is not.
+**Status:** **Accepted. Implemented in tree, unverified on hardware** — the
+transparent path, the termination, and the policy the termination exists to
+carry are all in; none of the policy work has run on a KVM host.
 Originally recorded ahead of the work, because
 `007-per-workload-credential-broker.md` is an accepted decision that assumes
 this one, and an accepted record resting on an undecided premise is the wrong
 order.
 
-**Date:** 2026-08-16. Status updated 2026-08-26.
+**Date:** 2026-08-16. Status updated 2026-08-27.
 
 **What has shipped.** Decisions 1, 6, 7, 8, 9 and 10: the uid-keyed transparent
 redirect on 80 and 443 with no guest-side proxy variables, both address
@@ -27,29 +28,51 @@ but the one the session's certificate was minted for is answered `421`.
 
 Decision 1's non-HTTP arm is in as well: a terminated connection whose first
 bytes do not begin a request line is closed rather than answered, since an HTTP
-response written into a protocol that is not HTTP is worse than silence. What
-is deferred with the policy is the distinguishable log line advising `splice`
-and the per-host figure split by whether a `policy` entry named the host — the
-split is the value, and `policy` does not exist yet.
+response written into a protocol that is not HTTP is worse than silence.
 
-**What has not.** The POLICY, which is what termination was for:
+**Built, and not yet run on hardware.** Decision 5's method and path matching,
+as `[[vm.network.policy]]`, with the three keys the rest of it needed:
 
-- **Decision 5's method and path matching.** The only thing a terminated request
-  is checked against today is the same `hosts` allowlist the spliced path used,
-  applied per request instead of per connection. That is a real gain and it is
-  not the decision. Its *normalisation* half is in ahead of it, and on purpose:
-  the target is percent-decoded, dot-resolved and slash-collapsed, and the
-  normalised form is what goes upstream, so the string a `paths` rule will be
-  written against is already the string the origin acts on. An encoded `/` is
-  refused rather than read either way.
-- **Decision 2's written `reason` for a splice.** `tls = "splice"` is accepted
-  as a bare value, so config review still cannot distinguish "spliced because it
-  must be" from "spliced because nobody tried" — which is the exact sentence
-  decision 2 gives as its justification.
+- **`[[vm.network.policy]]`** — `methods` and `paths` per host, a cross product
+  inside one entry, entries unioning so file order cannot change what is
+  allowed. A host any entry matches is governed by those entries ALONE; `hosts`
+  contributes no rules to it. A policy entry allowlists its own host, so a
+  workload's whole allowlist may be written as policy entries.
+- **`[[vm.network.splice]]`** — the per-host form of `tls = "splice"`, carrying
+  a required `reason`. This is what closes most of decision 2's complaint: the
+  hatch an operator should reach for first now cannot be opened without saying
+  why. `tls = "splice"` remains a bare value with no `reason`, and remains the
+  whole-workload hatch of last resort.
+- **`[[vm.network.http2]]`** — every terminated host is offered `http/1.1`
+  alone, which is what lets `methods`, `paths` and the `Host` binding work on
+  plain text with no HPACK decoder anywhere. This key is the opt-out, and it is
+  a HOLE rather than a protocol setting: a host listed here is relayed at the
+  frame level and enforced by its name alone. It carries a `reason` for that
+  reason, and `validate` refuses it beside a `policy` or a `splice` entry.
+  Where `splice` works it is the better choice — both leave enforcement at the
+  server name, and `splice` additionally returns the host its end-to-end TLS
+  and needs no CA in the guest.
 
-Until those land, `Given up` describes a cost this design has chosen to pay and
-has paid only in part, and the per-path properties under `Consequences` are the
-argument for the remaining work rather than a description of the host.
+With `policy` in place, the two figures deferred with it are in too: the
+non-HTTP refusal now carries a distinguishable log line naming
+`[[vm.network.splice]]`, and a per-host figure split by whether a `policy`
+entry named the host — the split is the value, and the second half is two
+lines of remedy rather than one, because `validate` refuses `splice` and
+`policy` on the same host. `workloadctl diagnose` prints both, along with the
+`Host`-binding count split into its two readings.
+
+None of this has run on a KVM host yet. Every claim above is a claim about the
+tree and its unit gates; the runtime rung and the enforcing-host pass are the
+things that turn it into a claim about a machine.
+
+**What has not.** Decision 2's written `reason` for a WHOLE-WORKLOAD splice.
+`tls = "splice"` is still accepted as a bare value, so config review cannot
+distinguish "spliced because it must be" from "spliced because nobody tried" on
+the mode — only on the per-host entries.
+
+Until that lands, `Given up` describes a cost this design has chosen to pay and
+has paid nearly in full, and the per-path properties under `Consequences` are a
+description of the tree awaiting a description of the host.
 
 This split is deliberate rather than a stall: the transparent path is what makes
 the guest's cooperation irrelevant, and it is worth having on its own before a

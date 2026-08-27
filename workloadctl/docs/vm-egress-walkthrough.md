@@ -230,22 +230,52 @@ Then the paths that don't work, which are the point:
   `splice` there is no session to say it in, so the connection is dropped after
   the ClientHello is read and the guest cannot tell that from the host being
   down.
+- **The guest asks an allowlisted host for something `policy` does not permit.**
+  A second `403`, and deliberately a different one: it names the method and the
+  path rather than the host, because the host *is* on the list and an operator
+  told otherwise goes looking in the wrong file. Counted apart, under *not
+  permitted by policy*.
 - **The guest speaks something other than HTTP over 443.** A database wire
-  protocol, a tunnel, HTTP/2 — under `inspect` the inspector is the one reading,
-  and bytes that do not begin a request line get the connection **closed**,
-  counted per host under *not HTTP*. Under `splice` those bytes went through
-  untouched. That per-host figure is the list of workloads to move to `splice`.
-- **The guest asks for a host not on the list, by name.** It does not get that
-  far: the responder answers only for names policy knows about, so the lookup
-  fails first. That is a second, earlier refusal than the inspector's.
+  protocol, a tunnel, raw HTTP/2 on a host nothing opted in — under `inspect`
+  the inspector is the one reading, and bytes that do not begin a request line
+  get the connection **closed**, counted per host under *not HTTP*. Under
+  `splice` those bytes went through untouched. That per-host figure is the list
+  of HOSTS to give a `[[vm.network.splice]]` entry — one host, not the whole
+  workload; `tls = "splice"` gives up far more than the one host asked for.
+  The figure comes in two halves: a host a `[[vm.network.policy]]` entry names
+  is counted separately, because splicing it also means DELETING that entry —
+  `validate` refuses a host that is in both.
 
-That second refusal has a trap in it. The patterns are fnmatch, not a DNS suffix
+  A host in `[[vm.network.http2]]` is the one exception, and it is checked the
+  other way round: it must open with the HTTP/2 connection preface, its first
+  frame must be SETTINGS on stream 0, and the origin must have selected `h2`
+  as well — or it is refused under *not HTTP/2*, with the same remedy. Without
+  those checks the key would mean *exempt from policy* rather than *speaks h2*,
+  reachable by writing different first bytes.
+
+There is no earlier, DNS-shaped refusal to add to that list, and it is worth
+saying so because the shape invites the assumption. The responder synthesises
+**unconditionally**: every name it is asked about that is not in its static map
+is answered with the inspector's address, listed or not. It reads the lists only
+to *count* — a lookup for a name on none of them is the tunnelling signature and
+is recorded as one. So the guest always resolves, always connects, and always
+learns its answer from the inspector rather than from a failed lookup. A
+responder that refused unlisted names would be a different design, and would
+hand a guest a cheap oracle for which names are on the list.
+
+The allowlist match has a trap in it. The patterns are fnmatch, not a DNS suffix
 match, so `*.fedoraproject.org` requires something before the dot and does **not**
 cover the bare `fedoraproject.org`. On the VM above, `download.fedoraproject.org`
 is reached and `fedoraproject.org` is refused — with a 403 identical to the one
 an entirely unlisted host gets. Nothing distinguishes "you did not allowlist this"
 from "your pattern did not reach as far as you thought". List the apex separately
 when you want both.
+
+The same trap bites harder one key along, which is why `validate` refuses it
+there: a `[[vm.network.policy]]` entry for `*.example.com` does not govern
+`example.com`, so an apex reachable through `.hosts` would be inspected with no
+method or path rules applied at all — a restriction you believe is in force and
+is not. That is an error, not a warning.
 
 Widening by port instead — "let this uid reach 443 anywhere" — was the obvious
 alternative to rule 17 and is fatal: it is precisely the bypass rule 19 exists to

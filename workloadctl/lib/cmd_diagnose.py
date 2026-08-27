@@ -1332,18 +1332,26 @@ def _not_http_fragments(status) -> list[str]:
     out = []
     plain = totals.get(VM_DROP_NOT_HTTP)
     if isinstance(plain, int) and plain:
-        hosts = _named_hosts(per_host.get(VM_DROP_NOT_HTTP))
+        # Guarded the way _binding_fragments guards its own, and for the reason
+        # that half already knew: a total with no map behind it renders `()`,
+        # an empty parenthesis where the operator is looking for the host. It
+        # takes a document whose two halves disagree to get here, so the honest
+        # thing is the sentence without the list rather than a blank where the
+        # list was promised.
+        where = f" ({hosts})" if (hosts := _named_hosts(
+            per_host.get(VM_DROP_NOT_HTTP))) else ""
         out.append(
             f"{plain} connection(s) were closed because the host did not speak "
-            f"HTTP ({hosts}) — if that is what those hosts really are, each "
+            f"HTTP{where} — if that is what those hosts really are, each "
             f"needs a [[vm.network.splice]] entry to pass through inspected by "
             f"name instead")
     governed = totals.get(VM_DROP_NOT_HTTP_POLICY)
     if isinstance(governed, int) and governed:
-        hosts = _named_hosts(per_host.get(VM_DROP_NOT_HTTP_POLICY))
+        where = f" ({hosts})" if (hosts := _named_hosts(
+            per_host.get(VM_DROP_NOT_HTTP_POLICY))) else ""
         out.append(
             f"{governed} connection(s) were closed for not speaking HTTP on "
-            f"hosts a [[vm.network.policy]] entry names ({hosts}) — those "
+            f"hosts a [[vm.network.policy]] entry names{where} — those "
             f"method and path rules CAN NEVER RUN. Splicing such a host means "
             f"deleting its policy entry too: a host in both `splice` and "
             f"`policy` is a validate error")

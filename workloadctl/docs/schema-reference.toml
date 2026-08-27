@@ -687,10 +687,13 @@ name = "schema-reference"
 # sibling you narrowed, while the file reads as if it were stricter.
 #
 # The apex trap is here too and is worse than in .hosts: "*.api.example.com"
-# does not constrain "api.example.com". If .hosts allowlists both an apex and
-# its wildcard and a policy entry names only the wildcard, that is an ERROR —
-# the apex would stay allowlisted and inspected with no rules applied, which is
-# a hole rather than an outage.
+# does not constrain "api.example.com". If .hosts allowlists an apex and the
+# only entry naming it is the wildcard under it, that is an ERROR — the apex
+# would stay allowlisted and inspected with no rules applied, which is a hole
+# rather than an outage. Note that .hosts need not mention the wildcard for
+# this to bite: an entry allowlists its own host, so
+# hosts = ["example.com"] beside a lone "*.example.com" entry is the ordinary
+# way to write it, and is exactly the shape that leaves the apex unconstrained.
 #
 # `paths` matches the path ALONE; the query string is not part of it, so
 # paths = ["/v1/messages"] still permits "/v1/messages?stream=true".
@@ -728,11 +731,17 @@ name = "schema-reference"
 # the connection terminated and logged. This key exists so that an HPACK
 # decoder has somewhere to land later, at which point it stops being a bypass.
 #
-# A connection here must actually SPEAK h2: it must open with the HTTP/2
-# connection preface and continue to parse as frames, or it is refused with the
-# same message and the same remedy as a host that is not speaking HTTP at all.
-# Without that the entry would mean "exempt from policy" rather than "speaks
-# h2", reachable by writing different first bytes.
+# A connection here must actually SPEAK h2, on BOTH legs. The guest must open
+# with the HTTP/2 connection preface, its first frame must be SETTINGS on
+# stream 0, and the stream must keep parsing as frames; the origin must have
+# selected `h2` in the handshake. Any of those failing is refused with the same
+# message and the same remedy as a host that is not speaking HTTP at all.
+# Without the guest half the entry would mean "exempt from policy" rather than
+# "speaks h2", reachable by writing different first bytes. Without the origin
+# half a host listed here by mistake would have the guest's preface relayed
+# into an HTTP/1.1 server, and fail as garbage no figure names — an ALPN offer
+# binds nobody, and a server that speaks only HTTP/1.1 completes the handshake
+# selecting nothing rather than refusing it.
 #
 # `host` is an fnmatch pattern like .hosts, with the same apex trap. An entry
 # matching no allowlisted name is an ERROR. So is an entry for a host that also

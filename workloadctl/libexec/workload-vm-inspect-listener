@@ -2540,6 +2540,42 @@ class Listener:
                 reason = self._dial_failure_reason(host)
                 refusal = (reason, 502, "Bad Gateway",
                            f"{host} could not be reached: {exc}")
+            else:
+                # AND THE ORIGIN HAS TO HAVE TAKEN THE OFFER. ALPN_H2 says at
+                # length that an offer binds nobody: a server speaking only
+                # HTTP/1.1 completes this handshake and selects NOTHING, with
+                # no alert of any kind. Unchecked, the guest's connection
+                # preface is relayed into an HTTP/1.1 server and the session
+                # fails as unattributable garbage -- while DROP_NOT_H2 cannot
+                # fire from the other side, because the guest is speaking h2
+                # perfectly and it is the ENTRY that is wrong.
+                #
+                # The guest half of this key is checked exhaustively -- preface,
+                # first frame, framing, alignment -- precisely so that
+                # [[vm.network.http2]] means SPEAKS H2 rather than EXEMPT.
+                # Leaving the origin half unchecked settles that question on one
+                # side of a relay whose entire content is the other side's
+                # protocol, and hands the operator a broken host with no figure
+                # naming it. One call, and it is the same reason and the same
+                # remedy as every other way this key can be wrong.
+                if h2 and upstream.sock.selected_alpn_protocol() != "h2":
+                    # Closed HERE rather than left to the refusal branch, which
+                    # has never had an upstream to close: every other refusal
+                    # above is taken before the dial or by its failure. Keeping
+                    # that invariant true is cheaper than a second close on a
+                    # path where a leak is one verified socket per connection,
+                    # owned by the workload uid, in a process the guest dials
+                    # at will.
+                    upstream.sock.close()
+                    upstream = None
+                    refusal = (
+                        DROP_NOT_H2, 502, "Bad Gateway",
+                        f"{host} is in [[vm.network.http2]] but did not select "
+                        f"h2 for this connection, so there is no HTTP/2 session "
+                        f"to relay. Either it does not speak h2 -- drop the "
+                        f"entry and let it be inspected as HTTP/1.1 -- or it "
+                        f"cannot take this workload's CA, and belongs in "
+                        f"[[vm.network.splice]]")
         leaf = None
         try:
             # `denied` picks the CACHE, not the disposition: an allowlisted host
@@ -3496,8 +3532,10 @@ class Listener:
                 # that has been read off the kernel and decrypted leaves nothing
                 # for the kernel to report, so a relay that only ever selected
                 # would sit idle holding a complete frame until the idle timeout
-                # cut it. Reachable only on the terminated plane, where a
-                # `101` hands an upgraded TLS connection to this loop.
+                # cut it. Reachable on the terminated plane in two ways now: a
+                # `101` handing an upgraded TLS connection to this loop, and an
+                # [[vm.network.http2]] host, where BOTH legs are TLS and every
+                # frame arrives through an engine.
                 buffered = [s for s in (client, upstream)
                             if getattr(s, "pending", None) and s.pending()]
                 if buffered:

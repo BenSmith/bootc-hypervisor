@@ -2346,6 +2346,54 @@ class TestRung2Schema(unittest.TestCase):
             "policy": [{"host": "*.example.com", "methods": ["GET"],
                         "paths": ["/*"]}]}), [])
 
+    def test_the_apex_trap_bites_with_the_wildcard_only_in_policy(self):
+        """THE SPELLING AN OPERATOR ACTUALLY WRITES, and the one that was
+        silent. A policy entry allowlists its own host, so putting the
+        wildcard in .hosts as well is redundant -- the natural file is an apex
+        in .hosts beside a lone wildcard entry, and the apex is then reachable
+        with no method or path rules at all.
+
+        The rule that missed this looked for the wildcard IN .hosts, which
+        made it fire only on the redundant form. `policy` is also the one key
+        where nothing else catches it: `splice` and `http2` entries that match
+        no allowlisted name are refused as dead, and a `policy` entry matching
+        none is the ordinary way to write one."""
+        errors = self._egress({
+            "hosts": ["example.com"],
+            "policy": [{"host": "*.example.com", "methods": ["GET"],
+                        "paths": ["/*"]}]})
+        self.assertTrue(any(".policy" in e and "does not cover the apex" in e
+                            for e in errors), errors)
+
+    def test_an_apex_governed_only_by_its_own_entry_is_fine(self):
+        """No .hosts at all: both names are allowlisted by their own entries
+        and both are constrained, which is the configuration §3 documents."""
+        self.assertEqual(self._egress({
+            "policy": [{"host": "*.example.com", "methods": ["GET"],
+                        "paths": ["/*"]},
+                       {"host": "example.com", "methods": ["GET"],
+                        "paths": ["/y"]}]}), [])
+
+    def test_a_dead_splice_entry_is_reported_once_not_twice(self):
+        """`*.example.com` spliced with only the apex allowlisted is DEAD --
+        it matches no allowlisted name -- and that is the error to give. The
+        apex message would be a second sentence saying a different thing about
+        the same line, so it is suppressed: unlike `policy`, a `splice` entry
+        does not allowlist its own host, so there is no configuration here for
+        the apex rule to be describing."""
+        errors = self._egress({
+            "hosts": ["example.com"],
+            "splice": [{"host": "*.example.com", "reason": "pins a cert"}]})
+        self.assertEqual(len(errors), 1, errors)
+        self.assertIn("matches no allowlisted name", errors[0])
+
+    def test_a_dead_http2_entry_is_reported_once_not_twice(self):
+        errors = self._egress({
+            "hosts": ["example.com"],
+            "http2": [{"host": "*.example.com", "reason": "gRPC"}]})
+        self.assertEqual(len(errors), 1, errors)
+        self.assertIn("matches no allowlisted name", errors[0])
+
     def test_a_wildcard_splice_entry_over_an_allowlisted_apex_is_refused(self):
         """The same trap, the other consequence: the apex is INSPECTED, so a
         host spliced precisely because its client cannot take our CA breaks at

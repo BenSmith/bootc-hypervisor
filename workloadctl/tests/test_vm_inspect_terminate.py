@@ -1588,6 +1588,102 @@ class TestAnHttp2HostIsRelayedAtFrameLevel(TerminationCase):
         per_host = listener.status()["per_host"][mod.DROP_NOT_H2]
         self.assertEqual(dict(per_host).get("localhost"), 1, per_host)
 
+    # --- and the ORIGIN half of the same question ---
+
+    def _http11_origin(self):
+        """An origin listed in `http2` that offers `http/1.1` and nothing else.
+
+        The operator's mistake, and the one an ALPN offer cannot report by
+        itself: ALPN_H2 says at length that a server speaking only HTTP/1.1
+        COMPLETES this handshake and selects nothing, with no alert. So the
+        fixture is not exotic -- it is the ordinary web server somebody added
+        to [[vm.network.http2]] by mistake.
+        """
+        origin = _Origin(self.origin_pem, alpn=("http/1.1",))
+        self.addCleanup(origin.close)
+        return origin
+
+    def test_an_origin_that_did_not_select_h2_is_refused_not_relayed(self):
+        """The guest half of this key is checked exhaustively; unchecked, the
+        origin half would have the guest's preface relayed into an HTTP/1.1
+        server and fail as garbage no figure names.
+
+        DROP_NOT_H2 cannot fire from the other side here: the guest is
+        speaking h2 perfectly, and it is the ENTRY that is wrong.
+        """
+        mod = _mod()
+        origin = self._http11_origin()
+        listener, out = self._listener(mod, origin, http2=("localhost",))
+        back, _, _ = self._h2_exchange(
+            listener, origin, mod.H2_PREFACE + self.SETTINGS)
+        self.assertEqual(listener.status()["drop_reasons"][mod.DROP_NOT_H2], 1)
+        self.assertEqual(origin.requests, [],
+                         "the guest's preface must never reach a server that "
+                         "did not select h2")
+        self.assertIn("bump", out.getvalue())
+
+    def test_the_refusal_names_both_ways_out(self):
+        """Drop the entry, or move the host to splice. Neither is guessable
+        from `502`, and this is the only place either is said."""
+        mod = _mod()
+        origin = self._http11_origin()
+        listener, _ = self._listener(mod, origin, http2=("localhost",))
+        back, _, _ = self._h2_exchange(
+            listener, origin, mod.H2_PREFACE + self.SETTINGS)
+        text = back.decode("latin-1")
+        self.assertIn("502", text)
+        self.assertIn("did not select h2", text)
+        self.assertIn("[[vm.network.http2]]", text)
+        self.assertIn("[[vm.network.splice]]", text)
+
+    def test_the_answer_is_readable_because_the_guest_leg_stays_http11(self):
+        """A refusal is an HTTP/1.1 response, so the guest leg must not have
+        been offered h2 for it -- otherwise the one thing this connection was
+        going to say arrives in a protocol it just advertised it was not."""
+        mod = _mod()
+        origin = self._http11_origin()
+        listener, _ = self._listener(mod, origin, http2=("localhost",))
+        back, error, alpn = self._h2_exchange(
+            listener, origin, mod.H2_PREFACE + self.SETTINGS)
+        self.assertIsNone(error)
+        self.assertIsNone(alpn, "the guest offered h2 alone and must have been "
+                                "answered with no selection, not with h2")
+        self.assertTrue(back.startswith(b"HTTP/1.1 502"), back[:40])
+
+    def test_the_refused_origin_leg_is_closed(self):
+        """The refusal branch has never had an upstream to close -- every
+        other refusal is taken before the dial or by its failure -- so this
+        one closes its own, and a later tidy-up moving that into the branch
+        would leak a verified socket per connection."""
+        mod = _mod()
+        origin = self._http11_origin()
+        listener, _ = self._listener(mod, origin, http2=("localhost",))
+        legs = []
+        real = listener._dial_upstream_tls
+
+        def capture(host, *args):
+            leg = real(host, *args)
+            legs.append(leg)
+            return leg
+
+        listener._dial_upstream_tls = capture
+        self._h2_exchange(listener, origin, mod.H2_PREFACE + self.SETTINGS)
+        self.assertEqual(len(legs), 1)
+        self.assertEqual(legs[0].sock.fileno(), -1,
+                         "the origin leg was left open by the refusal")
+
+    def test_a_host_not_in_http2_is_unaffected_by_the_check(self):
+        """The check is asked only of an `http2` host. An ordinary terminated
+        host facing an origin that selects nothing is the COMMON case -- most
+        origins offer h2 and take our http/1.1 by not selecting -- and a check
+        that fired there would refuse most of the web."""
+        mod = _mod()
+        origin = self._http11_origin()
+        listener, _ = self._listener(mod, origin)
+        self._exchange(listener, origin)
+        self.assertEqual(
+            listener.status()["drop_reasons"][mod.DROP_NOT_H2], 0)
+
 
 class TestWhatTheStatusFileCarriesFromARealExchange(TerminationCase):
     """Rung 3 T8, through the seam rather than over the counters. A figure that
