@@ -343,6 +343,71 @@ or not speaking HTTP over 443 is refused. `tls = "splice"` is the older, weaker
 property and stays fully supported — the same bytes replayed upstream, nothing
 decrypted, no CA, and the name checked once per connection.
 
+Three per-host keys sit under that default, and **two of the three are holes**
+— which is the thing to carry away from them, because each reads like a
+protocol setting:
+
+- **`[[vm.network.splice]]`** exempts one host from termination: its name is
+  read from the ClientHello, matched against `.hosts`, and its own bytes are
+  relayed with no key of ours in the session. Reach for it first when a client
+  cannot be made to trust the CA (it pins, or it verifies a signed transparency
+  log), or when the thing on 443 is not HTTP.
+- **`[[vm.network.http2]]`** exempts one host from the `http/1.1`-only ALPN
+  offer. That downgrade is what lets everything else work without an HPACK
+  decoder — an HTTP/1.1 head is plain text, so the `Host` binding and the
+  method/path rules apply to *every* inspected host rather than to a subset.
+  A listed host is relayed at the frame level and enforced by name alone.
+  **Prefer `.splice` wherever it works**: both stop at the server name, and
+  splice additionally gives the host its end-to-end TLS back and needs no CA in
+  the guest. The key exists so an HPACK decoder has somewhere to land later.
+- **`[[vm.network.policy]]`** is the only one that *tightens*: `.hosts` says
+  which hosts, this says what may be asked of them. `methods` and `paths`
+  inside one entry are a cross product; to vary methods by path, repeat the
+  host. Two composition rules do the damage. **A host any entry matches is
+  governed by policy alone** — `.hosts` allowlists it and contributes no rules,
+  deliberately, so that a wildcard written for an unrelated reason cannot
+  contribute "any method, any path" to a host someone restricted. And
+  **entries union**, by pattern rather than by identical strings, so ordering
+  is irrelevant and there is **no way to subtract**: a narrow entry cannot
+  carve an exception out of a wide one, and the file does not show what a name
+  may do without collecting every entry whose pattern matches it. The trap
+  that follows: an omitted `methods` or `paths` means *any*, which is safe for
+  a lone entry and defeats every narrowed sibling under union — so where more
+  than one entry can match a host, all of them must state both keys.
+
+`splice` and `http2` each carry a required `reason`, because a hole should say
+who opened it and why. All three are fnmatch patterns with the same **apex
+trap** as `.hosts`: `*.example.com` does not cover `example.com`. Under
+`.policy` that trap is worse and is caught as an error: an allowlisted apex
+whose only entry is the wildcard beneath it would stay allowlisted and
+inspected *with no rules applied*, which is a hole rather than an outage.
+
+An entry matching no allowlisted name is an **error, not a no-op** — it means someone
+believes a host is exempt that is not, and that failure would otherwise arrive
+as a TLS error rather than as a policy message. `http2` and `policy` on one
+host is likewise an error (the rules could never run), as is `http2` with
+`splice` (a spliced connection is never terminated, so no ALPN of ours is
+offered on it).
+
+The **h2 exemption is checked on both legs**, and neither half is optional.
+Without the guest half the key would mean "exempt from policy" rather than
+"speaks h2", reachable by writing different first bytes. Without the origin
+half a host listed by mistake would have the guest's preface relayed into an
+HTTP/1.1 server and fail as garbage no figure names — an ALPN offer binds
+nobody, and a server that speaks only HTTP/1.1 completes the handshake
+selecting nothing, with no alert of any kind.
+
+**The drop reasons split where a merged figure would mislead**, and the splits
+are the reason `diagnose` can tell one operator error from another: `not HTTP`
+against `not HTTP (policy entry)` separates "this host is not speaking HTTP"
+from "you wrote a policy entry for a host that is not", and `host does not
+match the server name` against `… (allowlisted)` separates an ordinary
+misdirect from one where the *name is on the allowlist* — a configuration
+error rather than a guest one. `not permitted by policy` and `not HTTP/2` are
+the two new refusals. The keys are pinned against the listener's own constants
+in `tests/test_vm_inspect_diagnose.py`; what no static test can say is whether
+anything ever *increments* them, since a counter that is declared, exported,
+pinned and never written reads 0 and 0 passes every assertion.
 Through rung 1 this was a per-workload tinyproxy the guest was *configured* to
 use via `https_proxy` at an advertised literal. That is gone. Its weakness was
 never the filtering, it was the configuring: a proxy is advisory, so a process
@@ -380,8 +445,14 @@ Non-obvious things that hold the replacement together:
   was under the proxy: an early denial changes which branch runs, so the harvest
   measures one sample. Both domains were finished by iterating under
   *enforcing*, one gate per round — the opposite of how `wlvfsd_t` was derived.
-  `tests/manual/inspect_rig.py` is the seam a unit test cannot reach (two
-  throwaway guests, 37 assertions, last green 2026-08-25 under enforcing).
+  `tests/manual/inspect_rig.py` is the seam a unit test cannot reach for the
+  redirect, the domains and the cgroup elements (two throwaway guests, 37
+  assertions, last green 2026-08-25 under enforcing);
+  `tests/manual/policy_rig.py` is the seam for the per-host keys and the split
+  counters, which it drives against one real listener with real origins (42
+  assertions, last green 2026-08-27). Both were break-verified — the rung-4
+  lists emptied one at a time on a throwaway copy — because a rig that asserts
+  nothing passes just as loudly as one that works.
 
 ### The credential broker
 
