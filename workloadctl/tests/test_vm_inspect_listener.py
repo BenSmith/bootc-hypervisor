@@ -562,6 +562,46 @@ class TestPolicyLoading(unittest.TestCase):
         policy = mod.load_policy(path)
         self.assertEqual(policy.internal, ("nas.example.com",))
 
+    def test_the_document_carries_the_policy_entries_through(self):
+        """Both halves against each other, not against a literal: a listener
+        reading a key the helper does not write governs nothing while the
+        config says every request is constrained."""
+        mod = _mod()
+        path = self._write(json.dumps(vm_inspect_policy({
+            "hosts": ["a.example"],
+            "policy": [{"host": "a.example", "methods": ["GET"],
+                        "paths": ["/v2/*"]}]})))
+        entry, = mod.load_policy(path).policy
+        self.assertEqual(entry.host, "a.example")
+        self.assertEqual(entry.methods, ("GET",))
+        self.assertEqual(entry.paths, ("/v2/*",))
+
+    def test_an_absent_key_survives_the_LOAD_as_absent(self):
+        """null and [] are different answers and the loader must keep them
+        apart, not only the writer.
+
+        `tuple(methods or ())` reads correct and turns every unconstrained
+        entry into one that permits NOTHING. That fails closed, so it fails
+        quietly: the workload reaches none of its hosts, every unit test about
+        the matcher still passes because the matcher was never wrong, and the
+        only symptom is a guest that gets a 403 for a request its config
+        permits.
+        """
+        mod = _mod()
+        path = self._write(json.dumps(vm_inspect_policy({
+            "policy": [{"host": "a.example"}]})))
+        entry, = mod.load_policy(path).policy
+        self.assertIsNone(entry.methods)
+        self.assertIsNone(entry.paths)
+        self.assertTrue(entry.permits("DELETE", "/anything"))
+
+    def test_a_malformed_policy_entry_is_an_error(self):
+        mod = _mod()
+        with self.assertRaises(ValueError):
+            mod.load_policy(self._write('{"hosts": [], "policy": "a.example"}'))
+        with self.assertRaises(ValueError):
+            mod.load_policy(self._write('{"hosts": [], "policy": [{"m": 1}]}'))
+
     def test_a_missing_document_is_an_error_not_an_empty_policy(self):
         """An empty `hosts` list is a legal configuration, so a listener that
         fell back to one could not tell "the operator allowed nothing" from
@@ -948,8 +988,11 @@ class _CleartextRig(unittest.TestCase):
         b.settimeout(2.0)
         return a, b
 
-    def _run(self, hosts, request_bytes, responses=()):
+    def _run(self, hosts, request_bytes, responses=(), policy=None):
         """Serve `request_bytes` under a policy of `hosts`.
+
+        `policy` overrides the whole document, for the cases whose subject
+        is a key other than `hosts`.
 
         Returns (log, what the guest was sent, [(dialled address, bytes the
         upstream received)]). Each dialled upstream is a socketpair whose far
@@ -959,7 +1002,8 @@ class _CleartextRig(unittest.TestCase):
         mod = _mod()
         out = io.StringIO()
         listener = mod.Listener(
-            [], out, policy=mod.Policy(tls="splice", hosts=tuple(hosts)))
+            [], out,
+            policy=policy or mod.Policy(tls="splice", hosts=tuple(hosts)))
         ours, guest = self._pair()
         guest.sendall(request_bytes)
         guest.shutdown(socket.SHUT_WR)
@@ -1019,6 +1063,158 @@ def _read_all(sock):
             out += chunk
     except (TimeoutError, OSError):
         return out
+
+
+class TestPolicyEnforcement(_CleartextRig):
+    """[[vm.network.policy]] applied to a real request, over real sockets.
+
+    The cleartext plane because it is the same request loop the terminated
+    plane runs -- `_serve_one_request` is shared -- and it can be driven
+    without a handshake.
+    """
+
+    def _policy(self, hosts, *entries):
+        mod = _mod()
+        return mod.Policy(
+            tls="splice", hosts=tuple(hosts),
+            policy=tuple(mod.VmPolicyEntry(host=h, methods=m, paths=p)
+                         for h, m, p in entries))
+
+    def _get(self, target="/", host="a.example", method="GET"):
+        return (f"{method} {target} HTTP/1.1\r\nHost: {host}\r\n"
+                f"\r\n").encode()
+
+    def test_a_permitted_method_and_path_is_forwarded(self):
+        log, _, dialled = self._run(
+            [], self._get("/v2/thing"), (_OK,),
+            policy=self._policy([], ("a.example", ("GET",), ("/v2/*",))))
+        self.assertIn("forward", log)
+        self.assertEqual(len(dialled), 1)
+
+    def test_a_method_no_entry_permits_is_a_403(self):
+        log, sent, dialled = self._run(
+            [], self._get("/v2/thing", method="DELETE"),
+            policy=self._policy([], ("a.example", ("GET",), ("/v2/*",))))
+        self.assertIn("not permitted by policy", log)
+        self.assertIn(b"403", sent)
+        self.assertEqual(dialled, [],
+                         "a refused request must never reach an origin")
+
+    def test_a_path_no_entry_permits_is_a_403(self):
+        log, sent, dialled = self._run(
+            [], self._get("/admin"),
+            policy=self._policy([], ("a.example", ("GET",), ("/v2/*",))))
+        self.assertIn("not permitted by policy", log)
+        self.assertIn(b"403", sent)
+        self.assertEqual(dialled, [])
+
+    def test_the_two_refusals_are_DISTINCT_reasons(self):
+        """An operator with one bucket for the two reads a working allowlist
+        as a broken one, and a guest told `not on the allowlist` about a host
+        that plainly is goes looking in the wrong file."""
+        policy = self._policy(["b.example"],
+                              ("a.example", ("GET",), ("/v2/*",)))
+        refused, sent_refused, _ = self._run(
+            [], self._get("/admin"), policy=policy)
+        unlisted, sent_unlisted, _ = self._run(
+            [], self._get("/", host="c.example"), policy=policy)
+        self.assertIn("not permitted by policy", refused)
+        self.assertNotIn("not allowlisted", refused)
+        self.assertIn("not allowlisted", unlisted)
+        self.assertNotIn("not permitted by policy", unlisted)
+        self.assertIn(b"egress policy", sent_refused)
+        self.assertIn(b"egress allowlist", sent_unlisted)
+
+    def test_a_policy_host_is_reachable_without_appearing_in_hosts(self):
+        """§3: a name in `policy` need not also appear in `hosts`. A listener
+        that admitted on `hosts` alone would refuse every host of a workload
+        whose entire allowlist is written as policy entries -- and report it as
+        `not allowlisted` for a name the file plainly carries."""
+        log, _, dialled = self._run(
+            [], self._get("/v2/x"), (_OK,),
+            policy=self._policy([], ("a.example", ("GET",), ("/v2/*",))))
+        self.assertNotIn("not allowlisted", log)
+        self.assertEqual(len(dialled), 1)
+
+    def test_hosts_does_not_union_into_policy_on_a_live_request(self):
+        """The composition rule, driven rather than asserted about a matcher.
+
+        `*.example` is in .hosts for an unrelated reason. Under the union
+        reading it contributes "any method, any path" to a.example and the
+        path restriction is gone -- with a 200 rather than a 403 and nothing
+        anywhere saying a rule stopped applying.
+        """
+        log, sent, dialled = self._run(
+            [], self._get("/admin"), (_OK,),
+            policy=self._policy(["*.example"],
+                                ("a.example", ("GET",), ("/v2/*",))))
+        self.assertIn("not permitted by policy", log)
+        self.assertIn(b"403", sent)
+        self.assertEqual(dialled, [])
+
+    def test_a_host_no_entry_matches_falls_back_to_hosts_with_no_rules(self):
+        log, _, dialled = self._run(
+            [], self._get("/anything", host="b.example"), (_OK,),
+            policy=self._policy(["b.example"],
+                                ("a.example", ("GET",), ("/v2/*",))))
+        self.assertIn("forward", log)
+        self.assertEqual(len(dialled), 1)
+
+    def test_paths_matches_the_path_alone_and_not_the_query(self):
+        """Both readings are defensible and silence picks the worse one:
+        matching the full target denies `/v1/messages?stream=true` for a reason
+        the operator cannot see anywhere in their config."""
+        log, _, dialled = self._run(
+            [], self._get("/v1/messages?stream=true", method="POST"), (_OK,),
+            policy=self._policy(
+                [], ("a.example", ("POST",), ("/v1/messages",))))
+        self.assertIn("forward", log)
+        self.assertEqual(len(dialled), 1)
+
+    def test_the_path_matched_is_the_NORMALISED_one(self):
+        """Rung 3 landed normalisation ahead of the matcher precisely for this:
+        `/v2/../admin` matches `/v2/*` as written and resolves at the origin to
+        `/admin`."""
+        log, sent, dialled = self._run(
+            [], self._get("/v2/../admin"),
+            policy=self._policy([], ("a.example", ("GET",), ("/v2/*",))))
+        self.assertIn("not permitted by policy", log)
+        self.assertIn(b"403", sent)
+        self.assertEqual(dialled, [])
+
+    def test_an_entry_with_neither_key_permits_anything_on_its_host(self):
+        """The single-entry shorthand, which still enforces Host binding and
+        the allowlist and nothing else."""
+        log, _, dialled = self._run(
+            [], self._get("/anything", method="DELETE"), (_OK,),
+            policy=self._policy([], ("a.example", None, None)))
+        self.assertIn("forward", log)
+        self.assertEqual(len(dialled), 1)
+
+    def test_entries_union_across_a_repeated_host(self):
+        policy = self._policy(
+            [], ("a.example", ("POST",), ("/v1/messages",)),
+            ("a.example", ("GET",), ("/v1/models", "/v1/models/*")))
+        for method, target in (("POST", "/v1/messages"),
+                               ("GET", "/v1/models/x")):
+            log, _, dialled = self._run(
+                [], self._get(target, method=method), (_OK,), policy=policy)
+            self.assertIn("forward", log, (method, target))
+        log, _, dialled = self._run(
+            [], self._get("/v1/models", method="POST"), policy=policy)
+        self.assertIn("not permitted by policy", log)
+        self.assertEqual(dialled, [])
+
+    def test_the_refusal_is_counted_under_its_own_reason(self):
+        mod = _mod()
+        out = io.StringIO()
+        listener = mod.Listener(
+            [], out, policy=self._policy(
+                [], ("a.example", ("GET",), ("/v2/*",))))
+        listener.counters.record_drop(mod.DROP_NOT_PERMITTED, "a.example")
+        snap = listener.counters.snapshot(open_now=0, refused=0)
+        self.assertEqual(snap["drop_reasons"][mod.DROP_NOT_PERMITTED], 1)
+        self.assertNotIn(mod.DROP_UNCLASSIFIED, snap.get("drop_reasons", {}))
 
 
 class TestCleartextAuthorisation(unittest.TestCase):

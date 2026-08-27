@@ -128,6 +128,7 @@ from vm import (
     VM_TLS_DEFAULT, LeafRefused, vm_ca_cert_path, vm_ca_key_path,
     vm_hostname_control_character, vm_hostname_match,
     vm_inspect_policy_path, vm_inspect_status_path, vm_normalise_hostname,
+    VmPolicyEntry, vm_policy_governs,
 )
 from vm_clock import vm_resync_guest_clock_if_skewed
 from vm_mint import MintFailed, MintThrottled, Minter
@@ -295,11 +296,43 @@ class Policy(NamedTuple):
     hosts: tuple
     internal: tuple = ()
     splice: tuple = ()
+    policy: tuple = ()
 
     @property
     def summary(self) -> str:
         return (f"tls={self.tls} hosts={len(self.hosts)} "
-                f"internal={len(self.internal)} splice={len(self.splice)}")
+                f"internal={len(self.internal)} splice={len(self.splice)} "
+                f"policy={len(self.policy)}")
+
+    def admits(self, host: str) -> bool:
+        """Whether this name is on a list at all -- the CONNECTION question.
+
+        Asked at the front of a TLS connection, where there is no request yet
+        and the only thing known is the name in the ClientHello. A `policy`
+        entry allowlists its own host (§3: a name in `policy` need not also
+        appear in `hosts`), so a workload whose entire allowlist is written as
+        policy entries has to be admitted here -- otherwise the connection dies
+        before the request the rules were written about ever exists, and the
+        operator sees `not allowlisted` for a host their file plainly names.
+        """
+        return (vm_hostname_match(host, self.hosts)
+                or bool(vm_policy_governs(host, self.policy)))
+
+    def permits(self, host: str, method: str, path: str) -> bool:
+        """Whether one request is authorised -- §3's composition rule.
+
+        A host ANY policy entry matches is governed by those entries alone and
+        `hosts` is not consulted for it; a host no entry matches is allowed by
+        `hosts` with no method or path constraint. The rule is not "union the
+        two lists", and the difference is the whole feature: under the union
+        reading one wildcard in `hosts` written for an unrelated reason
+        contributes "any method, any path" to every host it covers, silently
+        removing the restriction somebody wrote a policy entry for.
+        """
+        governing = vm_policy_governs(host, self.policy)
+        if governing:
+            return any(e.permits(method, path) for e in governing)
+        return vm_hostname_match(host, self.hosts)
 
     def splices(self, host: str) -> bool:
         """Whether this host is exempt from termination.
@@ -344,9 +377,28 @@ def load_policy(path):
     # vm_hostname_match normalises both sides at the point of comparison.
     # Normalising a pattern early is harmless today and would silently stop
     # being so the moment a pattern could carry something a hostname cannot.
+    entries = doc.get("policy") or []
+    if not isinstance(entries, list):
+        raise ValueError(f"{path}: 'policy' is not a list")
+    policy = []
+    for item in entries:
+        if not isinstance(item, dict) or not isinstance(item.get("host"), str):
+            raise ValueError(f"{path}: a 'policy' entry is not a table with a "
+                             f"host: {item!r}")
+        # None and [] are DIFFERENT and the document distinguishes them, so
+        # this must too: absent means any, empty would mean none. A `or ()`
+        # here would turn every unconstrained entry into one permitting
+        # nothing, which fails closed and therefore quietly -- the workload
+        # reaches nothing and every unit test still passes.
+        methods = item.get("methods")
+        paths = item.get("paths")
+        policy.append(VmPolicyEntry(
+            host=item["host"],
+            methods=None if methods is None else tuple(methods),
+            paths=None if paths is None else tuple(paths)))
     return Policy(tls=doc.get("tls") or VM_TLS_DEFAULT, hosts=tuple(hosts),
                   internal=tuple(vm_normalise_hostname(h) for h in internal),
-                  splice=tuple(splice))
+                  splice=tuple(splice), policy=tuple(policy))
 
 
 # --- the ClientHello peek ---
@@ -723,6 +775,17 @@ class Request(NamedTuple):
     expects_continue: bool
     wants_close: bool
     upgrade: str = ""   # the Upgrade value to re-emit, "" for an ordinary request
+
+    @property
+    def path(self) -> str:
+        """The target's path ALONE, which is what `paths` is matched against.
+
+        The query is deliberately not part of it (§3, and normalise_path says
+        so at length): matching the full target makes `paths = ["/v1/messages"]`
+        fail on `/v1/messages?stream=true`, a legitimate request denied for a
+        reason the operator cannot see anywhere in their config.
+        """
+        return self.target.partition("?")[0]
 
 
 class _Stream:
@@ -1617,6 +1680,7 @@ DROP_MISDIRECTED = "host does not match the server name"
 DROP_THROTTLED = "mint rationed"
 DROP_MINT_FAILED = "could not mint a leaf"
 DROP_NOT_HTTP = "not HTTP"
+DROP_NOT_PERMITTED = "not permitted by policy"
 
 DROP_REASONS = (
     DROP_NOT_ALLOWLISTED,
@@ -1633,6 +1697,7 @@ DROP_REASONS = (
     DROP_THROTTLED,
     DROP_MINT_FAILED,
     DROP_NOT_HTTP,
+    DROP_NOT_PERMITTED,
 )
 
 # The reasons that also get a PER-HOST figure, and the only ones that do.
@@ -2086,7 +2151,11 @@ class Listener:
                       f"ClientHello carries no server_name extension'")
             return
         host = vm_normalise_hostname(hello.server_name)
-        allowed = vm_hostname_match(host, self._policy.hosts)
+        # `admits`, not a bare `hosts` match: a [[vm.network.policy]] entry
+        # allowlists its own host, so a workload whose entire allowlist is
+        # written as policy entries would otherwise lose every connection at
+        # the front, before the request its rules were written about exists.
+        allowed = self._policy.admits(host)
         self.counters.record_hello(hello, allowed)
         # THE ALLOWLIST DECISION COMES FIRST, and the parenthesisation is what
         # says so. A name on the splice list and on no allowlist is refused,
@@ -2580,7 +2649,7 @@ class Listener:
                 client, conn, req, 421, "Misdirected Request",
                 f"this session was established for {pinned_host}, not "
                 f"{req.host}")
-        if not vm_hostname_match(req.host, self._policy.hosts):
+        if not self._policy.admits(req.host):
             # A denial IS speakable on 80, unlike 443 -- there is no session to
             # be inside, so the guest gets a real answer naming the host rather
             # than a connection that closed for reasons it cannot see.
@@ -2589,6 +2658,20 @@ class Listener:
             return self._refuse(
                 client, conn, req, 403, "Forbidden",
                 f"{req.host} is not on this workload's egress allowlist")
+        if not self._policy.permits(req.host, req.method, req.path):
+            # A SECOND refusal and a second reason, never merged into the one
+            # above. The host IS allowlisted -- the operator wrote it down on
+            # purpose -- and what was refused is the method or the path. An
+            # operator with one bucket for the two reads a working allowlist as
+            # a broken one, and a guest told `not on the allowlist` about a
+            # host that plainly is goes looking in the wrong file.
+            self.counters.record_drop(DROP_NOT_PERMITTED, req.host)
+            self._log(f"drop {where} host={req.host} method={req.method} "
+                      f"reason='not permitted by policy'")
+            return self._refuse(
+                client, conn, req, 403, "Forbidden",
+                f"{req.method} {req.path} is not permitted on {req.host} by "
+                f"this workload's egress policy")
         # An HTTP/1.0 request is the one we tell the origin to close (see
         # rebuild_request), so its upstream is opened for this request alone
         # and is not put in the map for the next one to find.
@@ -2826,7 +2909,10 @@ class Listener:
             return
         for value in _get_all(headers, "location"):
             target = redirect_host(value)
-            if target and not vm_hostname_match(target, self._policy.hosts):
+            # `admits`, not a `hosts` match: a redirect to a host named only
+            # by a `policy` entry is allowlisted, and a note saying otherwise
+            # would send the operator to add a name that is already there.
+            if target and not self._policy.admits(target):
                 self._log(f"note {where} host={req.host} reason='redirected to "
                           f"{target}, which is not allowlisted'")
 
