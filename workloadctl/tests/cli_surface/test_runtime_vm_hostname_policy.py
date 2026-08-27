@@ -35,13 +35,23 @@ plane is proven against a real guest; this suite proves the composition.
 
 WHY THE REFUSED PROBES DIAL A LITERAL AND SET THEIR OWN Host HEADER
 
-Because under a synthesising resolver an unlisted name does not resolve at all.
-That is a real property and it is asserted below on its own — but it is not the
-inspector's refusal, and a test that let DNS answer the question would pass with
-the inspector's allowlist emptied. So the refusal probes connect to an address
-the redirect catches and put the unlisted name in the Host header, which is the
-only way to put a name in front of the inspector that DNS declined to answer
-for.
+Not because DNS refuses the name — it does not, and this file used to say it
+did. Synthesis is UNCONDITIONAL: the responder answers every name it is asked
+about with the inspector's own address (lib/vm.py vm_resolve_policy, and the
+matching comment in libexec/workload-vm-resolve). `hosts` changes no answer it
+gives; the list is carried so unlisted queries can be COUNTED. The refusal is
+the listener's, and only the listener's.
+
+The probes dial a literal anyway, and it is worth being exact about what that
+buys now that it is not the only way in: it takes DNS out of the probe
+entirely. A probe that dialled the name would reach the same listener by the
+same redirect, but its failure would have two available explanations instead of
+one. Dialling an address the redirect catches and putting the name in the Host
+header leaves exactly one thing that can decide the answer.
+
+The DNS half is asserted on its own below, in the terms the design actually
+holds: every name resolves, all to one address, and the unlisted ones are
+counted.
 
 WHY THE UPSTREAM IS LOCAL AND THE NAMES ARE FAKE
 
@@ -59,6 +69,9 @@ inspector's upstream dial is subject to the internal-destination guard, and
 """
 
 import base64
+import ipaddress
+import json
+import time
 
 import pytest
 
@@ -92,6 +105,10 @@ ALLOWED = "wl-allowed.test"          # exact entry
 WILD_SUB = "sub.wl-wild.test"        # matches *.wl-wild.test
 WILD_APEX = "wl-wild.test"           # does NOT match *.wl-wild.test
 UNLISTED = "wl-denied.test"          # in no entry at all
+
+# The inspector reservation (RFC 2544 benchmarking space), spelled out for the
+# reason HTTP_PORT is. Every workload's listener address is a /32 inside it.
+INSPECT_NETWORK = ipaddress.ip_network("198.18.0.0/16")
 
 STUB_PORT = 80                       # what the inspector dials upstream
 STUB_PID = "/run/wl-rt-hostname-stub.pid"
@@ -241,16 +258,79 @@ def _http_status(target, dial: str, host_header: str) -> str:
     return parts[1] if len(parts) >= 2 and parts[1].isdigit() else line or "EMPTY"
 
 
-def _resolves(target, host: str) -> bool:
-    """Whether the guest's own resolver returns an address for `host`.
+def _resolved_address(target, host: str) -> str | None:
+    """The v4 address the guest's own resolver returns for `host`, or None.
 
     getent, not dig: the cloud image has no bind-utils and getent goes through
     the same stub the guest's real clients use.
+
+    Returns the ADDRESS rather than a bool because under this responder the
+    interesting question is never whether a name resolved — every name does —
+    but what it resolved TO. A bool cannot tell "answered with the inspector"
+    from "answered with something the guest could reach directly", and those
+    are the pass and the fail.
+
+    `getent ahostsv4` prints one line per socket type, all with the same
+    address in the first field:
+
+        198.18.1.0      STREAM wl-allowed.test
+        198.18.1.0      DGRAM
+        198.18.1.0      RAW
     """
     result = target.wl_exec(
         WORKLOAD, ["getent", "ahostsv4", host],
         sudo=True, check=False, timeout=60)
-    return result.rc == 0 and bool((result.stdout or "").strip())
+    if result.rc != 0:
+        return None
+    first = (result.stdout or "").strip().splitlines()
+    if not first:
+        return None
+    parts = first[0].split()
+    return parts[0] if parts else None
+
+
+# /run/workload-vm/<name>/resolve-status.json, spelled out for the reason
+# HTTP_PORT is: a test that read the path from lib/vm.py would follow a change
+# to it instead of catching one.
+RESOLVE_STATUS = f"/run/workload-vm/{WORKLOAD}/resolve-status.json"
+
+# The responder replaces its status file on a 30s tick (STATUS_INTERVAL), so a
+# counter read straight after a query legitimately reports the tick before it.
+# Long enough for one full tick plus the round trip, and no longer — a budget
+# that hides a responder which stopped writing is not a budget.
+STATUS_SETTLE = 45
+
+
+def _resolve_status(target) -> dict | None:
+    """The responder's own status document, or None if it has not written one."""
+    result = target.run(["cat", RESOLVE_STATUS], sudo=True, check=False,
+                        timeout=30)
+    if result.rc != 0:
+        return None
+    try:
+        return json.loads(result.stdout or "")
+    except ValueError:
+        return None
+
+
+def _await_unlisted(target, names, timeout=STATUS_SETTLE) -> dict | None:
+    """Poll the status file until every name in `names` is in unlisted_names.
+
+    Returns the last document read, whether or not it satisfied the condition,
+    so the caller's assertion can show what the responder actually reported
+    rather than a bare None.
+    """
+    deadline = time.monotonic() + timeout
+    doc = None
+    while True:
+        doc = _resolve_status(target) or doc
+        if doc is not None:
+            seen = doc.get("unlisted_names") or {}
+            if all(n in seen for n in names):
+                return doc
+        if time.monotonic() >= deadline:
+            return doc
+        time.sleep(3)
 
 
 def _uid(target) -> int:
@@ -474,15 +554,52 @@ def test_the_guest_is_told_nothing_and_is_filtered_anyway(target):
         _stub_down(target)
 
 
-def test_an_unlisted_name_does_not_resolve(target):
-    """The DNS half, which is a different refusal from the inspector's 403.
+def test_every_name_resolves_to_the_inspector_and_unlisted_ones_are_counted(target):
+    """The DNS half. NOT a second refusal — the responder refuses nothing.
 
-    The synthesising responder answers only for names on a list, so an unlisted
-    name comes back NODATA and the guest never opens a socket at all. That is
-    asserted separately from the 403 above on purpose: they are two mechanisms
-    refusing the same name, either one of them could regress silently while the
-    other kept the observable answer the same, and a suite that only probed
-    through DNS would pass with the inspector's allowlist emptied.
+    WHAT THIS TEST USED TO ASSERT, AND WHY IT WAS WRONG
+
+    It asserted that an unlisted name does not resolve. It does resolve, and it
+    is supposed to: synthesis is unconditional. Every name the guest asks about
+    that is not in the `allow`-derived static map is answered with the
+    inspector's own address, so `hosts` changes no answer this responder gives
+    (lib/vm.py vm_resolve_policy states it; libexec/workload-vm-resolve's
+    Policy.answers is where it happens). The old assertion described a design
+    the project considered and rejected, and it had never run: dev mode skips
+    the VM modules and the VM half had never run in gate mode, so it failed the
+    first time anything executed it, on 2026-08-27.
+
+    THE PROPERTY THAT IS ACTUALLY LOAD-BEARING
+
+    Synthesis makes the exfiltration channel ABSENT rather than filtered. A
+    guest encoding data into a1.example.com … aN.example.com is not refused —
+    it is answered, identically, every time, and nothing resolves those names
+    onward. So the thing worth proving is not that a name fails but that no
+    name is ever answered with anywhere the guest could actually reach:
+
+      * all four names resolve
+      * all four resolve to ONE address
+      * that address is in the inspector reservation, 198.18.0.0/16
+
+    The third is what keeps the second from being vacuous. Two names agreeing
+    on 127.0.0.1, or on whatever an upstream said, would satisfy "the same
+    address" while meaning the opposite.
+
+    AND THE COUNTER, WHICH IS THE PART WITH NO OTHER WITNESS
+
+    The responder classifies each query against every list that could
+    authorise the name and counts the ones no list does. That figure is the
+    tunnelling signature and it is the only observable difference between an
+    allowlisted lookup and an unlisted one — the wire answer is identical by
+    design. A counter nothing increments reads 0 and passes any test that only
+    checks it exists, so this asserts the split: UNLISTED and WILD_APEX land in
+    `unlisted_names`, ALLOWED and WILD_SUB do not.
+
+    WILD_APEX carries the apex trap here, and it is a stronger form of it than
+    the old assertion managed. `*.wl-wild.test` does not cover `wl-wild.test`,
+    so the apex must be counted unlisted while its subdomain is not — the same
+    matcher parity the inspector's 403 proves on the request plane, proved
+    independently on the DNS plane.
     """
     skip_if_no_kvm(target)
     skip_if_no_vm_toolchain(target)
@@ -492,18 +609,59 @@ def test_an_unlisted_name_does_not_resolve(target):
         assert _stub_listening(target), "harness stub is not listening"
         _bring_up(target, f"{WORKLOAD}-dns")
 
-        assert _resolves(target, ALLOWED), (
-            f"{ALLOWED} does not resolve inside the guest, so the negative "
-            f"below would be satisfied by a responder that answers nothing")
-        assert not _resolves(target, UNLISTED), (
-            f"{UNLISTED} resolved inside the guest. The responder synthesises "
-            f"answers only for names on a list; anything else it answers for "
-            f"is a name the guest can then dial, and the exfiltration channel "
-            f"the synthesis exists to remove is back")
-        assert not _resolves(target, WILD_APEX), (
-            f"{WILD_APEX} resolved inside the guest, so the responder's "
-            f"matcher covers the apex of a `*.` pattern while the inspector's "
-            f"does not — the two are supposed to be the same matcher")
+        answers = {name: _resolved_address(target, name)
+                   for name in (ALLOWED, WILD_SUB, WILD_APEX, UNLISTED)}
+
+        unresolved = sorted(n for n, a in answers.items() if not a)
+        assert not unresolved, (
+            f"{unresolved} did not resolve inside the guest. Synthesis is "
+            f"unconditional — every name is answered with the inspector's "
+            f"address — so a name that resolves to nothing means the "
+            f"responder is not the guest's resolver at all, or is not running")
+
+        distinct = set(answers.values())
+        assert len(distinct) == 1, (
+            f"the guest got more than one address across four names: "
+            f"{answers}. Every name is supposed to land on this workload's "
+            f"own inspector; a name answered differently is a destination "
+            f"reached without passing the listener that decides about it")
+
+        synthesised = distinct.pop()
+        assert ipaddress.ip_address(synthesised) in INSPECT_NETWORK, (
+            f"the guest resolved every name to {synthesised}, which is outside "
+            f"the inspector reservation {INSPECT_NETWORK}. One address for all "
+            f"four names is only the right answer when that address is the "
+            f"inspector's: agreeing on the harness stub's 127.0.0.1, or on "
+            f"whatever an upstream returned, satisfies the check above while "
+            f"meaning that the responder was bypassed")
+
+        doc = _await_unlisted(target, (UNLISTED, WILD_APEX))
+        assert doc is not None, (
+            f"the responder never wrote {RESOLVE_STATUS}. It emits once before "
+            f"its first query and on a {STATUS_SETTLE}s-covered tick after "
+            f"that, so an absent file is a responder that never started")
+
+        counted = doc.get("unlisted_names") or {}
+        for name in (UNLISTED, WILD_APEX):
+            assert name in counted, (
+                f"{name} is on no list this workload carries, and the guest "
+                f"just looked it up, but the responder did not count it as "
+                f"unlisted: {doc}. The answer it gave is identical to an "
+                f"allowlisted name's by design, so this counter is the only "
+                f"place the difference is visible — silent here means an "
+                f"operator watching for a name-encoding guest sees nothing")
+        for name in (ALLOWED, WILD_SUB):
+            assert name not in counted, (
+                f"{name} IS authorised — {ALLOWED} by an exact `hosts` entry, "
+                f"{WILD_SUB} by the `*.wl-wild.test` one — and was still "
+                f"counted as unlisted: {doc}. The tunnelling signature reading "
+                f"loud on a correct config is how it stops being read at all")
+
+        assert doc.get("unlisted", 0) >= 2, (
+            f"unlisted_names holds the names but the `unlisted` total is "
+            f"{doc.get('unlisted')}: {doc}. The two are written from one "
+            f"observation under one lock, so a disagreement is a bug in the "
+            f"counting, not a race")
 
     finally:
         _purge_workload(target, WORKLOAD)
