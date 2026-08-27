@@ -3191,7 +3191,54 @@ class Listener:
         # number where it is opened, and the TLS plane's splice sets both.
         conn.settimeout(RELAY_IDLE_TIMEOUT)
         try:
-            up.sock.sendall(rebuild_request(req))
+            try:
+                up.sock.sendall(rebuild_request(req))
+            except OSError as exc:
+                # THE HEAD NEVER LEFT, which makes this a refusal like the dial
+                # failures above rather than a relay that broke in the middle:
+                # the guest's body is still unread and no byte of a response has
+                # been written, so `_refuse` can drain and answer exactly as it
+                # does there. Falling through to the relay's handler instead --
+                # which is what this did -- ends the connection with `return
+                # False` and gives the guest a SILENT CLOSE, the one outcome
+                # _serve_tls_inspect argues against at length: a guest told "no"
+                # by a dead socket cannot tell a refusal from the host being
+                # down, and the CA is held precisely so it can be told.
+                #
+                # IT IS ALSO WHERE A CLIENT-CERTIFICATE ORIGIN LANDS, SOMETIMES,
+                # and that is why the body names the possibility. Under TLS 1.3
+                # a CertificateRequest is answered after the handshake
+                # completes, so the same origin either fails at the dial with
+                # `CERTIFICATE_REQUIRED` -- named exactly, by
+                # _upstream_tls_failure -- or resets the connection here, with
+                # nothing left to read the reason from. Which one happens is
+                # decided inside the peer's stack and is not ours to make
+                # deterministic; found by looping the unit suite 2026-08-27,
+                # where it presented as a flaky test rather than as a guest
+                # being told nothing.
+                #
+                # The COUNTER stays `relay failed`. A bare reset is genuinely
+                # ambiguous -- an origin that crashed or closed an idle socket
+                # produces the same errno -- and minting a client-certificate
+                # figure out of it would misfile those. The sentence names the
+                # possibility without asserting it, which is the same choice the
+                # TLS 1.2 arm of _upstream_tls_failure makes for the same
+                # reason.
+                self.counters.record_drop(DROP_RELAY_FAILED, req.host)
+                self._log(f"drop {where} host={req.host} "
+                          f"reason='relay failed before the head was sent: "
+                          f"{exc}'")
+                return self._refuse(
+                    client, conn, req, 502, "Bad Gateway",
+                    f"the request to {req.host} was not delivered: the "
+                    f"upstream connection failed before its head could be "
+                    f"sent ({exc}). If {req.host} requires a client "
+                    f"certificate, this is one of the two ways that arrives -- "
+                    f"under TLS 1.3 the demand can land after the handshake "
+                    f"succeeded, leaving a reset rather than a named alert -- "
+                    f"and it must then be spliced: set tls = \"splice\" for "
+                    f"this workload so the guest's own handshake reaches "
+                    f"{req.host}.")
             if req.expects_continue:
                 # AFTER policy, and by us. The natural implementation answers a
                 # continue while reading the head, which grants it on a request

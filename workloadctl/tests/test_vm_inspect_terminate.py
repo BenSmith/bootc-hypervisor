@@ -445,10 +445,24 @@ class TestTheClientCertificateCase(TerminationCase):
     def test_tls13_required_is_named_and_the_request_never_arrives(self):
         """One of three cases, and the only distinguishable one.
 
+        TWO DISPOSITIONS, BOTH LEGITIMATE, AND THE TEST ASSERTS THE DISJUNCTION.
         Under TLS 1.3 the CertificateRequest is answered after the handshake
-        succeeds, so the alert lands on the first read -- which the inspector
-        takes BEFORE forwarding anything, which is what keeps the request out of
-        the origin.
+        succeeds, so the demand can surface either as an SSLError on the dial --
+        `CERTIFICATE_REQUIRED`, named exactly -- or as a reset when the head is
+        written, with nothing left to read the reason from. Which one happens is
+        decided inside the peer's stack.
+
+        Asserting only the first is what this test used to do, and it failed
+        about one run in thirty as a result. That read as flakiness; it was not.
+        On the losing branch the guest received an EMPTY response, because the
+        relay's handler closed the connection instead of refusing it -- so the
+        race was hiding a real defect, and the fix was to make BOTH branches
+        deliver a legible 502 rather than to make the race go away, which
+        nothing here can do.
+
+        What must hold either way: the guest is told, the sentence points at
+        splice, and the request never reaches an origin that will refuse the
+        session.
         """
         mod = _mod()
         origin = _Origin(self.origin_pem, client_ca=self.origin_ca_cert)
@@ -462,9 +476,13 @@ class TestTheClientCertificateCase(TerminationCase):
         self.assertEqual(origin.requests, [],
                          "the request must not reach an origin that will "
                          "refuse the session")
+        reasons = listener.status()["drop_reasons"]
+        named = reasons["upstream wants a client certificate"]
+        deferred = reasons["relay failed"]
         self.assertEqual(
-            listener.status()["drop_reasons"][
-                "upstream wants a client certificate"], 1)
+            named + deferred, 1,
+            f"exactly one refusal, under one of the two reasons this can "
+            f"arrive as; got named={named} deferred={deferred}")
 
     def test_the_tls12_case_names_the_possibility_without_asserting_it(self):
         """Written down as unmet rather than guessed at.
