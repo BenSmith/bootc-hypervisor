@@ -271,8 +271,24 @@ def _qemu_argv(*, disk, seed, tpm_sock, port, run_dir, mem_mib, vcpus, name,
             "-tpmdev", "emulator,id=tpm0,chardev=chrtpm",
             "-device", "tpm-tis,tpmdev=tpm0",
         ]
+    # ipv6=off is load-bearing, not tidying. Slirp hands the guest a synthetic
+    # address out of 2001:2::/32 and advertises a v6 default route whether or
+    # not the HOST has a v6 uplink. On a v4-only host the guest then resolves a
+    # AAAA, SYNs into a black hole, and blocks for the full connect timeout --
+    # ~11 minutes, per attempt, per fetch. Measured 2026-08-27: the gate run
+    # wedged in workload-vm-build-disk with one socket in
+    #   SYN-SENT [2001:2::c612:102]:52116 -> [2620:52:6:1161::37]:443
+    # fetching the guest's cloud image, while `curl` from the same guest
+    # answered 302 in 0.6s -- happy eyeballs falls back to v4 and a plain
+    # getaddrinfo-then-connect does not. So the symptom is one hung test and a
+    # shell that proves the network is fine.
+    #
+    # Nothing in tests/cli_surface or tests/runtime asserts anything about v6,
+    # so the address family is not under test here and a guest that advertises
+    # one it cannot route is only a trap. A host WITH a v6 uplink loses nothing:
+    # slirp's v6 is synthetic either way and every fetch works over v4.
     argv += [
-        "-netdev", f"user,id=net0,hostfwd=tcp:127.0.0.1:{port}-:22",
+        "-netdev", f"user,id=net0,ipv6=off,hostfwd=tcp:127.0.0.1:{port}-:22",
         "-device", "virtio-net-pci,netdev=net0",
         "-serial", f"file:{run_dir / 'console.log'}",
         "-qmp", f"unix:{run_dir / 'qmp.sock'},server=on,wait=off",
