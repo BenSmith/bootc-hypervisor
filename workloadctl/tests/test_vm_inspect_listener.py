@@ -620,6 +620,48 @@ class TestPolicyLoading(unittest.TestCase):
         with self.assertRaises(ValueError):
             mod.load_policy(self._write('{"hosts": [], "policy": [{"m": 1}]}'))
 
+    def test_a_lowercase_method_in_the_document_is_normalised_on_load(self):
+        """The reader normalises as well as the writer, which is the
+        convention `internal` and the responder's static map already hold.
+        VmPolicyEntry.permits compares `method.upper()` against these, so a
+        document carrying `["get"]` would deny every GET on that host -- fails
+        closed, and therefore in silence, on a file that reads as permitting
+        it."""
+        mod = _mod()
+        path = self._write(json.dumps({
+            "tls": "inspect", "hosts": ["a.example"],
+            "policy": [{"host": "a.example", "methods": ["get"],
+                        "paths": ["/v1/*"]}]}))
+        policy = mod.load_policy(path)
+        self.assertEqual(policy.policy[0].methods, ("GET",))
+        self.assertTrue(policy.permits("a.example", "GET", "/v1/x"))
+
+    def test_a_non_string_in_methods_or_paths_is_dropped_not_carried(self):
+        """Carried, it reaches fnmatchcase and raises TypeError out of the
+        request path -- one guest request killing the connection on a
+        malformed line in a file, rather than being ignored the way every
+        other reader here ignores a shape validation owns."""
+        mod = _mod()
+        path = self._write(json.dumps({
+            "tls": "inspect", "hosts": ["a.example"],
+            "policy": [{"host": "a.example", "methods": ["GET", 7],
+                        "paths": ["/v1/*", None]}]}))
+        entry, = mod.load_policy(path).policy
+        self.assertEqual(entry.methods, ("GET",))
+        self.assertEqual(entry.paths, ("/v1/*",))
+
+    def test_an_absent_key_survives_the_normalisation(self):
+        """None and () are still different after it. A normaliser that turned
+        an absent `methods` into an empty tuple would make every
+        unconstrained entry permit nothing."""
+        mod = _mod()
+        path = self._write(json.dumps({
+            "tls": "inspect", "hosts": ["a.example"],
+            "policy": [{"host": "a.example"}]}))
+        entry, = mod.load_policy(path).policy
+        self.assertIsNone(entry.methods)
+        self.assertIsNone(entry.paths)
+
     def test_a_missing_document_is_an_error_not_an_empty_policy(self):
         """An empty `hosts` list is a legal configuration, so a listener that
         fell back to one could not tell "the operator allowed nothing" from
@@ -1235,6 +1277,57 @@ def _read_all(sock):
             out += chunk
     except (TimeoutError, OSError):
         return out
+
+
+class TestPolicyGovernsIsAskedWhereThereIsNoRequest(unittest.TestCase):
+    """Rung 4 tier 6. `governs` is not `permits` with the arguments left off.
+
+    `permits` answers "was this request allowed"; `governs` is asked about a
+    connection that never carried a request at all, and answers the operator's
+    question instead -- are there `methods` and `paths` on this host that never
+    got to run? The two are separate because a merge in either direction is
+    silent: permits() on a governed host with no request would have to invent a
+    method and a path, and reading governs() as permission would let any host
+    somebody wrote a rule for through without the rule.
+    """
+
+    def _policy(self, *entries, hosts=("a.example",)):
+        mod = _mod()
+        return mod.Policy(
+            tls="inspect", hosts=tuple(hosts),
+            policy=tuple(mod.VmPolicyEntry(host=h, methods=m, paths=pa)
+                         for h, m, pa in entries))
+
+    def test_a_host_with_an_entry_is_governed(self):
+        policy = self._policy(("a.example", ("GET",), ("/v1/*",)))
+        self.assertTrue(policy.governs("a.example"))
+
+    def test_an_allowlisted_host_with_no_entry_is_not(self):
+        """`hosts` is not policy. A host allowed by name alone has no rules to
+        have failed to run, and counting it in the policy bucket would tell an
+        operator to go looking for an entry that is not there."""
+        policy = self._policy(("b.example", ("GET",), ("/v1/*",)),
+                              hosts=("a.example", "b.example"))
+        self.assertFalse(policy.governs("a.example"))
+
+    def test_no_entries_at_all_governs_nothing(self):
+        self.assertFalse(self._policy().governs("a.example"))
+
+    def test_it_matches_by_pattern_and_normalises_the_name(self):
+        policy = self._policy(("*.example", ("GET",), ("/",)),
+                              hosts=("*.example",))
+        self.assertTrue(policy.governs("API.a.Example."))
+        self.assertFalse(policy.governs("example"),
+                         "fnmatch, not DNS suffix matching: the apex trap")
+
+    def test_it_does_not_care_whether_the_entry_would_permit_anything(self):
+        """A host whose only entry permits GET /v1 alone is governed just as
+        much as one permitting everything. The figure is about rules EXISTING,
+        not about what they say -- an entry that permits nothing the guest
+        wanted is still an entry that never ran."""
+        policy = self._policy(("a.example", ("GET",), ("/v1/only",)))
+        self.assertTrue(policy.governs("a.example"))
+        self.assertFalse(policy.permits("a.example", "POST", "/other"))
 
 
 class TestPolicyEnforcement(_CleartextRig):
@@ -2389,12 +2482,16 @@ class TestEchTripwire(unittest.TestCase):
 class TestCounters(unittest.TestCase):
     """The rung's figures, emitted rather than rendered."""
 
-    def _listener(self, hosts=("allowed.example",), internal=()):
+    def _listener(self, hosts=("allowed.example",), internal=(), splice=(),
+                  http2=(), policy=()):
         mod = _mod()
         out = io.StringIO()
         return mod, mod.Listener([], out, policy=mod.Policy(
             tls="splice", hosts=tuple(hosts),
-            internal=tuple(internal))), out
+            internal=tuple(internal), splice=tuple(splice),
+            http2=tuple(http2),
+            policy=tuple(mod.VmPolicyEntry(host=h, methods=m, paths=p)
+                         for h, m, p in policy))), out
 
     def test_every_drop_reason_is_present_before_anything_happens(self):
         """A reason absent from the file and a reason reading zero are the
@@ -2505,6 +2602,41 @@ class TestCounters(unittest.TestCase):
         self.assertEqual(lists["hosts"], ["a.example", "b.example"])
         self.assertEqual(lists["internal"], ["nas.internal"])
         self.assertEqual(lists["tls"], "splice")
+
+    def test_every_list_that_decides_something_is_reported(self):
+        """Three of these decide on their own -- `splice` exempts a host from
+        termination, `http2` changes what is offered on both legs, `policy`
+        decides individual requests. Reporting `hosts` and `internal` alone
+        answers 'what is this process enforcing' with a subset, in the one
+        file whose purpose is that the answer is not a guess."""
+        _, listener, _ = self._listener(
+            splice=("pinned.example",), http2=("grpc.example",),
+            policy=(("api.example", ("GET",), ("/v1/*",)),))
+        lists = listener.status()["lists"]
+        self.assertEqual(lists["splice"], ["pinned.example"])
+        self.assertEqual(lists["http2"], ["grpc.example"])
+        self.assertEqual(lists["policy"],
+                         [{"host": "api.example", "methods": ["GET"],
+                           "paths": ["/v1/*"]}])
+
+    def test_the_reported_policy_carries_the_rules_and_not_just_the_names(self):
+        """Which hosts are governed is half the question; what they are
+        governed BY is the half an operator reads this file for. An absent key
+        stays null, because null and [] are different answers here too."""
+        _, listener, _ = self._listener(
+            policy=(("api.example", None, ("/v1/*",)),))
+        entry, = listener.status()["lists"]["policy"]
+        self.assertIsNone(entry["methods"])
+        self.assertEqual(entry["paths"], ["/v1/*"])
+
+    def test_the_lists_key_names_every_list_the_policy_holds(self):
+        """The drift guard for the three above: a list added to Policy and not
+        to `lists` is reported by nothing, and every existing assertion here
+        still passes. `tls` is the mode rather than a list, so it is the one
+        key with no field behind it."""
+        mod, listener, _ = self._listener()
+        fields = set(mod.Policy._fields)
+        self.assertEqual(set(listener.status()["lists"]), fields)
 
     def test_concurrency_reports_live_and_refused_together(self):
         """One number cannot separate a guest storming the listener from a

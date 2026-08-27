@@ -2530,6 +2530,17 @@ def vm_resolve_policy(net: dict, uid: int, resolved=None) -> dict:
     unique unlisted names exfiltrates nothing and is still the cleanest
     evidence that something in the guest is trying. A responder that REFUSED
     those names would be a different design; this one only notices.
+
+    `policy` is carried BESIDE `hosts` and for the same counting reason, not as
+    a second thing to answer from. §3 lets a name be allowlisted by a
+    [[vm.network.policy]] entry alone, so a workload whose whole allowlist is
+    written as policy entries has an empty `hosts` and is perfectly valid --
+    and a responder that knew only `hosts` would count every legitimate lookup
+    it makes as unlisted. That fails in the direction that costs the most: the
+    tunnelling signature reads loud and constant on a correct config, which is
+    how a detector stops being read at all. Kept as its own key rather than
+    merged into `hosts` because the document describes the FILE, and the two
+    keys are two different statements about a name.
     """
     inspect = vm_inspect_address(uid)
     if resolved is None:
@@ -2552,6 +2563,7 @@ def vm_resolve_policy(net: dict, uid: int, resolved=None) -> dict:
         "ttl": VM_RESOLVE_TTL,
         "static": static,
         "hosts": vm_allowed_hosts(net),
+        "policy": [e.host for e in vm_policy_entries(net)],
     }
 
 
@@ -2674,8 +2686,9 @@ def vm_policy_governs(host: str, entries) -> list[VmPolicyEntry]:
 
     Host patterns union among themselves, so `*.example.com` and
     `api.example.com` both govern `api.example.com` and neither overrides the
-    other. That is the apex trap's sibling and it is why `diagnose` has to
-    print the EFFECTIVE rules per host rather than the file's entries.
+    other. That is the apex trap's sibling, and it is why `diagnose` will have
+    to print the EFFECTIVE rules per host rather than the file's entries --
+    owed, not built, so do not cite it to an operator as though it were.
     """
     return [e for e in entries if vm_hostname_match(host, (e.host,))]
 
@@ -2846,10 +2859,19 @@ def _validate_policy_methods(item, host: str) -> tuple[tuple | None, list[str]]:
     return tuple(out), errors
 
 
-def _validate_policy(net: dict, hosts, splice_hosts, http2_hosts,
-                     egress: str,
+def _validate_policy(net: dict, splice_hosts, http2_hosts, egress: str,
                      tls) -> tuple[list[VmPolicyEntry], list[str]]:
-    """Validate [[vm.network.policy]]. Returns (entries, errors)."""
+    """Validate [[vm.network.policy]]. Returns (entries, errors).
+
+    NO `hosts` PARAMETER, and its absence is the decision rather than a rule
+    left unwritten. `internal`, `splice` and `http2` each get a "this entry
+    matches no allowlisted name" error, because each of them is an exception
+    TO the allowlist and one naming a host that is not on it is dead. A
+    `policy` entry is not: §3 makes it allowlist its own host, so an entry
+    matching nothing in `.hosts` is the ordinary way to write one, and a rule
+    borrowed from the three siblings for symmetry would refuse the
+    configuration the schema documents.
+    """
     errors: list[str] = []
     raw = net.get("policy", [])
     if not isinstance(raw, list):
@@ -3177,7 +3199,7 @@ def _validate_egress(net: dict) -> list[str]:
                 break
 
     policy_entries, policy_errors = _validate_policy(
-        net, hosts, splice_hosts, http2_hosts, egress, tls)
+        net, splice_hosts, http2_hosts, egress, tls)
     errors.extend(policy_errors)
     policy_hosts = [e.host for e in policy_entries]
 

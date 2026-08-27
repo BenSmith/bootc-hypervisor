@@ -255,6 +255,30 @@ class TestPolicyDocument(unittest.TestCase):
         self.assertEqual(VM_RESOLVE_TTL, 3600)
         self.assertGreaterEqual(VM_RESOLVE_TTL, 3600)
 
+    def test_the_policy_host_patterns_are_carried(self):
+        """Carried for the same COUNTING reason `hosts` is, and beside it
+        rather than merged into it -- the document describes the file, and the
+        two keys are two different statements about a name."""
+        net = {"policy": [{"host": "api.example.com", "methods": ["GET"]},
+                          {"host": "*.cdn.example.com"}]}
+        doc = vm_resolve_policy(net, UID)
+        self.assertEqual(doc["policy"],
+                         ["api.example.com", "*.cdn.example.com"])
+        self.assertEqual(doc["hosts"], [])
+
+    def test_a_workload_with_no_policy_carries_an_empty_list(self):
+        self.assertEqual(vm_resolve_policy({}, UID)["policy"], [])
+
+    def test_the_two_keys_stay_apart(self):
+        """A `hosts` name must not appear under `policy`. Merging them would
+        make the document unable to say which key authorised a name, which is
+        the question `diagnose` and any later drift check have to answer."""
+        net = {"hosts": ["plain.example.com"],
+               "policy": [{"host": "api.example.com"}]}
+        doc = vm_resolve_policy(net, UID)
+        self.assertEqual(doc["hosts"], ["plain.example.com"])
+        self.assertEqual(doc["policy"], ["api.example.com"])
+
     def test_an_address_form_allow_entry_is_not_in_the_map(self):
         """`allow` by address names no hostname, so there is nothing to answer
         for -- and inventing a name for it would be a name the operator never
@@ -1494,6 +1518,48 @@ class TestDnsCounters(unittest.TestCase):
         snap = self.counters.snapshot()
         self.assertEqual(snap["unlisted"], 0)
         self.assertEqual(snap["queries"]["static"], 1)
+
+    def test_a_policy_entry_counts_as_a_list(self):
+        """§3 lets a [[vm.network.policy]] entry allowlist its own host, so a
+        query for one is not the tunnelling signature even though `hosts` does
+        not match it. The listener's Policy.admits already knows this; a
+        responder that did not would count every legitimate lookup on such a
+        workload as unlisted."""
+        policy = _policy(self.mod, hosts=[], policy=["api.example.com"])
+        self.mod.build_answer(query("api.example.com", TYPE_A), policy,
+                              counters=self.counters)
+        self.assertEqual(self.counters.snapshot()["unlisted"], 0)
+
+    def test_a_policy_only_workload_reports_no_tunnelling_signature(self):
+        """The failure this rule exists to prevent, in the shape it takes: an
+        empty `hosts` is VALID when the whole allowlist is written as policy
+        entries, and the workload works either way. Only the detector breaks
+        -- pinned at every query the guest makes, which is how a signal stops
+        being read."""
+        policy = _policy(self.mod, hosts=[],
+                         policy=["api.example.com", "*.cdn.example.com"])
+        for name in ("api.example.com", "assets.cdn.example.com"):
+            self.mod.build_answer(query(name, TYPE_A), policy,
+                                  counters=self.counters)
+        snap = self.counters.snapshot()
+        self.assertEqual(snap["unlisted"], 0)
+        self.assertEqual(snap["unlisted_names"], {})
+
+    def test_a_policy_pattern_does_not_swallow_the_names_it_excludes(self):
+        """A rule that put everything on a list would pass the two above on its
+        own. The apex trap is the case that proves it did not: `*.` requires a
+        label before the dot, so the apex is NOT covered and stays counted."""
+        policy = _policy(self.mod, hosts=[], policy=["*.cdn.example.com"])
+        self.mod.build_answer(query("cdn.example.com", TYPE_A), policy,
+                              counters=self.counters)
+        self.assertEqual(self.counters.snapshot()["unlisted"], 1)
+
+    def test_a_document_with_no_policy_key_still_loads(self):
+        """Tolerated absent for the reason `hosts` is: a policy document
+        written before this key existed must not fail the responder."""
+        doc = vm_resolve_policy({}, UID)
+        del doc["policy"]
+        self.assertEqual(self.mod.Policy(doc).policy, ())
 
     def test_a_nodata_type_is_counted_as_nodata_and_not_as_unlisted(self):
         """An HTTPS query names a host the guest is about to look up properly

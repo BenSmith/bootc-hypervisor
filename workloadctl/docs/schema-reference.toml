@@ -675,8 +675,9 @@ name = "schema-reference"
 #     is what has to change.
 #   * Host patterns union too. "*.example.com" and "api.example.com" both
 #     govern api.example.com, and the specific one does not override the
-#     general one. `workloadctl diagnose` prints the EFFECTIVE rules per host
-#     for this reason — the file does not show what a given name may do.
+#     general one. So the file does not show what a given name may actually
+#     do: to read the effective rules for one host, collect EVERY entry whose
+#     `host` pattern matches it and union them.
 #
 # An omitted `methods` means any method and an omitted `paths` means any path.
 # That shorthand is safe in a single-entry host and dangerous under union, so

@@ -363,6 +363,16 @@ class Policy(NamedTuple):
             return any(e.permits(method, path) for e in governing)
         return vm_hostname_match(host, self.hosts)
 
+    def governs(self, host: str) -> bool:
+        """Whether ANY policy entry names this host.
+
+        Not "whether the request was permitted" -- this is asked where there is
+        no request to permit, about a connection that turned out not to carry
+        HTTP at all. It answers the operator's question instead: are there
+        `methods` and `paths` here that never got to run?
+        """
+        return bool(vm_policy_governs(host, self.policy))
+
     def splices(self, host: str) -> bool:
         """Whether this host is exempt from termination.
 
@@ -438,12 +448,24 @@ def load_policy(path):
         # here would turn every unconstrained entry into one permitting
         # nothing, which fails closed and therefore quietly -- the workload
         # reaches nothing and every unit test still passes.
+        #
+        # Uppercased and string-filtered HERE as well as in
+        # vm_policy_entries, which is the convention this file already holds
+        # for `internal` and the responder holds for its static map: the
+        # writer normalises, and the reader normalises again so that a
+        # hand-edited document cannot introduce a rule that never matches.
+        # `methods` is the one that needs it -- VmPolicyEntry.permits compares
+        # `method.upper()` against these, so a document carrying `["get"]`
+        # would deny every GET on that host while the file reads as
+        # permitting it. Fails closed, and therefore in silence.
         methods = item.get("methods")
         paths = item.get("paths")
         policy.append(VmPolicyEntry(
             host=item["host"],
-            methods=None if methods is None else tuple(methods),
-            paths=None if paths is None else tuple(paths)))
+            methods=None if methods is None else tuple(
+                m.upper() for m in methods if isinstance(m, str)),
+            paths=None if paths is None else tuple(
+                p for p in paths if isinstance(p, str))))
     return Policy(tls=doc.get("tls") or VM_TLS_DEFAULT, hosts=tuple(hosts),
                   internal=tuple(vm_normalise_hostname(h) for h in internal),
                   splice=tuple(splice), http2=tuple(http2),
@@ -1819,6 +1841,17 @@ DROP_MISDIRECTED = "host does not match the server name"
 DROP_THROTTLED = "mint rationed"
 DROP_MINT_FAILED = "could not mint a leaf"
 DROP_NOT_HTTP = "not HTTP"
+# The same refusal on a host a [[vm.network.policy]] entry names, kept apart
+# because the operator's next move differs. Plain `not HTTP` is one line away
+# from working -- add the host to [[vm.network.splice]]. This one is two, and
+# the second is a DELETION: `validate` refuses a host that is in both `splice`
+# and `policy`, so the entry whose `methods` and `paths` can never run has to
+# go with it. An operator reading a single merged figure cannot tell which of
+# their hosts is in which situation, and the two-line one is the one whose
+# config states an intention the wire has already contradicted.
+#
+# Both strings begin "not HTTP" so a grep for the reason still finds both.
+DROP_NOT_HTTP_POLICY = "not HTTP (policy entry)"
 DROP_NOT_PERMITTED = "not permitted by policy"
 DROP_NOT_H2 = "not HTTP/2"
 
@@ -1837,6 +1870,7 @@ DROP_REASONS = (
     DROP_THROTTLED,
     DROP_MINT_FAILED,
     DROP_NOT_HTTP,
+    DROP_NOT_HTTP_POLICY,
     DROP_NOT_H2,
     DROP_NOT_PERMITTED,
 )
@@ -1849,7 +1883,16 @@ DROP_REASONS = (
 # `tls = "splice"`, and the host that is not speaking HTTP and therefore needs
 # the same. `not HTTP/2` joins them and is read the same way with one word
 # changed: the operator put that host in [[vm.network.http2]] and it did not
-# speak h2, so either the entry is wrong or the host needs splicing. A per-host figure for `not allowlisted` is deliberately absent --
+# speak h2, so either the entry is wrong or the host needs splicing.
+#
+# `not HTTP` appears TWICE, and the split is the whole value of the pair. The
+# figures answer two different questions -- which hosts want splicing, and
+# which hosts have method and path rules that can never run. The second has no
+# other way of being learnt: nothing at startup could have told the operator,
+# because whether a host speaks HTTP is not knowable from the file, which is
+# exactly why §8 made it a runtime report rather than a validation rule.
+#
+# A per-host figure for `not allowlisted` is deliberately absent --
 # the guest picks those names, there is no bound on how many it invents, and
 # the answer is already the allowlist itself rather than a list to read.
 #
@@ -1861,6 +1904,7 @@ PER_HOST_REASONS = (
     DROP_UNVERIFIED,
     DROP_CLIENT_CERT,
     DROP_NOT_HTTP,
+    DROP_NOT_HTTP_POLICY,
     DROP_NOT_H2,
 )
 
@@ -1929,11 +1973,20 @@ class Counters:
     THE PER-HOST MAPS ARE A DIFFERENT KIND OF FIGURE
 
     `dispositions` and `drop_reasons` answer "what happened, how often".
-    `per_host` answers "to which host", and only for the four reasons whose
-    remedy is written against a name -- an internal destination missing an
-    entry, an upstream this host cannot verify, a host wanting a client
-    certificate, and a host not speaking HTTP. The last two are the operator's
-    list of `splice` candidates, which is the whole reason they are per host.
+    `per_host` answers "to which host", and only for the reasons whose remedy
+    is written against a name -- an internal destination missing an entry, an
+    upstream this host cannot verify, a host wanting a client certificate, a
+    host not speaking HTTP, and a host that did not speak h2 after being told
+    it would. All but the first are the operator's list of `splice`
+    candidates, which is the whole reason they are per host.
+
+    `not HTTP` is TWO of those figures rather than one, split by whether a
+    [[vm.network.policy]] entry named the host. Merged, an operator reading a
+    single total can see that some host needs splicing but not that some OTHER
+    host has method and path rules that never ran; and those two facts have
+    different remedies, the second of which includes deleting the policy entry
+    (`validate` refuses `splice` and `policy` on one host). See
+    PER_HOST_REASONS.
 
     They are bounded top-N with a counted overflow because the keys come from
     the guest. `per_host_totals` is exact regardless: the top-N can lose which
@@ -1967,10 +2020,29 @@ class Counters:
         # The lists as LOADED, not as written in the file: `drift` cannot see
         # them, and the question an operator has is what this process is
         # actually enforcing.
+        #
+        # EVERY list this process enforces, and a key added here whenever one
+        # is added there. Three of these decide something on their own --
+        # `splice` exempts a host from termination, `http2` changes what is
+        # offered on both legs, `policy` decides individual requests -- so a
+        # status file naming only `hosts` and `internal` answers "what is this
+        # process enforcing" with a subset, in a file whose whole purpose is
+        # that the answer is not a guess. `policy` carries the rules and not
+        # just the names: which hosts are governed is half the question, and
+        # what they are governed BY is the half an operator is reading this
+        # for.
         self.lists = {
             "tls": policy.tls if policy else VM_TLS_DEFAULT,
             "hosts": list(policy.hosts) if policy else [],
             "internal": list(policy.internal) if policy else [],
+            "splice": list(policy.splice) if policy else [],
+            "http2": list(policy.http2) if policy else [],
+            "policy": [
+                {"host": e.host,
+                 "methods": None if e.methods is None else list(e.methods),
+                 "paths": None if e.paths is None else list(e.paths)}
+                for e in policy.policy
+            ] if policy else [],
         }
 
     def record_hello(self, hello, on_a_list: bool) -> None:
@@ -2654,7 +2726,8 @@ class Listener:
                 self.counters.record_drop(DROP_NOT_H2, host)
                 self._log(f"drop {where} host={host} reason='not HTTP/2: the "
                           f"connection preface never arrived ({exc}); drop the "
-                          f"[[vm.network.http2]] entry for {host}, or splice it'")
+                          f"[[vm.network.http2]] entry for {host}, or move it "
+                          f"to [[vm.network.splice]]'")
                 return
             if preface != H2_PREFACE:
                 self.counters.record_drop(DROP_NOT_H2, host)
@@ -2662,7 +2735,8 @@ class Listener:
                           f"{preface[:8]!r} is not the connection preface, and "
                           f"{host} is in [[vm.network.http2]]. Either it does not "
                           f"speak h2 -- drop the entry -- or it speaks something "
-                          f"this cannot police, and needs splicing'")
+                          f"this cannot police, and belongs in "
+                          f"[[vm.network.splice]] instead'")
                 return
             framing = H2Framing()
             # Everything the preface read pulled in past its own 24 bytes. It is
@@ -2716,7 +2790,8 @@ class Listener:
         self.counters.record_drop(DROP_NOT_H2, host)
         self._log(f"drop {where} host={host} reason='not HTTP/2: {exc}. "
                   f"{host} is in [[vm.network.http2]] and this session did not "
-                  f"speak h2; drop the entry, or splice the host'")
+                  f"speak h2; drop the entry, or move the host to "
+                  f"[[vm.network.splice]]'")
 
     def _serve_terminated(self, tls_conn, where, host, upstream):
         """Authorise every request inside one terminated session.
@@ -2752,20 +2827,23 @@ class Listener:
         session we completed, so a close here is a close it can see and cannot
         interpret.
 
-        WHAT THIS RUNG DOES NOT DO, so the next one inherits a list rather than
-        a gap: the log line below is the ordinary drop line, not a
-        distinguishable one telling the operator to splice the host; there is
-        no per-host figure split by whether a policy entry named it, because
-        policy entries do not exist yet; and a host meant to speak h2 is read
-        the same as any other, because [[vm.network.http2]] does not exist
-        either and a preface check without it would make that key mean EXEMPT
-        rather than SPEAKS H2.
+        THE COST IS REAL AND THIS LINE IS THE ONLY EVIDENCE. A host that
+        speaks something other than HTTP over 443 stops working the moment a
+        workload terminates, and nothing before the connection could have
+        predicted it -- which is why the remedy is written into the line rather
+        than left for a doc. The remedy is a per-host [[vm.network.splice]]
+        entry (HLD §11 hatch 2): the host keeps end-to-end TLS while every
+        other name on the workload stays inspected. Whole-workload
+        `tls = "splice"` is hatch 3 and gives up far more than the one host
+        asked for.
 
-        THE COST IS REAL AND ARRIVES BEFORE THE REMEDY. A host that speaks
-        something other than HTTP over 443 stops working the moment a workload
-        terminates, and until the policy rung lands the only evidence is a
-        closed connection and this line in the journal. The remedy for a
-        workload that has such a host is `tls = "splice"` on the workload.
+        AND THE TWO REFUSALS ARE COUNTED APART. A host a [[vm.network.policy]]
+        entry names is the same wire failure with a different remedy: the
+        entry's `methods` and `paths` never ran and never can, so splicing the
+        host is only half of it -- the entry has to go too, because `validate`
+        refuses a host that is in `splice` and `policy` both. Reporting one
+        merged figure would leave that operator with a number they cannot act
+        on, and the split is the entire reason §11 asked for this counter.
         """
         conn.settimeout(CONNECTION_TIMEOUT)
         start = client.peek_start(
@@ -2776,10 +2854,24 @@ class Listener:
             # which owns the ways they end -- a 400, a clean close, a timeout
             # -- with the dispositions they already have.
             return True
+        # Asked of the policy, not of the request: there is no request. See
+        # Policy.governs.
+        if self._policy.governs(host):
+            self.counters.record_drop(DROP_NOT_HTTP_POLICY, host)
+            self._log(
+                f"drop {where} host={host} reason='not HTTP (policy entry): "
+                f"this session was terminated and {start[:8]!r} does not begin "
+                f"a request line, so the [[vm.network.policy]] entry for "
+                f"{host} never ran and never will. Either the host does not "
+                f"belong in policy at all, or it needs a [[vm.network.splice]] "
+                f"entry AND that policy entry deleted -- validate refuses both "
+                f"on one host'")
+            return False
         self.counters.record_drop(DROP_NOT_HTTP, host)
         self._log(f"drop {where} host={host} reason='not HTTP: this session "
                   f"was terminated and {start[:8]!r} does not begin a request "
-                  f"line; splice this workload if the host needs it'")
+                  f"line. Add {host} to [[vm.network.splice]] if it needs to "
+                  f"keep end-to-end TLS'")
         return False
 
     def _dial_failure_reason(self, host: str) -> str:

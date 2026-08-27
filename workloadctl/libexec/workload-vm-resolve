@@ -201,15 +201,34 @@ class Policy:
         # a different design. Tolerated absent so a policy document written
         # before this key existed still loads.
         self.hosts = tuple(document.get("hosts") or ())
+        # The [[vm.network.policy]] host patterns, read for the same counting
+        # reason and tolerated absent for the same compatibility one. See
+        # on_a_list for why a responder that knew only `hosts` is wrong.
+        self.policy = tuple(document.get("policy") or ())
 
     def on_a_list(self, name: str) -> bool:
         """Whether any list in this workload would authorise the name.
 
+        ANY list, and the word is load-bearing -- this predicate decides
+        nothing except whether a query is the tunnelling signature, so every
+        list that authorises a name has to be in it or a working config
+        reports an attack.
+
         `static` counts as a list: an `allow` entry is an authorisation, and a
         query for one is not the tunnelling signature even though `hosts` does
         not match it.
+
+        So does `policy`. §3 lets a [[vm.network.policy]] entry allowlist its
+        own host, so `hosts` can legitimately be EMPTY on a workload that
+        reaches several names -- and the listener's Policy.admits already
+        knows it. Leaving this half behind does not break any traffic, which
+        is exactly why it would have survived: the workload works, and the one
+        figure built to notice exfiltration sits pinned at every query the
+        guest makes.
         """
-        return name in self.static or vm_hostname_match(name, self.hosts)
+        return (name in self.static
+                or vm_hostname_match(name, self.hosts)
+                or vm_hostname_match(name, self.policy))
 
     def answers(self, name, qtype):
         """The addresses to answer `name`/`qtype` with, and where they came from.
@@ -796,7 +815,8 @@ def main(argv):
     policy = load_policy(vm_resolve_policy_path(name))
     log(f"  responder for {name}: {len(sockets)} socket(s), "
         f"{len(policy.static)} static name(s), "
-        f"{len(policy.hosts)} host pattern(s), ttl {policy.ttl}s")
+        f"{len(policy.hosts)} host pattern(s), "
+        f"{len(policy.policy)} policy pattern(s), ttl {policy.ttl}s")
     counters = Counters()
     stopping = []
     signal.signal(signal.SIGTERM, lambda *_a: stopping.append(True))

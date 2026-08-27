@@ -198,10 +198,13 @@ class TerminationCase(unittest.TestCase):
         return Minter("demo", self.state, **kwargs)
 
     def _listener(self, mod, origin, *, hosts=("localhost",), trust=True,
-                  minter=None, http2=()):
+                  minter=None, http2=(), entries=()):
         out = io.StringIO()
-        policy = mod.Policy(tls="inspect", hosts=tuple(hosts),
-                            http2=tuple(http2))
+        # `entries` is [[vm.network.policy]] as (host, methods, paths) triples.
+        policy = mod.Policy(
+            tls="inspect", hosts=tuple(hosts), http2=tuple(http2),
+            policy=tuple(mod.VmPolicyEntry(host=h, methods=m, paths=pa)
+                         for h, m, pa in entries))
         listener = mod.Listener([unittest.mock.Mock()], out, policy=policy,
                                 minter=minter or self._minter(mod))
         if trust:
@@ -795,9 +798,11 @@ class TestWhatCountsAsTheStartOfARequest(unittest.TestCase):
 
     def test_the_h2_preface_is_left_to_the_parser(self):
         """`PRI * HTTP/2.0` IS a request line; what it is not is one this
-        listener speaks. It gets the parser's 400, not a close -- and the
-        preface-and-frame check that would do better belongs with the
-        [[vm.network.http2]] key that does not exist yet."""
+        listener speaks ON THIS PATH. It gets the parser's 400, not a close.
+        The preface-and-frame check that reads it properly is reached only for
+        a host in [[vm.network.http2]]; a host that is not in that list and
+        opens with the preface anyway is a client ignoring the ALPN, and it is
+        answered rather than closed."""
         self.check(b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n", True)
 
     def test_a_leading_space_is_not_a_method(self):
@@ -839,6 +844,21 @@ class TestNonHttpInsideATerminatedSessionIsClosed(TerminationCase):
         self.assertEqual(reasons[mod.DROP_NOT_HTTP], 1)
         self.assertEqual(reasons[mod.DROP_UNREADABLE_REQUEST], 0)
         self.assertEqual(reasons[mod.DROP_TIMED_OUT], 0)
+
+    def test_the_remedy_it_names_is_the_PER_HOST_key(self):
+        """Rung 4 tier 6. Rung 3 could only say `tls = "splice"`, which gives
+        up inspection for every OTHER name on the workload to fix one host.
+        [[vm.network.splice]] exists now, and the line has to name it -- an
+        operator does what the log tells them, so a line naming the wrong hatch
+        is how a workload ends up spliced whole."""
+        origin = _Origin(self.origin_pem)
+        self.addCleanup(origin.close)
+        mod = _mod()
+        listener, out = self._listener(mod, origin)
+        self._exchange(listener, origin, request=self.NOT_HTTP)
+        line = out.getvalue()
+        self.assertIn("[[vm.network.splice]]", line)
+        self.assertIn("localhost", line)
 
     def test_a_malformed_but_recognisable_request_still_gets_its_400(self):
         """The check must not swallow the case it looks most like. A request
@@ -885,6 +905,130 @@ class TestNonHttpInsideATerminatedSessionIsClosed(TerminationCase):
         stream = mod._Stream(ours)
         stream.peek_start()
         self.assertEqual(stream.read_head(), head)
+
+
+@unittest.skipUnless(_have_openssl(), "openssl is not installed")
+class TestTheNonHttpRefusalIsSplitByPolicy(TerminationCase):
+    """Rung 4 tier 6. The same wire failure, two figures, because the two have
+    different remedies -- and the second remedy includes a DELETION the first
+    does not.
+
+    A host with no policy entry needs one line: put it in
+    [[vm.network.splice]]. A host with a policy entry needs that line AND the
+    entry removed, because `validate` refuses a host that is in both. Merged
+    into one count an operator can see that something needs splicing but not
+    that some of their method and path rules never ran, and nothing at startup
+    could have told them -- whether a host speaks HTTP is not knowable from the
+    file, which is why §8 made this a runtime report rather than a validation
+    rule.
+    """
+
+    NOT_HTTP = bytes(range(32)) + b"\x00" * 8
+
+    def _governed(self, mod, origin):
+        return self._listener(
+            mod, origin,
+            entries=(("localhost", ("GET",), ("/v1/*",)),))
+
+    def test_a_governed_host_lands_in_the_policy_bucket_not_the_plain_one(self):
+        origin = _Origin(self.origin_pem)
+        self.addCleanup(origin.close)
+        mod = _mod()
+        listener, _ = self._governed(mod, origin)
+        self._exchange(listener, origin, request=self.NOT_HTTP)
+        reasons = listener.status()["drop_reasons"]
+        self.assertEqual(reasons[mod.DROP_NOT_HTTP_POLICY], 1)
+        self.assertEqual(reasons[mod.DROP_NOT_HTTP], 0)
+
+    def test_an_ungoverned_host_stays_in_the_plain_bucket(self):
+        """The other half of the same guard. A split that put everything in one
+        bucket would pass the test above on its own."""
+        origin = _Origin(self.origin_pem)
+        self.addCleanup(origin.close)
+        mod = _mod()
+        listener, _ = self._listener(mod, origin)
+        self._exchange(listener, origin, request=self.NOT_HTTP)
+        reasons = listener.status()["drop_reasons"]
+        self.assertEqual(reasons[mod.DROP_NOT_HTTP], 1)
+        self.assertEqual(reasons[mod.DROP_NOT_HTTP_POLICY], 0)
+
+    def test_a_WILDCARD_policy_entry_governs_the_name_it_covers(self):
+        """The split is asked of the policy's matcher, not of a literal host
+        string. An entry written `*.example` governs `api.example`, and a check
+        comparing names would put that host in the wrong bucket -- the same
+        defect §3's widening trap is about, one plane along."""
+        origin = _Origin(self.origin_pem)
+        self.addCleanup(origin.close)
+        mod = _mod()
+        listener, _ = self._listener(
+            mod, origin, entries=(("*host", ("GET",), ("/",)),))
+        self._exchange(listener, origin, request=self.NOT_HTTP)
+        self.assertEqual(
+            listener.status()["drop_reasons"][mod.DROP_NOT_HTTP_POLICY], 1)
+
+    def test_both_are_per_host_so_the_operator_gets_names_not_totals(self):
+        origin = _Origin(self.origin_pem)
+        self.addCleanup(origin.close)
+        mod = _mod()
+        listener, _ = self._governed(mod, origin)
+        self._exchange(listener, origin, request=self.NOT_HTTP)
+        per_host = listener.status()["per_host"]
+        self.assertEqual(per_host[mod.DROP_NOT_HTTP_POLICY],
+                         {"localhost": 1})
+        self.assertEqual(per_host[mod.DROP_NOT_HTTP], {})
+
+    def test_the_governed_line_names_the_deletion_as_well_as_the_key(self):
+        """Half the remedy is the trap. An operator told only to splice adds
+        the entry, `validate` refuses the file, and the message that sent them
+        there said nothing about why."""
+        origin = _Origin(self.origin_pem)
+        self.addCleanup(origin.close)
+        mod = _mod()
+        listener, out = self._governed(mod, origin)
+        self._exchange(listener, origin, request=self.NOT_HTTP)
+        line = out.getvalue()
+        self.assertIn("[[vm.network.splice]]", line)
+        self.assertIn("[[vm.network.policy]]", line)
+        self.assertIn("deleted", line)
+
+    def test_the_ungoverned_line_does_NOT_mention_policy(self):
+        """A remedy that names a key the operator has not written sends them
+        looking for a file they do not have."""
+        origin = _Origin(self.origin_pem)
+        self.addCleanup(origin.close)
+        mod = _mod()
+        listener, out = self._listener(mod, origin)
+        self._exchange(listener, origin, request=self.NOT_HTTP)
+        self.assertNotIn("policy", out.getvalue())
+
+    def test_the_guest_still_gets_a_close_and_the_origin_still_gets_nothing(
+            self):
+        """Tier 6 changed the accounting and the sentence. It must not have
+        changed the disposition -- these bytes reach no origin either way."""
+        origin = _Origin(self.origin_pem)
+        self.addCleanup(origin.close)
+        mod = _mod()
+        listener, _ = self._governed(mod, origin)
+        response, _ = self._exchange(listener, origin, request=self.NOT_HTTP)
+        self.assertEqual(response, b"")
+        self.assertEqual(origin.requests, [])
+
+    def test_a_governed_host_that_DOES_speak_http_is_not_counted_at_all(self):
+        """The bucket is for connections that never became requests. A request
+        the policy denies is `not permitted by policy`, which is a different
+        reason with a different meaning -- one says the rules did not run, the
+        other says they ran and said no."""
+        origin = _Origin(self.origin_pem)
+        self.addCleanup(origin.close)
+        mod = _mod()
+        listener, _ = self._governed(mod, origin)
+        self._exchange(
+            listener, origin,
+            request=b"DELETE /v1/x HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        reasons = listener.status()["drop_reasons"]
+        self.assertEqual(reasons[mod.DROP_NOT_HTTP_POLICY], 0)
+        self.assertEqual(reasons[mod.DROP_NOT_HTTP], 0)
+        self.assertEqual(reasons[mod.DROP_NOT_PERMITTED], 1)
 
 
 @unittest.skipUnless(_have_openssl(), "openssl is not installed")
