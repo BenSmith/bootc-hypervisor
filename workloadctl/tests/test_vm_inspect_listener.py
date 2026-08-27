@@ -2719,6 +2719,41 @@ class TestCounters(unittest.TestCase):
         self.assertNotIn(mod.DROP_NOT_ALLOWLISTED,
                          listener.status()["per_host"])
 
+    def test_the_allowlisted_half_of_the_binding_rejection_is_named(self):
+        """Rung 4 T7. The key space is this workload's own file, so unlike the
+        un-allowlisted half there is no unbounded set of guest-chosen names --
+        and WHICH pair of names a client is coalescing is the whole question."""
+        mod, listener, _ = self._listener()
+        self.assertIn(mod.DROP_MISDIRECTED_LISTED, mod.PER_HOST_REASONS)
+        listener.counters.record_drop(mod.DROP_MISDIRECTED_LISTED,
+                                      "other.example")
+        self.assertEqual(
+            listener.status()["per_host"][mod.DROP_MISDIRECTED_LISTED],
+            {"other.example": 1})
+
+    def test_the_two_binding_rejections_are_two_figures(self):
+        """Rung 4 T7. A non-zero binding count is either an attack or a broken
+        assumption in §4, and one bucket cannot say which. Both are counted,
+        both under their own reason, and neither lands on a policy figure."""
+        mod, listener, _ = self._listener()
+        listener.counters.record_drop(mod.DROP_MISDIRECTED, "evil.example")
+        listener.counters.record_drop(mod.DROP_MISDIRECTED_LISTED,
+                                      "other.example")
+        reasons = listener.status()["drop_reasons"]
+        self.assertEqual(reasons[mod.DROP_MISDIRECTED], 1)
+        self.assertEqual(reasons[mod.DROP_MISDIRECTED_LISTED], 1)
+        self.assertEqual(reasons[mod.DROP_NOT_ALLOWLISTED], 0)
+        self.assertEqual(reasons[mod.DROP_NOT_PERMITTED], 0)
+
+    def test_both_binding_reasons_are_found_by_one_grep(self):
+        """The `not HTTP` convention one tier earlier: an operator who greps
+        the reason out of the log must not lose the half they did not think
+        to look for."""
+        mod, _, _ = self._listener()
+        self.assertTrue(
+            mod.DROP_MISDIRECTED_LISTED.startswith(mod.DROP_MISDIRECTED),
+            "the split reason must carry the original as its prefix")
+
     def test_the_splice_candidates_are_countable_per_host(self):
         """The two reasons whose remedy is `tls = "splice"` on the workload."""
         mod, listener, _ = self._listener()

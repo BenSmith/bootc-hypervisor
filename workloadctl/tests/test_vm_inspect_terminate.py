@@ -486,9 +486,155 @@ class TestTheHostHeaderIsPinnedToTheServerName(TerminationCase):
         self.assertIsNone(error)
         self.assertIn(b"421 Misdirected Request", response)
         self.assertEqual(origin.requests, [])
+        # The ALLOWLISTED half: `other.example` is on this workload's list, so
+        # the mismatch is a client reusing a session across two names it was
+        # given, not a guest reaching for one it was not. See T7.
+        status = listener.status()
+        self.assertEqual(
+            status["drop_reasons"][
+                "host does not match the server name (allowlisted)"], 1)
+        self.assertEqual(
+            status["drop_reasons"]["host does not match the server name"], 0)
+        self.assertEqual(
+            status["per_host"][
+                "host does not match the server name (allowlisted)"],
+            {"other.example": 1})
+
+    def test_a_name_on_no_list_inside_the_session_is_the_other_figure(self):
+        """Rung 4 T7. Same refusal, same 421, different figure.
+
+        This is the attack §4's binding exists to close -- a guest reusing a
+        session it was granted to reach a name it never was -- and an operator
+        reading a merged count could not tell it from the coalescing client
+        above. `admits` decides which figure and nothing else: the request is
+        refused either way, and it is refused BEFORE the allowlist check, so
+        the guest learns no more than the 421 already tells it.
+        """
+        mod = _mod()
+        origin = _Origin(self.origin_pem)
+        self.addCleanup(origin.close)
+        listener, out = self._listener(mod, origin, hosts=("localhost",))
+        response, error = self._exchange(
+            listener, origin,
+            request=b"GET / HTTP/1.1\r\nHost: evil.example\r\n"
+                    b"Connection: close\r\n\r\n")
+        self.assertIsNone(error)
+        self.assertIn(b"421 Misdirected Request", response)
+        self.assertEqual(origin.requests, [])
+        status = listener.status()
+        self.assertEqual(
+            status["drop_reasons"]["host does not match the server name"], 1)
+        self.assertEqual(
+            status["drop_reasons"][
+                "host does not match the server name (allowlisted)"], 0)
+        # No per-host map for this half: the guest picks the name and there is
+        # no bound on how many it invents. The log line carries it.
+        self.assertNotIn("host does not match the server name",
+                         status["per_host"])
+        self.assertIn("host=evil.example", out.getvalue())
+        self.assertNotIn("(allowlisted)", out.getvalue())
+
+    def test_neither_binding_figure_is_a_policy_denial(self):
+        """Rung 4 T7. `not allowlisted` and `not permitted by policy` stay at
+        zero through both, or the figure §4 asks to be read at a glance is
+        being read out of a bucket three different decisions land in."""
+        mod = _mod()
+        origin = _Origin(self.origin_pem)
+        self.addCleanup(origin.close)
+        listener, _ = self._listener(
+            mod, origin, hosts=("localhost", "other.example"))
+        self._exchange(
+            listener, origin,
+            request=b"GET / HTTP/1.1\r\nHost: other.example\r\n"
+                    b"Connection: close\r\n\r\n")
+        reasons = listener.status()["drop_reasons"]
+        self.assertEqual(reasons["not allowlisted"], 0)
+        self.assertEqual(reasons["not permitted by policy"], 0)
+
+    def test_a_trailing_root_dot_is_the_same_name(self):
+        """`localhost.` and `localhost` are one name, and a naive comparison
+        rejects a legitimate request. §4's normalisation, as a fixture."""
+        mod = _mod()
+        origin = _Origin(self.origin_pem)
+        self.addCleanup(origin.close)
+        listener, _ = self._listener(mod, origin)
+        response, error = self._exchange(
+            listener, origin,
+            request=b"GET / HTTP/1.1\r\nHost: localhost.\r\n"
+                    b"Connection: close\r\n\r\n")
+        self.assertIsNone(error)
+        self.assertNotIn(b"421", response)
+        self.assertEqual(len(origin.requests), 1)
+
+    def test_an_uppercase_host_is_the_same_name(self):
+        """DNS names are case-insensitive; the binding has to be too."""
+        mod = _mod()
+        origin = _Origin(self.origin_pem)
+        self.addCleanup(origin.close)
+        listener, _ = self._listener(mod, origin)
+        response, error = self._exchange(
+            listener, origin,
+            request=b"GET / HTTP/1.1\r\nHost: LOCALHOST\r\n"
+                    b"Connection: close\r\n\r\n")
+        self.assertIsNone(error)
+        self.assertNotIn(b"421", response)
+        self.assertEqual(len(origin.requests), 1)
+
+    def test_the_port_spelling_is_accepted_end_to_end(self):
+        """`Host: name:443` reaches the origin rather than being bound out.
+
+        The unit test below asserts the parser accepts it; this asserts the
+        BINDING does, which is a different comparison -- the port is dropped
+        before the pinned name is compared, and a copy that kept it would
+        refuse the ordinary spelling on the plane it is ordinary on.
+        """
+        mod = _mod()
+        origin = _Origin(self.origin_pem)
+        self.addCleanup(origin.close)
+        listener, _ = self._listener(mod, origin)
+        response, error = self._exchange(
+            listener, origin,
+            request=b"GET / HTTP/1.1\r\nHost: localhost:443\r\n"
+                    b"Connection: close\r\n\r\n")
+        self.assertIsNone(error)
+        self.assertNotIn(b"421", response)
+        self.assertEqual(len(origin.requests), 1)
+
+    def test_a_denied_host_mid_connection_leaves_its_neighbours_alone(self):
+        """Rung 4 T7, §7.3. Three requests on ONE session: good, bound out,
+        good. The 421 is the middle one's alone -- pinning to the first Host
+        or tearing the connection down would either send a later request to an
+        upstream it never authorised or lose one that was authorised.
+
+        The THIRD request is asserted on the log rather than on the origin:
+        `_Origin` answers one request per connection and closes, so the reused
+        upstream is dead by then and the exchange ends `relay failed`. That is
+        the fixture, not the listener -- what is under test is that the request
+        was authorised and forwarded after the refusal, which is a line the
+        loop only reaches by having stayed on the connection.
+        """
+        mod = _mod()
+        origin = _Origin(self.origin_pem)
+        self.addCleanup(origin.close)
+        listener, out = self._listener(
+            mod, origin, hosts=("localhost", "other.example"))
+        response, error = self._exchange(
+            listener, origin,
+            request=b"GET /one HTTP/1.1\r\nHost: localhost\r\n\r\n"
+                    b"GET /two HTTP/1.1\r\nHost: other.example\r\n\r\n"
+                    b"GET /three HTTP/1.1\r\nHost: localhost\r\n"
+                    b"Connection: close\r\n\r\n")
+        self.assertIsNone(error)
+        self.assertEqual(response.count(b"421 Misdirected Request"), 1)
+        self.assertIn(b"200 OK", response)
+        self.assertEqual([r.split(b" ")[1] for r in origin.requests], [b"/one"])
+        log = out.getvalue()
+        self.assertEqual(log.count("forward plane=tls host=localhost"), 2,
+                         "the request after the refusal must be authorised")
+        self.assertEqual(log.count("host=other.example"), 1)
         self.assertEqual(
             listener.status()["drop_reasons"][
-                "host does not match the server name"], 1)
+                "host does not match the server name (allowlisted)"], 1)
 
     def test_the_port_this_plane_reaches_is_accepted_in_a_host_header(self):
         """`Host: name:443` is the ordinary spelling on a terminated plane.

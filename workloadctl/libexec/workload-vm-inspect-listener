@@ -1838,6 +1838,26 @@ DROP_TIMED_OUT = "timed out"
 DROP_UNVERIFIED = "upstream certificate unverified"
 DROP_CLIENT_CERT = "upstream wants a client certificate"
 DROP_MISDIRECTED = "host does not match the server name"
+# The same binding rejection where the name inside the session IS on this
+# workload's allowlist, and the split is the whole value of the figure.
+#
+# §4 gives the count one job: a non-zero value is either an attack or a broken
+# assumption in §4, and an operator has to tell which AT A GLANCE. Merged, they
+# cannot. A guest reusing an authorised session to reach a name it was never
+# given is the attack the binding exists to close, and the name it picks is on
+# no list. A client reusing one connection across two names that resolve to the
+# same address -- ordinary connection coalescing, which no client asks
+# permission for -- produces the identical mismatch with both names allowlisted
+# and nothing adversarial happening. One figure for both reads every coalescing
+# client as an intrusion, which is how an alarm stops being read.
+#
+# Both strings begin "host does not match the server name" so a grep for the
+# reason still finds both, the convention `not HTTP` set one tier earlier.
+#
+# The guest is told the same thing either way -- a 421 naming the session's
+# name -- because the split is FOR THE OPERATOR and changing the body would
+# only tell the guest which of its guesses were on the list.
+DROP_MISDIRECTED_LISTED = "host does not match the server name (allowlisted)"
 DROP_THROTTLED = "mint rationed"
 DROP_MINT_FAILED = "could not mint a leaf"
 DROP_NOT_HTTP = "not HTTP"
@@ -1867,6 +1887,7 @@ DROP_REASONS = (
     DROP_UNVERIFIED,
     DROP_CLIENT_CERT,
     DROP_MISDIRECTED,
+    DROP_MISDIRECTED_LISTED,
     DROP_THROTTLED,
     DROP_MINT_FAILED,
     DROP_NOT_HTTP,
@@ -1894,13 +1915,20 @@ DROP_REASONS = (
 #
 # A per-host figure for `not allowlisted` is deliberately absent --
 # the guest picks those names, there is no bound on how many it invents, and
-# the answer is already the allowlist itself rather than a list to read.
+# the answer is already the allowlist itself rather than a list to read. The
+# un-allowlisted half of the binding rejection is absent for the same reason
+# and the ALLOWLISTED half is present for its inverse: those names came off
+# this workload's own lists, so the key space is bounded by the file, and WHICH
+# PAIR of names a client is coalescing is the entire question that figure
+# answers. A count alone says a mismatch happened; §4 needs to know between
+# what.
 #
 # Every one of these is a BOUNDED top-N with a counted overflow, because the
 # keys are guest-chosen: unbounded, a guest inflating the report damages the
 # host's Prometheus label cardinality rather than its own workload.
 PER_HOST_REASONS = (
     DROP_INTERNAL,
+    DROP_MISDIRECTED_LISTED,
     DROP_UNVERIFIED,
     DROP_CLIENT_CERT,
     DROP_NOT_HTTP,
@@ -3010,9 +3038,13 @@ class Listener:
             # was established for, and 421 is the answer HTTP already has for
             # that -- the client reopens to the right origin and is checked
             # there on its own merits.
-            self.counters.record_drop(DROP_MISDIRECTED, req.host)
+            #
+            reason = self._binding_reason(req.host)
+            self.counters.record_drop(reason, req.host)
+            listed = " (allowlisted)" if (
+                reason is DROP_MISDIRECTED_LISTED) else ""
             self._log(f"drop {where} host={req.host} reason='host does not "
-                      f"match the server name {pinned_host}'")
+                      f"match the server name {pinned_host}{listed}'")
             return self._refuse(
                 client, conn, req, 421, "Misdirected Request",
                 f"this session was established for {pinned_host}, not "
@@ -3283,6 +3315,25 @@ class Listener:
             if target and not self._policy.admits(target):
                 self._log(f"note {where} host={req.host} reason='redirected to "
                           f"{target}, which is not allowlisted'")
+
+    def _binding_reason(self, host):
+        """Which of the two §4 binding figures a mismatched name lands in.
+
+        `admits` decides only WHICH FIGURE; it does not admit the request,
+        which is refused either way and refused BEFORE the allowlist is
+        consulted. The two answers are the attack and the ordinary client --
+        a guest reusing a session it was granted to reach a name it never was,
+        against a client coalescing two names it was given -- and §4 asks for a
+        count an operator can read at a glance, which one bucket for both is
+        not.
+
+        Asked here rather than left to whoever reads the figure: by then the
+        connection is gone and the name with it. The log line carries the name
+        either way; the figure is what has to arrive already split.
+        """
+        if self._policy.admits(host):
+            return DROP_MISDIRECTED_LISTED
+        return DROP_MISDIRECTED
 
     def _refuse(self, client, conn, req, status, reason, text):
         """Answer a request we will not relay. True if the connection lives.
