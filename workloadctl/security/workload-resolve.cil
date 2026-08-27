@@ -81,7 +81,29 @@
 ; The inherited listening sockets, created by init_t in this domain. Both
 ; transports, for the reason in the header.
 (allow init_t wlresolve_t (udp_socket (bind create getattr getopt read setopt shutdown write)))
-(allow init_t wlresolve_t (tcp_socket (bind create getattr getopt listen read setopt shutdown write)))
+
+; `accept` IS ON THIS RULE AND NOT ONLY ON THE DOMAIN'S OWN, and the reason is
+; a systemd behaviour nothing about a socket unit suggests. Measured on an
+; enforcing host 2026-08-27, during inspect_rig's responder-restart check:
+;
+;   avc: denied { accept } comm="systemd" scontext=…init_t
+;     tcontext=…wlresolve_t tclass=tcp_socket
+;
+; 180 of them, at exactly 15 every 2 seconds for 22 seconds, plus 1260 more in
+; the snapshot before the run. `Accept=no` means systemd does not accept
+; connections to HAND to the service -- it does not mean systemd never accepts
+; at all. When the service goes away with connections pending, systemd flushes
+; them by accepting and closing, and denied that, it retries at the socket's
+; own trigger interval until TriggerLimitBurst stops it. The workload keeps
+; working throughout, which is why no assertion and no rig noticed: the visible
+; effect is a spin in the journal that looks like the guest reconnecting.
+;
+; Granted on BOTH modules though only the responder was measured. The two
+; socket units have the same shape and the same restart path, so the inspector
+; differs only in not having been restarted under a harvest -- an unexercised
+; path, not an unused permission, which is the distinction workload-resolve's
+; own `accept` comment already turns on.
+(allow init_t wlresolve_t (tcp_socket (accept bind create getattr getopt listen read setopt shutdown write)))
 
 ; Port 53 is dns_port_t in shipped policy; node_bind covers binding to the
 ; workload's own management address rather than a wildcard.

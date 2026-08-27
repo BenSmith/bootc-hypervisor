@@ -76,6 +76,22 @@ class TestSocketActivation(unittest.TestCase):
             body,
             r"\(allow\s+init_t\s+wlinspect_t\s+\(tcp_socket\s+\([^)]*create")
 
+    def test_init_can_flush_pending_connections(self):
+        """`accept`, on the init_t rule rather than the domain's own.
+
+        `Accept=no` does not mean systemd never accepts: when the service goes
+        away with connections pending, systemd flushes them by accepting and
+        closing. Denied, it retries at the socket's trigger interval and spins
+        -- while the workload keeps working, which is why this was found by
+        reading an audit log rather than by anything failing. Measured on the
+        RESPONDER's socket 2026-08-27 and granted here too: the two units have
+        the same shape and the same restart path, so this one differs only in
+        not having been restarted under a harvest.
+        """
+        self.assertRegex(
+            _body(),
+            r"\(allow\s+init_t\s+wlinspect_t\s+\(tcp_socket\s+\([^)]*accept")
+
     def test_the_fd_passing_socketpair_rule_is_present(self):
         """The rule whose absence leaves the audit log EMPTY.
 
