@@ -441,3 +441,49 @@
 ; caches were labelled BEFORE its first start, which is why a rig that had run
 ; once already did not show it.
 (allow init_t wlinspect_leaf_t (dir (mounton)))
+
+; THE PER-REQUEST RECORD'S SUBTREE. /var/log/workloadctl/egress/<name>/
+;
+; A THIRD TYPE, and not var_log_t, because the modes are the access decision:
+; the directory is 0700 owned by the workload and the file is 0600, so that
+; root and the workload uid are the only readers of what a sandboxed agent
+; asked for. A record left as var_log_t would be reachable by every domain
+; shipped policy lets read the system's logs, which is the ACL the whole
+; decision to keep this out of the journal exists to avoid.
+;
+; `logfile` in the attribute set is what lets shipped logrotate_t policy rotate
+; it with no rule of ours. Rotation is logrotate's deliberately -- writing our
+; own is a solved problem whose failure mode is a full /var on a hypervisor.
+;
+; A `filecon` IS REACHABLE HERE, which is the opposite of what the PKI subtree
+; needs, and the difference is the prefix rather than anything about the rule.
+; file_contexts.local outranks the base file wholesale, so a module filecon is
+; shadowed only under a path workloadctl registers via semanage; that set is
+; provisioning.LOCAL_FCONTEXT_ROOTS -- /var/lib/workloads and /run/workload-vm
+; -- and /var/log is in neither. One glob also covers every workload, so unlike
+; vm_pki_fcontext_patterns there is nothing per-workload to register at enable
+; or to remove at disable.
+(type wlinspect_log_t)
+(roletype object_r wlinspect_log_t)
+(typeattributeset file_type (wlinspect_log_t))
+(typeattributeset logfile (wlinspect_log_t))
+(filecon "/var/log/workloadctl/egress(/.*)?" any (system_u object_r wlinspect_log_t ((s0) (s0))))
+
+; NOT YET MEASURED ON A HOST. Every other rule in this module carries a date
+; because it was harvested from a real denial; these are DERIVED from what the
+; listener and systemd do, and tier 3 is where they are confirmed or corrected.
+; Stated so that a reader does not mistake a prediction for a measurement.
+;
+; The domain's own use is narrow: open the file, append to it, fchmod it, and
+; -- after logrotate renames it away -- create it again in the directory. It
+; never reads the record back and never removes one.
+(allow wlinspect_t wlinspect_log_t (dir (add_name getattr open read search write)))
+(allow wlinspect_t wlinspect_log_t (file (append create getattr open setattr write)))
+
+; SYSTEMD CREATES AND MOUNTS THE DIRECTORY BEFORE THE PROCESS EXISTS, which is
+; the same lesson the leaf caches taught one rule up. LogsDirectory= is init_t
+; doing a mkdir and a chown, and then -- under ProtectSystem=strict -- a bind
+; mount whose label is checked against INIT_T rather than against this domain.
+; Without the mounton the unit does not start at all, and the message names the
+; ExecStartPre rather than the mount.
+(allow init_t wlinspect_log_t (dir (add_name create getattr mounton open read search setattr write)))

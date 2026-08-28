@@ -29,22 +29,32 @@ def _body():
                      if not l.lstrip().startswith(";"))
 
 
+def _filecons():
+    """Every path this module labels."""
+    return re.findall(r'\(filecon\s+"([^"]+)"', _body())
+
+
 class TestFilecon(unittest.TestCase):
-    def test_the_filecon_names_exactly_one_path(self):
+    def test_no_filecon_globs_the_libexec_directory(self):
         """A glob over /usr/libexec/workloadctl would make every helper an
         entrypoint into this domain -- including workload-vm-inspect, which
         the socket unit runs privileged. Nothing would fail; the domain would
-        just be enterable from six more binaries."""
-        filecons = re.findall(r'\(filecon\s+"([^"]+)"', _body())
-        self.assertEqual(len(filecons), 1, filecons)
-        self.assertNotIn("*", filecons[0])
-        self.assertNotIn("(", filecons[0])
+        just be enterable from six more binaries.
 
-    def test_the_filecon_path_is_the_installed_listener(self):
+        Asserted as a property of every filecon rather than as a count of
+        them. The count was the original spelling and it fails the moment the
+        module labels anything else -- which says nothing about the entrypoint
+        and sends the reader to the wrong rule."""
+        for path in _filecons():
+            if not path.startswith("/usr/libexec"):
+                continue
+            self.assertNotIn("*", path)
+            self.assertNotIn("(", path)
+
+    def test_the_entrypoint_filecon_is_the_installed_listener(self):
         """The drift guard. The module and lib/vm.py each name this path, and
         a disagreement looks exactly like the domain not being applied."""
-        filecons = re.findall(r'\(filecon\s+"([^"]+)"', _body())
-        self.assertEqual(filecons[0], VM_INSPECT_LISTENER_BIN)
+        self.assertIn(VM_INSPECT_LISTENER_BIN, _filecons())
 
 
 class TestSocketActivation(unittest.TestCase):
@@ -365,8 +375,13 @@ class TestBoundary(unittest.TestCase):
         lose on specificity, it is simply never consulted. The label an
         operator asked for is not applied and nothing errors.
         """
+        # Matched on the CONTEXT each filecon assigns, not on where the rule
+        # sits in the file. The original spelling split the text at the type
+        # declaration and searched everything after it, so it failed on the
+        # first unrelated filecon added below -- reporting the PKI rule as
+        # wrongly declared when the PKI rule had not changed.
         for t in ("wlinspect_ca_t", "wlinspect_leaf_t"):
-            self.assertNotIn(f"filecon", _body().split(f"(type {t})")[1])
+            self.assertNotRegex(_body(), rf'\(filecon\s+"[^"]+"[^\n]*\b{t}\b')
 
 
 if __name__ == "__main__":

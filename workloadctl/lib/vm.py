@@ -807,6 +807,84 @@ def vm_resolve_status_path(name: str) -> str:
     return f"{VM_SOCKET_DIR}/{name}/{VM_RESOLVE_STATUS_FILE}"
 
 
+# WHERE THE PER-REQUEST RECORD GOES, and why it is not in the journal and not
+# under the workload tree.
+#
+# NOT THE JOURNAL. The inspector's unit sets StandardOutput=journal, so a record
+# written with its ordinary logging lands in a sink readable by root,
+# `systemd-journal` and `adm` -- every sudo-capable login on the host -- rotated
+# by nothing this project owns and forwarded off-box by whatever the host's
+# journald is configured to do. A URL path is evidence of what a sandboxed agent
+# was doing, and a query string can carry a credential outright. The decision
+# lines STAY in the journal, which is the right sink for a message whose job is
+# to tell an operator what to fix; the record is a different document with a
+# different reader. A LogNamespace= was the leading alternative and gives
+# rotation and isolation for free -- but a namespace journal is still readable
+# by `systemd-journal` and `adm`, which is the wrong ACL on a host where sudo
+# does not stay passwordless.
+#
+# NOT THE WORKLOAD TREE either. state/ is svirt_image_t, the label
+# vm_pki_fcontext_patterns() exists to move material OUT of -- an audit record
+# does not belong in the same tree as the guest's disks. data/ is worse: `./`
+# volume anchors resolve into it, so a guest with a virtiofs volume at the data
+# root would read its own audit log.
+#
+# So /var/log, where logrotate is expected to look and where the record survives
+# a rollback of the state tree. The MODES are the access decision:
+#
+#   /var/log/workloadctl/               root:root  0755
+#   /var/log/workloadctl/egress/        root:root  0700
+#   /var/log/workloadctl/egress/<name>/ _wl-<name> 0700
+#   .../requests.log                    _wl-<name> 0600
+#
+# Root and the workload uid, nobody else -- strictly tighter than any journal
+# option. The per-workload directory is owned by the workload rather than by
+# root because the listener recreates the file itself after a rotation (see the
+# logrotate snippet's `nocreate`), and a process running as _wl-<name> cannot
+# create a name in a directory root owns at 0700. The 0700 on egress/ is what
+# keeps the ACL argument intact one level up.
+VM_INSPECT_RECORD_ROOT = Path("/var/log/workloadctl/egress")
+VM_INSPECT_RECORD_FILE = "requests.log"
+
+# The per-workload directory is a systemd LogsDirectory=, whose names are
+# relative to /var/log. Stated once so the generator and the readers cannot
+# drift: a LogsDirectory= that named a different path than the listener writes
+# to would give the unit a writable directory nobody uses and a write that
+# fails EROFS under ProtectSystem=strict -- which the leaf caches already
+# taught us is swallowed by the per-connection OSError handler and reads as a
+# network fault.
+VM_LOG_BASE = Path("/var/log")
+
+
+def vm_inspect_record_dir(name: str) -> Path:
+    """Where one workload's per-request record lives."""
+    return VM_INSPECT_RECORD_ROOT / name
+
+
+def vm_inspect_record_path(name: str) -> Path:
+    """The record file itself."""
+    return vm_inspect_record_dir(name) / VM_INSPECT_RECORD_FILE
+
+
+def vm_inspect_logs_directory(name: str) -> str:
+    """The LogsDirectory= value for one workload's inspect service."""
+    return str(vm_inspect_record_dir(name).relative_to(VM_LOG_BASE))
+
+
+# The type the record subtree carries, and the pattern the CIL module's own
+# filecon names.
+#
+# A `filecon` IS reachable here, unlike the PKI subtree's -- and the difference
+# is worth stating, because vm_pki_fcontext_patterns()'s docstring says the
+# opposite about a path that looks similar. file_contexts.local outranks the
+# base file wholesale, so a module filecon is shadowed only under a prefix
+# workloadctl has registered via semanage; LOCAL_FCONTEXT_ROOTS names those, and
+# /var/log is not one of them. One glob also covers every workload, so unlike
+# the PKI rules there is nothing per-workload to register or to remove at
+# disable.
+VM_INSPECT_RECORD_SELINUX_TYPE = "wlinspect_log_t"
+
+
 def vm_inspect_policy(net: dict) -> dict:
     """The inspector's policy document for one workload.
 

@@ -85,6 +85,7 @@ try:
         VM_RESOLVE_LISTENER_BIN, VM_RESOLVE_PORT,
         vm_resolve_address, vm_uses_resolve,
         vm_denial_dir, vm_leaf_dir,
+        vm_inspect_logs_directory,
     )
     from validation import valid_userns_mode, validate_workload_config
     from secrets_template import (
@@ -2171,6 +2172,26 @@ def generate_vm_inspect_service(config, user_name: str) -> str:
     svc.blank()
     svc.add("StandardOutput", "journal")
     svc.add("StandardError", "journal")
+    svc.blank()
+    # Where the PER-REQUEST RECORD goes, which is NOT the journal above. The
+    # two lines are different documents with different readers: the journal
+    # carries the decision and the remedy, and the record carries what the
+    # guest actually asked for -- paths, and query strings that can carry a
+    # credential outright. vm.py's VM_INSPECT_RECORD_ROOT comment has the
+    # argument; the modes are the access decision.
+    #
+    # LogsDirectory= rather than a mkdir of ours, for three things at once:
+    # systemd creates it as User= (so the listener can recreate the file after
+    # a rotation, which the logrotate snippet's `nocreate` requires), recreates
+    # it if an operator deletes it, and -- the part that is easy to miss --
+    # adds it to the unit's writable set under ProtectSystem=strict with no
+    # ReadWritePaths= entry of ours. See _harden_vm_sidecar's `extra_rw`
+    # comment for what the absence of that costs: EROFS, swallowed by the
+    # per-connection OSError handler, presenting as a network fault.
+    svc.add("LogsDirectory", vm_inspect_logs_directory(name))
+    # 0700, not the 0755 systemd would default to. Root and the workload uid,
+    # nobody else -- the whole reason the record is not in a journal.
+    svc.add("LogsDirectoryMode", "0700")
     svc.blank()
     # The socket's trigger limit is a transient slowdown by design; the service
     # still needs its own restart policy so a failed listener that the socket

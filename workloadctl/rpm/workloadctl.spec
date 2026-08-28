@@ -206,6 +206,13 @@ install -Dpm 0644 %{_sourcedir}/security/workload-vm.cil \
 install -Dpm 0644 %{_sourcedir}/security/workload-inspect.cil \
     %{buildroot}%{_datadir}/workloadctl/workload-inspect.cil
 
+# The per-request record's rotation. A plain drop-in with no scriptlet: the
+# snippet is inert until a workload's inspector creates a file matching its
+# glob, and `missingok` is what makes a host with no inspected VM a no-op
+# rather than a nightly error.
+install -Dpm 0644 %{_sourcedir}/logrotate/workloadctl-inspect \
+    %{buildroot}%{_sysconfdir}/logrotate.d/workloadctl-inspect
+
 install -Dpm 0644 %{_sourcedir}/security/workload-resolve.cil \
     %{buildroot}%{_datadir}/workloadctl/workload-resolve.cil
 
@@ -529,5 +536,9 @@ fi
 %{_datadir}/workloadctl/
 %dir %{_sysconfdir}/workloads.d
 %attr(0700,root,root) %dir %{_sysconfdir}/agent-broker
+# %%config(noreplace): the retention numbers are defaults to revisit, and an
+# operator who has already revisited them on a host must not lose that to an
+# upgrade.
+%config(noreplace) %{_sysconfdir}/logrotate.d/workloadctl-inspect
 
 %changelog

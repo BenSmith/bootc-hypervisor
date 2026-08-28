@@ -128,7 +128,8 @@ from vm import (
     VM_INSPECT_ORIG_CLEARTEXT, VM_INSPECT_ORIG_TLS, VM_INSPECT_PORT_CLEARTEXT, VM_INSPECT_PORT_TLS,
     VM_TLS_DEFAULT, LeafRefused, vm_ca_cert_path, vm_ca_key_path,
     vm_hostname_control_character, vm_hostname_match,
-    vm_inspect_policy_path, vm_inspect_status_path, vm_normalise_hostname,
+    vm_inspect_policy_path, vm_inspect_record_path, vm_inspect_status_path,
+    vm_normalise_hostname,
     VmPolicyEntry, vm_policy_governs,
 )
 from vm_clock import vm_resync_guest_clock_if_skewed
@@ -2001,6 +2002,110 @@ PER_HOST_REASONS = (
 DROP_UNCLASSIFIED = "(unclassified)"
 
 
+class RequestLog:
+    """The per-request record's file: append, reopen on SIGHUP, never raise.
+
+    A SEPARATE SINK FROM THE JOURNAL, deliberately. The decision lines stay
+    where they are -- they exist to tell an operator what to fix, and the
+    journal is the right place for that. This carries the per-request detail
+    for allowed and denied alike, which is evidence of what a sandboxed agent
+    was doing, and lands in a file readable by root and the workload uid only.
+    vm.py's VM_INSPECT_RECORD_ROOT comment carries the whole argument, including
+    why a LogNamespace= was not enough.
+
+    NEVER RAISES, and the except clauses have to be as wide as that claim -- the
+    standing rule for every diagnostic in this file, and it binds harder here
+    than in write_status: this runs on the CONNECTION threads, so an exception
+    escaping would take one guest request down per failure rather than the
+    accept loop once.
+
+    The first failure is logged and the rest are not. A sink that cannot be
+    written is unwritable for every request, and a line per request would put
+    exactly the volume the private sink exists to keep out of the journal back
+    into it. The permanent reading is the counter -- see Counters.record_write
+    -- because a warning nobody re-reads is not a signal an operator has.
+    """
+
+    def __init__(self, path, out=None, on_failure=None):
+        self._path = None if path is None else str(path)
+        self._out = out
+        self._on_failure = on_failure
+        self._fd = None
+        self._lock = threading.Lock()
+        # Set by the signal handler, acted on by the next write. NOT reopened
+        # in the handler itself: a signal is delivered on whichever thread the
+        # kernel picks, and taking this lock there deadlocks against a thread
+        # already inside write(). The cost is that an idle workload holds the
+        # rotated fd until its next request, which is exactly what the
+        # logrotate snippet's `delaycompress` is for -- the two are a pair.
+        self._reopen = False
+        self._warned = False
+
+    def reopen(self):
+        """Ask for a reopen. Async-signal-safe: one assignment, no I/O."""
+        self._reopen = True
+
+    def write(self, record: dict) -> None:
+        if self._path is None:
+            return
+        try:
+            line = json.dumps(record, sort_keys=True) + "\n"
+        except (TypeError, ValueError) as exc:
+            # A field a later rung added that json cannot serialise. Degrade to
+            # a missing record, never to a failed request.
+            self._fail(f"could not serialise a record: {exc}")
+            return
+        try:
+            with self._lock:
+                if self._reopen or self._fd is None:
+                    self._open_locked()
+                # ONE write of the whole line. O_APPEND fixes the offset so two
+                # threads cannot overwrite each other, but it does not make a
+                # partial write atomic -- the lock is what keeps one record on
+                # one line, and it is needed for the reopen regardless.
+                os.write(self._fd, line.encode())
+        except OSError as exc:
+            self._fail(f"could not write {self._path}: {exc}")
+
+    def _open_locked(self):
+        if self._fd is not None:
+            try:
+                os.close(self._fd)
+            except OSError:
+                pass
+            self._fd = None
+        self._reopen = False
+        fd = os.open(self._path,
+                     os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+        # The open mode is a REQUEST, filtered by the umask this process
+        # inherited from its socket unit. fchmod is what makes 0600 a fact --
+        # and the mode is the access decision here, not a nicety.
+        try:
+            os.fchmod(fd, 0o600)
+        except OSError:
+            os.close(fd)
+            raise
+        self._fd = fd
+
+    def _fail(self, message):
+        if self._on_failure is not None:
+            self._on_failure()
+        if self._warned or self._out is None:
+            return
+        self._warned = True
+        print(f"WARNING: the per-request record is not being written: "
+              f"{message}", file=self._out, flush=True)
+
+    def close(self):
+        with self._lock:
+            if self._fd is not None:
+                try:
+                    os.close(self._fd)
+                except OSError:
+                    pass
+                self._fd = None
+
+
 class Counters:
     """What this listener reports, and the only place any of it is defined.
 
@@ -2090,6 +2195,14 @@ class Counters:
         self.dispositions = {"spliced": 0, "terminated": 0, "forwarded": 0,
                              "dropped": 0}
         self.bumped = 0
+        # Records the per-request sink could not take. HAS A WRITER, which is
+        # the whole point of it being here rather than a journal line: the
+        # WARNING is emitted once per process, so a sink that has been broken
+        # since boot is invisible to anyone who was not tailing at the moment
+        # it failed. This is the reading that survives, and a non-zero here
+        # means the record is incomplete -- which a reader must know before
+        # concluding a guest made no requests.
+        self.record_failures = 0
         # Pre-seeded from DROP_REASONS rather than grown on first use. A reason
         # absent from the file and a reason reading zero are the same fact and
         # must look the same, or an operator reads "no key" as "not measured".
@@ -2162,6 +2275,13 @@ class Counters:
         with self._lock:
             self.dispositions["terminated"] += 1
 
+    def record_write_failure(self) -> None:
+        """One record the sink refused. Passed to RequestLog as its callback
+        rather than called from the write path, so the counter cannot drift
+        from the failures it counts."""
+        with self._lock:
+            self.record_failures += 1
+
     def record_bump(self) -> None:
         """One handshake completed solely to deliver a refusal legibly.
 
@@ -2204,6 +2324,7 @@ class Counters:
                 "drop_reasons": reasons,
                 "ech": {"seen": self.ech_seen, "alarm": self.ech_alarm},
                 "bumped": self.bumped,
+                "record_failures": self.record_failures,
                 "internal_refusals": self.internal_refusals.snapshot(),
                 "internal_refusals_total": self.internal_refusals.total,
                 "per_host": {reason: counts.snapshot()
@@ -2270,7 +2391,7 @@ class Listener:
     """Accept on the inherited listeners and act on each connection by plane."""
 
     def __init__(self, sockets, out=None, limit=MAX_CONNECTIONS, policy=None,
-                 status_path=None, minter=None):
+                 status_path=None, minter=None, record_path=None):
         self._sockets = list(sockets)
         self._out = out if out is not None else sys.stdout
         self._ceiling = Ceiling(limit)
@@ -2292,6 +2413,14 @@ class Listener:
         self._policy = policy if policy is not None else Policy(
             tls="splice", hosts=())
         self.counters = Counters(self._policy)
+        # None means "build no record", the same convention _status_path uses
+        # and for the same reason: the rung-1 shape tests construct a Listener
+        # with no workload name and no directory to write into, and a
+        # diagnostic that made those impossible would be a diagnostic that
+        # decides which tests can exist.
+        self.record = RequestLog(
+            record_path, out=self._out,
+            on_failure=self.counters.record_write_failure)
         # None under `tls = "splice"`, and main() refuses to start without one
         # under `tls = "inspect"`. Not defaulted here: a Listener that
         # terminated with no minter would have no leaf to present and would
@@ -3773,9 +3902,15 @@ def main(argv=None):
         print(f"error: {exc}", file=sys.stderr)
         return 1
     listener = Listener(sockets, policy=policy, minter=minter,
-                        status_path=vm_inspect_status_path(argv[1]))
+                        status_path=vm_inspect_status_path(argv[1]),
+                        record_path=vm_inspect_record_path(argv[1]))
     print(f"policy loaded from {policy_path}: {policy.summary}", flush=True)
     signal.signal(signal.SIGTERM, lambda *_args: listener.stop())
+    # Rotation is logrotate's (see /etc/logrotate.d/workloadctl-inspect), and
+    # this is the half of it that lives here: the snippet renames the file and
+    # then HUPs us, rather than using copytruncate, which races an in-flight
+    # write. The handler only sets a flag -- RequestLog.reopen says why.
+    signal.signal(signal.SIGHUP, lambda *_args: listener.record.reopen())
     try:
         listener.accept_loop()
     finally:
@@ -3784,6 +3919,7 @@ def main(argv=None):
         # otherwise leave its last half-minute unreported.
         listener.write_status()
         listener.log_summary()
+        listener.record.close()
         listener.close()
     return 0
 

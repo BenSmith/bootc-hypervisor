@@ -1,0 +1,39 @@
+# The per-request record written by each VM workload's egress inspector.
+#
+# ROTATION IS LOGROTATE'S, NOT OURS. Writing our own was considered and
+# rejected: it is a solved problem with a packaged solution, and the failure
+# mode of getting it wrong is a full /var on a hypervisor.
+#
+# `nocreate`, because this path is a GLOB and logrotate's `create` takes one
+# literal owner -- it cannot produce <name>/requests.log owned by _wl-<name>
+# per match. So the file is recreated by the listener on its SIGHUP reopen, as
+# the uid it already runs as and with the 0600 it already sets. `su` stays root
+# for the same reason: there is no single user this snippet could drop to.
+#
+# `postrotate` + HUP rather than `copytruncate`, which races an in-flight write
+# and would tear a record in half. `|| true` is not tidiness -- a postrotate
+# that fails aborts the rotation, and the glob matches nothing on a host whose
+# inspected workloads are all stopped.
+#
+# `delaycompress` because the listener holds the current fd open until its next
+# write: an idle workload does not act on the HUP until a request arrives.
+#
+# THE NUMBERS ARE DEFAULTS TO REVISIT, not settled figures -- there is no
+# measured request rate yet. `maxsize` matters more than `rotate` does: a
+# chatty agent filling /var takes the hypervisor down, where a truncated
+# history only loses evidence. `maxsize` rather than `size` so it rotates on
+# the daily run OR at the cap, whichever comes first.
+/var/log/workloadctl/egress/*/requests.log {
+    su root root
+    daily
+    rotate 14
+    maxsize 100M
+    missingok
+    notifempty
+    nocreate
+    compress
+    delaycompress
+    postrotate
+        systemctl kill -s HUP 'workload-*-inspect.service' 2>/dev/null || true
+    endscript
+}
