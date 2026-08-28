@@ -776,6 +776,20 @@ VM_DROP_MISDIRECTED_LISTED = "host does not match the server name (allowlisted)"
 VM_DROP_NOT_HTTP = "not HTTP"
 VM_DROP_NOT_HTTP_POLICY = "not HTTP (policy entry)"
 
+# The two field names that tie one of the inspector's journal lines to the
+# per-request record written beside it. Second definitions for the same reason
+# the four keys above are, and pinned the same way by
+# tests/test_vm_inspect_diagnose.py.
+#
+# `id` is per CONNECTION and `req` is the ordinal within it, so a reader
+# selecting on `id` alone gets every decision taken on one connection in order.
+# Neither can be replaced by `peer=`, which the listener also logs: a source
+# port repeats across the requests on one keep-alive connection and is reused
+# by the kernel after close, so it groups the wrong lines together and splits
+# the right ones apart.
+VM_INSPECT_LOG_ID_FIELD = "id"
+VM_INSPECT_LOG_REQ_FIELD = "req"
+
 
 def vm_inspect_status_path(name: str) -> str:
     """Where one workload's inspector writes its counters.

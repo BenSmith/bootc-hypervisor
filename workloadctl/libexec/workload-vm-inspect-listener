@@ -112,6 +112,7 @@ report each break as a request that could not be read.
 import ipaddress
 import json
 import os
+import secrets
 import selectors
 import signal
 import socket
@@ -241,6 +242,19 @@ H2_FRAME_SETTINGS = 0x4
 # would otherwise hold a ceiling slot for attempts * CONNECTION_TIMEOUT. An
 # honest hello needs one attempt, occasionally two.
 PEEK_ATTEMPTS_MAX = 16
+
+# The two field names that tie a journal line to its record.
+#
+# STATED AS CONSTANTS BECAUSE lib/ RESTATES THEM. `workloadctl` reads these
+# back out of the journal to join a decision to the request it was taken on,
+# and nothing in lib/ can import this extension-less entrypoint -- the same
+# situation VM_DROP_* is in, and answered the same way:
+# VM_INSPECT_LOG_ID_FIELD / VM_INSPECT_LOG_REQ_FIELD in lib/vm.py are pinned
+# against these by tests/test_vm_inspect_diagnose.py. A rename here fails that
+# test rather than turning the join into a silent no-match, which is what a
+# reader looking for a field nobody emits any more would look like.
+LOG_ID_FIELD = "id"
+LOG_REQ_FIELD = "req"
 
 _ACCEPT_POLL = 0.1
 
@@ -2347,10 +2361,20 @@ class Listener:
         # name cannot distinguish the planes under Accept=no (module docstring).
         local = listen_sock.getsockname()
         plane = plane_for_port(local[1])
+        # HERE, not in _serve, and before the ceiling is consulted: _serve does
+        # not run for a connection the ceiling rejects, and those two
+        # `rejected` lines are exactly the ones an operator correlates when a
+        # guest reports a stall it got no answer to.
+        #
+        # Random rather than a counter. The listener is socket-activated, so a
+        # counter restarts at zero every time the socket re-triggers it, while
+        # the record file this keys outlives that restart -- two unrelated
+        # connections would share a key in the one file a reader joins on.
+        cid = secrets.token_hex(6)
         if not self._ceiling.admit():
             # Reject rather than queue: close now, count it, spawn no thread.
             self._log(
-                f"rejected plane={plane} local={_fmt(local)} "
+                f"rejected {LOG_ID_FIELD}={cid} plane={plane} local={_fmt(local)} "
                 f"peer={_fmt(peer)} reason='connection ceiling reached'")
             # Counted as a drop as well as a rejection. The guest saw a closed
             # connection, which is the same thing every other drop reason gives
@@ -2372,18 +2396,28 @@ class Listener:
         # while still reporting itself active.
         try:
             threading.Thread(
-                target=self._serve, args=(conn, peer, local, plane),
+                target=self._serve, args=(conn, peer, local, plane, cid),
                 daemon=True).start()
         except RuntimeError as exc:
             self._ceiling.release(refused=True)
             self._log(
-                f"rejected plane={plane} local={_fmt(local)} "
+                f"rejected {LOG_ID_FIELD}={cid} plane={plane} local={_fmt(local)} "
                 f"peer={_fmt(peer)} reason='cannot start thread: {exc}'")
             self.counters.record_drop(DROP_CEILING)
             conn.close()
 
-    def _serve(self, conn, peer, local, plane):
-        where = f"plane={plane} local={_fmt(local)} peer={_fmt(peer)}"
+    def _serve(self, conn, peer, local, plane, cid):
+        # The id LEADS `where`, and `where` is interpolated by every decision
+        # path in this file -- so one field here is what puts a join key on
+        # `drop`, `splice`, `bump`, `terminate`, `forward`, `close` and
+        # `upgrade` at once, rather than on the subset someone remembered.
+        #
+        # `peer=` cannot serve as that key and this does not replace it: a
+        # port repeats across the requests on one keep-alive connection and is
+        # reused by the kernel after close, so it groups the wrong things
+        # together and separates the right ones.
+        where = (f"{LOG_ID_FIELD}={cid} plane={plane} "
+                 f"local={_fmt(local)} peer={_fmt(peer)}")
         try:
             if plane == "tls":
                 self._serve_tls(conn, where)
@@ -2917,10 +2951,14 @@ class Listener:
             if not self._is_http(client, tls_conn, where, host):
                 return
             first = True
-            while self._serve_one_request(client, tls_conn, where, upstreams,
-                                          first, scheme=SCHEME_HTTPS,
+            seq = 1
+            while self._serve_one_request(client, tls_conn,
+                                          f"{where} {LOG_REQ_FIELD}={seq}",
+                                          upstreams, first,
+                                          scheme=SCHEME_HTTPS,
                                           pinned_host=host):
                 first = False
+                seq += 1
         finally:
             for up in upstreams.values():
                 up.sock.close()
@@ -3049,9 +3087,12 @@ class Listener:
         upstreams = {}
         try:
             first = True
-            while self._serve_one_request(client, conn, where, upstreams,
-                                          first):
+            seq = 1
+            while self._serve_one_request(client, conn,
+                                          f"{where} {LOG_REQ_FIELD}={seq}",
+                                          upstreams, first):
                 first = False
+                seq += 1
         finally:
             for up in upstreams.values():
                 up.sock.close()
@@ -3065,6 +3106,12 @@ class Listener:
         the session's certificate was minted for: a request naming any other
         host is answered 421 rather than relayed, because the connection it
         would be relayed down is not the one its Host header authorises.
+
+        `where` arrives with the connection id AND this request's ordinal
+        already in it -- composed by the caller, because the ordinal is the
+        loop's to count and this function serves exactly one request. Nothing
+        here rebuilds it, so `_refuse`, `_relay_response` and the redirect
+        notes all carry the same key without knowing it exists.
 
         `first` says which of the two timeouts bounds the wait for this
         request's first byte. On the first request it is the decision timeout:

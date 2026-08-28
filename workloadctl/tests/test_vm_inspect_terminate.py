@@ -25,6 +25,7 @@ CA signed, which is exactly the check that must not accidentally hold.
 
 import io
 import os
+import re
 import socket
 import ssl
 import subprocess
@@ -664,7 +665,12 @@ class TestTheHostHeaderIsPinnedToTheServerName(TerminationCase):
         self.assertIn(b"200 OK", response)
         self.assertEqual([r.split(b" ")[1] for r in origin.requests], [b"/one"])
         log = out.getvalue()
-        self.assertEqual(log.count("forward plane=tls host=localhost"), 2,
+        # Counted with the request ordinal wildcarded: `where` carries a
+        # `req=` between the plane and the host, and these are requests 1 and
+        # 3 -- pinning the whole literal here would pin the ordinal too and
+        # assert the numbering rather than the authorisation.
+        forwards = re.findall(r"forward plane=tls req=\d+ host=localhost", log)
+        self.assertEqual(len(forwards), 2,
                          "the request after the refusal must be authorised")
         self.assertEqual(log.count("host=other.example"), 1)
         self.assertEqual(

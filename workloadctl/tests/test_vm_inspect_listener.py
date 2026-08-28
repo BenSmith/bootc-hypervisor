@@ -87,7 +87,7 @@ def _serve_line(test, local, peer=("192.0.2.1", 1024)):
     guest.sendall(b"GET / HTTP/1.1\r\nHost: nobody.example\r\n\r\n")
     guest.shutdown(socket.SHUT_WR)
     plane = mod.plane_for_port(local[1])
-    listener._serve(ours, peer, local, plane)
+    listener._serve(ours, peer, local, plane, "0" * 12)
     return out.getvalue()
 
 
