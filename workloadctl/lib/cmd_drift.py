@@ -12,9 +12,21 @@ import os
 import subprocess
 import sys
 import tempfile
+import tomllib
 from pathlib import Path
 
-from workload_lib import GENERATED_BY_RE, RUN_TREE_SCANS, workload_config_dir
+from vm import (
+    VM_INSPECT_POLICY_FILE,
+    VM_SOCKET_DIR,
+    vm_inspect_policy_text,
+    vm_uses_inspect,
+)
+from workload_lib import (
+    GENERATED_BY_RE,
+    RUN_TREE_SCANS,
+    workload_config_dir,
+    workload_config_path,
+)
 
 
 # The generator script location (installed path first, dev checkout fallback)
@@ -24,6 +36,10 @@ _GENERATOR_CANDIDATES = [
 ]
 
 LIVE_UNITS_DIR = Path("/run/systemd/system")
+
+# Where the inspectors' policy documents live. A module-level name for the same
+# reason LIVE_UNITS_DIR is one: it is the root the tests stage instead of.
+POLICY_ROOT = VM_SOCKET_DIR
 
 
 def _find_generator() -> Path:
@@ -151,6 +167,72 @@ def collect_drift(workload_name=None) -> list:
     return diffs
 
 
+def _rendered_policy(name: str) -> str:
+    """What this workload's policy document would be, or "" if it has none.
+
+    "" is the orphan case and covers both of its shapes: the workload was
+    removed from the config dir, and the workload is still configured but is no
+    longer inspected (`egress` opened, or a bridge added). Both leave a document
+    in /run that nothing will rewrite -- `down` does not delete it -- and both
+    have to be reported, because an operator reading a stale document has no
+    way to tell it from a live one.
+    """
+    path = workload_config_path(name)
+    if not path.is_file():
+        return ""
+    try:
+        with open(path, "rb") as f:
+            config = tomllib.load(f)
+    except (OSError, tomllib.TOMLDecodeError) as e:
+        # Loud rather than skipped. A config that will not parse is exactly the
+        # state in which the document on disk is least likely to match it, and
+        # silently omitting the workload would make "No drift detected" a false
+        # all-clear for the one workload most likely to have drifted.
+        raise RuntimeError(f"could not read {path}: {e}") from None
+    if not vm_uses_inspect(config):
+        return ""
+    return vm_inspect_policy_text(config.get("vm", {}).get("network", {}) or {})
+
+
+def collect_policy_drift(workload_name=None) -> list:
+    """Policy-document drift as [(filename, live_text, gen_text)].
+
+    The same caller-facing shape as collect_drift, so cmd_drift and doctor
+    render it with the unified diff they already have. It is a separate
+    collector rather than another RUN_TREE_SCANS row because both halves
+    differ: the producer is `workload-vm-inspect up` at service start rather
+    than the boot generator, and the root is /run/workload-vm rather than the
+    unit tree, so collect_drift's generator-into-a-scratch-dir mechanism cannot
+    reach this file at all.
+
+    THE SCAN IS DRIVEN BY WHAT IS ON DISK, not by what is configured. An
+    inspected workload that has never started this boot has no document, and
+    that is not drift -- it is the ordinary state of a stopped VM, and
+    reporting it would mark every stopped workload as drifted forever. What a
+    present document means is that some listener start rendered it, so a
+    difference against a re-render is the actionable condition detail §7.7
+    names: an inspector still enforcing the policy the previous start read.
+    The remedy is a restart, not a regenerate, which is why cmd_drift prints a
+    different remedy for these.
+    """
+    diffs = []
+    # glob() on a root that does not exist yields nothing rather than raising,
+    # which is the wanted answer for a host that has never started a VM — so
+    # there is no is_dir() guard to go stale.
+    root = Path(POLICY_ROOT)
+    for policy_file in sorted(root.glob(f"*/{VM_INSPECT_POLICY_FILE}")):
+        name = policy_file.parent.name
+        if workload_name and name != workload_name:
+            continue
+        try:
+            live_text = policy_file.read_text()
+        except OSError as e:
+            raise RuntimeError(f"could not read {policy_file}: {e}") from None
+        gen_text = _rendered_policy(name)
+        if live_text != gen_text:
+            diffs.append((f"{name}/{VM_INSPECT_POLICY_FILE}", live_text, gen_text))
+    return diffs
+
 def cmd_drift(args, manager):
     """Show diff between TOML-generated units and running units.
 
@@ -163,46 +245,60 @@ def cmd_drift(args, manager):
 
     try:
         diffs = collect_drift(workload_name)
+        policy_diffs = collect_policy_drift(workload_name)
     except RuntimeError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
 
-    if json_output:
-        import json
-        out = []
-        for fname, live_text, gen_text in diffs:
-            diff_lines = list(difflib.unified_diff(
-                live_text.splitlines(keepends=True),
-                gen_text.splitlines(keepends=True),
-                fromfile=f"running/{fname}",
-                tofile=f"generated/{fname}",
-            ))
-            out.append({
-                "unit": fname,
-                "drifted": True,
-                "diff": "".join(diff_lines),
-            })
-        if not out:
-            out_obj = {"drifted": False, "units": []}
-        else:
-            out_obj = {"drifted": True, "units": out}
-        print(json.dumps(out_obj, indent=2))
-        sys.exit(1 if out else 0)
-
-    if not diffs:
-        print("No drift detected — running units match generated output")
-        sys.exit(0)
-
-    for fname, live_text, gen_text in diffs:
+    def _render(fname, live_text, gen_text):
         from_label = f"running/{fname}" if live_text else "/dev/null"
         to_label = f"generated/{fname}" if gen_text else "/dev/null"
-        diff_lines = list(difflib.unified_diff(
+        return list(difflib.unified_diff(
             live_text.splitlines(keepends=True),
             gen_text.splitlines(keepends=True),
             fromfile=from_label,
             tofile=to_label,
         ))
-        sys.stdout.writelines(diff_lines)
+
+    if json_output:
+        import json
+        out = [{"unit": fname, "drifted": True,
+                "diff": "".join(_render(fname, live_text, gen_text))}
+               for fname, live_text, gen_text in diffs]
+        # A separate key rather than another "units" row: these are not units,
+        # the remedy is a restart rather than a regenerate, and a consumer that
+        # fed this list to `systemctl daemon-reload` would be acting on the
+        # wrong noun. "drifted" spans both, so a reader that only checks the
+        # boolean is still right.
+        docs = [{"document": fname, "drifted": True,
+                 "diff": "".join(_render(fname, live_text, gen_text))}
+                for fname, live_text, gen_text in policy_diffs]
+        print(json.dumps({
+            "drifted": bool(out or docs),
+            "units": out,
+            "documents": docs,
+        }, indent=2))
+        sys.exit(1 if (out or docs) else 0)
+
+    if not diffs and not policy_diffs:
+        print("No drift detected — running units match generated output")
+        sys.exit(0)
+
+    for fname, live_text, gen_text in diffs:
+        sys.stdout.writelines(_render(fname, live_text, gen_text))
         print()
+
+    for fname, live_text, gen_text in policy_diffs:
+        sys.stdout.writelines(_render(fname, live_text, gen_text))
+        print()
+
+    # Named separately because the remedy differs. The unit tree is fixed by
+    # regenerating; a policy document is written by the inspect socket's
+    # ExecStartPre and read once by the listener at start, so nothing short of
+    # restarting that socket applies an edited [vm.network] table.
+    for fname, _live, _gen in policy_diffs:
+        name = fname.split("/", 1)[0]
+        print(f"# {fname} is the inspector's loaded policy — apply the config "
+              f"with:\n#   systemctl restart workload-{name}-inspect.socket")
 
     sys.exit(1)

@@ -107,7 +107,7 @@ from vm import (
     NFT_SET_INTERNAL_OK4, NFT_SET_INTERNAL_OK6,
     ensure_advertised_interface, vm_inspect_element_commands,
     vm_inspect_link_address_commands, vm_inspect_link_delete_commands,
-    vm_inspect_policy, vm_inspect_policy_path,
+    vm_inspect_policy_path, vm_inspect_policy_text,
     vm_internal_hosts, vm_internal_ok_commands, vm_internal_resolve,
     vm_internal_ok_delete_commands, vm_internal_ok_list_commands,
     vm_internal_ok_uid_elements,
@@ -191,8 +191,11 @@ def write_policy(name: str) -> str:
     net = network_config(name)
     tmp = f"{path}.tmp"
     with open(tmp, "w") as f:
-        json.dump(vm_inspect_policy(net), f, indent=2, sort_keys=True)
-        f.write("\n")
+        # vm_inspect_policy_text, not a json.dump with its own arguments:
+        # `workloadctl drift` compares this file's bytes against a re-render
+        # through that function, so a formatting difference here would report
+        # every inspected workload as permanently drifted.
+        f.write(vm_inspect_policy_text(net))
     os.chown(tmp, 0, pwd.getpwnam(f"_wl-{name}").pw_gid)
     os.chmod(tmp, 0o640)
     os.replace(tmp, path)

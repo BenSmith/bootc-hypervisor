@@ -83,6 +83,11 @@ class DoctorReportTest(unittest.TestCase):
             lambda config, manager: self.HEALTHY_CHECKS))
         self.enterContext(mock.patch.object(
             cmd_doctor, "collect_drift", lambda name: []))
+        # Pinned for the same reason units_from_other_build is: it reads
+        # /run/workload-vm, so a host with an inspected VM running would flip
+        # every case in this class.
+        self.enterContext(mock.patch.object(
+            cmd_doctor, "collect_policy_drift", lambda name: []))
         substrate = mock.Mock()
         substrate.liveness.return_value = dict(self.HEALTHY_LIVENESS)
         self.enterContext(mock.patch.object(
@@ -99,6 +104,21 @@ class DoctorReportTest(unittest.TestCase):
         except SystemExit as e:
             code = e.code
         return code, out.getvalue()
+
+    def test_a_stale_inspector_policy_is_a_problem(self):
+        """Rung 5 T3. The unit tree is in sync, the units are active, nothing
+        else in doctor can see this — the inspector's policy document has a
+        different producer and a different root, so the unit-tree scan does not
+        reach it. Without this the operator's only symptom is a guest being
+        allowed or refused by the policy of a previous start.
+        """
+        with mock.patch.object(cmd_doctor, "_unit_rows", lambda config: []), \
+             mock.patch.object(
+                 cmd_doctor, "collect_policy_drift",
+                 lambda name: [("app/inspect.json", "{}\n", "{}\n")]):
+            code, out = self._run()
+        self.assertEqual(code, 1)
+        self.assertIn("app/inspect.json", out)
 
     def test_units_from_an_older_build_is_a_problem(self):
         """An RPM upgrade with no re-enable: healthy on every other axis.

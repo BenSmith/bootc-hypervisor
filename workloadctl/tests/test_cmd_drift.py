@@ -66,6 +66,14 @@ class OrphanDetectionTest(unittest.TestCase):
             cmd_drift, "LIVE_UNITS_DIR", self.live))
         self.enterContext(mock.patch.object(
             cmd_drift, "workload_config_dir", lambda: root / "cfg"))
+        # Staged empty for the same reason LIVE_UNITS_DIR is staged: the real
+        # /run/workload-vm exists on a hypervisor running this suite, and an
+        # inspected VM's document there would make these unit-tree assertions
+        # depend on what happens to be running.
+        self.policy_root = root / "run-vm"
+        self.policy_root.mkdir()
+        self.enterContext(mock.patch.object(
+            cmd_drift, "POLICY_ROOT", self.policy_root))
 
     def _stage_keep(self):
         """Live copy that matches what the fake generator emits (no drift)."""

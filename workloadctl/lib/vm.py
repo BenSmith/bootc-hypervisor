@@ -12,6 +12,7 @@ Installed to /usr/libexec/workloadctl/vm.py.
 import fnmatch
 import hashlib
 import ipaddress
+import json
 import os
 import re
 import socket
@@ -942,6 +943,25 @@ def vm_inspect_policy(net: dict) -> dict:
                     "paths": None if e.paths is None else list(e.paths)}
                    for e in vm_policy_entries(net)],
     }
+
+
+def vm_inspect_policy_text(net: dict) -> str:
+    """The policy document as the exact bytes that land on disk.
+
+    THE ONE RENDERER. `write_policy()` in libexec/workload-vm-inspect writes
+    what this returns, and `collect_policy_drift()` compares against it, so the
+    two cannot disagree about a separator, a key order or a trailing newline.
+    A second `json.dumps` with its own arguments would not be a cosmetic
+    duplicate: drift is a byte comparison, so an indent that differed by one
+    would report every inspected workload as drifted forever, which is how a
+    signal stops being read.
+
+    sort_keys because the document has to be a pure function of the TOML and
+    dict order is not; the trailing newline because a text file ends in one and
+    a diff of a file that does not says `\\ No newline at end of file` on
+    every hunk.
+    """
+    return json.dumps(vm_inspect_policy(net), indent=2, sort_keys=True) + "\n"
 
 
 def vm_normalise_hostname(host: str) -> str:

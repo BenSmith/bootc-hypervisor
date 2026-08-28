@@ -14,7 +14,7 @@ import subprocess
 import sys
 
 from cmd_diagnose import collect_diagnose_checks
-from cmd_drift import collect_drift
+from cmd_drift import collect_drift, collect_policy_drift
 from cmd_validate import report_config_load_failure
 from substrate import get_substrate
 from workload_lib import (
@@ -169,7 +169,12 @@ def cmd_doctor(args, manager):
     drift_error = None
     drifted: list[str] = []
     try:
+        # Both collectors, because a workload can be exactly in sync in the
+        # unit tree and still have an inspector enforcing the previous start's
+        # policy — the two have different producers and the unit-tree scan
+        # cannot see /run/workload-vm at all.
         drifted = [fname for fname, _, _ in collect_drift(name)]
+        drifted += [fname for fname, _, _ in collect_policy_drift(name)]
     except RuntimeError as e:
         drift_error = str(e)
 
