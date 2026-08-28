@@ -791,6 +791,30 @@ VM_DROP_NOT_HTTP_POLICY = "not HTTP (policy entry)"
 VM_INSPECT_LOG_ID_FIELD = "id"
 VM_INSPECT_LOG_REQ_FIELD = "req"
 
+# The per-request record's field names, and the vocabularies of two of them.
+# MORE SECOND DEFINITIONS OF LISTENER STRINGS, for the reason the VM_DROP_*
+# keys above are: the record is written by an extension-less entrypoint nothing
+# in lib/ can import, and the reader that renders it lives here. Restating them
+# is safe only because tests/test_vm_inspect_record.py pins each against the
+# listener's own constant -- without that pin a renamed field turns a column
+# into a permanent blank, which reads exactly like a guest that did nothing.
+VM_INSPECT_RECORD_FIELDS = (
+    VM_INSPECT_LOG_ID_FIELD, VM_INSPECT_LOG_REQ_FIELD, "ts", "plane", "mode",
+    "host", "method", "path", "query", "http", "decision", "reason", "status",
+    "upstream", "duration_ms",
+)
+
+# `forward` and `drop`, the journal's own verbs, and deliberately no third
+# value for "refused with an answer": whether the guest was told is carried
+# exactly by `status` being non-null, and a second spelling of one fact is free
+# to disagree with it.
+VM_INSPECT_RECORD_DECISIONS = ("forward", "drop")
+
+# What the listener was doing with the connection, which is not the question
+# `plane` answers. `splice` and `h2` are the two connection-level records --
+# the paths that carry requests this design never decodes.
+VM_INSPECT_RECORD_MODES = ("forward", "terminate", "splice", "h2")
+
 
 def vm_inspect_status_path(name: str) -> str:
     """Where one workload's inspector writes its counters.

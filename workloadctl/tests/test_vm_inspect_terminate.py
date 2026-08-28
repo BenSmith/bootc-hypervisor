@@ -52,6 +52,17 @@ def _mod():
     return _MOD
 
 
+def _where(plane="tls", cid="0" * 12):
+    """A connection key of the shape _serve builds.
+
+    A plain string will not do since T1c: `where` is a _Where, and the request
+    loops ask it for each request's ordinal. Tests that enter at _serve_tls or
+    _serve_cleartext skip _serve, so they build one here.
+    """
+    return _mod()._Where(f"{_mod().LOG_ID_FIELD}={cid} plane={plane}",
+                         cid=cid, plane=plane)
+
+
 def _have_openssl():
     return bool(__import__("shutil").which("openssl"))
 
@@ -261,7 +272,7 @@ class TerminationCase(unittest.TestCase):
         guest.settimeout(3.0)
         mod = _mod()
         served = threading.Thread(
-            target=listener._serve_tls, args=(ours, "plane=tls"), daemon=True)
+            target=listener._serve_tls, args=(ours, _where("tls")), daemon=True)
         with unittest.mock.patch.object(mod, "VM_INSPECT_ORIG_TLS",
                                         origin.port):
             served.start()
@@ -669,7 +680,7 @@ class TestTheHostHeaderIsPinnedToTheServerName(TerminationCase):
         # `req=` between the plane and the host, and these are requests 1 and
         # 3 -- pinning the whole literal here would pin the ordinal too and
         # assert the numbering rather than the authorisation.
-        forwards = re.findall(r"forward plane=tls req=\d+ host=localhost", log)
+        forwards = re.findall(r"forward id=[0-9a-f]+ plane=tls req=\d+ host=localhost", log)
         self.assertEqual(len(forwards), 2,
                          "the request after the refusal must be authorised")
         self.assertEqual(log.count("host=other.example"), 1)
@@ -1020,7 +1031,7 @@ class TestTheStartRefusesWhatItCannotDo(unittest.TestCase):
         ours, guest = _tcp_pair()
         self.addCleanup(ours.close)
         self.addCleanup(guest.close)
-        listener._serve_tls(ours, "plane=tls")
+        listener._serve_tls(ours, _where("tls"))
         self.assertIn("has no minter", out.getvalue())
         self.assertEqual(
             listener.status()["drop_reasons"]["could not mint a leaf"], 1)
@@ -1414,7 +1425,7 @@ class TestAnHttp2HostIsRelayedAtFrameLevel(TerminationCase):
         guest.settimeout(3.0)
         mod = _mod()
         served = threading.Thread(
-            target=listener._serve_tls, args=(ours, "plane=tls"), daemon=True)
+            target=listener._serve_tls, args=(ours, _where("tls")), daemon=True)
         negotiated = []
         with unittest.mock.patch.object(mod, "VM_INSPECT_ORIG_TLS",
                                         origin.port):
@@ -1845,7 +1856,8 @@ class TestARedialThatCannotBeVerifiedSaysSo(TerminationCase):
         with unittest.mock.patch.object(
                 listener, "_upstream_for", side_effect=exc):
             listener._serve_one_request(
-                mod._Stream(ours), ours, "where", {}, True)
+                mod._Stream(ours), ours, _where("tls").request(1),
+                {}, True)
         return listener, guest.recv(65536), out.getvalue()
 
     def test_a_verification_failure_is_not_called_unreachable(self):

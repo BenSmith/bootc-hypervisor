@@ -109,6 +109,7 @@ bounding that wait at the decision timeout would both break keep-alive and
 report each break as a request that could not be read.
 """
 
+import datetime
 import ipaddress
 import json
 import os
@@ -2002,6 +2003,173 @@ PER_HOST_REASONS = (
 DROP_UNCLASSIFIED = "(unclassified)"
 
 
+# The record's field names, and the vocabularies of two of them. Stated once
+# here and restated in lib/vm.py for the reason the VM_DROP_* keys are: nothing
+# in lib/ can import this entrypoint, so T2's reader either restates them or
+# matches on a substring, and tests/test_vm_inspect_record.py pins each pair.
+RECORD_FIELDS = (
+    LOG_ID_FIELD, LOG_REQ_FIELD, "ts", "plane", "mode", "host", "method",
+    "path", "query", "http", "decision", "reason", "status", "upstream",
+    "duration_ms",
+)
+
+# `forward` and `drop` ARE THE JOURNAL'S OWN VERBS, and there is deliberately
+# no third value for "refused with an answer". Whether the guest was told is
+# already carried, exactly and without a second representation, by `status`
+# being non-null: a `drop` with a status is a refusal the guest can read, a
+# `drop` without one is a connection that died saying nothing. A `refuse`
+# value beside them would be a second spelling of that same fact, free to
+# disagree with it -- which is the failure this file argues against wherever
+# one number is derived twice.
+RECORD_DECISIONS = ("forward", "drop")
+
+# What the listener was doing with the connection, which is not the same
+# question as which port it arrived on (`plane`). `forward` is a cleartext
+# request relayed, `terminate` a request inside a session this process
+# completed, `splice` and `h2` the two connection-level records -- the paths
+# that carry requests this process never decoded.
+RECORD_MODES = ("forward", "terminate", "splice", "h2")
+
+
+def _record_timestamp():
+    """Wall clock, ISO-8601 UTC to milliseconds.
+
+    WALL CLOCK AND NOT monotonic(): a record exists to be joined against a
+    journal line, an audit log and a person's memory of when something
+    happened, and a monotonic reading joins to none of the three. `duration_ms`
+    is the one figure taken from monotonic(), because an interval is the one
+    thing a wall clock measures badly.
+    """
+    return (datetime.datetime.now(datetime.UTC)
+            .isoformat(timespec="milliseconds").replace("+00:00", "Z"))
+
+
+class _Where(str):
+    """The journal's connection key, carrying the record's fields as data.
+
+    A str subclass so that every `f"drop {where} ..."` in this file keeps
+    working untouched while the record builder gets the id, the plane and the
+    request ordinal without re-parsing the line it just composed.
+
+    The alternative was a second parameter threaded through _serve_tls,
+    _serve_tls_inspect, _serve_h2, _serve_terminated and _serve_one_request --
+    five signatures, and a sixth path added later that forgets it produces a
+    record with no id while its journal line still looks perfectly right.
+
+    `t0` is when this context began: the connection for a connection-level
+    record, the request for a per-request one. That is what `duration_ms` is
+    measured from, so each kind of record measures its own kind of interval.
+    """
+
+    __slots__ = ("cid", "plane", "seq", "t0")
+
+    def __new__(cls, text, *, cid, plane, seq=None):
+        where = super().__new__(cls, text)
+        where.cid = cid
+        where.plane = plane
+        where.seq = seq
+        where.t0 = time.monotonic()
+        return where
+
+    def request(self, seq):
+        """This connection's key with one request's ordinal appended."""
+        return _Where(f"{self} {LOG_REQ_FIELD}={seq}",
+                      cid=self.cid, plane=self.plane, seq=seq)
+
+
+class _Record:
+    """One line of the private record, filled in as the exchange runs.
+
+    Built at the top of a pass and written once at the bottom, so that a pass
+    which never got a parseable head still leaves a line -- the record's
+    coverage is the COUNTERS' coverage, which is what makes the two joinable
+    in the rung that renders them. A pass with no decision wrote nothing to
+    count and writes nothing here either: an idle kept-alive connection
+    reaching its bound, and a guest that closed between requests, are not
+    requests and must not be invented as ones.
+
+    NO HEADERS AND NO BODIES, EVER. There is no redaction step because there is
+    nothing here to redact -- the standing constraint is met at construction,
+    which is the only place it can be met without being one `--verbose` away
+    from not being met at all.
+    """
+
+    def __init__(self, log, where, mode, *, host=None):
+        self._log = log
+        self._t0 = where.t0
+        # SEEDED FROM RECORD_FIELDS, so the constant lib/ restates is the one
+        # this actually emits. Every field is present on every line and null
+        # where it was not measured: a key that is absent and a key that is
+        # null are different facts, and a reader cannot tell "not measured"
+        # from "measured as nothing" if the writer drops the Nones.
+        self.fields = dict.fromkeys(RECORD_FIELDS)
+        self.fields.update({
+            LOG_ID_FIELD: where.cid,
+            LOG_REQ_FIELD: where.seq,
+            "ts": _record_timestamp(),
+            "plane": where.plane,
+            "mode": mode,
+            "host": host,
+        })
+
+    def set(self, **fields):
+        self.fields.update(fields)
+
+    def started(self):
+        """Re-stamp, now that a head has actually arrived.
+
+        On a kept-alive connection the pass begins when the previous response
+        finished and may wait out the whole idle timeout before a byte of this
+        request exists. Stamping only at construction would date every second
+        request on a connection to the end of the first. The timeout arms
+        deliberately do NOT call this: there the interval being measured IS the
+        wait, and the pass's own start is when it began.
+        """
+        self.fields["ts"] = _record_timestamp()
+        self._t0 = time.monotonic()
+
+    def request(self, req):
+        """The fields a parsed head supplies, and only those.
+
+        `path` and `query` are the split req.path already makes, kept apart
+        because they are different evidence: a path is what was asked for and a
+        query can carry a credential outright. Both are recorded -- the sink is
+        private, and eliding the query to protect a credential in a URL only
+        moves that credential somewhere with less protection.
+        """
+        path, _, query = req.target.partition("?")
+        self.set(host=req.host, method=req.method, path=path,
+                 query=query or None, http=req.version)
+
+    def dialled(self, sock):
+        """The address actually reached -- §11's other half of the join.
+
+        The name was resolved here, by this process, so it is the only party
+        that knows which address a policy name became. Best effort: a socket
+        that has already gone away answers nothing, and a record missing one
+        field is better than a request that failed for a diagnostic.
+        """
+        try:
+            peer = sock.getpeername()
+            if not isinstance(peer, (tuple, list)) or len(peer) < 2:
+                # A unix socket, or anything that is not an address pair. The
+                # shape is checked rather than assumed because THE DIAGNOSTIC
+                # MAY NOT KILL THE REQUEST -- the standing rule for every
+                # diagnostic in this file, and the except below is as wide as
+                # that claim for the same reason.
+                return
+            self.set(upstream=_fmt(peer))
+        except Exception:
+            return
+
+    def emit(self):
+        if self.fields["decision"] is None:
+            return
+        self.fields["duration_ms"] = round(
+            (time.monotonic() - self._t0) * 1000, 3)
+        self._log.write(self.fields)
+
+
 class RequestLog:
     """The per-request record's file: append, reopen on SIGHUP, never raise.
 
@@ -2203,6 +2371,14 @@ class Counters:
         # means the record is incomplete -- which a reader must know before
         # concluding a guest made no requests.
         self.record_failures = 0
+        # Connections whose requests are NOT in the record, because nothing in
+        # them was decoded: an h2 session is relayed at frame level by design.
+        # Named rather than left to look like silence -- without it a reader
+        # counting requests in the file concludes the guest made none, when
+        # what happened is that this listener cannot see them. The connection
+        # itself IS recorded (mode "h2"); this is the count of how many such
+        # blind spots there are.
+        self.h2_unrecorded = 0
         # Pre-seeded from DROP_REASONS rather than grown on first use. A reason
         # absent from the file and a reason reading zero are the same fact and
         # must look the same, or an operator reads "no key" as "not measured".
@@ -2282,6 +2458,11 @@ class Counters:
         with self._lock:
             self.record_failures += 1
 
+    def record_h2_unrecorded(self) -> None:
+        """One h2 session whose requests this process never decoded."""
+        with self._lock:
+            self.h2_unrecorded += 1
+
     def record_bump(self) -> None:
         """One handshake completed solely to deliver a refusal legibly.
 
@@ -2325,6 +2506,7 @@ class Counters:
                 "ech": {"seen": self.ech_seen, "alarm": self.ech_alarm},
                 "bumped": self.bumped,
                 "record_failures": self.record_failures,
+                "h2_unrecorded": self.h2_unrecorded,
                 "internal_refusals": self.internal_refusals.snapshot(),
                 "internal_refusals_total": self.internal_refusals.total,
                 "per_host": {reason: counts.snapshot()
@@ -2545,8 +2727,9 @@ class Listener:
         # port repeats across the requests on one keep-alive connection and is
         # reused by the kernel after close, so it groups the wrong things
         # together and separates the right ones.
-        where = (f"{LOG_ID_FIELD}={cid} plane={plane} "
-                 f"local={_fmt(local)} peer={_fmt(peer)}")
+        where = _Where(f"{LOG_ID_FIELD}={cid} plane={plane} "
+                       f"local={_fmt(local)} peer={_fmt(peer)}",
+                       cid=cid, plane=plane)
         try:
             if plane == "tls":
                 self._serve_tls(conn, where)
@@ -2557,6 +2740,22 @@ class Listener:
         finally:
             conn.close()
             self._ceiling.release()
+
+    def _connection_record(self, where, mode, *, host=None, decision,
+                           reason=None, status=None):
+        """One record for a whole connection, where there are no requests.
+
+        THE RECORD'S COVERAGE IS THE COUNTERS' COVERAGE. Every path that calls
+        record_drop, record_splice or record_termination writes a line, or the
+        file answers "what did this guest do" with a subset and a reader has no
+        way to know which subset. Two of these are the paths §11 names --
+        `splice` and `h2` relay bytes this process never decodes -- and the
+        rest are decisions taken at the front of a TLS connection, before there
+        is a request to attach anything to.
+        """
+        rec = _Record(self.record, where, mode, host=host)
+        rec.set(decision=decision, reason=reason, status=status)
+        rec.emit()
 
     def _serve_tls(self, conn, where):
         """Peek, match, and then act by mode.
@@ -2588,6 +2787,8 @@ class Listener:
             # which is the one failure this whole path exists to avoid, and a
             # test that constructed one would otherwise get it silently.
             self.counters.record_drop(DROP_MINT_FAILED)
+            self._connection_record(where, "terminate", decision="drop",
+                                    reason=DROP_MINT_FAILED)
             self._log(f"drop {where} reason='could not mint a leaf: this "
                       f"listener has no minter'")
             return
@@ -2596,6 +2797,8 @@ class Listener:
         except HelloUnreadable as exc:
             self.counters.record_unreadable_hello()
             self.counters.record_drop(DROP_NO_NAME)
+            self._connection_record(where, "terminate", decision="drop",
+                                    reason=DROP_NO_NAME)
             self._log(f"drop {where} reason='no readable name: {exc}'")
             return
         if not hello.server_name:
@@ -2604,6 +2807,8 @@ class Listener:
             # ECH that is the strongest form of the signal, not an absent one.
             self.counters.record_hello(hello, False)
             self.counters.record_drop(DROP_NO_NAME)
+            self._connection_record(where, "terminate", decision="drop",
+                                    reason=DROP_NO_NAME)
             self._log(f"drop {where} reason='no readable name: the "
                       f"ClientHello carries no server_name extension'")
             return
@@ -2627,6 +2832,9 @@ class Listener:
             return
         if not allowed:
             self.counters.record_drop(DROP_NOT_ALLOWLISTED, host)
+            self._connection_record(where, "splice", host=host,
+                                    decision="drop",
+                                    reason=DROP_NOT_ALLOWLISTED)
             self._log(f"drop {where} host={host} reason='not allowlisted'")
             return
         # Dial the NAME, never an address (§7.4). The address the guest aimed
@@ -2640,6 +2848,8 @@ class Listener:
         except OSError as exc:
             reason = self._dial_failure_reason(host)
             self.counters.record_drop(reason, host)
+            self._connection_record(where, "splice", host=host,
+                                    decision="drop", reason=reason)
             self._log(f"drop {where} host={host} reason='{reason}: {exc}'")
             return
         try:
@@ -2659,7 +2869,18 @@ class Listener:
             self.counters.record_splice()
             self._log(f"splice {where} host={host}"
                       f"{' per-host' if inspect else ''}")
-            self._relay(conn, upstream)
+            rec = _Record(self.record, where, "splice", host=host)
+            rec.dialled(upstream)
+            rec.set(decision="forward")
+            try:
+                self._relay(conn, upstream)
+            finally:
+                # A NAMED EXEMPTION SHOULD BE VISIBLE IN THE RECORD AS ONE.
+                # There is no path, no method and no status here and there
+                # never will be -- that is what splicing means -- so the line
+                # says which host was exempted and for how long, and a reader
+                # who finds no requests for that host has this to find instead.
+                rec.emit()
         finally:
             upstream.close()
 
@@ -2752,11 +2973,15 @@ class Listener:
             # one outcome that closes on the guest. It is reachable only after
             # the bucket has been emptied, which honest traffic does not do.
             self.counters.record_drop(DROP_THROTTLED, host)
+            self._connection_record(where, "terminate", host=host,
+                                    decision="drop", reason=DROP_THROTTLED)
             self._log(f"drop {where} host={host} reason='mint rationed: the "
                       f"leaf bucket is empty'")
             return
         except (LeafRefused, MintFailed) as exc:
             self.counters.record_drop(DROP_MINT_FAILED, host)
+            self._connection_record(where, "terminate", host=host,
+                                    decision="drop", reason=DROP_MINT_FAILED)
             self._log(f"drop {where} host={host} "
                       f"reason='could not mint a leaf: {exc}'")
             return
@@ -2795,6 +3020,9 @@ class Listener:
             # other line would ever tell anyone.
             if not leaf.path.exists():
                 self.counters.record_drop(DROP_MINT_FAILED, host)
+                self._connection_record(where, "terminate", host=host,
+                                        decision="drop",
+                                        reason=DROP_MINT_FAILED)
                 self._log(f"drop {where} host={host} reason='the leaf minted "
                           f"for this connection was evicted before it could be "
                           f"presented: {exc}. This is a cache-sizing fault, "
@@ -2804,6 +3032,8 @@ class Listener:
                     upstream.sock.close()
                 return
             self.counters.record_drop(DROP_RELAY_FAILED, host)
+            self._connection_record(where, "terminate", host=host,
+                                    decision="drop", reason=DROP_RELAY_FAILED)
             self._log(f"drop {where} host={host} reason='the guest did not "
                       f"complete the handshake: {exc}. A guest provisioned "
                       f"before this workload had a CA does not trust it and "
@@ -2820,6 +3050,14 @@ class Listener:
                 reason, status, phrase, text = refusal
                 self.counters.record_drop(reason, host)
                 self.counters.record_bump()
+                # THE MOST COMMON DENIAL ON THIS PLANE, and it never reaches
+                # _serve_request: the decision was taken from the server name
+                # before the guest's handshake completed, so there is no
+                # request to hang it on. Without this the record's terminated
+                # plane holds every allowed request and no refused one.
+                self._connection_record(where, "terminate", host=host,
+                                        decision="drop", reason=reason,
+                                        status=status)
                 self._log(f"bump {where} host={host} status={status} "
                           f"reason='{reason}: {text}'")
                 self._bump_answer(tls_conn, status, phrase, text)
@@ -2987,6 +3225,13 @@ class Listener:
         # process a guest can open connections to at will -- and every
         # assertion about frames and counters passes while it does, because
         # nothing in the exchange is wrong.
+        # ONE RECORD FOR THE WHOLE SESSION, because nothing inside it is
+        # decoded -- that is what [[vm.network.http2]] means, and §11 names it
+        # rather than letting the file be silent about a connection that
+        # carried requests. `h2_unrecorded` beside it is the count a reader
+        # needs before concluding a guest made no requests.
+        rec = _Record(self.record, where, "h2", host=host)
+        rec.dialled(upstream.sock)
         try:
             client = _Stream(tls_conn)
             tls_conn.settimeout(CONNECTION_TIMEOUT)
@@ -2994,6 +3239,7 @@ class Listener:
                 preface = client.read_exactly(len(H2_PREFACE))
             except (RequestUnreadable, OSError) as exc:
                 self.counters.record_drop(DROP_NOT_H2, host)
+                rec.set(decision="drop", reason=DROP_NOT_H2)
                 self._log(f"drop {where} host={host} reason='not HTTP/2: the "
                           f"connection preface never arrived ({exc}); drop the "
                           f"[[vm.network.http2]] entry for {host}, or move it "
@@ -3001,6 +3247,7 @@ class Listener:
                 return
             if preface != H2_PREFACE:
                 self.counters.record_drop(DROP_NOT_H2, host)
+                rec.set(decision="drop", reason=DROP_NOT_H2)
                 self._log(f"drop {where} host={host} reason='not HTTP/2: "
                           f"{preface[:8]!r} is not the connection preface, and "
                           f"{host} is in [[vm.network.http2]]. Either it does not "
@@ -3018,6 +3265,7 @@ class Listener:
                 framing.feed(surplus)
             except NotH2 as exc:
                 self._drop_not_h2(where, host, exc)
+                rec.set(decision="drop", reason=DROP_NOT_H2)
                 return
             try:
                 upstream.sock.sendall(preface + surplus)
@@ -3031,6 +3279,7 @@ class Listener:
                     tls_conn.sendall(early)
             except OSError as exc:
                 self.counters.record_drop(DROP_RELAY_FAILED, host)
+                rec.set(decision="drop", reason=DROP_RELAY_FAILED)
                 self._log(f"drop {where} host={host} "
                           f"reason='relay failed: {exc}'")
                 return
@@ -3039,12 +3288,18 @@ class Listener:
                             on_client_bytes=framing.feed)
             except NotH2 as exc:
                 self._drop_not_h2(where, host, exc)
+                rec.set(decision="drop", reason=DROP_NOT_H2)
                 return
             except OSError as exc:
                 self.counters.record_drop(DROP_RELAY_FAILED, host)
+                rec.set(decision="drop", reason=DROP_RELAY_FAILED)
                 self._log(f"drop {where} host={host} "
                           f"reason='relay failed: {exc}'")
                 return
+            # The session ran. Recorded as a forward and counted as a blind
+            # spot in the same breath, because both are true of it.
+            rec.set(decision="forward")
+            self.counters.record_h2_unrecorded()
             if not framing.aligned:
                 # Counted, and the session is over either way -- but silence
                 # here would make a stream that stopped framing halfway
@@ -3053,7 +3308,9 @@ class Listener:
                 self._drop_not_h2(
                     where, host,
                     NotH2("the connection ended part-way through a frame"))
+                rec.set(decision="drop", reason=DROP_NOT_H2)
         finally:
+            rec.emit()
             upstream.sock.close()
 
     def _drop_not_h2(self, where, host, exc):
@@ -3082,7 +3339,7 @@ class Listener:
             first = True
             seq = 1
             while self._serve_one_request(client, tls_conn,
-                                          f"{where} {LOG_REQ_FIELD}={seq}",
+                                          where.request(seq),
                                           upstreams, first,
                                           scheme=SCHEME_HTTPS,
                                           pinned_host=host):
@@ -3132,6 +3389,9 @@ class Listener:
         # Policy.governs.
         if self._policy.governs(host):
             self.counters.record_drop(DROP_NOT_HTTP_POLICY, host)
+            self._connection_record(where, "terminate", host=host,
+                                    decision="drop",
+                                    reason=DROP_NOT_HTTP_POLICY)
             self._log(
                 f"drop {where} host={host} reason='not HTTP (policy entry): "
                 f"this session was terminated and {start[:8]!r} does not begin "
@@ -3142,6 +3402,8 @@ class Listener:
                 f"on one host'")
             return False
         self.counters.record_drop(DROP_NOT_HTTP, host)
+        self._connection_record(where, "terminate", host=host,
+                                decision="drop", reason=DROP_NOT_HTTP)
         self._log(f"drop {where} host={host} reason='not HTTP: this session "
                   f"was terminated and {start[:8]!r} does not begin a request "
                   f"line. Add {host} to [[vm.network.splice]] if it needs to "
@@ -3218,7 +3480,7 @@ class Listener:
             first = True
             seq = 1
             while self._serve_one_request(client, conn,
-                                          f"{where} {LOG_REQ_FIELD}={seq}",
+                                          where.request(seq),
                                           upstreams, first):
                 first = False
                 seq += 1
@@ -3228,6 +3490,26 @@ class Listener:
 
     def _serve_one_request(self, client, conn, where, upstreams, first, *,
                            scheme=SCHEME_HTTP, pinned_host=None):
+        """One request, and the record it leaves. True to stay on the connection.
+
+        A WRAPPER, so that the record is written on every way out of the pass
+        below without wrapping two hundred argued lines in another try. Every
+        path through _serve_request either sets a decision on `rec` or is one
+        of the two that are not requests at all -- an idle kept-alive
+        connection reaching its bound, and a guest that closed between
+        requests -- and _Record.emit writes nothing for those.
+        """
+        rec = _Record(self.record, where,
+                      "terminate" if pinned_host is not None else "forward")
+        try:
+            return self._serve_request(client, conn, where, upstreams, first,
+                                       rec, scheme=scheme,
+                                       pinned_host=pinned_host)
+        finally:
+            rec.emit()
+
+    def _serve_request(self, client, conn, where, upstreams, first, rec, *,
+                       scheme=SCHEME_HTTP, pinned_host=None):
         """One request, start to finish. True to stay on the connection.
 
         `scheme` says which plane this is, for the two parser refusals that
@@ -3269,14 +3551,19 @@ class Listener:
                 self._log(f"close {where} reason='{exc}'")
                 return False
             self.counters.record_drop(DROP_TIMED_OUT)
+            rec.set(decision="drop", reason=DROP_TIMED_OUT)
             self._log(f"drop {where} reason='timed out: {exc}'")
             return False
         except RequestUnreadable as exc:
             self.counters.record_drop(DROP_UNREADABLE_REQUEST)
+            rec.set(decision="drop", reason=DROP_UNREADABLE_REQUEST)
             self._log(f"drop {where} reason='unreadable request: {exc}'")
             return False
         if not head:
             return False                # the guest closed between requests
+        # A head exists, so the record's clock restarts here: on a kept-alive
+        # connection the pass began when the previous response finished.
+        rec.started()
         try:
             req = parse_request(head, scheme)
         except RequestUnreadable as exc:
@@ -3284,6 +3571,10 @@ class Listener:
             # decision, and reporting it as one would put a name we could not
             # read into the same bucket as a name we refused.
             self.counters.record_drop(DROP_UNREADABLE_REQUEST)
+            # No host, no method and no path: the head is exactly what could
+            # not be read, so the record says so by carrying none of them
+            # rather than by guessing at a name out of bytes we refused.
+            rec.set(decision="drop", reason=DROP_UNREADABLE_REQUEST, status=400)
             self._log(f"drop {where} reason='unreadable request: {exc}'")
             self._answer(conn, 400, "Bad Request", str(exc), close=True)
             return False
@@ -3296,6 +3587,8 @@ class Listener:
             #
             reason = self._binding_reason(req.host)
             self.counters.record_drop(reason, req.host)
+            rec.request(req)
+            rec.set(decision="drop", reason=reason, status=421)
             listed = " (allowlisted)" if (
                 reason is DROP_MISDIRECTED_LISTED) else ""
             self._log(f"drop {where} host={req.host} reason='host does not "
@@ -3309,6 +3602,8 @@ class Listener:
             # be inside, so the guest gets a real answer naming the host rather
             # than a connection that closed for reasons it cannot see.
             self.counters.record_drop(DROP_NOT_ALLOWLISTED, req.host)
+            rec.request(req)
+            rec.set(decision="drop", reason=DROP_NOT_ALLOWLISTED, status=403)
             self._log(f"drop {where} host={req.host} reason='not allowlisted'")
             return self._refuse(
                 client, conn, req, 403, "Forbidden",
@@ -3321,6 +3616,8 @@ class Listener:
             # a broken one, and a guest told `not on the allowlist` about a
             # host that plainly is goes looking in the wrong file.
             self.counters.record_drop(DROP_NOT_PERMITTED, req.host)
+            rec.request(req)
+            rec.set(decision="drop", reason=DROP_NOT_PERMITTED, status=403)
             self._log(f"drop {where} host={req.host} method={req.method} "
                       f"reason='not permitted by policy'")
             return self._refuse(
@@ -3331,6 +3628,7 @@ class Listener:
         # rebuild_request), so its upstream is opened for this request alone
         # and is not put in the map for the next one to find.
         transient = req.version == "HTTP/1.0"
+        rec.request(req)
         try:
             up = self._upstream_for(
                 req.host, upstreams, reusable=not transient,
@@ -3349,12 +3647,14 @@ class Listener:
             # which is the only thing an operator can act on.
             reason, text = self._upstream_tls_failure(req.host, exc)
             self.counters.record_drop(reason, req.host)
+            rec.set(decision="drop", reason=reason, status=502)
             self._log(f"drop {where} host={req.host} "
                       f"reason='{reason}: {exc}'")
             return self._refuse(client, conn, req, 502, "Bad Gateway", text)
         except OSError as exc:
             reason = self._dial_failure_reason(req.host)
             self.counters.record_drop(reason, req.host)
+            rec.set(decision="drop", reason=reason, status=502)
             self._log(f"drop {where} host={req.host} "
                       f"reason='{reason}: {exc}'")
             return self._refuse(client, conn, req, 502, "Bad Gateway",
@@ -3366,6 +3666,9 @@ class Listener:
         # count it as `relay failed`. The upstream socket is set to the same
         # number where it is opened, and the TLS plane's splice sets both.
         conn.settimeout(RELAY_IDLE_TIMEOUT)
+        # The address a policy NAME became, resolved by this process and known
+        # to nobody else -- §11's other half of the join.
+        rec.dialled(up.sock)
         try:
             try:
                 up.sock.sendall(rebuild_request(req))
@@ -3401,6 +3704,7 @@ class Listener:
                 # TLS 1.2 arm of _upstream_tls_failure makes for the same
                 # reason.
                 self.counters.record_drop(DROP_RELAY_FAILED, req.host)
+                rec.set(decision="drop", reason=DROP_RELAY_FAILED, status=502)
                 self._log(f"drop {where} host={req.host} "
                           f"reason='relay failed before the head was sent: "
                           f"{exc}'")
@@ -3433,10 +3737,18 @@ class Listener:
             # where a half-built pump would be none of the three.
             copy_body(client, up.sock, req.framing)
             self.counters.record_forward()
+            rec.set(decision="forward")
             self._log(f"forward {where} host={req.host} method={req.method}")
-            return self._relay_response(up, client, conn, req, where)
+            return self._relay_response(up, client, conn, req, where, rec)
         except (RequestUnreadable, OSError) as exc:
             self.counters.record_drop(DROP_RELAY_FAILED, req.host)
+            # OVERWRITES the `forward` set above, and follows the counter,
+            # which does the same. A relay that broke mid-exchange is counted
+            # as a drop, so recording it as a forward would put the record and
+            # every figure derived from it into disagreement. `status` survives
+            # if a head had already come back, which is how a reader tells a
+            # relay that failed before the answer from one that failed after.
+            rec.set(decision="drop", reason=DROP_RELAY_FAILED)
             self._log(f"drop {where} host={req.host} "
                       f"reason='relay failed: {exc}'")
             return False
@@ -3511,8 +3823,13 @@ class Listener:
         sock.settimeout(RELAY_IDLE_TIMEOUT)
         return _Stream(sock)
 
-    def _relay_response(self, up, client, conn, req, where=""):
+    def _relay_response(self, up, client, conn, req, where="", rec=None):
         """Relay one response. True if the connection may carry another.
+
+        `rec` is the caller's record, given the status as soon as one is
+        parsed. Set here rather than returned, because the interesting statuses
+        are the ones on paths that do not return normally: a 101 leaves through
+        the upgrade relay, and an interim head is replaced by the final one.
 
         The head goes across verbatim, which is not the rule the REQUEST
         direction follows -- there the framing we emit is the framing we
@@ -3535,6 +3852,10 @@ class Listener:
                 raise RequestUnreadable(
                     f"status line {start!r} is not one we read")
             status = int(fields[1])
+            if rec is not None:
+                # Every head, so an interim is overwritten by the final one and
+                # a 101 is recorded as itself.
+                rec.set(status=status)
             framing = response_framing(status, req.method, headers)
             conn.sendall(head)
             if status == 101:

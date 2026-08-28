@@ -28,6 +28,8 @@ from pathlib import Path
 from tests import load_script
 from vm import (
     VM_INSPECT_LOG_ID_FIELD, VM_INSPECT_LOG_REQ_FIELD,
+    VM_INSPECT_RECORD_DECISIONS, VM_INSPECT_RECORD_FIELDS,
+    VM_INSPECT_RECORD_MODES,
     VM_INSPECT_RECORD_FILE, VM_INSPECT_RECORD_ROOT,
     VM_INSPECT_RECORD_SELINUX_TYPE,
     vm_inspect_logs_directory, vm_inspect_record_dir, vm_inspect_record_path,
@@ -100,6 +102,15 @@ class TestTheFieldNamesAreShared(unittest.TestCase):
 
     def test_the_request_field_name_matches(self):
         self.assertEqual(_mod().LOG_REQ_FIELD, VM_INSPECT_LOG_REQ_FIELD)
+
+    def test_the_record_field_names_match(self):
+        self.assertEqual(_mod().RECORD_FIELDS, VM_INSPECT_RECORD_FIELDS)
+
+    def test_the_decision_vocabulary_matches(self):
+        self.assertEqual(_mod().RECORD_DECISIONS, VM_INSPECT_RECORD_DECISIONS)
+
+    def test_the_mode_vocabulary_matches(self):
+        self.assertEqual(_mod().RECORD_MODES, VM_INSPECT_RECORD_MODES)
 
 
 class TestEveryLineCarriesTheId(_Harness):
@@ -587,3 +598,349 @@ class TestTheListenerHoldsOne(unittest.TestCase):
         listener = mod.Listener([], io.StringIO())
         self.assertIn("record_failures",
                       listener.counters.snapshot(open_now=0, refused=0))
+
+
+# ---------------------------------------------------------------------------
+# T1c — the record's fields
+# ---------------------------------------------------------------------------
+
+class _Records(_Harness):
+    """A listener whose record file is real, driven through _serve."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory(prefix="record-fields-")
+        self.addCleanup(self._tmp.cleanup)
+        self.path = Path(self._tmp.name) / "requests.log"
+
+    def _drive(self, feed, *, local=CLEARTEXT, policy=None,
+               peer=("192.0.2.1", 1024), origin=None):
+        """One connection. Returns (journal text, [record dicts])."""
+        mod = _mod()
+        out = io.StringIO()
+        listener = mod.Listener(
+            [_listener_with(local)], out,
+            policy=policy or mod.Policy(tls="splice", hosts=()),
+            record_path=self.path)
+        ours, guest = self._pair()
+        guest.sendall(feed)
+        guest.shutdown(socket.SHUT_WR)
+        ctx = (unittest.mock.patch.object(
+                   socket, "create_connection", side_effect=origin)
+               if origin else unittest.mock.patch.object(mod, "_fmt", mod._fmt))
+        with ctx:
+            listener._serve(ours, peer, local, mod.plane_for_port(local[1]),
+                            mod.secrets.token_hex(6))
+        listener.record.close()
+        return out.getvalue(), self._records()
+
+    def _records(self):
+        if not self.path.exists():
+            return []
+        return [json.loads(ln) for ln in
+                self.path.read_text().splitlines() if ln.strip()]
+
+    def _origin(self, response=b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n"):
+        kept = []
+
+        def dial(addr, timeout=None):
+            near, far = self._pair()
+            far.sendall(response)
+            kept.append(far)
+            return near
+        return dial
+
+
+class TestTheRecordOfAnAllowedRequest(_Records):
+    """The shape every other case is a variation on."""
+
+    def _one(self):
+        mod = _mod()
+        _log, records = self._drive(
+            b"GET /v1/messages?stream=true HTTP/1.1\r\nHost: ok.example\r\n"
+            b"Connection: close\r\n\r\n",
+            policy=mod.Policy(tls="splice", hosts=("ok.example",)),
+            origin=self._origin())
+        self.assertEqual(len(records), 1, records)
+        return records[0]
+
+    def test_every_field_is_present(self):
+        """A field absent and a field null are different facts. A reader that
+        has to tell "not measured" from "measured as nothing" cannot, if the
+        writer drops keys whose value is None."""
+        self.assertEqual(sorted(self._one()), sorted(VM_INSPECT_RECORD_FIELDS))
+
+    def test_the_decision_and_mode(self):
+        rec = self._one()
+        self.assertEqual(rec["decision"], "forward")
+        self.assertEqual(rec["mode"], "forward")
+        self.assertEqual(rec["plane"], "cleartext")
+
+    def test_the_path_and_query_are_split(self):
+        """Two different kinds of evidence. `paths` policy is matched against
+        the path alone, and a query can carry a credential outright — merged
+        into one field a reader cannot ask about either."""
+        rec = self._one()
+        self.assertEqual(rec["path"], "/v1/messages")
+        self.assertEqual(rec["query"], "stream=true")
+
+    def test_the_request_line_fields(self):
+        rec = self._one()
+        self.assertEqual(rec["method"], "GET")
+        self.assertEqual(rec["host"], "ok.example")
+        self.assertEqual(rec["http"], "HTTP/1.1")
+
+    def test_the_status_is_the_one_the_origin_sent(self):
+        self.assertEqual(self._one()["status"], 200)
+
+    def test_a_request_with_no_query_records_null_not_empty(self):
+        """"" would say the guest sent a bare `?`. It did not."""
+        mod = _mod()
+        _log, records = self._drive(
+            b"GET /plain HTTP/1.1\r\nHost: ok.example\r\n"
+            b"Connection: close\r\n\r\n",
+            policy=mod.Policy(tls="splice", hosts=("ok.example",)),
+            origin=self._origin())
+        self.assertIsNone(records[0]["query"])
+
+    def test_the_timestamp_is_wall_clock_utc_to_milliseconds(self):
+        """Not monotonic(). The record exists to be joined against a journal
+        line and a person's memory of when something happened, and a monotonic
+        reading joins to neither."""
+        rec = self._one()
+        self.assertRegex(rec["ts"],
+                         r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$")
+
+    def test_the_duration_is_a_number_of_milliseconds(self):
+        self.assertIsInstance(self._one()["duration_ms"], float)
+
+    def test_the_upstream_is_the_address_actually_dialled(self):
+        """§11's other half of the join: the name was resolved by THIS process,
+        so nothing else on the host knows which address a policy name became.
+
+        A REAL TCP ORIGIN, not the socketpair the other cases use. A unix
+        socket has no address pair to report, so a mocked upstream would leave
+        this field null and the assertion would be measuring the mock.
+        """
+        mod = _mod()
+        server = socket.socket()
+        server.bind(("127.0.0.1", 0))
+        server.listen(1)
+        self.addCleanup(server.close)
+        addr = server.getsockname()
+
+        def serve():
+            try:
+                conn, _ = server.accept()
+            except OSError:
+                return
+            with conn:
+                conn.recv(65536)
+                conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+        thread = threading.Thread(target=serve, daemon=True)
+        thread.start()
+        self.addCleanup(thread.join, 3.0)
+
+        def dial(_addr, timeout=None):
+            sock = socket.create_connection(addr, timeout=timeout)
+            self.addCleanup(sock.close)
+            return sock
+
+        real = socket.create_connection
+        with unittest.mock.patch.object(
+                socket, "create_connection",
+                side_effect=lambda a, timeout=None: real(addr, timeout=timeout)):
+            _log, records = self._drive(
+                b"GET / HTTP/1.1\r\nHost: ok.example\r\n"
+                b"Connection: close\r\n\r\n",
+                policy=mod.Policy(tls="splice", hosts=("ok.example",)))
+        self.assertEqual(records[0]["upstream"],
+                         f"{addr[0]}:{addr[1]}")
+
+    def test_the_id_joins_it_to_the_journal(self):
+        mod = _mod()
+        log, records = self._drive(
+            b"GET / HTTP/1.1\r\nHost: ok.example\r\nConnection: close\r\n\r\n",
+            policy=mod.Policy(tls="splice", hosts=("ok.example",)),
+            origin=self._origin())
+        self.assertEqual(records[0][VM_INSPECT_LOG_ID_FIELD],
+                         ID.search(log).group(1))
+        self.assertEqual(records[0][VM_INSPECT_LOG_REQ_FIELD], 1)
+
+
+class TestNoHeaderOrBodyEverReachesIt(_Records):
+    """The standing constraint, met at CONSTRUCTION. There is no redaction step
+    because there is nothing to redact — a record redacted at rendering time is
+    one --verbose away from being the thing it was written not to be."""
+
+    def test_neither_a_header_value_nor_a_body_byte_appears(self):
+        mod = _mod()
+        body = b"tok_SECRETBODY"
+        self._drive(
+            b"POST /x HTTP/1.1\r\nHost: ok.example\r\n"
+            b"Authorization: Bearer tok_SECRETHEADER\r\n"
+            b"X-Custom: tok_SECRETCUSTOM\r\n"
+            b"Content-Length: %d\r\nConnection: close\r\n\r\n%s"
+            % (len(body), body),
+            policy=mod.Policy(tls="splice", hosts=("ok.example",)),
+            origin=self._origin())
+        text = self.path.read_text()
+        for secret in (b"SECRETHEADER", b"SECRETCUSTOM", b"SECRETBODY"):
+            self.assertNotIn(secret.decode(), text)
+        self.assertIn("/x", text)
+
+
+class TestARefusalIsRecorded(_Records):
+
+    def test_a_403_carries_the_reason_and_the_status(self):
+        _log, records = self._drive(
+            b"GET /secret?k=v HTTP/1.1\r\nHost: nobody.example\r\n\r\n")
+        self.assertEqual(len(records), 1, records)
+        rec = records[0]
+        self.assertEqual(rec["decision"], "drop")
+        self.assertEqual(rec["status"], 403)
+        self.assertEqual(rec["reason"], _mod().DROP_NOT_ALLOWLISTED)
+
+    def test_a_denied_path_is_recorded_too(self):
+        """The split is by CONTENT, not by outcome. A denied path is evidence
+        of what the agent was trying to do, which is exactly the question the
+        record exists to answer."""
+        _log, records = self._drive(
+            b"GET /secret?k=v HTTP/1.1\r\nHost: nobody.example\r\n\r\n")
+        self.assertEqual(records[0]["path"], "/secret")
+        self.assertEqual(records[0]["query"], "k=v")
+
+    def test_a_refusal_never_dialled_an_upstream(self):
+        _log, records = self._drive(
+            b"GET / HTTP/1.1\r\nHost: nobody.example\r\n\r\n")
+        self.assertIsNone(records[0]["upstream"])
+
+
+class TestAHeadThatCouldNotBeRead(_Records):
+
+    def test_it_is_recorded_with_no_host_and_no_path(self):
+        """A pass that never got a parseable head still leaves a line — the
+        record's coverage is the counters' coverage. What it must NOT do is
+        guess a name out of bytes it refused to read."""
+        _log, records = self._drive(b"NOT-A-REQUEST\r\n\r\n")
+        self.assertEqual(len(records), 1, records)
+        rec = records[0]
+        self.assertEqual(rec["decision"], "drop")
+        self.assertEqual(rec["reason"], _mod().DROP_UNREADABLE_REQUEST)
+        self.assertEqual(rec["status"], 400)
+        self.assertIsNone(rec["host"])
+        self.assertIsNone(rec["path"])
+        self.assertIsNone(rec["method"])
+
+
+class TestWhatIsNotARequest(_Records):
+    """Two passes end without a decision, and neither may invent a request."""
+
+    def test_a_guest_that_closes_between_requests_records_nothing(self):
+        mod = _mod()
+        _log, records = self._drive(
+            b"GET / HTTP/1.1\r\nHost: ok.example\r\n\r\n",
+            policy=mod.Policy(tls="splice", hosts=("ok.example",)),
+            origin=self._origin())
+        # One request, then EOF. The second pass reads nothing and is not one.
+        self.assertEqual(len(records), 1, records)
+
+
+class TestTheConnectionLevelRecords(_Records):
+    """Two paths carry requests this design never decodes, and one denial is
+    taken before a request exists. All three are named rather than left to look
+    like silence."""
+
+    def _tls_listener(self, policy):
+        mod = _mod()
+        out = io.StringIO()
+        return mod.Listener([_listener_with(TLS)], out, policy=policy,
+                            record_path=self.path), out
+
+    def test_a_spliced_connection_is_recorded_as_an_exemption(self):
+        mod = _mod()
+        listener, _out = self._tls_listener(
+            mod.Policy(tls="splice", hosts=("ok.example",)))
+        ours, guest = self._pair()
+        from tests.test_vm_inspect_listener import _hello_bytes
+        guest.sendall(_hello_bytes(server_name="ok.example"))
+        guest.shutdown(socket.SHUT_WR)
+        with unittest.mock.patch.object(
+                socket, "create_connection", side_effect=self._origin(b"")):
+            listener._serve(ours, ("192.0.2.1", 1024), TLS, "tls",
+                            mod.secrets.token_hex(6))
+        listener.record.close()
+        records = self._records()
+        self.assertEqual(len(records), 1, records)
+        rec = records[0]
+        self.assertEqual(rec["mode"], "splice")
+        self.assertEqual(rec["decision"], "forward")
+        self.assertEqual(rec["host"], "ok.example")
+        self.assertIsNone(rec["path"], "a splice decodes nothing")
+        self.assertIsNone(rec["status"])
+        self.assertIsNone(rec[VM_INSPECT_LOG_REQ_FIELD])
+
+    def test_a_hello_with_no_name_is_recorded(self):
+        mod = _mod()
+        listener, _out = self._tls_listener(mod.Policy(tls="splice", hosts=()))
+        ours, guest = self._pair()
+        guest.sendall(b"\x16\x03\x01\x00\x05rubbish")
+        guest.shutdown(socket.SHUT_WR)
+        listener._serve(ours, ("192.0.2.1", 1024), TLS, "tls",
+                        mod.secrets.token_hex(6))
+        listener.record.close()
+        records = self._records()
+        self.assertEqual(len(records), 1, records)
+        self.assertEqual(records[0]["decision"], "drop")
+        self.assertEqual(records[0]["reason"], mod.DROP_NO_NAME)
+        self.assertIsNone(records[0]["host"])
+
+
+class TestTheH2BlindSpotIsCounted(unittest.TestCase):
+    """`h2_unrecorded` is what lets a reader say THIS connection's requests are
+    not in the file, rather than an operator concluding the guest sent none."""
+
+    def test_the_counter_exists_and_starts_at_zero(self):
+        counters = _mod().Counters()
+        self.assertEqual(counters.h2_unrecorded, 0)
+
+    def test_it_is_reported(self):
+        snap = _mod().Counters().snapshot(open_now=0, refused=0)
+        self.assertIn("h2_unrecorded", snap)
+
+    def test_it_has_a_writer(self):
+        """A counter with no writer reads 0, which is a legal value — so every
+        test passes while the figure means nothing."""
+        counters = _mod().Counters()
+        counters.record_h2_unrecorded()
+        self.assertEqual(counters.h2_unrecorded, 1)
+
+    def test_the_h2_relay_increments_it(self):
+        source = (ROOT / "libexec" / "workload-vm-inspect-listener").read_text()
+        body = source[source.index("def _serve_h2("):
+                      source.index("def _drop_not_h2(")]
+        self.assertIn("record_h2_unrecorded()", body)
+        self.assertIn('_Record(self.record, where, "h2"', body)
+
+
+class TestTheRecordNeverKillsARequest(_Records):
+    """The standing rule for every diagnostic in this file, and it binds harder
+    here: this runs on the CONNECTION threads, so an escape costs one guest
+    request per failure rather than the accept loop once."""
+
+    def test_a_sink_that_cannot_be_written_still_serves_the_request(self):
+        mod = _mod()
+        out = io.StringIO()
+        listener = mod.Listener(
+            [_listener_with(CLEARTEXT)], out,
+            policy=mod.Policy(tls="splice", hosts=("ok.example",)),
+            record_path=Path(self._tmp.name) / "no-such-dir" / "requests.log")
+        ours, guest = self._pair()
+        guest.sendall(b"GET / HTTP/1.1\r\nHost: ok.example\r\n"
+                      b"Connection: close\r\n\r\n")
+        guest.shutdown(socket.SHUT_WR)
+        with unittest.mock.patch.object(
+                socket, "create_connection", side_effect=self._origin()):
+            listener._serve(ours, ("192.0.2.1", 1024), CLEARTEXT, "cleartext",
+                            mod.secrets.token_hex(6))
+        self.assertIn("forward ", out.getvalue())
+        self.assertEqual(listener.counters.record_failures, 1)

@@ -46,6 +46,17 @@ def _mod():
     return _MOD
 
 
+def _where(plane="tls", cid="0" * 12):
+    """A connection key of the shape _serve builds.
+
+    A plain string will not do since T1c: `where` is a _Where, and the request
+    loops ask it for each request's ordinal. Tests that enter at _serve_tls or
+    _serve_cleartext skip _serve, so they build one here.
+    """
+    return _mod()._Where(f"{_mod().LOG_ID_FIELD}={cid} plane={plane}",
+                         cid=cid, plane=plane)
+
+
 def _mock_conn():
     """A stand-in for an accepted socket: records settimeout and close.
 
@@ -123,7 +134,7 @@ class TestPlaneDetection(unittest.TestCase):
         """
         local = ("198.18.0.1", VM_INSPECT_PORT_CLEARTEXT)
         log = _serve_line(self, local)
-        self.assertIn("plane=cleartext", log)
+        self.assertIn(_where("cleartext"), log)
         self.assertIn(f"local=198.18.0.1:{VM_INSPECT_PORT_CLEARTEXT}", log)
         self.assertIn("peer=192.0.2.1:1024", log)
 
@@ -738,12 +749,12 @@ class TestTlsPlane(unittest.TestCase):
         which is the tunnelling signature."""
         mod, listener, out = self._listener(["example.com"])
         conn, _ = self._client(b"GET / HTTP/1.1\r\n\r\n")
-        listener._serve_tls(conn, "plane=tls")
+        listener._serve_tls(conn, _where("tls"))
         unreadable = out.getvalue()
 
         mod, listener, out = self._listener(["allowed.example"])
         conn, _ = self._client(_hello_bytes(server_name="denied.example"))
-        listener._serve_tls(conn, "plane=tls")
+        listener._serve_tls(conn, _where("tls"))
         miss = out.getvalue()
 
         self.assertIn("no readable name", unreadable)
@@ -754,7 +765,7 @@ class TestTlsPlane(unittest.TestCase):
     def test_a_hello_with_no_name_is_a_no_readable_name_drop(self):
         _, listener, out = self._listener(["example.com"])
         conn, _ = self._client(_hello_bytes(server_name=None))
-        listener._serve_tls(conn, "plane=tls")
+        listener._serve_tls(conn, _where("tls"))
         self.assertIn("no readable name", out.getvalue())
 
     def test_an_unlisted_name_never_reaches_an_upstream(self):
@@ -763,7 +774,7 @@ class TestTlsPlane(unittest.TestCase):
         _, listener, out = self._listener(["allowed.example"])
         conn, _ = self._client(_hello_bytes(server_name="denied.example"))
         with unittest.mock.patch.object(socket, "create_connection") as dial:
-            listener._serve_tls(conn, "plane=tls")
+            listener._serve_tls(conn, _where("tls"))
         dial.assert_not_called()
         self.assertIn("host=denied.example", out.getvalue())
 
@@ -786,7 +797,7 @@ class TestTlsPlane(unittest.TestCase):
             # Close the guest end after the hello so the relay ends promptly;
             # the assertion is about what reached the far side first.
             guest.shutdown(socket.SHUT_WR)
-            listener._serve_tls(conn, "plane=tls")
+            listener._serve_tls(conn, _where("tls"))
         far.settimeout(2.0)
         self.assertEqual(far.recv(len(raw)), raw)
         self.assertEqual(dial.call_args.args[0], ("example.com", 443))
@@ -804,7 +815,7 @@ class TestTlsPlane(unittest.TestCase):
         self.addCleanup(far.close)
         with unittest.mock.patch.object(
                 socket, "create_connection", return_value=upstream) as dial:
-            listener._serve_tls(conn, "plane=tls")
+            listener._serve_tls(conn, _where("tls"))
         host, port = dial.call_args.args[0]
         self.assertEqual(host, "a.example.com")
         self.assertEqual(port, 443)
@@ -815,7 +826,7 @@ class TestTlsPlane(unittest.TestCase):
         with unittest.mock.patch.object(
                 socket, "create_connection",
                 side_effect=OSError("Name or service not known")):
-            listener._serve_tls(conn, "plane=tls")
+            listener._serve_tls(conn, _where("tls"))
         self.assertIn("upstream unreachable", out.getvalue())
         self.assertNotIn("not allowlisted", out.getvalue())
 
@@ -873,7 +884,7 @@ class TestPerHostSplice(unittest.TestCase):
         with unittest.mock.patch.object(listener, "_serve_tls_inspect") as term:
             with unittest.mock.patch.object(
                     socket, "create_connection", return_value=upstream):
-                listener._serve_tls(conn, "plane=tls")
+                listener._serve_tls(conn, _where("tls"))
         term.assert_not_called()
         self.assertIn("splice", out.getvalue())
         self.assertIn("host=sum.golang.org", out.getvalue())
@@ -897,7 +908,7 @@ class TestPerHostSplice(unittest.TestCase):
         self.addCleanup(far.close)
         with unittest.mock.patch.object(
                 socket, "create_connection", return_value=upstream):
-            listener._serve_tls(conn, "plane=tls")
+            listener._serve_tls(conn, _where("tls"))
         far.settimeout(2.0)
         upstream.close()
         received = b""
@@ -917,7 +928,7 @@ class TestPerHostSplice(unittest.TestCase):
         conn, guest = self._client(_hello_bytes(server_name="b.example"))
         guest.shutdown(socket.SHUT_WR)
         with unittest.mock.patch.object(listener, "_serve_tls_inspect") as term:
-            listener._serve_tls(conn, "plane=tls")
+            listener._serve_tls(conn, _where("tls"))
         term.assert_called_once()
         self.assertEqual(term.call_args.args[2], "b.example")
 
@@ -936,7 +947,7 @@ class TestPerHostSplice(unittest.TestCase):
         guest.shutdown(socket.SHUT_WR)
         with unittest.mock.patch.object(listener, "_serve_tls_inspect") as term:
             with unittest.mock.patch.object(socket, "create_connection") as dial:
-                listener._serve_tls(conn, "plane=tls")
+                listener._serve_tls(conn, _where("tls"))
         dial.assert_not_called()
         term.assert_called_once()
         self.assertEqual(term.call_args.args[3], False)   # `allowed`
@@ -1158,7 +1169,7 @@ class TestLogInjection(unittest.TestCase):
         self.addCleanup(ours.close)
         guest.sendall(_hello_bytes(server_name=self._forged))
         ours.settimeout(2.0)
-        listener._serve_tls(ours, "plane=tls")
+        listener._serve_tls(ours, _where("tls"))
         lines = out.getvalue().splitlines()
         self.assertEqual(len(lines), 1, lines)
         self.assertIn("no readable name", lines[0])
@@ -1173,7 +1184,7 @@ class TestLogInjection(unittest.TestCase):
         self.addCleanup(ours.close)
         guest.sendall(_hello_bytes(server_name=self._forged))
         ours.settimeout(2.0)
-        listener._serve_tls(ours, "plane=tls")
+        listener._serve_tls(ours, _where("tls"))
         self.assertNotIn("evil.example", out.getvalue())
         self.assertIn(repr("\n"), out.getvalue())
 
@@ -1186,7 +1197,7 @@ class TestLogInjection(unittest.TestCase):
         self.addCleanup(ours.close)
         guest.sendall(_hello_bytes(server_name=self._forged))
         ours.settimeout(2.0)
-        listener._serve_tls(ours, "plane=tls")
+        listener._serve_tls(ours, _where("tls"))
         snapshot = json.dumps(
             listener.counters.snapshot(open_now=0, refused=0))
         self.assertNotIn("evil.example", snapshot)
@@ -1273,7 +1284,7 @@ class _CleartextRig(unittest.TestCase):
                 socket, "create_connection", side_effect=dial), \
                 unittest.mock.patch.object(mod, "RELAY_IDLE_TIMEOUT", 2.0), \
                 unittest.mock.patch.object(mod, "CONNECTION_TIMEOUT", 2.0):
-            listener._serve_cleartext(ours, "plane=cleartext")
+            listener._serve_cleartext(ours, _where("cleartext"))
         ours.close()
         for _, _, pump in dialled:
             pump.join(timeout=3.0)
@@ -2095,7 +2106,7 @@ class TestCleartextTimeouts(unittest.TestCase):
                     mod, "CONNECTION_TIMEOUT", self.CONNECTION), \
                 unittest.mock.patch.object(
                     mod, "RELAY_IDLE_TIMEOUT", self.IDLE):
-            listener._serve_cleartext(ours, "plane=cleartext")
+            listener._serve_cleartext(ours, _where("cleartext"))
         elapsed = time.monotonic() - started
         for pump in pumps:
             pump.join(timeout=3.0)
@@ -2134,7 +2145,8 @@ class TestCleartextTimeouts(unittest.TestCase):
             responses=[_OK])
         self.assertEqual(self._drops(snap), {})
         self.assertEqual(snap["dispositions"]["forwarded"], 1)
-        self.assertIn("close plane=cleartext", log)
+        self.assertIn("plane=cleartext", log)
+        self.assertIn("close id=", log)
 
     def test_the_idle_wait_is_the_tunnel_number_not_the_decision_one(self):
         """Measured, because the count above would also be satisfied by a
@@ -2361,7 +2373,7 @@ class TestCleartextUpstreamFailure(unittest.TestCase):
         with unittest.mock.patch.object(
                 socket, "create_connection",
                 side_effect=OSError("Name or service not known")):
-            listener._serve_cleartext(ours, "plane=cleartext")
+            listener._serve_cleartext(ours, _where("cleartext"))
         ours.close()
         log, got = out.getvalue(), _read_all(guest)
         self.assertIn("upstream unreachable", log)
@@ -2441,7 +2453,7 @@ class TestEchTripwire(unittest.TestCase):
         self.addCleanup(ours.close)
         guest.sendall(payload)
         ours.settimeout(2.0)
-        listener._serve_tls(ours, "plane=tls")
+        listener._serve_tls(ours, _where("tls"))
 
     def test_an_allowlisted_ech_hello_moves_capability_and_not_the_alarm(self):
         """THE case the split exists for: an ordinary modern client reaching
