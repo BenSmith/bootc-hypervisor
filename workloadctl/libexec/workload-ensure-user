@@ -1165,6 +1165,35 @@ def _uncommented(text: str) -> str:
                       if not line.lstrip().startswith("#"))
 
 
+def _virtiofs_mount_opts(guest_path: str, opts_str: str,
+                          guest_home: PurePosixPath) -> str:
+    """Add an SELinux `context=` option when `guest_path` covers guest_home.
+
+    A share covering the guest's home directory carries ~/.ssh, and virtiofs
+    has no xattr passthrough here (no `--xattr` flag on the virtiofsd sidecar,
+    see generate_virtiofs_service), so every file under it lands in the guest
+    labelled bare `virtiofs_t` — a type sshd has no policy access to. That is
+    silent and late: the denial is logged but not enforced for however long
+    the guest happens to keep running its *current* loaded policy, then bites
+    on the next boot that actually reloads one — a `dnf upgrade` touching
+    selinux-policy is exactly such a boot, and the guest may run for hours on
+    the old policy first. `context=` pins every file under the mount to a type
+    sshd already has broad, correct access to, so login stops depending on a
+    hand-run `semanage permissive` surviving the guest's own next upgrade.
+
+    Only applied when `opts_str` is still the "rw" parse_volume_spec default —
+    a spec that already sets its own mount options made this call once and
+    should not be overridden.
+    """
+    try:
+        guest_home.relative_to(PurePosixPath(guest_path))
+    except ValueError:
+        return opts_str
+    if opts_str != "rw":
+        return opts_str
+    return opts_str + ',context="system_u:object_r:user_home_t:s0"'
+
+
 def _render_default_user_data(name: str, guest_user: str, pubkey: str,
                               mounts: list, has_data_disk: bool,
                               host_private_key: str = "",
@@ -1637,9 +1666,11 @@ def build_cloud_init_iso(pw, config: dict, name: str, config_path: Path | None =
         # Default mode: built-in cloud-config with SSH key + optional disks.
         # Collision-safe tags, same set the generator emits sidecar units for (B3).
         vm_volumes = vm_cfg.get("volumes", [])
+        guest_home = PurePosixPath(VM_GUEST_HOME_BASE) / guest_user
         mounts = []
         for tag, vol_spec in zip(virtiofs_tags(vm_volumes), vm_volumes):
             _host, guest_path, opts_str = parse_volume_spec(vol_spec)
+            opts_str = _virtiofs_mount_opts(guest_path, opts_str, guest_home)
             mounts.append((tag, guest_path, "virtiofs", opts_str))
         user_data_text = _render_default_user_data(
             name=name,
