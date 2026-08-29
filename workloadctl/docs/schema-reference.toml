@@ -195,18 +195,28 @@ name = "schema-reference"
 # Optional: Tell the guest where a nested filesystem begins, so it gets its own
 # st_dev rather than sharing the enclosing share's.
 # Type: boolean
-# Default: false
-# announce_submounts = false
+# Default: true
+# announce_submounts = true
 #
-# Leave it false unless something in the guest walks across the boundary. With
-# it off, a nested mount shares st_dev with the share, and two files on opposite
-# sides can collide on (st_dev, st_ino) — a real risk under CIFS with
-# `serverino`, where the inodes come from the file server and were never
-# coordinated with the local ones. `rsync -a` and `tar` hardlink detection,
-# `cp -a` and `find` loop detection all use that pair for identity. The cost of
-# turning it on is that the guest must then mount each submount separately: a
-# seed whose single fstab line covered the whole tree will see the nested
-# directory as empty.
+# virtiofsd flags each directory that is a mount point on the host, and a guest
+# kernel with virtio-fs submount support automounts it: a second virtiofs mount
+# appears there (source `none` in /proc/mounts), with its own superblock and
+# st_dev, inheriting the parent mount's options — including `context=`, so an
+# SELinux label set on the share still covers what is nested inside it.
+#
+# Leave it true. With it off, a nested mount shares st_dev with the share, and
+# two files on opposite sides can collide on (st_dev, st_ino) — a real risk
+# under CIFS with `serverino`, where the inodes come from the file server and
+# were never coordinated with the local ones. `rsync -a` and `tar` hardlink
+# detection, `cp -a` and `find` loop detection all use that pair for identity.
+#
+# Turn it off only for a guest whose kernel lacks submount support, or one that
+# cannot tolerate mounts it did not create showing up in /proc/mounts.
+#
+# The generator passes --announce-submounts or --no-announce-submounts, never
+# neither. virtiofsd's own default has moved once already (the C version
+# announced nothing unless asked; the Rust 1.x version announces unless told
+# not to), so a unit that omits the flag does not mean what it appears to.
 #
 # Optional: How many *older* system disk generations to keep for rollback,
 # in addition to the generation rotated by the current update. Each update

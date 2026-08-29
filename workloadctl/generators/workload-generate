@@ -1591,7 +1591,7 @@ def generate_sysuser_config_vm(config, user_name, uid):
 
 
 def generate_virtiofs_service(name: str, tag: str, host_path: str, user_name: str, uid: int,
-                              after_mounts=(), announce_submounts: bool = False) -> str:
+                              after_mounts=(), announce_submounts: bool = True) -> str:
     """Generate a virtiofsd sidecar service for one virtiofs volume.
 
     The design this unit implements — the share's ownership model, why the
@@ -1673,23 +1673,34 @@ def generate_virtiofs_service(name: str, tag: str, host_path: str, user_name: st
     #
     # The trade the flag documents — handles keep fewer fds open — is why
     # LimitNOFILE= below is set rather than left at the default.
-    # --announce-submounts makes virtiofsd tell the guest where one host
-    # filesystem ends and a nested one begins, so the guest gives the submount
-    # its own st_dev instead of folding it into the share's.
+    # Submount announcement: virtiofsd flags each directory that is a mount
+    # point on the host (ATTR_SUBMOUNT), and a guest kernel with virtio-fs
+    # submount support answers by automounting it -- a second virtiofs mount,
+    # its own superblock, its own st_dev, inheriting this mount's options.
     #
-    # OFF BY DEFAULT, AND THE DEFAULT IS NOT THE SAFE-LOOKING ONE. Without it a
-    # nested mount shares st_dev with the share around it, and two files on
-    # opposite sides of the boundary can collide on (st_dev, st_ino) -- a real
-    # risk when the nested filesystem is CIFS with `serverino`, where the inode
-    # numbers come from Samba and have never been coordinated with the local
-    # ones underneath. Anything that uses that pair for identity mis-pairs them:
-    # `rsync -a` and `tar` hardlink detection, `cp -a`, `find` loop detection.
+    # Without it a nested mount shares st_dev with the share around it, and two
+    # files on opposite sides of the boundary can collide on (st_dev, st_ino) --
+    # a real risk when the nested filesystem is CIFS with `serverino`, where the
+    # inode numbers come from Samba and have never been coordinated with the
+    # local ones underneath. Anything that uses that pair for identity mis-pairs
+    # them: `rsync -a` and `tar` hardlink detection, `cp -a`, `find` loop
+    # detection.
     #
-    # What it costs is that the guest must mount each submount separately; a
-    # guest that does not, or a seed whose single fstab line covered the whole
-    # tree, sees an empty directory where the nested content was. That is why
-    # this is the operator's call per workload rather than a default flip.
-    submounts = " --announce-submounts" if announce_submounts else ""
+    # BOTH FORMS ARE PASSED EXPLICITLY, and that is the point of this block.
+    # virtiofsd's own default has moved: the C implementation shipped with qemu
+    # announced nothing unless asked, while the Rust one (1.x, --help: "Tell the
+    # guest which directories are mount points [default]") announces unless told
+    # --no-announce-submounts. Emitting a flag only for the true case therefore
+    # made announce_submounts=false unachievable -- it silently got the announced
+    # behaviour anyway -- and would flip meaning again under a future default.
+    # Naming the state we want in every unit costs one argument and pins it.
+    #
+    # Default true, matching current virtiofsd and every already-deployed
+    # sidecar. The opt-out is for a guest whose kernel lacks submount support,
+    # or one that cannot tolerate mounts it did not create appearing in
+    # /proc/mounts; the collision above is the price it pays for that.
+    submounts = (" --announce-submounts" if announce_submounts
+                 else " --no-announce-submounts")
     virtiofsd_cmd = (
         f"/usr/libexec/virtiofsd "
         f"--socket-path={socket_path} "
@@ -2416,7 +2427,7 @@ def generate_vm_workload(config, user_name: str, uid: int):
     # nested mount declared twice.
     after_mounts = [expand_volume_path(p, home_dir).split(":", 2)[0]
                     for p in vm_cfg.get("after_mounts", [])]
-    announce_submounts = bool(vm_cfg.get("announce_submounts", False))
+    announce_submounts = bool(vm_cfg.get("announce_submounts", True))
     for (tag, vol_spec), vfs_dest in zip(zip(vfs_tags, volumes), vfs_dests):
         host_raw, _guest_path, _opts = parse_volume_spec(vol_spec)
         # Expand ./ @/ data/ state/ anchors relative to the workload dirs.
