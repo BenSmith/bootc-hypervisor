@@ -12,12 +12,24 @@ import signal
 import socket
 import subprocess
 import sys
+import threading
 import time
 
 sys.dont_write_bytecode = True
 
 from vm import VM_SOCKET_DIR, qemu_launch_argv
 from qmp import QMPClient
+from vm_provision import (marker_reports_failure, marker_vouches_for,
+                          read_provision_marker, record_guest_provision_result)
+from workload_lib import workload_state_dir
+
+# How long to keep asking the guest whether cloud-init finished, and how often.
+# READY=1 goes out when the vCPUs start (~1 s); provisioning runs for tens of
+# seconds on a plain seed and for many minutes on one whose runcmd installs
+# packages, so the budget is generous — it costs one local socket round trip
+# per poll, and the watch exits the moment the guest answers.
+PROVISION_WATCH_TIMEOUT = 1800.0
+PROVISION_POLL_INTERVAL = 15.0
 
 
 def sd_notify(msg: str):
@@ -43,6 +55,62 @@ def wait_running(qmp: QMPClient, timeout: float = 120.0):
             return
         time.sleep(0.5)
     raise TimeoutError(f"Guest did not enter running state within {timeout:.0f}s")
+
+
+def watch_provisioning(name: str,
+                       deadline: float = PROVISION_WATCH_TIMEOUT,
+                       interval: float = PROVISION_POLL_INTERVAL) -> None:
+    """Record whether this instance's cloud-init actually finished.
+
+    READY=1 means "the vCPUs are running", which is true a good half-minute
+    before the guest is provisioned — so nothing on the host has ever known
+    whether the per-instance modules (users, sudo drop-ins, runcmd) completed.
+    A first boot cut short leaves them half-done *and* marked done by the
+    guest's own semaphores, and the host then pins that instance-id forever
+    because the seed content never changed. See lib/vm_provision.py.
+
+    We are the VM service's main process, we run as the workload user that owns
+    the state dir, and we already live for the guest's whole lifetime, so this
+    is the one place that can watch without a new unit. Best-effort throughout:
+    every failure path just leaves no record, which callers read as "not
+    observed" rather than as a broken guest.
+
+    The question goes to the guest over SSH rather than qemu-guest-agent: the
+    agent is confined to virt_qemu_ga_t, which stock guest policy does not let
+    read cloud-init's state at all (see lib/vm_provision.py). So the first polls
+    of a cold boot normally fail simply because sshd is not up yet, which is an
+    ordinary "ask again", not a fault.
+    """
+    try:
+        state_dir = workload_state_dir(name)
+        instance_id = (state_dir / ".cloud-init-instance-id").read_text().strip()
+    except OSError:
+        return
+    if not instance_id:
+        return
+
+    marker = read_provision_marker(state_dir)
+    if (marker_vouches_for(marker, instance_id)
+            or marker_reports_failure(marker, instance_id)):
+        return  # outcome already recorded for this instance; nothing to watch
+
+    end = time.monotonic() + deadline
+    while time.monotonic() < end:
+        try:
+            status = record_guest_provision_result(state_dir, instance_id, name)
+        except Exception as e:
+            print(f"workload-vm-notify: provisioning watch error: {e}",
+                  file=sys.stderr)
+            return
+        if status is not None:
+            print(f"workload-vm-notify: cloud-init reported {status} for "
+                  f"instance {instance_id}", flush=True)
+            return
+        time.sleep(interval)
+
+    print(f"workload-vm-notify: cloud-init outcome unknown for instance "
+          f"{instance_id} after {deadline:.0f}s (the guest never answered). "
+          f"Provisioning is unverified, not failed.", file=sys.stderr)
 
 
 def monitor_shutdown_reason(name: str, proc) -> str | None:
@@ -143,6 +211,12 @@ def main():
         sd_notify("READY=1")
     finally:
         qmp.close()
+
+    # Watch the guest's cloud-init from here on. A daemon thread so it can never
+    # hold up the exit paths below: whatever it has learned by the time QEMU
+    # goes away is already persisted, and what it hasn't is simply unrecorded.
+    threading.Thread(target=watch_provisioning, args=(name,),
+                     name="provision-watch", daemon=True).start()
 
     # on-reboot mode: the generator arms this env var and adds qmp-notify.sock.
     # Translate the guest's shutdown reason into an exit code the unit's

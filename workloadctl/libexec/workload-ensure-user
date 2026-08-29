@@ -40,6 +40,9 @@ from vm import (VM_SOCKET_DIR, VM_DEFAULT_GUEST_USER, VM_GUEST_HOME_BASE,
                 VM_PROXY_ADDR, VM_PROXY_PORT,
                 VM_SEED_CONTRACT_EXIT, SeedContractError, find_ovmf_vars,
                 vm_broker_env, vm_proxy_env, vm_uses_proxy)
+from vm_provision import (MAX_HEAL_ATTEMPTS, PROVISION_UNVERIFIED,
+                          heal_attempts, read_provision_marker, should_heal,
+                          write_provision_marker)
 from secrets_template import substitute_template
 
 
@@ -1181,7 +1184,9 @@ def _bundle_workloadctl_rpm(seed_dir: Path) -> bool:
 
 
 def _resolve_cloud_init_instance_id(name: str, instance_id_file: Path,
-                                    fp_unchanged: bool) -> tuple[str, bool]:
+                                    fp_unchanged: bool,
+                                    marker: dict | None = None
+                                    ) -> tuple[str, bool, int]:
     """Decide the cloud-init instance-id for a (re)built seed ISO.
 
     Reuse the persisted id when the user-data fingerprint is unchanged — that
@@ -1191,14 +1196,29 @@ def _resolve_cloud_init_instance_id(name: str, instance_id_file: Path,
     actually changed (a real edit that warrants re-provisioning) or when no id
     has been persisted yet (first provision).
 
-    Returns ``(instance_id, minted)`` — ``minted`` is True when a new id was
-    generated and the caller must persist it.
+    The one exception to reuse is the heal: `marker` is the recorded outcome of
+    the guest's own cloud-init run (see vm_provision), and when it says that
+    run *failed* for the very id we are about to reuse, reusing it would pin
+    the half-provisioned guest forever — its per-instance semaphores are
+    already written, so the modules that didn't finish are never retried. A
+    fresh id is what makes cloud-init treat the existing disk as a new instance
+    and run them again. Capped at MAX_HEAL_ATTEMPTS per lineage so a guest that
+    fails deterministically re-provisions once and then stays put rather than
+    churning a new instance on every start.
+
+    Returns ``(instance_id, minted, heal_attempts)`` — ``minted`` is True when a
+    new id was generated and the caller must persist it, and ``heal_attempts``
+    is the lineage's attempt count to persist alongside it (nonzero only for a
+    heal).
     """
     existing = (instance_id_file.read_text().strip()
                 if instance_id_file.exists() else "")
     if fp_unchanged and existing:
-        return existing, False
-    return f"{name}-{uuid.uuid4().hex[:8]}", True
+        if not should_heal(marker, existing):
+            return existing, False, 0
+        attempts = heal_attempts(marker, existing) + 1
+        return f"{name}-{uuid.uuid4().hex[:8]}", True, attempts
+    return f"{name}-{uuid.uuid4().hex[:8]}", True, 0
 
 
 def build_cloud_init_iso(pw, config: dict, name: str, config_path: Path | None = None):
@@ -1525,7 +1545,21 @@ def build_cloud_init_iso(pw, config: dict, name: str, config_path: Path | None =
     fingerprint_file = home_path / ".cloud-init-fingerprint"
     fp_unchanged = (fingerprint_file.exists()
                     and fingerprint_file.read_text().strip() == current_fp)
-    if iso_path.exists() and fp_unchanged:
+
+    # The recorded outcome of the guest's own cloud-init run, if we ever
+    # observed one. Read before the early return because a recorded *failure*
+    # is the one thing that must defeat it: the ISO on tmpfs is fine and the
+    # content is unchanged, but reusing that instance-id is precisely what
+    # keeps the guest broken, so a heal has to be able to rebuild within a
+    # single boot (i.e. `workloadctl restart` heals; it need not wait for the
+    # next host reboot to wipe /run).
+    instance_id_file = home_path / ".cloud-init-instance-id"
+    existing_id = (instance_id_file.read_text().strip()
+                   if instance_id_file.exists() else "")
+    marker = read_provision_marker(home_path)
+    healing = fp_unchanged and bool(existing_id) and should_heal(marker, existing_id)
+
+    if iso_path.exists() and fp_unchanged and not healing:
         return
 
     # Rotate the cloud-init instance-id ONLY when the guest-affecting content
@@ -1537,12 +1571,24 @@ def build_cloud_init_iso(pw, config: dict, name: str, config_path: Path | None =
     # Without this, every host reboot churns the id and forces a full guest
     # re-provision. An absent/empty id file falls back to a fresh mint (first
     # provision).
-    instance_id_file = home_path / ".cloud-init-instance-id"
-    instance_id, minted = _resolve_cloud_init_instance_id(
-        name, instance_id_file, fp_unchanged)
+    instance_id, minted, attempts = _resolve_cloud_init_instance_id(
+        name, instance_id_file, fp_unchanged, marker)
     if minted:
+        if attempts:
+            errors = (marker or {}).get("errors") or []
+            log(f"  cloud-init reported failure for instance {existing_id}"
+                + (f": {errors[0]}" if errors else "")
+                + f" — re-provisioning with a fresh instance-id (heal {attempts}"
+                  f"/{MAX_HEAL_ATTEMPTS})")
         instance_id_file.write_text(instance_id)
         os.chown(instance_id_file, pw.pw_uid, pw.pw_gid)
+        # Record the new id as unverified straight away, so the marker always
+        # names the instance currently in play. Without this a heal would leave
+        # the *old* failure record in place, and the next start would read it
+        # as a failure of the new id and heal again.
+        write_provision_marker(home_path, instance_id, PROVISION_UNVERIFIED,
+                               heal_attempts=attempts,
+                               uid=pw.pw_uid, gid=pw.pw_gid)
 
     seed_dir.mkdir(exist_ok=True)
     os.chown(seed_dir, pw.pw_uid, pw.pw_gid)

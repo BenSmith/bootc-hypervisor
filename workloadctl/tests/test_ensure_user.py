@@ -18,6 +18,8 @@ from pathlib import Path
 from unittest import mock
 
 from tests import load_script
+from vm_provision import (PROVISION_FAILED, PROVISION_UNVERIFIED,
+                          read_provision_marker, write_provision_marker)
 
 
 def _load_script():
@@ -423,6 +425,78 @@ class TestBuildCloudInitIsoTemplateMode(unittest.TestCase):
         iso_mtime_second = self._iso_path().stat().st_mtime_ns
         self.assertEqual(fp_first, fp_second)
         self.assertEqual(iso_mtime_first, iso_mtime_second)
+
+    def test_mint_records_the_new_instance_as_unverified(self):
+        # The marker must name the instance actually in play from the moment it
+        # is minted; otherwise a heal leaves the *previous* failure record in
+        # place and the next start reads it as a failure of the new id.
+        ud = self.config_dir / "user-data"
+        ud.write_text("#cloud-config\nv: 1\n")
+        cfg = {"vm": {"cloud_init": {"user_data_file": "user-data"}}}
+        self._run_build(cfg)
+        marker = read_provision_marker(self.home)
+        self.assertEqual(marker["instance_id"],
+                         (self.home / ".cloud-init-instance-id").read_text().strip())
+        self.assertEqual(marker["status"], PROVISION_UNVERIFIED)
+        self.assertEqual(marker["heal_attempts"], 0)
+
+    def test_recorded_failure_rebuilds_within_one_boot(self):
+        # The seam the whole feature turns on. Content unchanged and the tmpfs
+        # ISO still present, so the fingerprint early-return would normally skip
+        # everything — but the guest's cloud-init is recorded as having failed
+        # on this instance-id, and reusing it is exactly what keeps the guest
+        # half-provisioned. A `workloadctl restart` has to heal it; waiting for
+        # the next host reboot to wipe /run is not a fix.
+        ud = self.config_dir / "user-data"
+        ud.write_text("#cloud-config\nv: 1\n")
+        cfg = {"vm": {"cloud_init": {"user_data_file": "user-data"}}}
+        self._run_build(cfg)
+        id_file = self.home / ".cloud-init-instance-id"
+        first_id = id_file.read_text().strip()
+        write_provision_marker(self.home, first_id, PROVISION_FAILED,
+                               errors=["getpwnam(): name not found: 'fedora'"])
+
+        self._run_build(cfg)
+        self.assertNotEqual(id_file.read_text().strip(), first_id)
+        marker = read_provision_marker(self.home)
+        self.assertEqual(marker["instance_id"], id_file.read_text().strip())
+        self.assertEqual(marker["status"], PROVISION_UNVERIFIED)
+        self.assertEqual(marker["heal_attempts"], 1)
+
+    def test_heal_does_not_repeat_for_the_same_lineage(self):
+        # A guest whose cloud-init fails deterministically must re-provision
+        # once and then stay put — visible to `diagnose` rather than minting a
+        # fresh instance on every single start.
+        ud = self.config_dir / "user-data"
+        ud.write_text("#cloud-config\nv: 1\n")
+        cfg = {"vm": {"cloud_init": {"user_data_file": "user-data"}}}
+        self._run_build(cfg)
+        id_file = self.home / ".cloud-init-instance-id"
+        write_provision_marker(self.home, id_file.read_text().strip(),
+                               PROVISION_FAILED)
+        self._run_build(cfg)                      # heal 1/1
+        healed_id = id_file.read_text().strip()
+
+        write_provision_marker(self.home, healed_id, PROVISION_FAILED,
+                               heal_attempts=1)
+        self._run_build(cfg)                      # cap reached → no rotation
+        self.assertEqual(id_file.read_text().strip(), healed_id)
+
+    def test_unverified_marker_does_not_rebuild(self):
+        # "Never heard back" is the normal state for a guest without
+        # qemu-guest-agent. Treating it as failure would re-run every seed's
+        # runcmd on healthy guests at each host reboot.
+        ud = self.config_dir / "user-data"
+        ud.write_text("#cloud-config\nv: 1\n")
+        cfg = {"vm": {"cloud_init": {"user_data_file": "user-data"}}}
+        self._run_build(cfg)
+        id_file = self.home / ".cloud-init-instance-id"
+        first_id = id_file.read_text().strip()
+        iso_mtime = self._iso_path().stat().st_mtime_ns
+
+        self._run_build(cfg)
+        self.assertEqual(id_file.read_text().strip(), first_id)
+        self.assertEqual(self._iso_path().stat().st_mtime_ns, iso_mtime)
 
     def test_user_data_written_0600(self):
         ud = self.config_dir / "user-data"
@@ -1451,37 +1525,93 @@ class TestResolveCloudInitInstanceId(unittest.TestCase):
         self.tmp = Path(self.enterContext(tempfile.TemporaryDirectory()))
         self.id_file = self.tmp / ".cloud-init-instance-id"
 
-    def _resolve(self, fp_unchanged):
+    def _resolve(self, fp_unchanged, marker=None):
         return self.mod._resolve_cloud_init_instance_id(
-            "myvm", self.id_file, fp_unchanged)
+            "myvm", self.id_file, fp_unchanged, marker)
+
+    @staticmethod
+    def _marker(instance_id, status, heal_attempts=0):
+        return {"instance_id": instance_id, "status": status,
+                "heal_attempts": heal_attempts}
 
     def test_first_provision_mints_when_no_file(self):
         # No persisted id yet → mint, regardless of fingerprint state.
-        iid, minted = self._resolve(fp_unchanged=True)
+        iid, minted, attempts = self._resolve(fp_unchanged=True)
         self.assertTrue(minted)
         self.assertTrue(iid.startswith("myvm-"))
+        self.assertEqual(attempts, 0)
 
     def test_host_reboot_reuses_id(self):
         # Unchanged content + an existing id == tmpfs ISO wiped by a reboot.
         self.id_file.write_text("myvm-deadbeef")
-        iid, minted = self._resolve(fp_unchanged=True)
+        iid, minted, attempts = self._resolve(fp_unchanged=True)
         self.assertEqual(iid, "myvm-deadbeef")
         self.assertFalse(minted)               # reused → caller must NOT rewrite
+        self.assertEqual(attempts, 0)
 
     def test_content_change_rotates_id(self):
         # A real config/secret edit (fingerprint changed) → fresh instance.
         self.id_file.write_text("myvm-deadbeef")
-        iid, minted = self._resolve(fp_unchanged=False)
+        iid, minted, attempts = self._resolve(fp_unchanged=False)
         self.assertNotEqual(iid, "myvm-deadbeef")
         self.assertTrue(iid.startswith("myvm-"))
         self.assertTrue(minted)
+        # A content change is not a heal; the lineage's counter starts fresh.
+        self.assertEqual(attempts, 0)
 
     def test_empty_id_file_mints(self):
         # A truncated/empty persisted id is not reusable → mint.
         self.id_file.write_text("   \n")
-        iid, minted = self._resolve(fp_unchanged=True)
+        iid, minted, attempts = self._resolve(fp_unchanged=True)
         self.assertTrue(minted)
         self.assertTrue(iid.startswith("myvm-"))
+
+    # --- healing a guest whose cloud-init is recorded as failed -------------
+
+    def test_recorded_failure_rotates_id(self):
+        # The aj case: content unchanged, so the id would be reused — but the
+        # guest's own cloud-init failed on it, and reuse pins that forever.
+        self.id_file.write_text("myvm-deadbeef")
+        marker = self._marker("myvm-deadbeef", "failed")
+        iid, minted, attempts = self._resolve(fp_unchanged=True, marker=marker)
+        self.assertNotEqual(iid, "myvm-deadbeef")
+        self.assertTrue(minted)
+        self.assertEqual(attempts, 1)
+
+    def test_heal_is_capped(self):
+        # Already healed once and it failed again → stop churning. A guest that
+        # fails deterministically must not re-provision on every start.
+        self.id_file.write_text("myvm-deadbeef")
+        marker = self._marker("myvm-deadbeef", "failed", heal_attempts=1)
+        iid, minted, attempts = self._resolve(fp_unchanged=True, marker=marker)
+        self.assertEqual(iid, "myvm-deadbeef")
+        self.assertFalse(minted)
+
+    def test_success_marker_reuses_id(self):
+        self.id_file.write_text("myvm-deadbeef")
+        marker = self._marker("myvm-deadbeef", "done")
+        iid, minted, _ = self._resolve(fp_unchanged=True, marker=marker)
+        self.assertEqual(iid, "myvm-deadbeef")
+        self.assertFalse(minted)
+
+    def test_unverified_marker_reuses_id(self):
+        # "We never heard an outcome" is not evidence of failure — most often
+        # it just means the guest has no qemu-guest-agent. Re-provisioning on
+        # it would re-run every seed's runcmd on guests that were fine.
+        self.id_file.write_text("myvm-deadbeef")
+        marker = self._marker("myvm-deadbeef", "unverified")
+        iid, minted, _ = self._resolve(fp_unchanged=True, marker=marker)
+        self.assertEqual(iid, "myvm-deadbeef")
+        self.assertFalse(minted)
+
+    def test_failure_recorded_for_another_instance_is_ignored(self):
+        # A failure recorded against an id we are no longer using says nothing
+        # about the current one.
+        self.id_file.write_text("myvm-deadbeef")
+        marker = self._marker("myvm-0ldbeef0", "failed")
+        iid, minted, _ = self._resolve(fp_unchanged=True, marker=marker)
+        self.assertEqual(iid, "myvm-deadbeef")
+        self.assertFalse(minted)
 
 
 class TestSetupHomeDirectory(unittest.TestCase):
