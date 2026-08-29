@@ -713,6 +713,131 @@ class TestBuildCloudInitIsoTemplateMode(unittest.TestCase):
             self._run_build(cfg)
         self.assertIn("proxy", str(ctx.exception))
 
+    # --- the home share's SELinux context ----------------------------------
+    #
+    # The third seed-completeness concern, and the one with the nastiest
+    # failure: a home share mounted without `context=` labels every file under
+    # it `virtiofs_t`, which sshd cannot read. Nothing fails at boot — the
+    # guest serves logins on its already-loaded policy — so it surfaces on the
+    # first reboot after an in-guest update reloads selinux-policy, locking the
+    # operator out of a cloud image whose only account has no password.
+
+    _HOME_MOUNT = "runcmd:\n  - mount -t virtiofs home-fedora /home/fedora\n"
+
+    def _home_cfg(self, **ci):
+        """Template-mode config whose one volume covers the guest home."""
+        return {"vm": {"user": "fedora",
+                       "cloud_init": {"user_data_file": "user-data", **ci},
+                       "volumes": ["./home:/home/fedora"]}}
+
+    def test_home_share_without_context_refused(self):
+        """The regression this contract exists for: the seed mounts the home
+        share, so the mounts check passes, and the VM would boot fine."""
+        self._seed(self._HOME_MOUNT)
+        with self.assertRaises(RuntimeError) as ctx:
+            self._run_build(self._home_cfg())
+        msg = str(ctx.exception)
+        self.assertIn("context=", msg)
+        self.assertIn("user_home_t", msg)
+        self.assertIn("home-fedora", msg)      # names the tag to fix
+
+    def test_home_share_with_context_accepted(self):
+        """The option the built-in cloud-config would have emitted."""
+        self._seed(
+            "runcmd:\n  - mount -t virtiofs -o "
+            'context="system_u:object_r:user_home_t:s0" '
+            "home-fedora /home/fedora\n"
+        )
+        self._run_build(self._home_cfg())
+
+    def test_ssh_home_t_is_also_accepted(self):
+        """Both types carry the user_home_type attribute stock policy grants
+        sshd, so pinning only user_home_t would refuse a working seed."""
+        self._seed(
+            "runcmd:\n  - mount -t virtiofs -o "
+            "context=system_u:object_r:ssh_home_t:s0 home-fedora /home/fedora\n"
+        )
+        self._run_build(self._home_cfg())
+
+    def test_host_side_context_type_is_refused(self):
+        """A `context=` naming svirt_image_t satisfies a bare "is context=
+        present" check while leaving sshd exactly as broken as omitting it.
+
+        This is the realistic mistake: svirt_image_t is what the HOST mounts a
+        nested cifs volume under the share with, so it is the value an operator
+        already has in front of them when they go looking for a context to
+        copy.
+        """
+        self._seed(
+            "runcmd:\n  - mount -t virtiofs -o "
+            "context=system_u:object_r:svirt_image_t:s0 home-fedora /home/fedora\n"
+        )
+        with self.assertRaises(RuntimeError) as ctx:
+            self._run_build(self._home_cfg())
+        self.assertIn("user_home_t", str(ctx.exception))
+
+    def test_volume_below_home_is_not_subject_to_the_check(self):
+        """Only a share COVERING the home carries ~/.ssh. A share mounted
+        inside it inherits the parent mount's context and needs none itself —
+        checking it would refuse an ordinary data volume."""
+        self._seed("runcmd:\n  - mount -t virtiofs home-fedora-work "
+                   "/home/fedora/work\n")
+        cfg = {"vm": {"user": "fedora",
+                      "cloud_init": {"user_data_file": "user-data"},
+                      "volumes": ["./work:/home/fedora/work"]}}
+        self._run_build(cfg)
+
+    def test_unrelated_volume_is_not_subject_to_the_check(self):
+        self._seed("runcmd:\n  - mount -t virtiofs srv-data /srv/data\n")
+        cfg = {"vm": {"user": "fedora",
+                      "cloud_init": {"user_data_file": "user-data"},
+                      "volumes": ["./srv:/srv/data"]}}
+        self._run_build(cfg)
+
+    def test_home_context_seed_provides_opts_out(self):
+        """For a guest that labels the mount by means the seed text cannot
+        show — an image-baked fstab entry, or local policy granting sshd
+        another type."""
+        self._seed(self._HOME_MOUNT)
+        self._run_build(self._home_cfg(seed_provides=["home_context"]))
+
+    def test_home_context_optout_keeps_the_mount_check(self):
+        """"home_context" is the narrow opt-out: it must not also silence the
+        check that the volume is mounted at all."""
+        self._seed()  # mounts nothing
+        with self.assertRaises(RuntimeError) as ctx:
+            self._run_build(self._home_cfg(seed_provides=["home_context"]))
+        self.assertIn("never mounts", str(ctx.exception))
+
+    def test_mounts_optout_also_covers_the_context_check(self):
+        """The converse: a seed declaring the image handles mounting cannot
+        also be asked for mount options we would not be able to see."""
+        self._seed()
+        self._run_build(self._home_cfg(seed_provides=["mounts"]))
+
+    def test_home_context_failure_is_typed(self):
+        """Same reasoning as test_contract_failures_are_typed: this is an
+        operator mistake with a stated remedy, not a crash."""
+        self._seed(self._HOME_MOUNT)
+        with self.assertRaises(self.mod.SeedContractError):
+            self._run_build(self._home_cfg())
+
+    def test_default_mode_emits_what_the_contract_demands(self):
+        """The emitter and the check must agree: the built-in cloud-config's
+        own output has to satisfy the contract template mode is held to.
+
+        A drift between VM_HOME_SELINUX_CONTEXT and the accepted types would
+        otherwise show up as the contract rejecting workloadctl's own seed.
+        """
+        cfg = {"vm": {"user": "fedora", "volumes": ["./home:/home/fedora"]}}
+        self._run_build(cfg)
+        text = self._read_user_data()
+        self.assertRegex(
+            text,
+            r"context=[\"']?[\w.-]*:[\w.-]*:(?:"
+            + "|".join(self.mod.VM_HOME_SELINUX_TYPES) + r"):",
+        )
+
     def test_default_mode_is_unaffected_by_the_contract(self):
         """The checks are template-mode only: default mode derives both the
         proxy env and the mounts itself, so the same config must build."""

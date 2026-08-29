@@ -58,6 +58,31 @@ VM_GUEST_UID = 1000
 VM_DEFAULT_GUEST_USER = "workload"
 VM_GUEST_HOME_BASE = "/home"
 
+# The SELinux context a virtiofs share covering the guest home must be mounted
+# with, and the types that satisfy it.
+#
+# virtiofs carries no xattrs here (the sidecar gets no --xattr), so every file
+# under such a share lands in the guest labelled bare `virtiofs_t` — a type
+# sshd has no access to at all. `~/.ssh/authorized_keys` then becomes
+# unreadable and key auth fails for a guest whose only account has no password.
+# A `context=` mount option is the only fix: it labels the whole mount at once,
+# which is also why the type has to be one sshd can read through to a home.
+#
+# BOTH HALVES MUST AGREE. workload-ensure-user emits this value into the
+# built-in cloud-config (_virtiofs_mount_opts) and separately REFUSES a custom
+# seed that does not carry one of these types (the seed contract in
+# build_cloud_init_iso). A drift between the emitter and the check looks like
+# the contract rejecting workloadctl's own output, which is what
+# test_default_mode_emits_what_the_contract_demands pins.
+#
+# `ssh_home_t` is accepted alongside `user_home_t` because both carry the
+# `user_home_type` attribute that stock policy grants sshd:
+#   allow sshd_t user_home_type:file { getattr ioctl lock open read };
+# An operator using some other locally-granted type opts out with
+# [vm.cloud_init].seed_provides = ["home_context"].
+VM_HOME_SELINUX_TYPES = ("user_home_t", "ssh_home_t")
+VM_HOME_SELINUX_CONTEXT = "system_u:object_r:user_home_t:s0"
+
 # --- passt networking (ADR 006) ---
 #
 # VM workloads have no bridge. passt terminates the guest's stack in userspace
@@ -388,10 +413,16 @@ VM_PROXY_PORT = 3128
 # What [vm.cloud_init].seed_provides may name — the concerns a custom seed can
 # declare it handles itself, suppressing the matching completeness check in
 # build_cloud_init_iso.
-SEED_PROVIDES_CHOICES = {"proxy", "mounts"}
+#
+# "home_context" is narrower than "mounts": a seed that mounts the home share
+# itself but labels it by some means we cannot read from the seed text (an
+# image-baked fstab entry, a local policy granting sshd another type) opts out
+# of the SELinux check alone and keeps the mount check.
+SEED_PROVIDES_CHOICES = {"proxy", "mounts", "home_context"}
 
 # workload-ensure-user exits with this when a custom seed fails one of the
-# contracts build_cloud_init_iso enforces (host key, proxy env, volume mounts).
+# contracts build_cloud_init_iso enforces (host key, proxy env, volume mounts,
+# home-share SELinux context).
 # Distinct from a plain 1 so the caller can tell "the operator's seed is wrong,
 # and the helper already said how" from "the helper broke": provisioning maps
 # it to UsageError, which keeps the CLI's bug-report banner — and the traceback

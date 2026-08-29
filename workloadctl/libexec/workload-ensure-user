@@ -36,7 +36,8 @@ from workload_lib import (
     append_subid_entries, replace_file_atomically, subgid_file, subuid_file,
 )
 from vm import (VM_SOCKET_DIR, VM_DEFAULT_GUEST_USER, VM_GUEST_HOME_BASE,
-                VM_GUEST_UID, VM_PROXY_ADDR, VM_PROXY_PORT,
+                VM_GUEST_UID, VM_HOME_SELINUX_CONTEXT, VM_HOME_SELINUX_TYPES,
+                VM_PROXY_ADDR, VM_PROXY_PORT,
                 VM_SEED_CONTRACT_EXIT, SeedContractError, find_ovmf_vars,
                 vm_broker_env, vm_proxy_env, vm_uses_proxy)
 from secrets_template import substitute_template
@@ -1018,6 +1019,22 @@ def _decrypt_systemd_credential(name: str) -> str:
     )
 
 
+def _covers_guest_home(guest_path: str, guest_home: PurePosixPath) -> bool:
+    """Whether a volume mounted at `guest_path` contains the guest's home.
+
+    The shared predicate behind both halves of the home-context rule: the
+    built-in cloud-config adds `context=` to exactly these mounts
+    (_virtiofs_mount_opts), and the seed contract in build_cloud_init_iso
+    refuses a custom seed that mounts one of them without it. Split out so the
+    two halves cannot disagree about which volume is the home share.
+    """
+    try:
+        guest_home.relative_to(PurePosixPath(guest_path))
+    except ValueError:
+        return False
+    return True
+
+
 def _virtiofs_mount_opts(guest_path: str, opts_str: str,
                           guest_home: PurePosixPath) -> str:
     """Add an SELinux `context=` option when `guest_path` covers guest_home.
@@ -1038,13 +1055,11 @@ def _virtiofs_mount_opts(guest_path: str, opts_str: str,
     a spec that already sets its own mount options made this call once and
     should not be overridden.
     """
-    try:
-        guest_home.relative_to(PurePosixPath(guest_path))
-    except ValueError:
+    if not _covers_guest_home(guest_path, guest_home):
         return opts_str
     if opts_str != "rw":
         return opts_str
-    return opts_str + ',context="system_u:object_r:user_home_t:s0"'
+    return opts_str + f',context="{VM_HOME_SELINUX_CONTEXT}"'
 
 
 def _render_default_user_data(name: str, guest_user: str, pubkey: str,
@@ -1411,21 +1426,68 @@ def build_cloud_init_iso(pw, config: dict, name: str, config_path: Path | None =
 
         if "mounts" not in seed_provides:
             vm_volumes = vm_cfg.get("volumes", []) or []
+            guest_home = PurePosixPath(VM_GUEST_HOME_BASE) / guest_user
             for tag, vol_spec in zip(virtiofs_tags(vm_volumes), vm_volumes):
-                if tag in user_data_text:
-                    continue
                 _host, guest_path, _opts = parse_volume_spec(vol_spec)
-                raise SeedContractError(
-                    f"[vm.cloud_init].user_data_file for {name} never mounts "
-                    f"the volume {vol_spec!r} (virtiofs tag {tag!r}). A custom "
-                    f"seed replaces the built-in cloud-config, which is what "
-                    f"would normally mount it, so {guest_path} would be an "
-                    f"ordinary directory on the system disk: writes there look "
-                    f"fine, never reach the host, and are discarded by a disk "
-                    f"rebuild. Mount tag {tag!r} at {guest_path} in the seed, "
-                    f"or set [vm.cloud_init].seed_provides = [\"mounts\"] if "
-                    f"the guest image mounts it already."
-                )
+                if tag not in user_data_text:
+                    raise SeedContractError(
+                        f"[vm.cloud_init].user_data_file for {name} never mounts "
+                        f"the volume {vol_spec!r} (virtiofs tag {tag!r}). A custom "
+                        f"seed replaces the built-in cloud-config, which is what "
+                        f"would normally mount it, so {guest_path} would be an "
+                        f"ordinary directory on the system disk: writes there look "
+                        f"fine, never reach the host, and are discarded by a disk "
+                        f"rebuild. Mount tag {tag!r} at {guest_path} in the seed, "
+                        f"or set [vm.cloud_init].seed_provides = [\"mounts\"] if "
+                        f"the guest image mounts it already."
+                    )
+                # The home share's SELinux context. Default mode adds this to
+                # the mount options itself (_virtiofs_mount_opts); template
+                # mode emits only what the operator wrote, so a seed that
+                # mounts the home share with plain `defaults` produces a guest
+                # whose every home file is `virtiofs_t` and whose sshd cannot
+                # read authorized_keys.
+                #
+                # This is the worst of the three seed-completeness failures and
+                # the reason it is checked at all: it is not visible at boot.
+                # The guest keeps serving logins on whatever policy is already
+                # LOADED, so the seed looks correct for as long as the guest
+                # stays up — then the first reboot after a `dnf upgrade` that
+                # touches selinux-policy loads the new one and locks the
+                # operator out of a cloud image whose only account has no
+                # password. There is no console recovery from that.
+                #
+                # A substring pin over the rendered text, in the style of the
+                # tag check above and the ssh_deletekeys check: it establishes
+                # the seed names a usable type at all, not that it attached it
+                # to the right mount. Checking the type rather than the bare
+                # presence of `context=` is deliberate — copying the HOST-side
+                # value (svirt_image_t, which is what a cifs volume under the
+                # share is mounted with) is a realistic mistake that leaves
+                # sshd exactly as broken as omitting the option.
+                if ("home_context" not in seed_provides
+                        and _covers_guest_home(guest_path, guest_home)
+                        and not re.search(
+                            r"context=[\"']?[\w.-]*:[\w.-]*:(?:"
+                            + "|".join(VM_HOME_SELINUX_TYPES) + r"):",
+                            user_data_text)):
+                    raise SeedContractError(
+                        f"[vm.cloud_init].user_data_file for {name} mounts the "
+                        f"volume {vol_spec!r} over the guest home {guest_home} "
+                        f"without an SELinux `context=` option naming one of "
+                        f"{', '.join(VM_HOME_SELINUX_TYPES)}. virtiofs carries "
+                        f"no xattrs, so every file under that share would be "
+                        f"labelled `virtiofs_t` in the guest — a type sshd has "
+                        f"no access to — and key auth would fail. This does NOT "
+                        f"fail at boot: the guest keeps running its already-"
+                        f"loaded policy, so it bites on the first reboot after "
+                        f"an in-guest update touches selinux-policy, locking "
+                        f"you out of an account that has no password. Mount tag "
+                        f"{tag!r} with "
+                        f"`context=\"{VM_HOME_SELINUX_CONTEXT}\"`, or set "
+                        f"[vm.cloud_init].seed_provides = [\"home_context\"] if "
+                        f"the guest labels that mount by other means."
+                    )
     else:
         # Default mode: built-in cloud-config with SSH key + optional disks.
         # Collision-safe tags, same set the generator emits sidecar units for (B3).

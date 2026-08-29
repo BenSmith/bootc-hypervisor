@@ -406,17 +406,25 @@ name = "schema-reference"
 #
 # Optional: Declare that this seed handles a concern the built-in cloud-config
 # would otherwise have covered, suppressing the matching completeness check.
-# Type: list of strings; valid entries: "proxy", "mounts".
+# Type: list of strings; valid entries: "proxy", "mounts", "home_context".
 # seed_provides = ["mounts"]
 #
 # Because a custom user-data replaces the built-in config rather than adding to
-# it, two things the TOML implies stop happening unless this file does them:
-# the guest's proxy environment (whenever [vm.network] sets `hosts`) and the
-# mounts for [vm].volumes. Both fail silently — filtered egress DROPS
+# it, three things the TOML implies stop happening unless this file does them:
+# the guest's proxy environment (whenever [vm.network] sets `hosts`), the
+# mounts for [vm].volumes, and the SELinux `context=` on a volume mounted over
+# the guest's home. All three fail silently — filtered egress DROPS
 # unproxied traffic, so the guest hangs rather than errors; an unmounted volume
 # leaves the guest writing to the system disk at a path believed persistent,
-# which the next disk rebuild discards. Provisioning therefore refuses a seed
-# that needs either and lacks it, and names what is missing. Use seed_provides
+# which the next disk rebuild discards; and a home share without `context=`
+# lands every file under it on `virtiofs_t`, which sshd cannot read, so key
+# auth breaks — but not until the first reboot that reloads SELinux policy,
+# which is typically an in-guest `dnf upgrade` days later, on a cloud image
+# whose only account has no password to fall back to.
+#
+# Provisioning therefore refuses a seed that needs one of the three and lacks
+# it, and names what is missing. "home_context" is the narrow opt-out: it
+# silences only the SELinux check, keeping the mount check. Use seed_provides
 # only when the guest image genuinely carries the configuration already (a
 # mount baked into its own /etc/fstab, say) — it silences the check, it does
 # not satisfy the requirement.
