@@ -222,23 +222,18 @@ write_files:
 # provisioning refuses to build a seed that needs it and lacks it, and names
 # what is missing, so you will be told rather than left to find out.
 
-# THERE IS NO PROXY BLOCK HERE ANY MORE, AND ITS ABSENCE IS THE POINT.
+# Egress filtering needs nothing from this file, by design. It is a uid-keyed
+# redirect the guest is neither told about nor able to opt out of: the guest
+# dials names normally and its own inspector reads the Host header or the SNI.
+# So there is no endpoint to advertise and no environment to export here.
 #
-# Through rung 1 this file carried an export block for
-# http_proxy/https_proxy/no_proxy at an advertised endpoint, plus recipes for
-# /etc/systemd/system.conf.d and /etc/dnf/dnf.conf, and a seed that omitted them
-# on a workload with `hosts` was refused. All of it is gone. Egress filtering is
-# now a uid-keyed redirect the guest is neither told about nor able to opt out
-# of: it dials names normally and its own inspector reads the Host header or the
-# SNI. A guest that still exports the old variables dials a host address where
-# nothing listens.
+# Do not add http_proxy/https_proxy/HTTP_PROXY/HTTPS_PROXY. They are not merely
+# redundant: they name an address nothing listens on, and they fail in the worst
+# shape available -- every client that honours them breaks while every client
+# that ignores them works, which reads as a flaky network rather than as
+# something the seed did.
 #
-# If you are copying an older seed forward, DELETE those exports rather than
-# leaving them. They do not degrade gracefully -- a client that honours them
-# fails outright, while every client that ignores them works, so the guest ends
-# up half broken in a way that looks like a flaky network.
-#
-# One consequence worth keeping: an allowlist of `*.fedoraproject.org` still
+# One consequence worth knowing: an allowlist of `*.fedoraproject.org` still
 # does not cover Fedora's mirrors (they live on mm.fcix.net, osuosl.org, ...).
 # Either pin the repos to a baseurl under dl.fedoraproject.org, or provision
 # with egress = "open" and switch to filtered once the guest is built.
