@@ -148,6 +148,47 @@ class TestRenderDefaultUserData(unittest.TestCase):
         self.assertTrue(out.endswith("\n"))
 
 
+class TestVirtiofsMountOpts(unittest.TestCase):
+    """A share covering the guest home gets a default SELinux context=.
+
+    Regression: a workload whose [vm].volumes shares the guest's home
+    directory booted, ran, and let `workloadctl exec`/`shell` in fine — until
+    a `dnf upgrade` inside the guest reloaded selinux-policy on the next
+    reboot and sshd started silently refusing every key, because virtiofs
+    carries no per-file SELinux label and the guest's default `virtiofs_t`
+    has no sshd access. `context=` makes that access correct by construction
+    instead of depending on a local `semanage permissive` surviving updates.
+    """
+
+    def setUp(self):
+        self.mod = _load_script()
+        self.guest_home = Path("/home/fedora")
+
+    def test_share_at_home_gets_context(self):
+        out = self.mod._virtiofs_mount_opts("/home/fedora", "rw",
+                                             self.guest_home)
+        self.assertIn('context="system_u:object_r:user_home_t:s0"', out)
+        self.assertTrue(out.startswith("rw,"))
+
+    def test_share_above_home_gets_context(self):
+        out = self.mod._virtiofs_mount_opts("/home", "rw", self.guest_home)
+        self.assertIn('context="system_u:object_r:user_home_t:s0"', out)
+
+    def test_share_below_home_is_untouched(self):
+        out = self.mod._virtiofs_mount_opts("/home/fedora/projects", "rw",
+                                             self.guest_home)
+        self.assertEqual(out, "rw")
+
+    def test_unrelated_share_is_untouched(self):
+        out = self.mod._virtiofs_mount_opts("/data", "rw", self.guest_home)
+        self.assertEqual(out, "rw")
+
+    def test_custom_opts_are_not_overridden(self):
+        out = self.mod._virtiofs_mount_opts("/home/fedora", "ro",
+                                             self.guest_home)
+        self.assertEqual(out, "ro")
+
+
 class TestBuildCloudInitIsoTemplateMode(unittest.TestCase):
     """Exercise the template-mode path of build_cloud_init_iso end-to-end.
 
