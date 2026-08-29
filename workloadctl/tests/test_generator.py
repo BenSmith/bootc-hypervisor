@@ -1989,22 +1989,44 @@ class TestGeneratorVmWorkload(unittest.TestCase):
         sidecar = self._read("workload-fedora-vm-virtiofs-home-ben.service")
         self.assertNotIn(".mount", sidecar)
 
-    def test_announce_submounts_is_off_by_default(self):
-        # Turning it on obliges the guest to mount each submount separately, so
-        # a seed with one fstab line covering the tree would see the nested
-        # directory as empty. That is why it is the operator's call.
+    def test_announce_submounts_is_on_by_default(self):
+        # A nested mount that shares the share's st_dev can collide with it on
+        # (st_dev, st_ino) -- CIFS `serverino` inodes are the file server's and
+        # were never coordinated with the local ones -- so announcing is the
+        # safe state and the default.
         self._write_vm_config(extra='volumes = ["/srv/data:/mnt/data"]')
         self._run()
         sidecar = self._read("workload-fedora-vm-virtiofs-mnt-data.service")
-        self.assertNotIn("--announce-submounts", sidecar)
+        self.assertIn(" --announce-submounts", sidecar)
 
-    def test_announce_submounts_opt_in_reaches_virtiofsd(self):
+    def test_announce_submounts_opt_out_reaches_virtiofsd(self):
         self._write_vm_config(extra=(
             'volumes = ["/srv/data:/mnt/data"]\n'
-            'announce_submounts = true'))
+            'announce_submounts = false'))
         self._run()
         sidecar = self._read("workload-fedora-vm-virtiofs-mnt-data.service")
-        self.assertIn("--announce-submounts", sidecar)
+        self.assertIn(" --no-announce-submounts", sidecar)
+
+    def test_announce_submounts_never_relies_on_the_virtiofsd_default(self):
+        # The flag is emitted in BOTH directions on purpose. virtiofsd's own
+        # default has already moved once (the C version announced nothing
+        # unless asked; Rust 1.x announces unless told --no-announce-submounts),
+        # so a unit that omits it silently means whatever the installed
+        # virtiofsd happens to think -- which is how announce_submounts=false
+        # came to be unachievable. Every sidecar must name its state.
+        for value, expected in (("true", " --announce-submounts"),
+                                ("false", " --no-announce-submounts")):
+            with self.subTest(announce_submounts=value):
+                self._write_vm_config(extra=(
+                    'volumes = ["/srv/data:/mnt/data"]\n'
+                    f'announce_submounts = {value}'))
+                self._run()
+                sidecar = self._read(
+                    "workload-fedora-vm-virtiofs-mnt-data.service")
+                execstart = [ln for ln in sidecar.splitlines()
+                             if ln.startswith("ExecStart=")][0]
+                self.assertIn(expected, execstart)
+                self.assertEqual(1, execstart.count("announce-submounts"))
 
     def test_virtiofsd_uses_exec_type_with_socket_poll(self):
         # virtiofsd 1.x only sends sd_notify READY after QEMU connects,
