@@ -808,11 +808,14 @@ name = "schema-reference"
 # seed_provides = ["mounts"]
 #
 # Because a custom user-data replaces the built-in config rather than adding to
-# it, what the TOML implies stops happening unless this file does it. The live
-# case is "mounts", for [vm].volumes: an unmounted volume leaves the guest
-# writing to the system disk at a path believed persistent, which the next disk
-# rebuild discards — silent, and not visible until the rebuild. Provisioning
-# refuses a seed that needs it and lacks it, and names what is missing. Use
+# it, what the TOML implies stops happening unless this file does it. Both
+# entries name a live check. "mounts" is for [vm].volumes: an unmounted volume
+# leaves the guest writing to the system disk at a path believed persistent,
+# which the next disk rebuild discards — silent, and not visible until the
+# rebuild. "ca" is for egress = "filtered": without the anchor the guest cannot
+# verify the leaf its own inspector presents, so every HTTPS request fails as a
+# bad certificate rather than as a policy decision. Provisioning refuses a seed
+# that needs either and lacks it, and names what is missing. Use
 # seed_provides only when the guest image genuinely carries the configuration
 # already (a mount baked into its own /etc/fstab, say) — it silences the check,
 # it does not satisfy the requirement.
@@ -825,10 +828,15 @@ name = "schema-reference"
 # carrying an older TOML forward is told what happened, instead of reading a
 # generic "unknown entry" and hunting a typo they did not make.
 #
-# "ca" is accepted and its check is not armed: the concern it names is the
-# trust anchor a decrypting inspector would be presented under, and nothing
-# mints one yet. Declaring it today suppresses nothing; it is accepted so that
-# a seed written against it does not have to change when it does.
+# "ca" SUPPRESSES A REAL REFUSAL, and did not always. Until rung 3 minted the
+# per-workload egress CA there was nothing for a seed to install, so the check
+# was unarmed and declaring this key cost nothing. It is armed now: a filtered,
+# inspected workload whose seed never writes the bundle is refused at
+# provisioning, and this key is what turns that refusal off. Declare it only
+# when the guest image genuinely carries the anchor already — declaring it to
+# get past the error leaves a guest that trusts nothing its inspector presents,
+# which is the exact outcome the check exists to prevent, arriving later as
+# certificate errors on every HTTPS request.
 #
 # Substitution rules applied to the user_data_file (in order):
 #   ${SECRET:name}  - Decrypted via `systemd-creds decrypt` from
