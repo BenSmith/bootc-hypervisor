@@ -3,7 +3,9 @@
 
 import contextlib
 import os
+import shutil
 import socket
+import subprocess
 import stat
 import tempfile
 import threading
@@ -22,7 +24,7 @@ from workload_lib import (
     workload_home_dir, workload_state_dir, expand_volume_path,
     expand_workload_tokens, dq,
     infer_workload_mode, normalize_containers,
-    virtiofs_tag, parse_volume_spec,
+    virtiofs_tag, parse_volume_spec, systemd_escape_path,
     selinux_module_name, selinux_type_name,
 )
 from vm import parse_memory_mib, vm_mac_address, vm_mac_collisions
@@ -771,6 +773,50 @@ class TestParseVolumeSpec(unittest.TestCase):
         self.assertEqual((host, guest, opts), ("/host", "/guest", "ro:context=foo"))
 
 
+class TestSystemdEscapePath(unittest.TestCase):
+    """The transform has to match systemd's exactly: an ordering edge on a
+    mis-escaped unit name is accepted in silence and orders nothing."""
+
+    def test_plain_path(self):
+        self.assertEqual(
+            systemd_escape_path("/var/lib/workloads/aj/data/home/netmnt"),
+            "var-lib-workloads-aj-data-home-netmnt")
+
+    def test_literal_dash_is_escaped(self):
+        # "-" is the separator, so a dash in the path must not survive as one.
+        # This is the case that looks right and matches nothing if missed.
+        self.assertEqual(systemd_escape_path("/srv/foo-bar"), "srv-foo\\x2dbar")
+
+    def test_trailing_and_leading_slashes_ignored(self):
+        self.assertEqual(systemd_escape_path("/srv/data/"),
+                         systemd_escape_path("srv/data"))
+
+    def test_root_is_a_single_dash(self):
+        self.assertEqual(systemd_escape_path("/"), "-")
+
+    def test_allowed_punctuation_survives(self):
+        self.assertEqual(systemd_escape_path("/srv/a.b_c:d"), "srv-a.b_c:d")
+
+    def test_leading_dot_is_escaped(self):
+        # Otherwise the unit file name would be hidden.
+        self.assertEqual(systemd_escape_path("/.hidden"), "\\x2ehidden")
+
+    def test_other_characters_hex_escape(self):
+        self.assertEqual(systemd_escape_path("/srv/a b"), "srv-a\\x20b")
+
+    @unittest.skipIf(shutil.which("systemd-escape") is None,
+                     "systemd-escape not available")
+    def test_agrees_with_systemd_escape(self):
+        for path in ("/var/lib/workloads/aj/data/home/netmnt",
+                     "/srv/foo-bar", "/srv/a.b_c:d", "/srv/a b", "/.hidden",
+                     "/"):
+            with self.subTest(path=path):
+                expected = subprocess.run(
+                    ["systemd-escape", "--path", path],
+                    capture_output=True, text=True, check=True).stdout.strip()
+                self.assertEqual(systemd_escape_path(path), expected)
+
+
 class TestVmMacAddress(unittest.TestCase):
     def test_locally_administered_unicast(self):
         # Bit 1 of the first byte = locally administered; bit 0 = unicast (0).
@@ -819,6 +865,31 @@ class TestValidateVmConfig(unittest.TestCase):
             },
         }
         self.assertEqual(validate_workload_config(cfg), [])
+
+    def test_after_mounts_accepts_absolute_and_anchored_paths(self):
+        cfg = self._base(volumes=["./home:/home/ben"],
+                         after_mounts=["./home/netmnt", "/srv/nfs", "data/x",
+                                       "state/y", "@/z"])
+        self.assertEqual(validate_workload_config(cfg), [])
+
+    def test_after_mounts_rejects_a_bare_relative_path(self):
+        # It would be expanded against the workload home and yield an ordering
+        # edge on a plausible unit name that names no mount -- which systemd
+        # accepts silently, so the operator gets no ordering and no error.
+        errs = validate_workload_config(self._base(after_mounts=["home/netmnt"]))
+        self.assertTrue(any("after_mounts" in e for e in errs), errs)
+
+    def test_after_mounts_must_be_a_list_of_non_empty_strings(self):
+        for bad in ("/srv/nfs", [""], [7]):
+            with self.subTest(bad=bad):
+                errs = validate_workload_config(self._base(after_mounts=bad))
+                self.assertTrue(any("after_mounts" in e for e in errs), errs)
+
+    def test_announce_submounts_must_be_boolean(self):
+        self.assertEqual(
+            validate_workload_config(self._base(announce_submounts=True)), [])
+        errs = validate_workload_config(self._base(announce_submounts="yes"))
+        self.assertTrue(any("announce_submounts" in e for e in errs), errs)
 
     def test_memory_in_qemu_notation_accepted(self):
         for mem in ("2048", "2048M", "4G", 2048):

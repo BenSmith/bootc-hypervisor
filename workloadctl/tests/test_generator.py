@@ -1954,6 +1954,58 @@ class TestGeneratorVmWorkload(unittest.TestCase):
         sidecar = self._read("workload-fedora-vm-virtiofs-mnt-data.service")
         self.assertIn('RequiresMountsFor="/srv/data"', sidecar)
 
+    def test_virtiofsd_orders_after_declared_nested_mounts(self):
+        # RequiresMountsFor= on the share root reaches the mounts along its
+        # path, never the ones below it, so a filesystem mounted UNDER an
+        # in-tree share has no guard at all. [vm].after_mounts is how the
+        # operator names those; the unit name must be the systemd-escaped form
+        # of the path or the edge silently names nothing.
+        self._write_vm_config(extra=(
+            'volumes = ["./home:/home/ben"]\n'
+            'after_mounts = ["./home/netmnt"]'))
+        self._run()
+        sidecar = self._read("workload-fedora-vm-virtiofs-home-ben.service")
+        self.assertIn(
+            "After=var-lib-workloads-fedora\\x2dvm-data-home-netmnt.mount",
+            sidecar)
+
+    def test_after_mounts_stays_an_ordering_edge_only(self):
+        # Deliberately NOT RequiresMountsFor=: that implies Requires=, and
+        # PartOf=workload-<name>.service would propagate it, keeping the VM
+        # down for as long as the remote filesystem is unreachable. A late host
+        # mount is visible to the running guest within about a second anyway.
+        self._write_vm_config(extra=(
+            'volumes = ["./home:/home/ben"]\n'
+            'after_mounts = ["./home/netmnt"]'))
+        self._run()
+        sidecar = self._read("workload-fedora-vm-virtiofs-home-ben.service")
+        self.assertNotIn("netmnt", sidecar.split("RequiresMountsFor=", 1)[-1]
+                         .split("\n", 1)[0])
+        self.assertNotIn("Requires=var-lib", sidecar)
+
+    def test_no_after_mounts_emits_no_mount_ordering(self):
+        self._write_vm_config(extra='volumes = ["./home:/home/ben"]')
+        self._run()
+        sidecar = self._read("workload-fedora-vm-virtiofs-home-ben.service")
+        self.assertNotIn(".mount", sidecar)
+
+    def test_announce_submounts_is_off_by_default(self):
+        # Turning it on obliges the guest to mount each submount separately, so
+        # a seed with one fstab line covering the tree would see the nested
+        # directory as empty. That is why it is the operator's call.
+        self._write_vm_config(extra='volumes = ["/srv/data:/mnt/data"]')
+        self._run()
+        sidecar = self._read("workload-fedora-vm-virtiofs-mnt-data.service")
+        self.assertNotIn("--announce-submounts", sidecar)
+
+    def test_announce_submounts_opt_in_reaches_virtiofsd(self):
+        self._write_vm_config(extra=(
+            'volumes = ["/srv/data:/mnt/data"]\n'
+            'announce_submounts = true'))
+        self._run()
+        sidecar = self._read("workload-fedora-vm-virtiofs-mnt-data.service")
+        self.assertIn("--announce-submounts", sidecar)
+
     def test_virtiofsd_uses_exec_type_with_socket_poll(self):
         # virtiofsd 1.x only sends sd_notify READY after QEMU connects,
         # which deadlocks with Type=notify + Before=VM.service. We use
