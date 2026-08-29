@@ -17,6 +17,7 @@ from unittest import mock
 
 import workload_lib            # noqa: E402
 import cmd_catalog            # noqa: E402
+import vm                     # noqa: E402
 from workloadctl_core import WorkloadManager  # noqa: E402
 
 REPO_BUNDLES = Path(__file__).resolve().parent.parent / "workloads"
@@ -239,6 +240,41 @@ class TestVmBaseBundle(CatalogTestBase):
         """workloads/vm-base/cloud-init/user-data must be byte-identical to _SCRATCH_VM_USER_DATA."""
         shipped = (REPO_BUNDLES / "vm-base" / "cloud-init" / "user-data").read_text()
         self.assertEqual(shipped, cmd_catalog._SCRATCH_VM_USER_DATA)
+
+    def test_vm_base_home_mount_example_satisfies_the_seed_contract(self):
+        """The seed's worked example for a home share must carry a `context=`
+        naming a type sshd can read.
+
+        This file is documentation an operator copies verbatim, and nothing
+        parsed it until now — which is how it came to teach the exact mistake
+        build_cloud_init_iso refuses. Its example mounted
+        `home-fedora /home/fedora virtiofs defaults,nofail`, and [vm].user is
+        `fedora`, so following it produced a guest whose every home file was
+        virtiofs_t and whose sshd could not read authorized_keys. Provisioning
+        would now reject the result, so the shipped reference would have been
+        contradicting the shipped contract.
+
+        Pinned against the same constants the contract reads, so the example
+        cannot drift away from what will actually be accepted.
+        """
+        shipped = (REPO_BUNDLES / "vm-base" / "cloud-init" / "user-data").read_text()
+        # The example line for the share that covers the guest home.
+        home_lines = [l for l in shipped.splitlines()
+                      if "virtiofs" in l and "/home/fedora " in l]
+        self.assertTrue(home_lines,
+                        "vm-base no longer shows a home-share mount example; "
+                        "if that is deliberate, drop this test with it")
+        accepted = "|".join(vm.VM_HOME_SELINUX_TYPES)
+        for line in home_lines:
+            self.assertRegex(
+                line, rf"context=[\"']?[\w.-]*:[\w.-]*:(?:{accepted}):",
+                f"home-share mount example lacks an sshd-readable context=: {line}")
+
+    def test_vm_base_documents_the_home_context_optout(self):
+        """seed_provides gained a third value; the reference has to name it, or
+        an operator hitting the refusal has no documented way out."""
+        shipped = (REPO_BUNDLES / "vm-base" / "cloud-init" / "user-data").read_text()
+        self.assertIn("home_context", shipped)
 
 
 class TestSeedsNeverSpliceRawMultilineVars(CatalogTestBase):
