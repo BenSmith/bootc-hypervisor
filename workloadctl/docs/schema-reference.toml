@@ -804,21 +804,35 @@ name = "schema-reference"
 #
 # Optional: Declare that this seed handles a concern the built-in cloud-config
 # would otherwise have covered, suppressing the matching completeness check.
-# Type: list of strings; valid entries: "ca", "mounts".
+# Type: list of strings; valid entries: "ca", "mounts", "home_context".
 # seed_provides = ["mounts"]
 #
 # Because a custom user-data replaces the built-in config rather than adding to
-# it, what the TOML implies stops happening unless this file does it. Both
-# entries name a live check. "mounts" is for [vm].volumes: an unmounted volume
-# leaves the guest writing to the system disk at a path believed persistent,
-# which the next disk rebuild discards — silent, and not visible until the
-# rebuild. "ca" is for egress = "filtered": without the anchor the guest cannot
-# verify the leaf its own inspector presents, so every HTTPS request fails as a
-# bad certificate rather than as a policy decision. Provisioning refuses a seed
-# that needs either and lacks it, and names what is missing. Use
-# seed_provides only when the guest image genuinely carries the configuration
-# already (a mount baked into its own /etc/fstab, say) — it silences the check,
-# it does not satisfy the requirement.
+# it, what the TOML implies stops happening unless this file does it. All three
+# entries name a live check.
+#
+#   "mounts" is for [vm].volumes: an unmounted volume leaves the guest writing
+#   to the system disk at a path believed persistent, which the next disk
+#   rebuild discards — silent, and not visible until the rebuild.
+#
+#   "ca" is for egress = "filtered": without the anchor the guest cannot verify
+#   the leaf its own inspector presents, so every HTTPS request fails as a bad
+#   certificate rather than as a policy decision.
+#
+#   "home_context" is for a [vm].volumes share mounted OVER the guest's home,
+#   and it is narrower than "mounts": it silences the SELinux check alone and
+#   keeps the mount check. Without a `context=` naming user_home_t or
+#   ssh_home_t, virtiofs carries no xattrs and every file under the share is
+#   `virtiofs_t`, which sshd cannot read, so key auth breaks. This one is not
+#   visible at boot at all — the guest keeps serving logins on its
+#   already-loaded policy, and it bites on the first reboot after an in-guest
+#   update reloads selinux-policy, days later, on a cloud image whose only
+#   account has no password.
+#
+# Provisioning refuses a seed that needs one and lacks it, and names what is
+# missing. Use seed_provides only when the guest image genuinely carries the
+# configuration already (a mount baked into its own /etc/fstab, say) — it
+# silences the check, it does not satisfy the requirement.
 #
 # "proxy" WAS one of these, and a seed that still declares it is REFUSED BY
 # NAME rather than ignored. There is no guest-side proxy configuration left to
