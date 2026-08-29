@@ -96,7 +96,28 @@ write_files:
 #   - path: /etc/fstab
 #     append: true
 #     content: |
-#       home-fedora /home/fedora virtiofs defaults,nofail 0 0
+#       home-fedora /home/fedora virtiofs defaults,nofail,context="system_u:object_r:user_home_t:s0" 0 0
+#
+#    THE context= IS LOAD-BEARING ON A SHARE THAT COVERS THE GUEST HOME, and
+#    provisioning refuses a seed that omits it. virtiofs carries no xattrs
+#    here, so without it every file under the mount is `virtiofs_t` in the
+#    guest — a type sshd has no access to at all — and ~/.ssh/authorized_keys
+#    becomes unreadable. What makes it worth refusing rather than warning is
+#    that it does NOT fail at boot: the guest keeps serving logins on whatever
+#    policy is already loaded, so it surfaces on the first reboot after an
+#    in-guest update reloads selinux-policy — days later, on a cloud image
+#    whose only account has no password to fall back on.
+#
+#    user_home_t is what stock policy grants sshd, via the user_home_type
+#    attribute (`sesearch -A -s sshd_t -t user_home_t -c file -p read`);
+#    ssh_home_t carries the same attribute and is accepted too. Do NOT copy a
+#    context from the host side — a cifs or nfs volume mounted underneath the
+#    share on the HOST needs svirt_image_t, which is what virtiofsd is granted.
+#    Same option, different layer, different type: aligning them breaks one end
+#    or the other.
+#
+#    Only a share COVERING the home needs this. One mounted inside it
+#    (./work:/home/fedora/work) inherits the parent mount's context.
 #
 # runcmd:
 #    Seed the skeleton dotfiles into the share before mounting over them, or
@@ -113,6 +134,12 @@ write_files:
 #    own /etc/fstab, say — declare it instead of duplicating it:
 #      [vm.cloud_init]
 #      seed_provides = ["mounts"]   # and/or "proxy"
+#
+#    "home_context" is the third value, and it is narrower than "mounts": it
+#    silences the SELinux check alone and keeps the check that the volume is
+#    mounted at all. Use it for a guest that labels the mount by means this
+#    file cannot show — an image-baked fstab entry, or local policy granting
+#    sshd some other type.
 
 # runcmd:
 #   - echo "first boot" > /etc/motd
