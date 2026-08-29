@@ -1281,4 +1281,35 @@ def validate_vm_config(config: dict) -> list[str]:
                     "paths (format 'host:guest[:opts]')"
                 )
 
+    # Host paths whose .mount unit each virtiofsd sidecar is ordered After=.
+    # For a filesystem mounted UNDER a share, which RequiresMountsFor= on the
+    # share root does not reach -- see generate_virtiofs_service.
+    after_mounts = vm.get("after_mounts", [])
+    if not isinstance(after_mounts, list):
+        errors.append(
+            f"[vm].after_mounts must be an array of host paths, "
+            f"got {type(after_mounts).__name__}"
+        )
+    else:
+        for p in after_mounts:
+            if not isinstance(p, str) or not p:
+                errors.append(
+                    f"[vm].after_mounts entries must be non-empty strings, got {p!r}"
+                )
+            elif not (p.startswith("/") or p.startswith("./")
+                      or p.startswith("@/") or p.split("/", 1)[0] in ("data", "state")):
+                # A bare relative path would be expanded against the workload
+                # home and produce an ordering edge on a plausible-looking unit
+                # name that names no mount -- which systemd accepts in silence.
+                errors.append(
+                    f"[vm].after_mounts entry {p!r} must be an absolute path or "
+                    "use a workload anchor ('./', '@/', 'data/', 'state/')"
+                )
+
+    announce_submounts = vm.get("announce_submounts")
+    if announce_submounts is not None and not isinstance(announce_submounts, bool):
+        errors.append(
+            f"[vm].announce_submounts must be a boolean, got {announce_submounts!r}"
+        )
+
     return errors

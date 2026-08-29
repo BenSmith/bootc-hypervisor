@@ -290,6 +290,39 @@ def parse_volume_spec(vol_spec: str) -> tuple[str, str, str]:
     return host, guest, opts
 
 
+def systemd_escape_path(path: str) -> str:
+    """Escape an absolute path the way `systemd-escape --path` does.
+
+    Used to name the .mount unit that manages a path, so a unit can be ordered
+    After= it. systemd derives mount unit names from the mountpoint by this
+    exact transform, so any divergence here produces an ordering edge on a unit
+    that does not exist -- which systemd accepts silently, leaving the caller
+    with no ordering and no error.
+
+    The rules (see systemd's unit_name_path_escape): strip the leading and
+    trailing slashes, map "" (the root) to "-", replace "/" with "-", and
+    hex-escape anything outside [A-Za-z0-9:_.], plus a leading ".".
+
+    A literal "-" in the path is therefore escaped to \\x2d -- it is the
+    separator, and leaving it alone is the easy way to get a name that looks
+    right and matches nothing.
+    """
+    trimmed = path.strip("/")
+    if not trimmed:
+        return "-"
+    out = []
+    for i, ch in enumerate(trimmed):
+        if ch == "/":
+            out.append("-")
+        elif ch.isascii() and (ch.isalnum() or ch in ":_.") and not (i == 0 and ch == "."):
+            # A leading "." would start a hidden unit file name, so systemd
+            # escapes it even though "." is otherwise allowed.
+            out.append(ch)
+        else:
+            out.append("".join(rf"\x{b:02x}" for b in ch.encode("utf-8")))
+    return "".join(out)
+
+
 # --- Naming conventions ---
 
 def workload_username(name: str) -> str:

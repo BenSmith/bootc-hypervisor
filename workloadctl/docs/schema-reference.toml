@@ -169,6 +169,45 @@ name = "schema-reference"
 # keys in that authorized_keys survive. A share OUTSIDE the workload tree is skipped
 # with a warning naming the file to place yourself; see docs/vm-virtiofs.md §8.
 #
+# Optional: Host paths whose .mount unit each virtiofsd sidecar is ordered
+# after. Absolute, or using the same "./" "@/" "data/" "state/" anchors as
+# volumes.
+# Type: array of strings
+# Default: [] (no extra ordering)
+# after_mounts = ["./home/netmnt"]
+#
+# This is for a filesystem mounted UNDERNEATH a share. The generator already
+# emits RequiresMountsFor= for a share whose own root is outside the workload
+# tree, but that reaches the mounts along the root's path, never the ones below
+# it — so a CIFS or NFS mount at ./home/netmnt inside an in-tree ./home share is
+# invisible to it, and the guest can be handed an empty directory where the
+# nested content should be. Naming it here is declarative on purpose: the
+# generator runs during early boot, before a _netdev mount could be up, so
+# discovering nested mountpoints by walking the share would find nothing in
+# exactly the boot that needed the guard.
+#
+# It is an ORDERING edge only, not RequiresMountsFor=. The stronger form implies
+# Requires=, and the sidecar's PartOf= propagates a failure to the VM, so it
+# would keep the VM down whenever the remote filesystem is unreachable. What it
+# would buy is small: a host mount made after the guest is up becomes visible to
+# the guest within about a second anyway, and nothing latches the empty view.
+#
+# Optional: Tell the guest where a nested filesystem begins, so it gets its own
+# st_dev rather than sharing the enclosing share's.
+# Type: boolean
+# Default: false
+# announce_submounts = false
+#
+# Leave it false unless something in the guest walks across the boundary. With
+# it off, a nested mount shares st_dev with the share, and two files on opposite
+# sides can collide on (st_dev, st_ino) — a real risk under CIFS with
+# `serverino`, where the inodes come from the file server and were never
+# coordinated with the local ones. `rsync -a` and `tar` hardlink detection,
+# `cp -a` and `find` loop detection all use that pair for identity. The cost of
+# turning it on is that the guest must then mount each submount separately: a
+# seed whose single fstab line covered the whole tree will see the nested
+# directory as empty.
+#
 # Optional: How many *older* system disk generations to keep for rollback,
 # in addition to the generation rotated by the current update. Each update
 # renames the live system.qcow2 to system.qcow2.gen-N (the newest rollback

@@ -69,7 +69,7 @@ try:
         normalize_containers, infer_workload_mode,
         infer_workload_kind,
         claim_uid, subid_lock,
-        virtiofs_tags, parse_volume_spec,
+        virtiofs_tags, parse_volume_spec, systemd_escape_path,
         selinux_type_name, render_sysusers_config,
         RUN_SYSTEMD_SYSTEM, workload_run_files,
     )
@@ -1590,7 +1590,8 @@ def generate_sysuser_config_vm(config, user_name, uid):
     )
 
 
-def generate_virtiofs_service(name: str, tag: str, host_path: str, user_name: str, uid: int) -> str:
+def generate_virtiofs_service(name: str, tag: str, host_path: str, user_name: str, uid: int,
+                              after_mounts=(), announce_submounts: bool = False) -> str:
     """Generate a virtiofsd sidecar service for one virtiofs volume.
 
     The design this unit implements — the share's ownership model, why the
@@ -1672,12 +1673,29 @@ def generate_virtiofs_service(name: str, tag: str, host_path: str, user_name: st
     #
     # The trade the flag documents — handles keep fewer fds open — is why
     # LimitNOFILE= below is set rather than left at the default.
+    # --announce-submounts makes virtiofsd tell the guest where one host
+    # filesystem ends and a nested one begins, so the guest gives the submount
+    # its own st_dev instead of folding it into the share's.
+    #
+    # OFF BY DEFAULT, AND THE DEFAULT IS NOT THE SAFE-LOOKING ONE. Without it a
+    # nested mount shares st_dev with the share around it, and two files on
+    # opposite sides of the boundary can collide on (st_dev, st_ino) -- a real
+    # risk when the nested filesystem is CIFS with `serverino`, where the inode
+    # numbers come from Samba and have never been coordinated with the local
+    # ones underneath. Anything that uses that pair for identity mis-pairs them:
+    # `rsync -a` and `tar` hardlink detection, `cp -a`, `find` loop detection.
+    #
+    # What it costs is that the guest must mount each submount separately; a
+    # guest that does not, or a seed whose single fstab line covered the whole
+    # tree, sees an empty directory where the nested content was. That is why
+    # this is the operator's call per workload rather than a default flip.
+    submounts = " --announce-submounts" if announce_submounts else ""
     virtiofsd_cmd = (
         f"/usr/libexec/virtiofsd "
         f"--socket-path={socket_path} "
         f"--shared-dir={dq(host_path)} "
         f"{idmap} "
-        f"--cache=auto --sandbox=none --inode-file-handles=never"
+        f"--cache=auto --sandbox=none --inode-file-handles=never{submounts}"
     )
 
     unit = Unit()
@@ -1697,6 +1715,31 @@ def generate_virtiofs_service(name: str, tag: str, host_path: str, user_name: st
     external = _external_host_path(host_path, name)
     if external is not None:
         u.add("RequiresMountsFor", uq(external))
+    # ...but that guards the SHARE ROOT ONLY, and only when the root is out of
+    # tree. A mount nested *below* an in-tree share -- `./home` with a CIFS
+    # share at `./home/netmnt` -- is invisible to it: RequiresMountsFor= pulls
+    # in the mounts along a path's prefix, never the ones underneath it, and
+    # _external_host_path returns None for the in-tree root anyway. That share
+    # is then handed to the guest with an empty directory where the nested
+    # content should be.
+    #
+    # [vm].after_mounts is how the operator names those. It is DECLARATIVE
+    # rather than discovered on purpose: this generator runs during early boot,
+    # before a _netdev mount has had any chance to come up, so a walk of the
+    # share for nested mountpoints would find nothing in exactly the boot where
+    # the guard was needed, and would look correct every time it was tested by
+    # hand afterwards.
+    #
+    # ORDERING ONLY -- After=, not RequiresMountsFor=. The stronger form implies
+    # Requires=, and PartOf=workload-<name>.service propagates a sidecar failure
+    # to the VM, so a hard edge here means the VM will not boot at all while the
+    # remote filesystem is unreachable. What it would buy is closing a
+    # sub-second window: a host mount made after the guest is up becomes visible
+    # to the guest within about a second anyway (measured; it is the --cache=auto
+    # entry timeout, and nothing latches the empty view). Trading VM
+    # availability against that transient is a bad deal, so the edge stays weak.
+    for mount_path in after_mounts:
+        u.add("After", f"{systemd_escape_path(mount_path)}.mount")
 
     svc = unit.section("Service")
     # Type=exec: systemd marks the service active once virtiofsd exec()s,
@@ -2367,11 +2410,21 @@ def generate_vm_workload(config, user_name: str, uid: int):
     # VM service's chardevs and the purge/cloud-init sites (B3).
     vfs_tags = virtiofs_tags(volumes)
     vfs_dests = paths.get(("unit", "virtiofs"), [])
+    # Both apply to every sidecar of the workload rather than being matched to
+    # the share they sit under: an After= on an unrelated mount costs an
+    # ordering edge and nothing else, and pairing them by path would need the
+    # nested mount declared twice.
+    after_mounts = [expand_volume_path(p, home_dir).split(":", 2)[0]
+                    for p in vm_cfg.get("after_mounts", [])]
+    announce_submounts = bool(vm_cfg.get("announce_submounts", False))
     for (tag, vol_spec), vfs_dest in zip(zip(vfs_tags, volumes), vfs_dests):
         host_raw, _guest_path, _opts = parse_volume_spec(vol_spec)
         # Expand ./ @/ data/ state/ anchors relative to the workload dirs.
         host_path = expand_volume_path(host_raw, home_dir).split(":", 2)[0]
-        vfs_content = generate_virtiofs_service(name, tag, host_path, user_name, uid)
+        vfs_content = generate_virtiofs_service(
+            name, tag, host_path, user_name, uid,
+            after_mounts=after_mounts,
+            announce_submounts=announce_submounts)
         vfs_dest.write_text(vfs_content)
         log_msg(f"  Created virtiofsd service for tag '{tag}'")
 
