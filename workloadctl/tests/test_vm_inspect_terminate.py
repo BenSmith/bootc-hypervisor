@@ -344,8 +344,11 @@ class TestADeniedNameIsBumpedRatherThanClosed(TerminationCase):
 
         Spliced, a refused name is a closed connection and the guest learns
         nothing it can distinguish from the host being down. Terminated, the
-        same refusal is a 403 naming the host, delivered inside a TLS session
-        the guest's own verification accepted.
+        same refusal is a readable 403, delivered inside a TLS session the
+        guest's own verification accepted. The body is deliberately generic --
+        the host and the reason are the operator's, in the journal and the
+        record, not the guest's -- so what the guest gains is a legible STATUS,
+        not a legible reason.
         """
         mod = _mod()
         origin = _Origin(self.origin_pem)
@@ -354,8 +357,8 @@ class TestADeniedNameIsBumpedRatherThanClosed(TerminationCase):
         response, error = self._exchange(listener, origin)
         self.assertIsNone(error, f"the handshake must succeed: {error}")
         self.assertIn(b"403 Forbidden", response)
-        self.assertIn(b"localhost is not on this workload's egress allowlist",
-                      response)
+        self.assertNotIn(b"egress allowlist", response)
+        self.assertNotIn(b"workloadctl", response)
         self.assertEqual(origin.requests, [],
                          "a denied name must never reach an origin")
         status = listener.status()

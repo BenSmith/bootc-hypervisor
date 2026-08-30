@@ -1410,9 +1410,11 @@ class TestPolicyEnforcement(_CleartextRig):
         self.assertEqual(dialled, [])
 
     def test_the_two_refusals_are_DISTINCT_reasons(self):
-        """An operator with one bucket for the two reads a working allowlist
-        as a broken one, and a guest told `not on the allowlist` about a host
-        that plainly is goes looking in the wrong file."""
+        """DISTINCT FOR THE OPERATOR, in the journal -- an operator with one
+        bucket for the two reads a working allowlist as a broken one. The GUEST
+        is told neither: both refusals carry an identical generic 403 body that
+        names no host, no allowlist and no policy, so a refused request cannot
+        tell the guest which bucket it hit or that there is a bucket at all."""
         policy = self._policy(["b.example"],
                               ("a.example", ("GET",), ("/v2/*",)))
         refused, sent_refused, _ = self._run(
@@ -1423,8 +1425,13 @@ class TestPolicyEnforcement(_CleartextRig):
         self.assertNotIn("not allowlisted", refused)
         self.assertIn("not allowlisted", unlisted)
         self.assertNotIn("not permitted by policy", unlisted)
-        self.assertIn(b"egress policy", sent_refused)
-        self.assertIn(b"egress allowlist", sent_unlisted)
+        # The guest-facing bodies are byte-identical and reveal nothing.
+        body_refused = sent_refused.split(b"\r\n\r\n", 1)[1]
+        body_unlisted = sent_unlisted.split(b"\r\n\r\n", 1)[1]
+        self.assertEqual(body_refused, body_unlisted)
+        for body in (sent_refused, sent_unlisted):
+            for leak in (b"egress", b"allowlist", b"policy", b"workloadctl"):
+                self.assertNotIn(leak, body)
 
     def test_a_policy_host_is_reachable_without_appearing_in_hosts(self):
         """§3: a name in `policy` need not also appear in `hosts`. A listener
@@ -1521,9 +1528,10 @@ class TestPolicyEnforcement(_CleartextRig):
 class TestCleartextAuthorisation(unittest.TestCase):
     """The name that authorises, and the answer a refusal gets.
 
-    Unlike 443 a denial is speakable here -- there is no session for the guest
-    to be inside -- so a refused request gets a real 403 naming the host rather
-    than a connection that closed for reasons it cannot see.
+    Unlike 443 a status is speakable here -- there is no session for the guest
+    to be inside -- so a refused request gets a real 403 rather than a
+    connection that closed for reasons it cannot see. The body is generic: the
+    host and the reason go to the operator's journal, not to the guest.
     """
 
     _run = _CleartextRig._run
@@ -1538,12 +1546,15 @@ class TestCleartextAuthorisation(unittest.TestCase):
         self.assertIn(b"HTTP/1.1 200 OK", got)
         self.assertIn("forward", log)
 
-    def test_an_unlisted_host_gets_a_403_naming_it_and_no_upstream(self):
+    def test_an_unlisted_host_gets_a_generic_403_and_no_upstream(self):
         log, got, ups = self._run(
             ["a.example"], b"GET / HTTP/1.1\r\nHost: denied.example\r\n\r\n")
         self.assertEqual(ups, [])
         self.assertIn(b"HTTP/1.1 403 Forbidden", got)
-        self.assertIn(b"denied.example", got)
+        # The refused host is named for the operator, in the journal -- never in
+        # the guest-facing body, which would tell the guest it is filtered.
+        self.assertNotIn(b"denied.example", got)
+        self.assertNotIn(b"workloadctl", got)
         self.assertIn("host=denied.example reason='not allowlisted'", log)
 
     def test_the_matcher_is_the_one_the_tls_plane_uses(self):

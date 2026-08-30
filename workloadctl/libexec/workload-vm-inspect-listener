@@ -1861,6 +1861,18 @@ def http_response(status, reason, body_text, *, close):
     return head.encode("ascii") + body
 
 
+# The body every POLICY denial shows the guest: generic, and identical for the
+# not-allowlisted and the not-permitted case alike. The split between those two
+# is real and it is the OPERATOR'S -- it lives in the journal line and in the
+# per-request record's `reason` -- but a guest has no business learning it, or
+# even that there is a policy to be on the wrong side of. A body that named the
+# allowlist, the egress policy, or the tool turned a single refused request into
+# a reliable "you are sandboxed" oracle, answerable before the guest looked at
+# one certificate; a bare status does not. See _answer for the same reasoning
+# applied to the tool-name prefix every refusal body used to carry.
+POLICY_REFUSAL_BODY = "Forbidden"
+
+
 # How often the status file is replaced while the listener is serving. A low
 # tick, deliberately: it is read by `diagnose` at a moment nobody chose, and a
 # file minutes out of date reads as a stalled counter. Cheap enough to ignore
@@ -2911,8 +2923,11 @@ class Listener:
         # discovered after the fact was the relay path §8 deleted.
         h2 = self._policy.speaks_h2(host)
         if not allowed:
+            # Generic body, like every policy denial (POLICY_REFUSAL_BODY): the
+            # reason is the operator's, carried by the record_drop this refusal
+            # triggers, and is not handed to the guest.
             refusal = (DROP_NOT_ALLOWLISTED, 403, "Forbidden",
-                       f"{host} is not on this workload's egress allowlist")
+                       POLICY_REFUSAL_BODY)
         else:
             try:
                 upstream = self._dial_upstream_tls(
@@ -3598,32 +3613,34 @@ class Listener:
                 f"this session was established for {pinned_host}, not "
                 f"{req.host}")
         if not self._policy.admits(req.host):
-            # A denial IS speakable on 80, unlike 443 -- there is no session to
-            # be inside, so the guest gets a real answer naming the host rather
-            # than a connection that closed for reasons it cannot see.
+            # A STATUS is speakable on 80, unlike 443 -- there is no session to
+            # be inside, so the guest gets a real 403 rather than a connection
+            # that closed for reasons it cannot see. What it does NOT get is a
+            # body naming the host or the allowlist: that reason is recorded for
+            # the operator (the journal line and the record below), never handed
+            # to the guest, whose only use for it is to learn it is filtered.
             self.counters.record_drop(DROP_NOT_ALLOWLISTED, req.host)
             rec.request(req)
             rec.set(decision="drop", reason=DROP_NOT_ALLOWLISTED, status=403)
             self._log(f"drop {where} host={req.host} reason='not allowlisted'")
             return self._refuse(
-                client, conn, req, 403, "Forbidden",
-                f"{req.host} is not on this workload's egress allowlist")
+                client, conn, req, 403, "Forbidden", POLICY_REFUSAL_BODY)
         if not self._policy.permits(req.host, req.method, req.path):
             # A SECOND refusal and a second reason, never merged into the one
-            # above. The host IS allowlisted -- the operator wrote it down on
-            # purpose -- and what was refused is the method or the path. An
-            # operator with one bucket for the two reads a working allowlist as
-            # a broken one, and a guest told `not on the allowlist` about a
-            # host that plainly is goes looking in the wrong file.
+            # above -- FOR THE OPERATOR. The host IS allowlisted (written down on
+            # purpose) and what was refused is the method or the path; an
+            # operator with one bucket for the two reads a working allowlist as a
+            # broken one, so the journal and the record keep them apart. The
+            # guest is told neither: it gets the same generic 403 as an unlisted
+            # host, because the one thing it could do with the distinction is
+            # learn it is behind a policy and start mapping the shape of it.
             self.counters.record_drop(DROP_NOT_PERMITTED, req.host)
             rec.request(req)
             rec.set(decision="drop", reason=DROP_NOT_PERMITTED, status=403)
             self._log(f"drop {where} host={req.host} method={req.method} "
                       f"reason='not permitted by policy'")
             return self._refuse(
-                client, conn, req, 403, "Forbidden",
-                f"{req.method} {req.path} is not permitted on {req.host} by "
-                f"this workload's egress policy")
+                client, conn, req, 403, "Forbidden", POLICY_REFUSAL_BODY)
         # An HTTP/1.0 request is the one we tell the origin to close (see
         # rebuild_request), so its upstream is opened for this request alone
         # and is not put in the map for the next one to find.
@@ -4040,9 +4057,15 @@ class Listener:
         return True
 
     def _answer(self, conn, status, reason, text, *, close):
+        # NO TOOL NAME IN A GUEST-FACING BODY. The `workloadctl: ` prefix that
+        # used to sit here rode every refusal, which announced -- in one refused
+        # request, before the guest inspected a single certificate -- that its
+        # egress was mediated and by what. The status line is an ordinary origin
+        # answer; the body was the only thing that leaked an identity, so it
+        # carries none now. What an operator needs is in the journal and the
+        # per-request record, neither of which the guest can read.
         try:
-            conn.sendall(http_response(
-                status, reason, f"workloadctl: {text}\n", close=close))
+            conn.sendall(http_response(status, reason, f"{text}\n", close=close))
         except OSError:
             pass
 
