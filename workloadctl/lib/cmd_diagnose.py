@@ -68,6 +68,11 @@ from vm import (
     vm_uses_resolve,
 )
 from vm_status import OTHER_KEY
+from vm_provision import (
+    PROVISION_DONE, PROVISION_FAILED, PROVISION_UNVERIFIED,
+    MAX_HEAL_ATTEMPTS,
+    read_provision_marker, record_guest_provision_result,
+)
 from podman import PodmanError
 from workloadctl_core import WorkloadManager, require_root
 from substrate import service_active
@@ -575,6 +580,67 @@ def collect_host_artifact_checks(config, _check) -> None:
                  else Path(artifact.ref).exists())
         passed, message, fix = host_artifact_check(artifact, state, config.name)
         _check(f"host_artifact[{artifact.ref}]", passed, message, fix=fix)
+
+
+def vm_provisioning_check(marker, instance_id: str | None,
+                          name: str) -> tuple[bool, str, str | None]:
+    """Did the guest's cloud-init actually finish, and what do we do if not?
+
+    The gap this closes: a VM whose first boot was cut short is `active`,
+    answers SSH and passes every other check here, while `fedora` was never
+    created, no sudo drop-in was written and cloud-init-main.service is failed
+    inside the guest. The host's only view of that is the marker written by the
+    VM service's provisioning watch (lib/vm_provision.py).
+
+    Only a *recorded failure* fails this check. "Not recorded" and "not yet
+    reported" are reported as facts and pass, because they mean the host could
+    not observe the guest — it never answered, or it is pinned to an
+    operator-provided bridge the watch does not probe — which is not evidence of
+    anything being wrong.
+    """
+    if not instance_id:
+        return (True, "cloud-init: no instance provisioned on this host yet", None)
+
+    recorded = (marker or {}).get("instance_id")
+    if recorded != instance_id:
+        return (True,
+                f"cloud-init outcome not recorded for instance {instance_id} "
+                f"(the guest never answered, it is pinned to a bridge, or it "
+                f"was provisioned by an older workloadctl)", None)
+
+    status = marker.get("status")
+    if status == PROVISION_DONE:
+        return (True, f"cloud-init finished cleanly (instance {instance_id})",
+                None)
+    if status == PROVISION_UNVERIFIED:
+        return (True,
+                f"cloud-init has not reported an outcome for instance "
+                f"{instance_id} yet", None)
+    if status != PROVISION_FAILED:
+        return (True, f"cloud-init status {status!r} for instance {instance_id}",
+                None)
+
+    errors = marker.get("errors") or []
+    detail = f": {errors[0]}" if errors else ""
+    attempts = marker.get("heal_attempts", 0)
+    if attempts and attempts >= MAX_HEAL_ATTEMPTS:
+        # The automatic re-provision has already been spent on this lineage and
+        # the guest still failed, so restarting would only reuse the same id.
+        # Rebuilding the system disk is the next escalation: it discards
+        # /var/lib/cloud entirely, so nothing survives to be skipped.
+        fix = (f"sudo workloadctl update {name}  (the one automatic "
+               f"re-provision was already used and cloud-init failed again; "
+               f"this rebuilds the system disk from the base image — data/ and "
+               f"virtiofs volumes are untouched, anything installed inside the "
+               f"guest is not)")
+    else:
+        fix = (f"sudo workloadctl restart {name}  (re-provisions once with a "
+               f"fresh instance-id, which is what makes cloud-init re-run the "
+               f"per-instance modules it already marked done)")
+    return (False,
+            f"cloud-init FAILED for instance {instance_id}{detail} — the guest "
+            f"is half-provisioned (users, sudo drop-ins and runcmd may be "
+            f"missing) and will not retry on its own", fix)
 
 
 def vm_network_check(config) -> tuple[str, bool, str]:
@@ -2251,6 +2317,37 @@ def collect_diagnose_checks(config, manager: WorkloadManager):
         passed, message, fix = vm_socket_dir_selinux_check(
             rule_present, label, inspected)
         _check("vm_socket_dir_selinux", passed, message, fix=fix)
+
+    # Check 5d: the guest's cloud-init actually finished. Nothing else in this
+    # battery can see inside the guest, so a VM whose first boot was interrupted
+    # passes everything above while being permanently half-provisioned.
+    if config.is_vm:
+        state_dir = config.home_dir
+        try:
+            instance_id = (state_dir / ".cloud-init-instance-id").read_text().strip()
+        except OSError:
+            instance_id = None
+        marker = read_provision_marker(state_dir)
+        # Ask the guest directly when we have no outcome for the instance in
+        # play and the VM is up: the marker is normally written by the running
+        # service's watch, but a VM that has been up since before this check
+        # existed has none, and a diagnose that answers "unknown" for a guest
+        # sitting right there is the sort of gap that hides the bug it was
+        # written for. Cheap and bounded — one local socket round trip, and it
+        # records what it learns so later runs need not ask.
+        have_outcome = ((marker or {}).get("instance_id") == instance_id
+                        and (marker or {}).get("status") in (PROVISION_DONE,
+                                                             PROVISION_FAILED))
+        if not have_outcome and instance_id and service_active(config.service_name)[0]:
+            try:
+                record_guest_provision_result(state_dir, instance_id,
+                                              config.name)
+                marker = read_provision_marker(state_dir)
+            except OSError:
+                pass  # unreadable/unwritable state dir: report what we have
+        passed, message, fix = vm_provisioning_check(marker, instance_id,
+                                                     config.name)
+        _check("vm_provisioning", passed, message, fix=fix)
 
     # Check 6: Image(s) exist locally
     if user_exists:
