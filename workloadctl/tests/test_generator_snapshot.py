@@ -433,6 +433,35 @@ FIXTURES = {
             bridge = "br0"
         """),
     ],
+
+    # VM path — filtered egress with a credential-backed host, which is the
+    # only fixture that emits workload-<name>-broker.service. Here for
+    # systemd-analyze verify above all: that unit is the one generated unit
+    # with DynamicUser=, LoadCredentialEncrypted= and an IPAddress* pair on it,
+    # and a directive systemd rejects there fails a unit nothing else renders.
+    "vm-credential": [
+        ("vmcred", """\
+            [workload]
+            name = "vmcred"
+
+            [vm]
+            cloud_image_url = "https://example.test/img.qcow2"
+            cloud_image_checksum = "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+
+            [vm.network]
+            egress = "filtered"
+            hosts = ["api.example.test"]
+
+            [[vm.network.credential]]
+            name = "example-token"
+            placeholder = "sk-000000000000PLACEHOLDER"
+            env = "EXAMPLE_API_KEY"
+
+            [[vm.network.policy]]
+            host = "api.example.test"
+            credential = "example-token"
+        """),
+    ],
 }
 
 

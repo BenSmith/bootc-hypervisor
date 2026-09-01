@@ -308,6 +308,12 @@ class TestCurrentDestructiveGolden(unittest.TestCase):
                 # behind answering for a guest told to ask nobody.
                 'workload-forge-resolve.socket',
                 'workload-forge-resolve.service',
+                # And the credential broker instance, on the inspector's terms
+                # plus a declared [[vm.network.credential]] block. Listed for
+                # every VM so a workload that drops its last credential has the
+                # unit unlinked rather than left behind holding material
+                # nothing selects; this fixture declares none.
+                'workload-forge-broker.service',
                 # no pod/net (VM branch); no virtiofs units (no vm.volumes)
             })
 

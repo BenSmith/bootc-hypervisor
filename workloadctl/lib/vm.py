@@ -2192,6 +2192,267 @@ def vm_broker_env(config: dict) -> dict[str, str]:
     return {VM_BROKER_ENV_VAR: f"http://{VM_ADVERTISED_ADDR}:{VM_BROKER_PORT}"}
 
 
+# --- The generated broker instance (ADR 007 decision 6, HLD detail 7.8) ---
+
+# The program the generated unit runs. It has shipped in this RPM since the
+# broker moved in-tree; what rung 6 changes is who starts it -- one instance per
+# workload, generated, rather than one host-wide unit an operator enables.
+VM_BROKER_BIN = "/usr/libexec/workloadctl/agent-broker"
+
+# The port every instance listens on. One value for all of them is safe here and
+# is not for the address: each instance binds an address of its own
+# (vm_broker_listen_address), so two instances on the same port never collide,
+# and the inspector derives BOTH halves from the workload uid it already holds.
+VM_BROKER_INSTANCE_PORT = 8081
+
+# Where the generated config lives (D2), as the unit's RuntimeDirectory= and as
+# the path the two readers -- the broker and its writer -- resolve.
+#
+# /run and NOT /etc, which is what the design's 7.8 first said. The requirement
+# it states is that the config is unreadable by the workload uid, and 0700 under
+# /run meets that identically while adding two things /etc cannot: it is a pure
+# function of the workload TOML, regenerated at every start, so it cannot
+# diverge from the bundle the way an /etc file nothing reconciles can; and it
+# cannot serve the previous boot's credential set.
+#
+# systemd creates and removes the directory as the instance's DynamicUser, so
+# the writer runs unprivileged INSIDE the unit and the file is owned by a uid
+# that exists only while the broker does. There is no chown of ours anywhere.
+#
+# Only the derived config moves. The material stays in
+# /etc/credstore.encrypted/broker/<workload>/, which is operator-created,
+# encrypted, and has to survive a reboot.
+VM_BROKER_RUNTIME_SUBDIR = "workloadctl/broker"
+VM_BROKER_CONFIG_NAME = "broker.toml"
+
+
+def vm_broker_runtime_directory(name: str) -> str:
+    """The unit's RuntimeDirectory= value (relative to /run, as systemd wants)."""
+    return f"{VM_BROKER_RUNTIME_SUBDIR}/{name}"
+
+
+def vm_broker_config_dir(name: str) -> Path:
+    return Path("/run") / VM_BROKER_RUNTIME_SUBDIR / name
+
+
+def vm_broker_config_path(name: str) -> Path:
+    return vm_broker_config_dir(name) / VM_BROKER_CONFIG_NAME
+
+
+def vm_uses_credentials(config: dict) -> bool:
+    """Whether this workload gets a broker instance of its own.
+
+    Inspection AND at least one declared credential. The first half is not
+    redundant: the inspector is the ONLY thing that dials the broker now (the
+    advertised endpoint is gone), so an instance for a bridged or unfiltered VM
+    would hold decrypted provider keys for a path that does not exist.
+    validate_vm_network refuses that combination, and this predicate is what
+    keeps the boot generator -- which renders whatever validates -- from
+    rendering the unit anyway.
+
+    It is also the `present=` of the run-file, so it decides what `remove`
+    unlinks and what `drift` compares. A workload that drops its last
+    credential therefore has its instance unlinked rather than left behind
+    holding material nothing selects.
+    """
+    if not vm_uses_inspect(config):
+        return False
+    net = (config.get("vm", {}) or {}).get("network", {}) or {}
+    if not isinstance(net, dict):
+        return False
+    return bool(vm_credential_entries(net))
+
+
+def vm_broker_credential(name: str, credential: str) -> tuple[Path, str]:
+    """(ciphertext path, systemd credential id) for one workload's material.
+
+    Asked of cmd_secret rather than spelled here, because the id is the SEAL
+    NAME and the seal name is not decorative: systemd-creds binds it into the
+    blob and verifies it on decrypt, so a generated unit that loaded another
+    workload's file -- given the path, which is guessable -- gets a decryption
+    failure at start instead of that workload's key. Two implementations of the
+    rule would be one refactor away from a unit that loads nothing, or worse,
+    one that loads the wrong thing under a name the config still matches.
+
+    The id is also what the broker looks the credential up by: systemd writes
+    each into $CREDENTIALS_DIRECTORY under exactly this name, and
+    render_vm_broker_config writes the same string as `credential =`.
+    """
+    # Lazy: cmd_secret imports the CLI core, and this module is imported by the
+    # boot generator, where the import budget is the reason Python is kept out
+    # of generator context in the first place.
+    from cmd_secret import credential_path
+    from workload_lib import CREDSTORE_DIR
+    path, seal = credential_path(Path(CREDSTORE_DIR), f"broker/{name}/{credential}")
+    return path, seal
+
+
+# The guest variables workloadctl seeds itself, and therefore the ones a
+# credential's `env` may not be. Derived from the two producers rather than
+# listed, so a sixth CA variable or a renamed broker one cannot leave this
+# behind: the failure a stale copy produces is a silent overwrite in the seed,
+# not an error anywhere.
+VM_RESERVED_GUEST_ENV = frozenset(VM_CA_ENV_VARS) | {VM_BROKER_ENV_VAR}
+
+
+def vm_credential_env(config: dict) -> dict[str, str]:
+    """{guest variable: placeholder} for every credential this workload declares.
+
+    What the guest is given INSTEAD of a key. The broker discards whatever
+    arrives in the auth header and sets the real one, so the placeholder never
+    has to be plausible to anything but the guest's own client library -- which
+    is exactly why it must be present: an SDK that refuses to send a request
+    without a key fails inside the guest, before a packet, which looks nothing
+    like a policy failure.
+
+    Seeded ONCE per instance, by cloud-init, like every other guest env var
+    here. Changing a `placeholder` in the TOML therefore does not reach a
+    running guest; `diagnose` says so.
+    """
+    net = (config.get("vm", {}) or {}).get("network", {}) or {}
+    if not isinstance(net, dict):
+        return {}
+    return {c.env: c.placeholder for c in vm_credential_entries(net)}
+
+
+def vm_broker_hosts(config: dict) -> list[tuple[str, str]]:
+    """(Host, credential name) for every credential-backed policy entry.
+
+    In file order, and only the entries that select a credential: an entry
+    without one is a host the guest reaches carrying whatever it holds, which
+    is not the broker's business and must not appear in its table.
+    """
+    net = (config.get("vm", {}) or {}).get("network", {}) or {}
+    if not isinstance(net, dict):
+        return []
+    return [(e.host, e.credential) for e in vm_policy_entries(net) if e.credential]
+
+
+def _toml_basic_string(value: str) -> str:
+    """One TOML basic string. json.dumps is the same grammar for what we emit.
+
+    Everything that reaches here has been through validation -- credential
+    names, guest variable names and hosts each have a character class -- except
+    `placeholder`, which is operator prose and the one value that can carry a
+    quote or a backslash. Escaped rather than trusted, because a placeholder
+    that broke the file would take the broker down with a parse error naming a
+    line the operator never wrote.
+    """
+    return json.dumps(value)
+
+
+def render_vm_broker_config(config: dict, uid: int) -> str:
+    """The broker.toml for one workload's instance.
+
+    A pure function of the workload TOML and the uid, which is the property D2
+    chose /run for: there is nothing here to reconcile, so two of the three
+    startup cross-checks 7.8 asked for cannot fail and are not written. The
+    third -- a `placeholder` byte-identical to the decrypted material -- lives
+    in the broker, because only the broker can see the plaintext.
+
+    `listen_address` is generated and never defaulted (ADR 007 decision 6): the
+    broker's own default was 127.0.0.1, which is where every OTHER workload's
+    inspector is dialling, so an instance that fell back to it would serve
+    callers it holds no material for and hand them refusals -- or, once two
+    instances raced for the same socket, one workload's key to another's
+    request. The broker refuses to start without the key for the same reason.
+    """
+    name = config["workload"]["name"]
+    lines = [
+        f"# Generated for workload {name} by workload-vm-broker. DO NOT EDIT:",
+        "# this file is a pure function of the workload's [vm.network] tables and",
+        "# is rewritten from them at every start of the broker unit.",
+        "",
+        f"listen_address = {_toml_basic_string(vm_broker_listen_address(uid))}",
+        f"listen_port = {VM_BROKER_INSTANCE_PORT}",
+    ]
+    for host, credential in vm_broker_hosts(config):
+        _path, cred_id = vm_broker_credential(name, credential)
+        lines += [
+            "",
+            f"[sandboxes.{_toml_basic_string(name)}."
+            f"hosts.{_toml_basic_string(host)}]",
+            # https:// and no path. The upstream is the host policy authorised
+            # and nothing else: a base path here would be prepended to the
+            # request the inspector already matched against `paths`, so the
+            # origin would receive a path no rule in this design ever saw.
+            f"upstream = {_toml_basic_string('https://' + host)}",
+            f"credential = {_toml_basic_string(cred_id)}",
+        ]
+        placeholder = _placeholder_for(config, credential)
+        if placeholder is not None:
+            lines.append(f"placeholder = {_toml_basic_string(placeholder)}")
+    return "\n".join(lines) + "\n"
+
+
+def _placeholder_for(config: dict, credential: str) -> str | None:
+    net = (config.get("vm", {}) or {}).get("network", {}) or {}
+    for cred in vm_credential_entries(net if isinstance(net, dict) else {}):
+        if cred.name == credential:
+            return cred.placeholder
+    return None
+
+
+def vm_broker_upstream_addresses(config: dict) -> list[str]:
+    """Every address the credential-backed hosts resolve to, for IPAddressAllow=.
+
+    Resolved HERE, at generation time, because IPAddressAllow= takes addresses
+    and systemd will not resolve a name in it. That makes the list stale on a
+    moved record exactly as every other resolve-at-start element in this design
+    is, and fixed by the same restart.
+
+    A name that does not resolve contributes nothing and is not an error. The
+    failure it produces is the safe one: with IPAddressDeny=any under the list,
+    an unresolvable upstream is a broker that cannot reach that provider and
+    says so per request, rather than a broker that reaches everything. This
+    matters more here than anywhere else in the design -- the broker's uid is
+    NOT in wl_filtered, so workload-filter.nft's default-deny never applies to
+    this leg and these two directives are its SOLE egress bound. A dropped
+    IPAddressAllow= line is not a degraded bound, it is no bound at all.
+    """
+    seen: list[str] = []
+    for host, _credential in vm_broker_hosts(config):
+        try:
+            infos = socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)
+        except OSError:
+            continue
+        for info in infos:
+            addr = str(ipaddress.ip_address(info[4][0]))
+            if addr not in seen:
+                seen.append(addr)
+    return seen
+
+
+def vm_host_resolver_addresses(resolv_conf: str = "/etc/resolv.conf") -> list[str]:
+    """The host's nameservers, for IPAddressAllow=.
+
+    NOT optional, and not an optimisation: the broker resolves its own upstream
+    names, so a list without the resolver in it is a broker whose every lookup
+    is denied -- the same shape as a guest that can reach its allowlisted hosts
+    and cannot resolve them, reached from a third direction, and one that
+    presents as the provider being down rather than as a policy fault.
+
+    Loopback is added by the caller rather than found here: on a
+    systemd-resolved host the only nameserver in this file is 127.0.0.53, and
+    the instance needs the loopback plane anyway for the address it binds.
+    """
+    found: list[str] = []
+    try:
+        text = Path(resolv_conf).read_text()
+    except OSError:
+        return found
+    for line in text.splitlines():
+        parts = line.split()
+        if len(parts) >= 2 and parts[0] == "nameserver":
+            try:
+                addr = str(ipaddress.ip_address(parts[1].split("%")[0]))
+            except ValueError:
+                continue
+            if addr not in found:
+                found.append(addr)
+    return found
+
+
 def ensure_advertised_interface(run) -> None:
     """Create the dummy link carrying the advertised address, idempotently.
 
@@ -3323,6 +3584,7 @@ def _validate_credentials(net: dict) -> tuple[list[VmCredential], list[str]]:
     known = {"name", "placeholder", "env"}
     creds: list[VmCredential] = []
     seen: set[str] = set()
+    seen_envs: set[str] = set()
     for item in raw:
         if not isinstance(item, dict):
             errors.append(
@@ -3375,6 +3637,29 @@ def _validate_credentials(net: dict) -> tuple[list[VmCredential], list[str]]:
                 f"guest's environment as `{env}=...`, so a name with a space "
                 f"or an `=` in it produces a line the guest silently drops")
             continue
+        if env in VM_RESERVED_GUEST_ENV:
+            # The seed merges this block over workloadctl's own guest variables,
+            # so a collision resolves silently whichever way the merge happens
+            # to go: either the guest loses the placeholder (its client sends no
+            # key and the provider answers 401 on a request this layer fully
+            # authorised) or it loses its CA path (every HTTPS request fails
+            # validation inside the guest, where no line on the host can see
+            # it). Both are invisible from here, so the collision is refused
+            # where it is still visible.
+            errors.append(
+                f"[vm.network].credential: {name!r} has `env` = {env!r}, which "
+                f"is a variable workloadctl already seeds this guest with. "
+                f"Choose another name -- the guest maps it to whatever its "
+                f"client reads, so it is yours to pick")
+            continue
+        if env in seen_envs:
+            errors.append(
+                f"[vm.network].credential: `env` = {env!r} is used by two "
+                f"credential blocks, so one placeholder overwrites the other "
+                f"in the guest and one credential's host answers 401 for a "
+                f"reason nothing on this host reports")
+            continue
+        seen_envs.add(env)
         if name in seen:
             errors.append(
                 f"[vm.network].credential: {name!r} is declared twice. A "
@@ -3490,6 +3775,23 @@ def _validate_policy(net: dict, splice_hosts, http2_hosts, egress: str,
                         f"block declares. Declare it with `name`, "
                         f"`placeholder` and `env`, or drop the key and let "
                         f"the guest reach this host with whatever it holds")
+        if credential and "*" in host:
+            # The broker's table is keyed by the EXACT Host a request carries
+            # (ADR 007 decision 3, and normalise_host does not glob), so a
+            # wildcard entry that selects a credential brokers nothing: the
+            # inspector authorises the request against this pattern, dials the
+            # broker, and the broker finds no row for the concrete name and
+            # refuses it. Refused here rather than left to produce that 403,
+            # because the 403 arrives on a request every other layer agreed to
+            # and names a host the file appears to cover.
+            errors.append(
+                f"[vm.network].policy: {host!r} selects credential "
+                f"{credential!r}, but a credential is attached per exact Host "
+                f"— the broker's table has no patterns in it, so every request "
+                f"matching this entry would be authorised here and refused "
+                f"there. Name the host this credential belongs to in an entry "
+                f"of its own, and keep the wildcard entry for the hosts that "
+                f"take no credential")
         entries.append(VmPolicyEntry(host=host, methods=methods, paths=paths,
                                      credential=credential))
 

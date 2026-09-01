@@ -282,3 +282,542 @@ class TestRedirectLandsWhereTheBrokerListens(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ---------------------------------------------------------------------------
+# Rung 6 T4: the generated per-workload instance
+#
+# Everything above this line is about the RETIRED shape -- one host-wide broker
+# reached at an advertised endpoint through a uid-keyed nft map. Everything
+# below is about the instance that replaces it: generated per workload, bound to
+# an address derived from that workload's uid, and dialled only by that
+# workload's inspector. The two coexist for one rung; T6 deletes the first.
+# ---------------------------------------------------------------------------
+
+from vm import (  # noqa: E402  (deliberately after the retired-shape imports)
+    UID_MIN, VM_BROKER_BIN, VM_BROKER_INSTANCE_PORT, VM_CA_ENV_VARS,
+    VM_RESERVED_GUEST_ENV,
+    render_vm_broker_config, vm_broker_config_path, vm_broker_credential,
+    vm_broker_hosts, vm_broker_listen_address, vm_broker_upstream_addresses,
+    vm_credential_env, vm_host_resolver_addresses, vm_uses_credentials,
+)
+import tomllib
+
+
+def cred_config(name="agent", **net):
+    """A filtered VM declaring one credential-backed host."""
+    base = {
+        "egress": "filtered",
+        "hosts": ["api.example.test"],
+        "credential": [{"name": "example-token",
+                        "placeholder": "sk-000000PLACEHOLDER",
+                        "env": "EXAMPLE_API_KEY"}],
+        "policy": [{"host": "api.example.test", "credential": "example-token"}],
+    }
+    base.update(net)
+    return {"workload": {"name": name}, "vm": {"network": base}}
+
+
+class TestUsesCredentials(unittest.TestCase):
+    """Which workloads get an instance at all.
+
+    Both halves of the predicate matter and only one is obvious. The declared
+    credential is the obvious half. The inspection half is what stops a bridged
+    or unfiltered VM from getting a unit that decrypts a provider key for a path
+    that does not exist -- nothing dials the broker but the inspector, now that
+    the advertised endpoint is gone.
+    """
+
+    def test_a_filtered_vm_with_a_credential_gets_one(self):
+        self.assertTrue(vm_uses_credentials(cred_config()))
+
+    def test_no_credential_blocks_means_no_instance(self):
+        cfg = cred_config()
+        cfg["vm"]["network"]["credential"] = []
+        cfg["vm"]["network"]["policy"] = [{"host": "api.example.test"}]
+        self.assertFalse(vm_uses_credentials(cfg))
+
+    def test_a_bridged_vm_gets_none_even_declaring_one(self):
+        self.assertFalse(vm_uses_credentials(cred_config(bridge="br0")))
+
+    def test_an_open_egress_vm_gets_none(self):
+        self.assertFalse(vm_uses_credentials(cred_config(egress="open")))
+
+    def test_a_container_workload_is_not_a_vm(self):
+        self.assertFalse(vm_uses_credentials({"workload": {"name": "web"},
+                                              "container": {"image": "x"}}))
+
+
+class TestTheGeneratedConfig(unittest.TestCase):
+    """render_vm_broker_config -- what the instance is told, and what it is not.
+
+    The address assertions are NEGATIVE as well as positive on purpose. Both
+    wrong values (127.0.0.1, the broker's own retired default, and 0.0.0.0) put
+    one workload's broker where every other workload's inspector is dialling,
+    which is exactly the hole ADR 007 decision 6 closes; a test that only
+    asserted the derived value would pass on a render that also bound the world.
+    """
+
+    def render(self, cfg=None, uid=UID_MIN + 5):
+        return render_vm_broker_config(cfg or cred_config(), uid)
+
+    def test_it_is_parseable_toml(self):
+        tomllib.loads(self.render())
+
+    def test_the_listen_address_is_the_uid_derived_one(self):
+        cfg = tomllib.loads(self.render())
+        self.assertEqual(cfg["listen_address"],
+                         vm_broker_listen_address(UID_MIN + 5))
+
+    def test_the_listen_address_is_never_localhost_or_the_world(self):
+        for uid in (UID_MIN, UID_MIN + 1, UID_MIN + 300):
+            addr = tomllib.loads(self.render(uid=uid))["listen_address"]
+            self.assertNotIn(addr, ("127.0.0.1", "0.0.0.0", "::", "*"))
+
+    def test_the_port_is_the_instance_port(self):
+        self.assertEqual(tomllib.loads(self.render())["listen_port"],
+                         VM_BROKER_INSTANCE_PORT)
+
+    def test_the_sandbox_key_is_the_workload_name(self):
+        """The broker resolves a caller's uid to a workload NAME and looks it
+        up here; a key that is anything else refuses every request."""
+        cfg = tomllib.loads(self.render(cred_config(name="myagent")))
+        self.assertEqual(list(cfg["sandboxes"]), ["myagent"])
+
+    def test_the_host_row_carries_the_upstream_and_the_credential_id(self):
+        row = tomllib.loads(self.render())["sandboxes"]["agent"]["hosts"][
+            "api.example.test"]
+        self.assertEqual(row["upstream"], "https://api.example.test")
+        _path, cred_id = vm_broker_credential("agent", "example-token")
+        self.assertEqual(row["credential"], cred_id)
+        self.assertEqual(row["placeholder"], "sk-000000PLACEHOLDER")
+
+    def test_the_upstream_carries_no_path(self):
+        """A base path here would be prepended to the request the inspector
+        already matched against `paths`, so the origin would be sent a target
+        no rule in this design ever saw."""
+        row = tomllib.loads(self.render())["sandboxes"]["agent"]["hosts"][
+            "api.example.test"]
+        self.assertEqual(row["upstream"].count("/"), 2)
+
+    def test_a_host_with_no_credential_gets_no_row(self):
+        cfg = cred_config()
+        cfg["vm"]["network"]["policy"].append({"host": "plain.example.test"})
+        hosts = tomllib.loads(self.render(cfg))["sandboxes"]["agent"]["hosts"]
+        self.assertEqual(list(hosts), ["api.example.test"])
+
+    def test_two_hosts_may_share_one_credential(self):
+        cfg = cred_config()
+        cfg["vm"]["network"]["hosts"].append("api2.example.test")
+        cfg["vm"]["network"]["policy"].append(
+            {"host": "api2.example.test", "credential": "example-token"})
+        hosts = tomllib.loads(self.render(cfg))["sandboxes"]["agent"]["hosts"]
+        self.assertEqual(sorted(hosts), ["api.example.test", "api2.example.test"])
+
+    def test_a_placeholder_carrying_a_quote_does_not_break_the_file(self):
+        cfg = cred_config()
+        cfg["vm"]["network"]["credential"][0]["placeholder"] = 'a"b\\c'
+        row = tomllib.loads(self.render(cfg))["sandboxes"]["agent"]["hosts"][
+            "api.example.test"]
+        self.assertEqual(row["placeholder"], 'a"b\\c')
+
+    def test_the_config_path_is_under_the_units_runtime_directory(self):
+        self.assertEqual(str(vm_broker_config_path("agent")),
+                         "/run/workloadctl/broker/agent/broker.toml")
+
+
+class TestTheCredentialId(unittest.TestCase):
+    """The systemd credential id is the SEAL name, and it carries the workload.
+
+    systemd-creds binds the id into the blob and verifies it on decrypt, so a
+    generated unit pointing at another workload's file -- the path is guessable
+    -- fails at start instead of serving that workload's key. Asked of
+    cmd_secret rather than spelled twice.
+    """
+
+    def test_it_matches_what_cmd_secret_seals_under(self):
+        from cmd_secret import credential_path
+        path, cred_id = vm_broker_credential("agent", "example-token")
+        expected_path, expected_id = credential_path(
+            Path("/etc/credstore.encrypted"), "broker/agent/example-token")
+        self.assertEqual((path, cred_id), (expected_path, expected_id))
+
+    def test_it_carries_the_workload_name(self):
+        _path, cred_id = vm_broker_credential("agent", "example-token")
+        self.assertEqual(cred_id, "broker-agent-example-token")
+
+    def test_two_workloads_get_different_ids_for_one_credential_name(self):
+        _p1, a = vm_broker_credential("one", "token")
+        _p2, b = vm_broker_credential("two", "token")
+        self.assertNotEqual(a, b)
+
+
+class TestTheGeneratedUnit(unittest.TestCase):
+    """The instance's unit. Four properties, each load-bearing on its own."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.gen = load_script("generators/workload-generate")
+
+    def unit(self, cfg=None, uid=UID_MIN + 5):
+        return self.gen.generate_vm_broker_service(cfg or cred_config(), uid)
+
+    def test_it_runs_as_a_dynamic_user_and_never_as_the_workload(self):
+        """The whole of ADR 007's protection. The inspector runs as the uid
+        QEMU runs as; this must not, or a guest escape obtains the key."""
+        unit = self.unit()
+        self.assertIn("DynamicUser=yes", unit)
+        self.assertNotIn("User=_wl-", unit)
+
+    def test_one_load_credential_line_per_declared_credential(self):
+        cfg = cred_config()
+        cfg["vm"]["network"]["hosts"].append("api2.example.test")
+        cfg["vm"]["network"]["policy"].append(
+            {"host": "api2.example.test", "credential": "example-token"})
+        lines = [l for l in self.unit(cfg).splitlines()
+                 if l.startswith("LoadCredentialEncrypted=")]
+        self.assertEqual(lines, [
+            "LoadCredentialEncrypted=broker-agent-example-token:"
+            "/etc/credstore.encrypted/broker/agent/example-token"])
+
+    def test_the_egress_bound_is_present_in_both_halves(self):
+        """The instance's uid is not in wl_filtered, so nothing else bounds
+        this leg: an allow list with no deny under it bounds nothing, and a
+        deny with no allow list is a broker that reaches nobody."""
+        unit = self.unit()
+        self.assertIn("IPAddressDeny=any", unit)
+        self.assertIn("IPAddressAllow=localhost", unit)
+
+    def test_the_resolver_is_allowed(self):
+        """Not optional: without it the broker's own lookups die, which
+        presents as the provider being down."""
+        resolvers = vm_host_resolver_addresses()
+        unit = self.unit()
+        for addr in resolvers:
+            self.assertIn(f"IPAddressAllow={addr}", unit)
+
+    def test_resolved_upstreams_are_allowed(self):
+        import vm as vm_mod
+        real = vm_mod.socket.getaddrinfo
+        try:
+            vm_mod.socket.getaddrinfo = lambda host, *a, **k: [
+                (2, 1, 6, "", ("203.0.113.7", 0))]
+            unit = self.unit()
+        finally:
+            vm_mod.socket.getaddrinfo = real
+        self.assertIn("IPAddressAllow=203.0.113.7", unit)
+        self.assertLess(unit.index("IPAddressAllow=203.0.113.7"),
+                        unit.index("IPAddressDeny=any"))
+
+    def test_an_unresolvable_upstream_contributes_nothing(self):
+        """And is not an error. With the deny under it, the failure is a
+        provider this broker cannot reach -- not a broker that reaches all."""
+        self.assertEqual(vm_broker_upstream_addresses(cred_config()), [])
+
+    def test_it_starts_before_and_stops_with_the_vm(self):
+        unit = self.unit()
+        self.assertIn("Before=workload-agent.service", unit)
+        self.assertIn("PartOf=workload-agent.service", unit)
+
+    def test_the_config_is_written_by_an_unprivileged_execstartpre(self):
+        """Unprivileged so the file is owned by the dynamic user that reads it,
+        and not tolerant: a broker started against a stale config attaches the
+        wrong credential to a request, silently."""
+        unit = self.unit()
+        self.assertIn('ExecStartPre=/usr/libexec/workloadctl/'
+                      'workload-vm-broker config "agent"', unit)
+        self.assertNotIn("ExecStartPre=+/usr/libexec/workloadctl/"
+                         "workload-vm-broker config", unit)
+        self.assertNotIn("ExecStartPre=-/usr/libexec/workloadctl/"
+                         "workload-vm-broker config", unit)
+
+    def test_the_runtime_directory_is_private_to_the_instance(self):
+        unit = self.unit()
+        self.assertIn("RuntimeDirectory=workloadctl/broker/agent", unit)
+        self.assertIn("RuntimeDirectoryMode=0700", unit)
+
+    def test_it_execs_the_packaged_broker_against_the_generated_config(self):
+        self.assertIn(f'ExecStart={VM_BROKER_BIN} '
+                      f'"{vm_broker_config_path("agent")}"', self.unit())
+
+
+class TestTheVmUnitWaitsForIt(unittest.TestCase):
+
+    @classmethod
+    def setUpClass(cls):
+        cls.gen = load_script("generators/workload-generate")
+
+    def vm_unit(self, cfg):
+        return self.gen.generate_vm_service(cfg, "_wl-agent", UID_MIN + 5)
+
+    def test_a_credential_workload_requires_its_broker(self):
+        unit = self.vm_unit(cred_config())
+        self.assertIn("workload-agent-broker.service", unit)
+
+    def test_a_workload_without_one_does_not(self):
+        cfg = cred_config()
+        cfg["vm"]["network"]["credential"] = []
+        cfg["vm"]["network"]["policy"] = [{"host": "api.example.test"}]
+        self.assertNotIn("workload-agent-broker.service", self.vm_unit(cfg))
+
+
+class TestTheRunFile(unittest.TestCase):
+    """Superset semantics, which is what buys `drift` and `remove` coverage."""
+
+    def files(self, cfg):
+        from workload_lib import workload_run_files
+
+        class _Cfg:
+            def __init__(self, config):
+                self.config = config
+                self.name = config["workload"]["name"]
+                self.is_vm = True
+                self.mode = "single"
+                self.uid = UID_MIN + 5
+
+            def container_names(self):
+                return []
+
+        return {f.path.name: f for f in workload_run_files(_Cfg(cfg))}
+
+    def test_it_is_listed_and_emitted_for_a_credential_workload(self):
+        entry = self.files(cred_config())["workload-agent-broker.service"]
+        self.assertEqual((entry.kind, entry.role), ("unit", "broker"))
+        self.assertTrue(entry.emitted)
+
+    def test_it_is_listed_but_not_emitted_without_a_credential(self):
+        """So a workload that drops its last credential has the unit unlinked
+        rather than left behind holding material nothing selects."""
+        cfg = cred_config()
+        cfg["vm"]["network"]["credential"] = []
+        cfg["vm"]["network"]["policy"] = [{"host": "api.example.test"}]
+        entry = self.files(cfg)["workload-agent-broker.service"]
+        self.assertFalse(entry.emitted)
+
+
+class TestTheGuestHalf(unittest.TestCase):
+    """One line: the placeholder reaches the guest under the declared name."""
+
+    def test_the_placeholder_is_seeded_under_the_declared_variable(self):
+        self.assertEqual(vm_credential_env(cred_config()),
+                         {"EXAMPLE_API_KEY": "sk-000000PLACEHOLDER"})
+
+    def test_a_workload_with_no_credentials_seeds_nothing(self):
+        self.assertEqual(vm_credential_env({"workload": {"name": "x"},
+                                            "vm": {"network": {}}}), {})
+
+    def test_the_rendered_seed_carries_it(self):
+        ensure = load_script("libexec/workload-ensure-user")
+        out = ensure._render_default_user_data(
+            name="agent", guest_user="fedora", pubkey="ssh-ed25519 AAAA u@h",
+            mounts=[], has_data_disk=False,
+            guest_env=vm_credential_env(cred_config()))
+        self.assertIn("EXAMPLE_API_KEY", out)
+        self.assertIn("sk-000000PLACEHOLDER", out)
+
+    def test_it_cannot_collide_with_a_variable_workloadctl_seeds(self):
+        """The seed merges the two, so a collision resolves silently either
+        way: a guest with no placeholder (401s) or one with no CA path (every
+        HTTPS request failing validation inside the guest)."""
+        cfg = cred_config()
+        cfg["vm"]["network"]["credential"][0]["env"] = VM_CA_ENV_VARS[0]
+        errors = validate_vm_network(cfg["vm"]["network"])
+        self.assertTrue(any("already seeds" in e for e in errors), errors)
+
+    def test_two_credentials_cannot_share_one_variable(self):
+        cfg = cred_config()
+        cfg["vm"]["network"]["credential"].append(
+            {"name": "second-token", "placeholder": "sk-2",
+             "env": "EXAMPLE_API_KEY"})
+        cfg["vm"]["network"]["policy"].append(
+            {"host": "api.example.test", "credential": "second-token"})
+        errors = validate_vm_network(cfg["vm"]["network"])
+        self.assertTrue(any("used by two" in e for e in errors), errors)
+
+    def test_the_reserved_set_is_derived_from_its_producers(self):
+        self.assertTrue(set(VM_CA_ENV_VARS) <= VM_RESERVED_GUEST_ENV)
+        self.assertIn(VM_BROKER_ENV_VAR, VM_RESERVED_GUEST_ENV)
+
+
+class TestAWildcardHostCannotBeBrokered(unittest.TestCase):
+    """The broker's table has no patterns in it.
+
+    An entry like `*.example.test` with a credential would be authorised by the
+    inspector and refused by the broker, which is a 403 on a request every
+    other layer agreed to, naming a host the file appears to cover.
+    """
+
+    def test_it_is_refused(self):
+        cfg = cred_config()
+        cfg["vm"]["network"]["hosts"] = ["*.example.test"]
+        cfg["vm"]["network"]["policy"] = [
+            {"host": "*.example.test", "credential": "example-token"}]
+        errors = validate_vm_network(cfg["vm"]["network"])
+        self.assertTrue(any("per exact Host" in e for e in errors), errors)
+
+    def test_a_wildcard_without_a_credential_is_still_fine(self):
+        cfg = cred_config()
+        cfg["vm"]["network"]["hosts"] = ["*.example.test", "api.example.test"]
+        cfg["vm"]["network"]["policy"] = [
+            {"host": "*.example.test"},
+            {"host": "api.example.test", "credential": "example-token"}]
+        errors = validate_vm_network(cfg["vm"]["network"])
+        self.assertFalse([e for e in errors if "per exact Host" in e], errors)
+
+
+class TestBrokerHosts(unittest.TestCase):
+
+    def test_only_credential_backed_entries_appear(self):
+        cfg = cred_config()
+        cfg["vm"]["network"]["policy"].append({"host": "plain.example.test"})
+        self.assertEqual(vm_broker_hosts(cfg),
+                         [("api.example.test", "example-token")])
+
+    def test_file_order_is_preserved(self):
+        cfg = cred_config()
+        cfg["vm"]["network"]["hosts"].append("api2.example.test")
+        cfg["vm"]["network"]["policy"].insert(
+            0, {"host": "api2.example.test", "credential": "example-token"})
+        self.assertEqual([h for h, _c in vm_broker_hosts(cfg)],
+                         ["api2.example.test", "api.example.test"])
+
+
+class TestDriftSeesAHandEditedInstance(unittest.TestCase):
+    """The free coverage the unit shape was chosen for, asserted not assumed.
+
+    A broker instance whose unit has silently diverged from the bundle is a
+    credential-SELECTION bug -- the wrong key on the wrong host, on the one path
+    that carries a real one. `drift` catches it with no machinery of its own
+    because the unit is an ordinary run-file, and that is one of the two reasons
+    the design chose a full generated unit over a template or a drop-in. If it
+    ever stops being one (emitted somewhere else, or written by a helper at
+    start), this test is what notices.
+    """
+
+    def setUp(self):
+        import os
+        import shutil
+        import cmd_drift
+        from unittest import mock
+        from tests import script_env
+        from tests.test_generator_snapshot import (
+            FIXTURES, run_generator, write_config)
+
+        cfg_dir = tempfile.mkdtemp(prefix="drift-cfg-")
+        sysusers_dir = tempfile.mkdtemp(prefix="drift-sysusers-")
+        # Generated straight INTO the live dir rather than copied there: the
+        # units bake the services directory into a few Exec paths, so a copy
+        # from somewhere else would differ from a fresh render in every unit
+        # and every workload would read as drifted for a reason that is this
+        # test's staging rather than the product.
+        self.live = Path(tempfile.mkdtemp(prefix="drift-live-"))
+        for cleanup in (cfg_dir, sysusers_dir, self.live):
+            self.addCleanup(shutil.rmtree, cleanup, ignore_errors=True)
+        for name, toml_content in FIXTURES["vm-credential"]:
+            write_config(cfg_dir, name, toml_content)
+        result = run_generator(cfg_dir, self.live, sysusers_dir)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.unit = self.live / "workload-vmcred-broker.service"
+
+        # collect_drift re-runs the generator with os.environ plus two keys of
+        # its own. On a host every module it imports sits beside it in
+        # /usr/libexec/workloadctl; in the checkout they do not, so the
+        # interpreter path has to come from the environment -- and the
+        # generator exits 0 whatever happens (never blocking boot), so without
+        # this the regeneration produces nothing and EVERY live unit reads as
+        # an orphan rather than as a failure.
+        self.enterContext(mock.patch.dict(
+            os.environ, {"PYTHONPATH": script_env()["PYTHONPATH"]}))
+
+        self.policy_root = Path(tempfile.mkdtemp(prefix="drift-policy-"))
+        self.addCleanup(shutil.rmtree, self.policy_root, ignore_errors=True)
+
+        self.cmd_drift = cmd_drift
+        for attr, value in (("LIVE_UNITS_DIR", self.live),
+                            ("POLICY_ROOT", self.policy_root),
+                            ("workload_config_dir", lambda: Path(cfg_dir))):
+            self.enterContext(mock.patch.object(cmd_drift, attr, value))
+
+    def test_the_instance_is_generated_at_all(self):
+        self.assertTrue(self.unit.exists(),
+                        "no broker unit was emitted for a credential workload")
+
+    def test_an_untouched_instance_is_not_drift(self):
+        names = [name for name, _live, _gen in self.cmd_drift.collect_drift()]
+        self.assertNotIn("workload-vmcred-broker.service", names)
+
+    def test_a_hand_edited_instance_is_reported(self):
+        self.unit.write_text(
+            self.unit.read_text().replace("IPAddressDeny=any", ""))
+        names = [name for name, _live, _gen in self.cmd_drift.collect_drift()]
+        self.assertIn("workload-vmcred-broker.service", names)
+
+
+class TestTheHelperWritesTheConfig(unittest.TestCase):
+    """`workload-vm-broker config` -- the ExecStartPre that materialises D2.
+
+    It runs unprivileged, as the instance's own DynamicUser, inside the unit's
+    sandbox: everything it reads is world-readable and the only thing it writes
+    is the unit's RuntimeDirectory. That is what makes the file owned by the uid
+    that reads it, with no chown and no window in which it is wider.
+    """
+
+    def setUp(self):
+        from unittest import mock
+        self.mod = load_script("libexec/workload-vm-broker")
+        self.tmp = Path(tempfile.mkdtemp(prefix="broker-config-"))
+        self.addCleanup(__import__("shutil").rmtree, self.tmp,
+                        ignore_errors=True)
+        self.path = self.tmp / "broker.toml"
+        self.enterContext(mock.patch.object(
+            self.mod, "vm_broker_config_path", lambda name: self.path))
+        self.enterContext(mock.patch.object(
+            self.mod.pwd, "getpwnam",
+            lambda user: type("pw", (), {"pw_uid": UID_MIN + 5})))
+
+    def write(self, cfg):
+        from unittest import mock
+        with mock.patch.object(self.mod, "load_config", lambda name: cfg):
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf), \
+                    contextlib.redirect_stderr(io.StringIO()):
+                return self.mod.write_config(cfg["workload"]["name"])
+
+    def test_it_writes_the_rendered_config(self):
+        self.assertEqual(self.write(cred_config()), 0)
+        self.assertEqual(tomllib.loads(self.path.read_text())["listen_address"],
+                         vm_broker_listen_address(UID_MIN + 5))
+
+    def test_the_file_is_readable_by_nobody_else(self):
+        self.write(cred_config())
+        self.assertEqual(self.path.stat().st_mode & 0o777, 0o600)
+
+    def test_it_leaves_no_temporary_behind(self):
+        self.write(cred_config())
+        self.assertEqual([p.name for p in self.tmp.iterdir()], ["broker.toml"])
+
+    def test_a_second_run_replaces_rather_than_appends(self):
+        """The config is a pure function of the TOML, rewritten at every start
+        -- which is what stops an instance serving the previous boot's set."""
+        self.write(cred_config())
+        cfg = cred_config()
+        cfg["vm"]["network"]["credential"][0]["placeholder"] = "sk-SECOND"
+        self.write(cfg)
+        row = tomllib.loads(self.path.read_text())["sandboxes"]["agent"][
+            "hosts"]["api.example.test"]
+        self.assertEqual(row["placeholder"], "sk-SECOND")
+
+    def test_a_workload_with_no_credentials_is_refused(self):
+        """Reaching here means a unit outlived the config that produced it.
+        Refused rather than written empty, so the message names the cause."""
+        cfg = cred_config()
+        cfg["vm"]["network"]["credential"] = []
+        cfg["vm"]["network"]["policy"] = [{"host": "api.example.test"}]
+        self.assertEqual(self.write(cfg), 1)
+        self.assertFalse(self.path.exists())
+
+    def test_the_verb_is_rejected_with_the_wrong_argument_count(self):
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            self.assertEqual(self.mod.main(["prog", "config"]), 2)
+        self.assertIn("<config|up|down>", buf.getvalue())

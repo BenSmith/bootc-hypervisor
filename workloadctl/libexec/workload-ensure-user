@@ -42,6 +42,7 @@ from vm import (VM_SOCKET_DIR, VM_DEFAULT_GUEST_USER, VM_GUEST_HOME_BASE,
                 VM_HOME_SELINUX_CONTEXT, VM_HOME_SELINUX_TYPES,
                 VM_SEED_CONTRACT_EXIT, SeedContractError, find_ovmf_vars,
                 vm_broker_env, vm_ca_env, vm_ca_cert_path, vm_ca_dir,
+                vm_credential_env,
                 vm_denial_dir, vm_leaf_dir,
                 vm_ca_key_path, vm_ca_openssl_argv,
                 vm_ptp_kvm_runcmd_lines, vm_ptp_kvm_seed_files,
@@ -1769,7 +1770,14 @@ def build_cloud_init_iso(pw, config: dict, name: str, config_path: Path | None =
             has_data_disk=bool(vm_cfg.get("data_disk_size")),
             host_private_key=host_private_key,
             host_public_key=host_public_key,
-            guest_env={**vm_ca_env(config), **vm_broker_env(config)},
+            # The placeholders last, and they cannot overwrite anything: a
+            # credential whose `env` names one of workloadctl's own guest
+            # variables is refused in validation, where the collision is still
+            # visible. Seeded once per instance-id like every other variable in
+            # this block -- so a CHANGED placeholder does not reach a running
+            # guest, which is what `diagnose` says out loud.
+            guest_env={**vm_ca_env(config), **vm_broker_env(config),
+                       **vm_credential_env(config)},
             # Unconditional for a filtered VM, NOT gated on tls = "inspect".
             # The seed is fingerprinted over its rendered text and the
             # cloud-init instance-id rotates with it, so gating would make an

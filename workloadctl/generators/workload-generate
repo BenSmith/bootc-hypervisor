@@ -86,6 +86,10 @@ try:
         vm_resolve_address, vm_uses_resolve,
         vm_denial_dir, vm_leaf_dir,
         vm_inspect_logs_directory,
+        VM_BROKER_BIN, VM_BROKER_INSTANCE_PORT,
+        vm_uses_credentials, vm_broker_config_path, vm_broker_credential,
+        vm_broker_hosts, vm_broker_listen_address, vm_broker_runtime_directory,
+        vm_broker_upstream_addresses, vm_host_resolver_addresses,
     )
     from validation import valid_userns_mode, validate_workload_config
     from secrets_template import (
@@ -2389,6 +2393,169 @@ def generate_vm_resolve_service(config, user_name: str) -> str:
     return unit.render()
 
 
+def generate_vm_broker_service(config, uid: int) -> str:
+    """Generate the credential broker instance for one VM workload.
+
+    Modelled on systemd/agent-broker.service, which is the shape this replaces
+    -- NOT on _harden_vm_sidecar. The two sandboxes differ in the one directive
+    that matters most here: this unit is DynamicUser=yes, and that is the whole
+    of ADR 007's protection. The inspector runs as _wl-<name>, the uid QEMU runs
+    as, so a guest escape obtains everything that uid can read; the broker's
+    dynamic uid sits at 61184-65519, disjoint from the workload range, and the
+    credential is only ever decrypted into ITS tmpfs. Give this unit
+    User=_wl-<name> "for consistency" and the design's central claim is gone.
+
+    That disjointness is also why NoNewPrivileges=yes is safe here and is
+    refused three functions up: the sidecars reach an SELinux domain through an
+    entrypoint transition that NNP forbids, and this program has no domain of
+    its own to transition into.
+
+    A full unit per workload rather than a template or a drop-in, for a reason
+    that is structural: the number of LoadCredentialEncrypted= lines varies with
+    the workload (one per declared credential), a @.service cannot carry a
+    variable number of directives, and a drop-in has no per-instance base to
+    attach to. Being an ordinary generated unit also buys PartOf=, ordering,
+    teardown and `drift` coverage with no special-casing -- and drift coverage
+    is not decoration on a unit whose content decides which credential goes to
+    which host.
+    """
+    name = config["workload"]["name"]
+
+    unit = Unit()
+    unit.comment(f"credential broker instance for {name}")
+    unit.comment(GENERATED_BY)
+
+    u = unit.section("Unit")
+    u.set("Description", f"Credential broker for {name}")
+    # The RPM's copy, not a checkout: a unit on a host cannot usefully cite a
+    # path that exists only on the machine it was written on.
+    u.set("Documentation", "file:/usr/share/doc/workloadctl/agent-broker.md")
+    u.set("Requires", f"workload-{name}-setup.service")
+    u.set("After", f"workload-{name}-setup.service")
+    # Stated from both ends, like the inspector socket and for the same reason:
+    # Before= orders the broker ahead of the VM, and the VM's own Requires=/
+    # After= is what makes its start wait. A later reader who deletes one side
+    # leaves the other direction's ordering rather than nothing.
+    u.set("Before", f"workload-{name}.service")
+    # PartOf=, so the instance stops with the workload that owns it. Lifecycle
+    # tied to the VM and not to `systemctl enable`: the shipped host-wide unit
+    # was deliberately not enabled because a broker with no config is a restart
+    # loop, and an instance generated FROM a config that exists cannot fail that
+    # way.
+    u.set("PartOf", f"workload-{name}.service")
+
+    svc = unit.section("Service")
+    svc.set("Type", "exec")
+    # The config is written into the unit's own runtime directory, by the unit,
+    # at every start (D2). systemd creates the leaf as the DynamicUser at 0700
+    # and removes it on stop, so the file is readable by the broker, unreadable
+    # by the workload uid, and gone when the broker is -- no chown of ours, and
+    # no way to serve the previous boot's credential set.
+    svc.set("RuntimeDirectory", vm_broker_runtime_directory(name))
+    svc.set("RuntimeDirectoryMode", "0700")
+    # NOT `+` prefixed. This runs unprivileged, as the instance's own dynamic
+    # user, which is what makes the file it writes owned by that user; it needs
+    # no privilege, because everything it reads (the workload TOML, the passwd
+    # db) is world-readable and the only thing it writes is $RUNTIME_DIRECTORY.
+    # And not `-` either: a broker started against a stale or missing config is
+    # a broker serving the wrong credentials or none.
+    svc.add("ExecStartPre",
+            f"/usr/libexec/workloadctl/workload-vm-broker config {dq(name)}")
+    svc.add("ExecStart", f"{VM_BROKER_BIN} {dq(str(vm_broker_config_path(name)))}")
+    svc.blank()
+    # One line per DECLARED credential, not per credential-backed host: two
+    # hosts may share one, and loading it twice under one id is an error.
+    # `<seal name>:<path>` -- the id is the name the blob was sealed under, so a
+    # unit pointing at another workload's file gets a decrypt failure at start
+    # rather than that workload's key, and it is also the filename the broker
+    # finds under $CREDENTIALS_DIRECTORY.
+    seen_credentials = []
+    for _host, credential in vm_broker_hosts(config):
+        if credential in seen_credentials:
+            continue
+        seen_credentials.append(credential)
+        path, cred_id = vm_broker_credential(name, credential)
+        svc.add("LoadCredentialEncrypted", f"{cred_id}:{path}")
+    svc.blank()
+    # No persistent identity: the broker owns no files and needs no home. This
+    # is the protection, not a tidiness measure -- see the docstring.
+    svc.set("DynamicUser", "yes")
+    svc.blank()
+    # This process holds a live provider key in memory and parses input that
+    # arrives, ultimately, from a guest assumed to be hostile.
+    svc.set("NoNewPrivileges", "yes")
+    svc.set("CapabilityBoundingSet", "")
+    svc.set("AmbientCapabilities", "")
+    svc.set("PrivateTmp", "yes")
+    svc.set("PrivateDevices", "yes")
+    # PrivateUsers= is deliberately NOT set. The broker identifies each caller
+    # by the uid owning the far end of the connection, and /proc/net translates
+    # that column through the reader's user namespace -- from a restricted one
+    # every caller reads as the overflow uid and they all collapse into one
+    # identity, with no error. The broker refuses to start if it detects this.
+    svc.set("ProtectSystem", "strict")
+    svc.set("ProtectHome", "yes")
+    svc.set("ProtectProc", "invisible")
+    svc.set("ProtectClock", "yes")
+    svc.set("ProtectHostname", "yes")
+    svc.set("ProtectKernelTunables", "yes")
+    svc.set("ProtectKernelModules", "yes")
+    svc.set("ProtectKernelLogs", "yes")
+    svc.set("ProtectControlGroups", "yes")
+    # AF_UNIX and AF_NETLINK beyond the two the shipped unit named, and the
+    # difference is deliberate: that unit has never run anywhere (it ships
+    # disabled and has no users), while the inspector's identical pair was
+    # MEASURED -- glibc's getaddrinfo opens a netlink socket for source-address
+    # selection and nss-resolve talks varlink over AF_UNIX. Without them the
+    # broker's own lookups fail, which presents as the provider being
+    # unreachable.
+    svc.set("RestrictAddressFamilies", "AF_INET AF_INET6 AF_UNIX AF_NETLINK")
+    svc.set("RestrictNamespaces", "yes")
+    svc.set("RestrictRealtime", "yes")
+    svc.set("RestrictSUIDSGID", "yes")
+    svc.set("LockPersonality", "yes")
+    svc.set("MemoryDenyWriteExecute", "yes")
+    svc.set("SystemCallArchitectures", "native")
+    svc.set("SystemCallFilter", "@system-service")
+    svc.set("SystemCallErrorNumber", "EPERM")
+    svc.set("UMask", "0077")
+    # Coredumps would contain the credential.
+    svc.set("LimitCORE", "0")
+    svc.blank()
+    # THE ONLY EGRESS BOUND ON THIS PROCESS. The instance's uid is not in
+    # wl_filtered -- that is the same disjointness the protection rests on --
+    # so workload-filter.nft's default-deny does not apply to it and its
+    # output chain matches nothing it sends. A missing IPAddressAllow= line is
+    # therefore not a degraded bound but no bound at all, which is why the
+    # render gate asserts the deny and the shape of the list rather than
+    # trusting them.
+    #
+    # `localhost` covers two things at once: the 127.129.x.y address this
+    # instance binds, and the stub resolver a systemd-resolved host puts at
+    # 127.0.0.53.
+    svc.add("IPAddressAllow", "localhost")
+    for addr in vm_host_resolver_addresses():
+        svc.add("IPAddressAllow", addr)
+    # Resolved at generation time, because systemd will not resolve a name in
+    # this directive. Stale on a moved record like every other resolve-at-start
+    # element in this design, and fixed by the same restart.
+    for addr in vm_broker_upstream_addresses(config):
+        svc.add("IPAddressAllow", addr)
+    svc.add("IPAddressDeny", "any")
+    svc.blank()
+    svc.add("StandardOutput", "journal")
+    svc.add("StandardError", "journal")
+    svc.blank()
+    # An instance whose config exists cannot fail for the reason the host-wide
+    # unit could, so restarting it is worth doing rather than a loop waiting to
+    # happen; the guest gets a refused connection from the inspector in the
+    # meantime, which is D5's named drop reason and not a silence.
+    svc.add("Restart", "on-failure")
+    svc.add("RestartSec", "2")
+
+    return unit.render()
+
+
 def generate_vm_build_service(config, user_name) -> str:
     """Generate the oneshot build service that creates system.qcow2."""
     name = config["workload"]["name"]
@@ -2477,6 +2644,14 @@ def generate_vm_service(config, user_name: str, uid: int, vfs_tags=None) -> str:
     # resolves nothing at all while looking healthy. Requires=, not Wants=.
     if vm_uses_resolve(config):
         prereqs.append(f"workload-{name}-resolve.socket")
+    # And the broker instance, Requires= on the same terms once more: a
+    # credential-backed host reached while the broker is down produces a
+    # refusal on the one channel the guest cannot work around, and the guest
+    # holds a placeholder, so failing over to the provider directly is a 401
+    # rather than a degradation. The instance is ordered Before= the VM from
+    # its own side too.
+    if vm_uses_credentials(config):
+        prereqs.append(f"workload-{name}-broker.service")
     prereqs_str = " ".join(prereqs)
 
     has_data_disk = bool(vm_cfg.get("data_disk_size"))
@@ -2824,6 +2999,16 @@ def generate_vm_workload(config, user_name: str, uid: int):
         if inspect_dests:
             inspect_dests[0].write_text(generate_vm_inspect_service(config, user_name))
             log_msg("  Created egress inspector service")
+
+    # The credential broker instance, on the inspector's terms plus at least one
+    # declared credential. It is not socket-activated (nothing dials it until
+    # the inspector does, and the inspector is not a socket that could pass it
+    # a connection), so it is an ordinary unit ordered before the VM.
+    if vm_uses_credentials(config):
+        broker_dests = paths.get(("unit", "broker"), [])
+        if broker_dests:
+            broker_dests[0].write_text(generate_vm_broker_service(config, uid))
+            log_msg("  Created credential broker service")
 
     # The synthesising responder, on the inspector's terms plus `resolver` not
     # being "none" -- a separate predicate, not a second reading of this one,

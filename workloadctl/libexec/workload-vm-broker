@@ -2,11 +2,18 @@
 """
 workload-vm-broker: open or close one VM's path to the credential broker.
 
-Usage: workload-vm-broker <up|down> <name>
+Usage: workload-vm-broker <config|up|down> <name>
 
-`up` runs as an ExecStartPre of the VM unit, `down` as an ExecStopPost. Between
-them they own two things: the shared advertised endpoint (a dummy interface and
-an nftables nat chain) and this workload's element in the uid -> broker map.
+`config` runs as an ExecStartPre of the workload's own broker instance and
+writes that instance's broker.toml. `up` runs as an ExecStartPre of the VM unit
+and `down` as an ExecStopPost; between them they own the shared advertised
+endpoint (a dummy interface and an nftables nat chain) and this workload's
+element in the uid -> broker map.
+
+`up`/`down` are the reachability half, and ADR 007 deletes what they reach: with
+the broker moved behind the inspector there is no advertised endpoint for a
+guest to dial and no map to translate it. They are removed with the rest of that
+mechanism; `config` is what this helper is for afterwards.
 
 `up` runs for every VM, entitled or not: for an entitled one it installs the
 element, and for the rest it makes sure no element is there. A uid is reused as
@@ -39,6 +46,7 @@ Better to fail the start than to boot a sandbox that cannot work and does not
 say why. `down` is tolerant: its element is legitimately absent whenever the
 start failed before installing it.
 """
+import os
 import pwd
 import subprocess
 import sys
@@ -48,6 +56,7 @@ sys.dont_write_bytecode = True
 from vm import (
     NFT_BIN, NFT_BROKER_SKELETON, VM_BROKER_PORT, VM_ADVERTISED_ADDR,
     ensure_advertised_interface, vm_broker_map_command, vm_uses_broker,
+    render_vm_broker_config, vm_broker_config_path, vm_uses_credentials,
 )
 from workload_lib import workload_config_path
 
@@ -69,6 +78,54 @@ def run(argv, check=False):
 def load_config(name: str) -> dict:
     with open(workload_config_path(name), "rb") as f:
         return tomllib.load(f)
+
+
+def write_config(name: str) -> int:
+    """Render this workload's broker.toml into the instance's runtime directory.
+
+    A pure function of the workload TOML and the workload uid, rewritten at
+    every start (design D2). Nothing here reconciles anything: there is no
+    previous file to compare against, because systemd removed the runtime
+    directory when the instance last stopped, and that is precisely what stops
+    an instance serving the previous boot's credential set.
+
+    UNPRIVILEGED, and the whole verb depends on it. It runs as the instance's
+    own DynamicUser, inside the unit's sandbox, so the file it writes is owned
+    by the uid the broker runs as and by nothing else -- no chown, and no window
+    in which the material's config is readable by the workload uid. Everything
+    it reads (the bundle, the passwd db) is world-readable.
+
+    Failing is the right outcome for every error below. A broker started against
+    a missing or stale config either refuses every request or attaches the wrong
+    credential to one, and the second is silent.
+    """
+    config = load_config(name)
+    uid = pwd.getpwnam(f"_wl-{name}").pw_uid
+    if not vm_uses_credentials(config):
+        # The generator does not emit an instance for such a workload, so
+        # reaching here means a unit outlived the config that produced it --
+        # a hand-edited unit, or a TOML edited without a regeneration. Refused
+        # rather than written empty: the broker exits on a config with no
+        # sandboxes anyway, and this message names the cause.
+        print(f"  ERROR: {name} declares no [[vm.network.credential]] blocks "
+              f"(or is not inspected), so it has no broker instance. This unit "
+              f"is stale: `workloadctl reload {name}`", file=sys.stderr)
+        return 1
+    path = vm_broker_config_path(name)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    text = render_vm_broker_config(config, uid)
+    # Written through a temporary and renamed, so a broker that is somehow
+    # already reading cannot see a half-written table -- and 0600 before the
+    # rename rather than after, so the file is never briefly wider than it ends
+    # up. The directory is already 0700 (RuntimeDirectoryMode=); this is the
+    # second half of the same rule and costs nothing.
+    tmp = path.with_name(path.name + ".new")
+    with open(tmp, "w") as fh:
+        fh.write(text)
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, path)
+    log(f"  Wrote {path} for uid {uid}")
+    return 0
 
 
 def up(name: str) -> int:
@@ -120,10 +177,12 @@ def down(name: str) -> int:
 
 
 def main(argv):
-    if len(argv) != 3 or argv[1] not in ("up", "down"):
-        print(f"usage: {argv[0]} <up|down> <name>", file=sys.stderr)
+    if len(argv) != 3 or argv[1] not in ("config", "up", "down"):
+        print(f"usage: {argv[0]} <config|up|down> <name>", file=sys.stderr)
         return 2
     action, name = argv[1], argv[2]
+    if action == "config":
+        return write_config(name)
     return up(name) if action == "up" else down(name)
 
 
@@ -132,4 +191,9 @@ if __name__ == "__main__":
         sys.exit(main(sys.argv))
     except Exception as e:  # noqa: BLE001
         print(f"  ERROR: {e}", file=sys.stderr)
-        sys.exit(1 if len(sys.argv) > 1 and sys.argv[1] == "up" else 0)
+        # `config` fails as loudly as `up`, and for a sharper reason: `up`
+        # leaves a guest with an unreachable endpoint, while a config that did
+        # not get written leaves the broker reading whatever is there -- or
+        # nothing. Only `down` is tolerant.
+        sys.exit(1 if len(sys.argv) > 1 and sys.argv[1] in ("up", "config")
+                 else 0)

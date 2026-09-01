@@ -883,7 +883,7 @@ def workload_run_files(config) -> list[WorkloadRunFile]:
     # would be circular.
     from workloadctl_core import WorkloadUserNotFound
     from vm import (  # same circularity: vm imports this module
-        vm_uses_inspect, vm_uses_resolve,
+        vm_uses_credentials, vm_uses_inspect, vm_uses_resolve,
     )
 
     run = RUN_SYSTEMD_SYSTEM
@@ -950,6 +950,21 @@ def workload_run_files(config) -> list[WorkloadRunFile]:
         files.append(WorkloadRunFile(
             run / f"workload-{name}-resolve.service", "unit", "resolve",
             uses_resolve,
+        ))
+        # The credential broker instance, superset semantics again: listed for
+        # every VM so a workload that drops its last credential has the unit
+        # unlinked rather than left behind holding material nothing selects,
+        # and emitted only when the workload declares one AND is inspected.
+        #
+        # Being an ordinary run-file is most of why the design chose a full
+        # generated unit here: `drift` compares it against a fresh render with
+        # no machinery of its own, and a broker instance whose unit has
+        # silently diverged from the bundle is a credential-SELECTION bug --
+        # the wrong key on the wrong host, on the one path that carries a real
+        # one.
+        files.append(WorkloadRunFile(
+            run / f"workload-{name}-broker.service", "unit", "broker",
+            vm_uses_credentials(config.config),
         ))
     else:
         # cgroup-placement drop-in (containers only). Keyed by the workload UID

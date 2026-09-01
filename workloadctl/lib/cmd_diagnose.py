@@ -72,6 +72,7 @@ from vm import (
     VM_DROP_NOT_HTTP, VM_DROP_NOT_HTTP_POLICY,
     VM_RESOLVE_PORT, vm_resolve_address, vm_resolve_policy_path,
     vm_uses_resolve,
+    vm_broker_hosts,
 )
 from vm_mint import pem_fingerprint
 from vm_status import OTHER_KEY
@@ -1695,6 +1696,13 @@ def vm_inspect_check(config, *, elements4=PROBE, elements6=PROBE,
     # Already resolved above, by the loaded-policy comparison -- which reads
     # the same document and must run before any of the tail, because it can
     # return a verdict.
+    # Independent of `status`, unlike the three above: this reads the bundle,
+    # and the answer it gives is most needed exactly when the inspector has
+    # produced no document yet -- an operator watching a guest get 401s from a
+    # provider it is sure it configured.
+    for fragment in _credential_fragments(config):
+        tail += f"; {fragment}"
+
     if status:
         for fragment in (_binding_fragments(status)
                          + _not_http_fragments(status)
@@ -2021,6 +2029,35 @@ def _ca_fingerprint_on_disk(name: str) -> str | None:
         return pem_fingerprint(vm_ca_cert_path(workload_state_dir(name)))
     except (OSError, ValueError):
         return None
+
+
+def _credential_fragments(config) -> list[str]:
+    """What the credential-backed hosts oblige an operator to know.
+
+    ONE SENTENCE, and it is about the seed rather than about the broker.
+    Everything else here is derivable from something this command already
+    prints or from `workloadctl validate`; this is not, because the fact it
+    states is a difference between the file on disk and a guest that is
+    already running.
+
+    The placeholder is seeded by cloud-init, cloud-init runs once per
+    instance-id, and the instance-id rotates only when the seed is rebuilt. So
+    editing `placeholder` in the TOML changes what the broker expects to
+    discard and does NOT change what the guest sends, and the guest's requests
+    keep working -- the broker replaces whatever arrives. What breaks is the
+    reverse edit an operator makes next, and the third occurrence of this same
+    shape (the egress mode and WORKLOAD_BROKER_URL were the first two) is worth
+    one line here rather than an evening.
+    """
+    entries = vm_broker_hosts(config.config)
+    if not entries:
+        return []
+    hosts = ", ".join(sorted({host for host, _cred in entries}))
+    return [f"credential-backed via this workload's own broker: {hosts} — the "
+            f"guest holds a PLACEHOLDER for each, seeded by cloud-init at "
+            f"provision time. Editing a `placeholder` in workload.toml does "
+            f"not reach a running guest: cloud-init runs once per instance-id, "
+            f"so it takes a re-provision"]
 
 
 def _ca_fragments(status) -> list[str]:
