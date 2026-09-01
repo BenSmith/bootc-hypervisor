@@ -2568,17 +2568,22 @@ class TestRung2Schema(unittest.TestCase):
             "policy": [{"host": "a.example", "reason": "why not"}]})
         self.assertTrue(any("unknown key" in e for e in errors), errors)
 
-    def test_credential_and_placeholder_name_the_rung_they_land_in(self):
-        """Named rather than reported as an unknown key, for the reason
-        VM_TLS_UNBUILT gives: an operator who wrote `credential` should be told
-        when it arrives, not sent hunting for a typo that is not there."""
-        for key in ("credential", "placeholder"):
-            errors = self._egress({
-                "hosts": ["a.example"],
-                "policy": [{"host": "a.example", key: "x"}]})
-            joined = " ".join(errors)
-            self.assertIn("rung 6", joined, (key, errors))
-            self.assertNotIn("unknown key", joined, (key, errors))
+    def test_placeholder_on_an_entry_is_sent_to_the_credential_block(self):
+        """It was on the entry in the design's §3 draft, and moved.
+
+        Named rather than reported as an unknown key, for the reason
+        VM_TLS_UNBUILT gives: an operator who wrote it followed a document that
+        told them to, so the message says where it went. Asserted on the
+        REMEDY -- naming the block -- and not on the fact of an error, because
+        a bare "unknown key" passes an "it errors" test while leaving the
+        operator to guess.
+        """
+        errors = self._egress({
+            "hosts": ["a.example"],
+            "policy": [{"host": "a.example", "placeholder": "x"}]})
+        joined = " ".join(errors)
+        self.assertIn("[[vm.network.credential]]", joined, errors)
+        self.assertNotIn("unknown key", joined, errors)
 
     def test_resolver_none_beside_policy_is_refused(self):
         errors = self._egress({
@@ -3096,28 +3101,62 @@ class TestReservedPlanes(unittest.TestCase):
         self.assertIn(VM_INSPECT_ADDR6_PREFIX, networks)
         self.assertTrue(any(n.version == 6 for n in networks),
                         "a v6 plane exists and must be one of these")
+        # Every plane now owns a whole range on every port. The one
+        # port-scoped entry was the host-wide broker's 127.0.0.1:8081, and it
+        # died with the host-wide listener -- a new port-scoped plane means
+        # something is again reserving a single socket on an address operators
+        # publish on, which is the shape that needed its own written entry.
+        self.assertEqual([p.what for p in VM_RESERVED_PLANES
+                          if p.port is not None], [])
 
-    def test_the_broker_plane_is_the_broker_s_own_listener(self):
-        """Cross-file, like tests/test_vm_broker.py and for the same reason.
+    def test_the_broker_plane_is_inherited_from_the_nine(self):
+        """The broker's reservation moved from stated to inherited (rung 6).
 
-        The broker is not a range: it is one socket on an address operators
-        publish on freely. If the plane and the listener ever disagree, the
-        reservation protects an address nothing listens on while the real
-        listener is bindable from a config key.
+        It had an entry of its own while there was one host-wide listener on
+        127.0.0.1:8081 -- an address operators publish on freely, so the
+        reservation had to be port-scoped and had to be written down. ADR 007
+        gives every workload its own listener at VM_BROKER_ADDR_BASE, which is
+        inside VM_MGMT_NETWORK (127.128.0.0/9), so `ports` cannot bind there for
+        the same reason it cannot bind the responder.
+
+        Asserted through vm_reserved_plane rather than by reading the list,
+        because "the entry is gone" and "the reservation is gone" are the two
+        outcomes of that deletion and only one of them is correct. A test that
+        merely stopped checking would be indistinguishable from one that never
+        did.
         """
-        from vm import (VM_BROKER_LISTEN_ADDR, VM_BROKER_LISTEN_PORT,
-                        VM_RESERVED_PLANES)
-        scoped = [p for p in VM_RESERVED_PLANES if p.port is not None]
-        self.assertEqual(len(scoped), 1, "one port-scoped plane, the broker")
-        self.assertEqual(str(scoped[0].network.network_address),
-                         VM_BROKER_LISTEN_ADDR)
-        self.assertEqual(scoped[0].port, VM_BROKER_LISTEN_PORT)
+        from vm import (UID_MAX, UID_MIN, VM_MGMT_NETWORK,
+                        vm_broker_listen_address, vm_reserved_plane)
+        for uid in (UID_MIN, UID_MIN + 1, 42000, UID_MAX):
+            addr = vm_broker_listen_address(uid)
+            with self.subTest(uid=uid):
+                self.assertIn(ipaddress.ip_address(addr), VM_MGMT_NETWORK)
+                # Every port, not the one the listener uses: the plane owns the
+                # address, so a `ports` entry naming any port on it is refused.
+                for port in (80, 8081, 65535):
+                    plane = vm_reserved_plane(addr, port)
+                    self.assertIsNotNone(plane, (addr, port))
+                    self.assertEqual(plane.network, VM_MGMT_NETWORK)
+
+    def test_a_broker_address_is_refused_by_ports(self):
+        """The end-to-end form of the rule above, through validation.
+
+        The inheritance argument is only worth anything if `ports` actually
+        refuses the address, and that path reads vm_reserved_plane through
+        parse_vm_port rather than being handed one.
+        """
+        from vm import UID_MIN, vm_broker_listen_address
+        addr = vm_broker_listen_address(UID_MIN + 7)
+        self.assertTrue(self._ports(f"{addr}:8081:80"), addr)
 
     def test_each_plane_is_refused(self):
         for spec in ("127.128.0.3:2222:22",
                      "198.18.1.4:8443:22",
                      "[2001:2::c612:100]:8443:22",
-                     "127.0.0.1:8081:80"):
+                     # The broker plane, reached through the /9 rather than
+                     # through an entry of its own -- 127.129.0.7 is
+                     # vm_broker_listen_address(UID_MIN + 7).
+                     "127.129.0.7:8081:80"):
             with self.subTest(spec=spec):
                 self.assertTrue(self._ports(spec), spec)
 
@@ -3132,28 +3171,36 @@ class TestReservedPlanes(unittest.TestCase):
         self.assertTrue(any("2001:2::/48" in e for e in errors), errors)
 
     def test_the_message_names_what_would_collide_not_just_the_range(self):
-        """Four planes, four sentences.
+        """Three planes, three sentences.
 
-        A collision with a management address, an inspector, a broker and (from
-        T5a) a responder are four different problems with four different
-        remedies. One recited range for all of them tells an operator the rule
-        and not what they broke.
+        A collision with a management address and one with an inspector are
+        different problems with different remedies, and one recited range for
+        both tells an operator the rule and not what they broke.
+
+        The broker, the responder and the management addresses now share ONE
+        sentence -- the /9's -- and that is the cost of the inheritance the
+        deletion above buys. It is the right trade only because all three are
+        planes `ports` has no business naming at all: the sentence an operator
+        needs there is "this range is not yours", and it is the same sentence
+        for all three. It was not the right trade for 127.0.0.1:8081, which is
+        an address they publish on daily.
         """
         mgmt = " ".join(self._ports("127.128.0.3:2222:22"))
         inspect = " ".join(self._ports("198.18.1.4:8443:22"))
-        broker = " ".join(self._ports("127.0.0.1:8081:80"))
         self.assertIn("workloadctl exec", mgmt)
         self.assertIn("inspector", inspect)
-        self.assertIn("credential", broker)
         self.assertNotEqual(mgmt, inspect)
-        self.assertNotEqual(inspect, broker)
 
-    def test_the_broker_refusal_is_scoped_to_its_port(self):
-        """127.0.0.1 stays a normal thing to publish on.
+    def test_the_loopback_address_operators_publish_on_is_free_again(self):
+        """127.0.0.1:8081 stops being reserved, and that is intended.
 
-        A plane that took the whole address would refuse most of what `ports`
-        is for, which is how a reservation gets narrowed back out again.
+        The port-scoped entry existed because ONE host-wide broker listened
+        there. With per-workload listeners nothing does, so a reservation would
+        refuse a bind that collides with nothing -- and 127.0.0.1 stays a normal
+        thing to publish on, which is the property the port scoping existed to
+        preserve in the first place.
         """
+        self.assertEqual(self._ports("127.0.0.1:8081:80"), [])
         self.assertEqual(self._ports("127.0.0.1:8080:80"), [])
         self.assertEqual(self._ports("127.0.0.1:9000:9000"), [])
 
@@ -3408,3 +3455,403 @@ class TestInternalOkElements(unittest.TestCase):
         # It must name the failure the operator will actually see, which is a
         # refusal on the allowlisted host -- not "an element is missing".
         self.assertIn("internal-destination drop", message)
+
+
+class TestRung6CredentialSchema(unittest.TestCase):
+    """`[[vm.network.credential]]` and the `credential` selector (rung 6, ADR 007).
+
+    Nothing here attaches a credential -- T5 is the branch that dials the
+    broker. What these pin is the set of configs the host will accept, and the
+    stakes are higher than the rung 2 schema's: every failure this table
+    prevents lands as a 401 from the provider on a request the inspector
+    considers fully authorised, which is the one error shape that sends an
+    operator looking at the guest, at the key, and at the provider before they
+    look here.
+
+    One test per rule, and the two remedy-naming refusals are asserted on the
+    REMEDY TEXT rather than on the fact of an error. A rule citation passes an
+    "it errors" test while telling an operator nothing they can act on.
+    """
+
+    def _egress(self, net):
+        from vm import _validate_egress
+        return _validate_egress(net)
+
+    def _net(self, **over):
+        net = {"hosts": ["api.example"],
+               "credential": [{"name": "tok",
+                               "placeholder": "PLACEHOLDER000000",
+                               "env": "API_TOKEN"}],
+               "policy": [{"host": "api.example", "methods": ["GET"],
+                           "paths": ["/v1/*"], "credential": "tok"}]}
+        net.update(over)
+        return net
+
+    # --- the block ---
+
+    def test_a_well_formed_workload_validates(self):
+        self.assertEqual(self._egress(self._net()), [])
+
+    def test_the_three_keys_are_each_required(self):
+        """`placeholder` is the one whose absence would otherwise be silent.
+
+        With no placeholder the guest is seeded with nothing, its client sends
+        no Authorization header, and the broker's substitution has nothing to
+        replace -- so the request reaches the provider unauthenticated while
+        every layer here reports success.
+        """
+        full = {"name": "tok", "placeholder": "P", "env": "API_TOKEN"}
+        for key in ("name", "placeholder", "env"):
+            block = {k: v for k, v in full.items() if k != key}
+            with self.subTest(missing=key):
+                errors = self._egress(self._net(credential=[block]))
+                self.assertTrue(any(f"`{key}`" in e for e in errors), errors)
+
+    def test_a_block_carries_no_other_key(self):
+        errors = self._egress(self._net(credential=[
+            {"name": "tok", "placeholder": "P", "env": "API_TOKEN",
+             "upstream": "https://api.example"}]))
+        self.assertTrue(any("unknown key" in e for e in errors), errors)
+
+    def test_a_name_that_is_not_a_credstore_name_is_refused(self):
+        """The name IS the filename the sealed material lands under.
+
+        `/` is the one that matters: a name carrying one would put a workload's
+        credential outside its own subtree, which is the whole of the scoping.
+        """
+        for name in ("../other/tok", "broker/other/tok", "tok name", "tok!"):
+            with self.subTest(name=name):
+                errors = self._egress(self._net(
+                    credential=[{"name": name, "placeholder": "P",
+                                 "env": "API_TOKEN"}],
+                    policy=[{"host": "api.example", "credential": name}]))
+                self.assertTrue(any("credstore name" in e for e in errors),
+                                (name, errors))
+
+    def test_an_env_that_is_not_a_shell_name_is_refused(self):
+        for env in ("API TOKEN", "API=TOKEN", "1TOKEN", ""):
+            with self.subTest(env=env):
+                errors = self._egress(self._net(credential=[
+                    {"name": "tok", "placeholder": "P", "env": env}]))
+                self.assertTrue(errors, env)
+
+    def test_two_blocks_may_not_share_a_name(self):
+        errors = self._egress(self._net(credential=[
+            {"name": "tok", "placeholder": "P", "env": "A"},
+            {"name": "tok", "placeholder": "Q", "env": "B"}]))
+        self.assertTrue(any("declared twice" in e for e in errors), errors)
+
+    def test_a_block_no_entry_selects_is_refused(self):
+        """The reverse of "selects a block that does not exist".
+
+        Material sealed, loaded into a broker instance and attached to nothing
+        reads -- in the file and in `diagnose` -- as a credential in use.
+        """
+        errors = self._egress(self._net(credential=[
+            {"name": "tok", "placeholder": "P", "env": "API_TOKEN"},
+            {"name": "spare", "placeholder": "Q", "env": "SPARE_TOKEN"}]))
+        self.assertTrue(any("'spare'" in e and "no [[vm.network.policy]]" in e
+                            for e in errors), errors)
+
+    def test_a_block_with_no_policy_at_all_is_refused(self):
+        """The rule fires with zero entries, not just with the wrong ones.
+
+        _validate_policy returns early when there are no entries, so a check
+        written after that return would be silent on exactly the config an
+        operator produces by declaring the credential first.
+        """
+        errors = self._egress({"hosts": ["api.example"],
+                               "credential": [{"name": "tok",
+                                               "placeholder": "P",
+                                               "env": "API_TOKEN"}]})
+        self.assertTrue(any("no [[vm.network.policy]]" in e for e in errors),
+                        errors)
+
+    # --- the selector ---
+
+    def test_an_entry_selecting_an_undeclared_credential_is_refused(self):
+        errors = self._egress(self._net(policy=[
+            {"host": "api.example", "credential": "nope"}]))
+        joined = " ".join(errors)
+        self.assertIn("'nope'", joined)
+        self.assertIn("[[vm.network.credential]]", joined)
+
+    def test_a_non_string_credential_is_refused(self):
+        for value in (True, 3, ["tok"], "", "   "):
+            with self.subTest(value=value):
+                self.assertTrue(self._egress(self._net(policy=[
+                    {"host": "api.example", "credential": value}])), value)
+
+    def test_credential_is_a_known_key_and_placeholder_is_not(self):
+        """The inversion this rung performs, asserted in both directions.
+
+        `credential` stopped being refused as unbuilt and `placeholder` did not
+        become an unknown key -- it moved, and the message says where.
+        """
+        self.assertEqual(self._egress(self._net()), [])
+        moved = " ".join(self._egress(self._net(policy=[
+            {"host": "api.example", "credential": "tok",
+             "placeholder": "P"}])))
+        self.assertIn("[[vm.network.credential]]", moved)
+        self.assertNotIn("unknown key", moved)
+
+    # --- the four ways a credential is silently not attached ---
+
+    def test_whole_workload_splice_beside_a_credential_names_the_remedy(self):
+        """Redundant with the "entries are inert" message, deliberately.
+
+        That message names a lost RESTRICTION. This one names a lost REQUEST --
+        the guest reaches the provider holding its placeholder. An operator who
+        read only the first would fix the wrong half, so both are emitted and
+        this asserts the second is present and actionable.
+        """
+        errors = self._egress(self._net(tls="splice",
+                                        tls_reason="the guest is sealed"))
+        credential_errors = [e for e in errors if "`credential`" in e]
+        self.assertTrue(credential_errors, errors)
+        joined = " ".join(credential_errors)
+        self.assertIn("tls = 'inspect'", joined)
+        self.assertIn("placeholder", joined)
+
+    def test_a_spliced_credential_host_names_the_remedy(self):
+        errors = self._egress(self._net(splice=[
+            {"host": "api.example", "reason": "its client rejects our CA"}]))
+        credential_errors = [e for e in errors if "credential 'tok'" in e]
+        self.assertTrue(credential_errors, errors)
+        self.assertIn("Drop the splice entry", " ".join(credential_errors))
+
+    def test_an_http2_credential_host_names_both_remedies(self):
+        """ADR 007 decision 4, which neither the design nor the ADR states.
+
+        Both name the splice case, which is this one's exact twin: an h2
+        connection is relayed at frame level with HPACK-compressed headers, so
+        there is no `Host` -- and (uid, Host) is the ENTIRE dispatch key of a
+        broker instance.
+        """
+        errors = self._egress(self._net(http2=[
+            {"host": "api.example", "reason": "the client requires h2"}]))
+        credential_errors = [e for e in errors if "credential 'tok'" in e]
+        self.assertTrue(credential_errors, errors)
+        joined = " ".join(credential_errors)
+        self.assertIn("HPACK", joined)
+        self.assertIn(".http2", joined)
+        self.assertIn("not relayed", joined)
+
+    def test_overlapping_entries_may_not_name_different_credentials(self):
+        errors = self._egress(self._net(
+            credential=[{"name": "tok", "placeholder": "P", "env": "A"},
+                        {"name": "other", "placeholder": "Q", "env": "B"}],
+            hosts=["api.example", "*.example"],
+            policy=[{"host": "api.example", "methods": ["GET"],
+                     "paths": ["/*"], "credential": "tok"},
+                    {"host": "*.example", "methods": ["GET"],
+                     "paths": ["/*"], "credential": "other"}]))
+        self.assertTrue(any("match the same host" in e for e in errors), errors)
+
+    def test_the_disagreement_is_reported_once_not_twice(self):
+        """One finding, read from either end of the pair."""
+        errors = self._egress(self._net(
+            credential=[{"name": "tok", "placeholder": "P", "env": "A"},
+                        {"name": "other", "placeholder": "Q", "env": "B"}],
+            hosts=["api.example", "*.example"],
+            policy=[{"host": "api.example", "methods": ["GET"],
+                     "paths": ["/*"], "credential": "tok"},
+                    {"host": "*.example", "methods": ["GET"],
+                     "paths": ["/*"], "credential": "other"}]))
+        self.assertEqual(
+            len([e for e in errors if "match the same host" in e]), 1, errors)
+
+    def test_an_overlapping_unbrokered_entry_names_both_remedies(self):
+        """And says the obvious third one is not a fix.
+
+        Adding the credential to the wider entry brokers everything it admits,
+        which is the opposite of what the narrow entry was written to do -- and
+        it is the first thing a reader reaches for, so the message has to
+        refuse it by name.
+        """
+        errors = self._egress(self._net(
+            hosts=["api.example", "*.example"],
+            policy=[{"host": "api.example", "methods": ["GET"],
+                     "paths": ["/*"], "credential": "tok"},
+                    {"host": "*.example", "methods": ["GET"],
+                     "paths": ["/*"]}]))
+        found = [e for e in errors if "leaves unbrokered" in e]
+        self.assertTrue(found, errors)
+        joined = " ".join(found)
+        self.assertIn("Demote", joined)
+        self.assertIn("narrow its `host`", joined)
+        self.assertIn("NOT a fix", joined)
+
+    def test_a_bridged_vm_may_not_declare_a_credential(self):
+        """Nothing of ours is in that guest's data path (§5.3).
+
+        No inspector, so no request to attach anything to -- and the material
+        would be sealed and loaded for a guest that reaches its provider
+        directly.
+        """
+        errors = self._egress({"bridge": "br0",
+                               "credential": [{"name": "tok",
+                                               "placeholder": "P",
+                                               "env": "A"}]})
+        self.assertTrue(any(".credential" in e and "bridge" in e
+                            for e in errors), errors)
+
+    # --- reading the schema ---
+
+    def test_entries_are_read_shape_tolerantly(self):
+        """Both readers run at VM start, where raising turns a typo into a
+        workload that does not boot -- long after the error was reportable."""
+        from vm import vm_credential_entries, vm_policy_entries
+        self.assertEqual(vm_credential_entries({"credential": "not a list"}), [])
+        self.assertEqual(vm_credential_entries({}), [])
+        self.assertEqual(
+            [c.name for c in vm_credential_entries({"credential": [
+                {"name": "tok", "placeholder": "P", "env": "A"},
+                {"name": "half"},
+                "a bare string",
+                {"name": "  ", "placeholder": "P", "env": "A"}]})],
+            ["tok"])
+        self.assertEqual(
+            [e.credential for e in vm_policy_entries({"policy": [
+                {"host": "a.example", "credential": "tok"},
+                {"host": "b.example"},
+                {"host": "c.example", "credential": "  "},
+                {"host": "d.example", "credential": 7}]})],
+            ["tok", None, None, None])
+
+
+class TestRung6PolicyDocument(unittest.TestCase):
+    """The `credential` key in the inspector's policy document (D8, D11)."""
+
+    def _net(self, credential):
+        entry = {"host": "api.example", "methods": ["GET"], "paths": ["/v1/*"]}
+        if credential:
+            entry["credential"] = credential
+        return {"hosts": ["api.example"], "policy": [entry],
+                "credential": [{"name": "tok", "placeholder": "P",
+                                "env": "A"}] if credential else []}
+
+    def test_an_entry_with_a_credential_carries_its_name(self):
+        from vm import vm_inspect_policy
+        self.assertEqual(vm_inspect_policy(self._net("tok"))["policy"][0]
+                         ["credential"], "tok")
+
+    def test_an_entry_without_one_carries_no_key_at_all(self):
+        """Sparse, not null, and this is the half that fails alone.
+
+        A writer emitting `"credential": null` unconditionally passes the test
+        above and fails only here -- and what it costs is the drift signal: the
+        digest of EVERY filtered VM on the fleet changes at upgrade, so every
+        one of them reports drift and the report stops being read.
+        """
+        from vm import vm_inspect_policy
+        self.assertNotIn("credential", vm_inspect_policy(self._net(None))
+                         ["policy"][0])
+
+    def test_a_credential_free_document_is_byte_identical_across_the_change(self):
+        """The concrete form of the rule above, in the bytes drift compares."""
+        from vm import vm_inspect_policy_text
+        self.assertEqual(
+            vm_inspect_policy_text(self._net(None)),
+            '{\n'
+            '  "hosts": [\n'
+            '    "api.example"\n'
+            '  ],\n'
+            '  "http2": [],\n'
+            '  "internal": [],\n'
+            '  "policy": [\n'
+            '    {\n'
+            '      "host": "api.example",\n'
+            '      "methods": [\n'
+            '        "GET"\n'
+            '      ],\n'
+            '      "paths": [\n'
+            '        "/v1/*"\n'
+            '      ]\n'
+            '    }\n'
+            '  ],\n'
+            '  "splice": [],\n'
+            '  "tls": "inspect"\n'
+            '}\n')
+
+    def test_the_digest_moves_for_a_credential_and_not_for_its_absence(self):
+        """Asserted in BOTH directions, because only the second half fails if
+        the key is emitted unconditionally."""
+        from vm import vm_inspect_policy_digest, vm_inspect_policy_text
+        bare = vm_inspect_policy_digest(vm_inspect_policy_text(self._net(None)))
+        with_cred = vm_inspect_policy_digest(
+            vm_inspect_policy_text(self._net("tok")))
+        self.assertNotEqual(bare, with_cred)
+        self.assertEqual(
+            bare,
+            vm_inspect_policy_digest(vm_inspect_policy_text(self._net(None))))
+
+    def test_no_address_placeholder_or_env_reaches_the_document(self):
+        """D8. The listener derives the address from its own uid, and decides
+        nothing by the other two -- carrying them would make the document
+        non-deterministic w.r.t. the TOML or leak the fiction into a file the
+        guest-facing process reads."""
+        from vm import vm_inspect_policy_text
+        text = vm_inspect_policy_text(self._net("tok"))
+        self.assertNotIn("127.129", text)
+        self.assertNotIn("placeholder", text)
+        self.assertNotIn('"env"', text)
+
+
+class TestRung6BrokerAddress(unittest.TestCase):
+    """`vm_broker_listen_address` (D3): per-workload, derived, never shared."""
+
+    def test_the_first_workload_lands_on_the_base(self):
+        from vm import UID_MIN, vm_broker_listen_address
+        self.assertEqual(vm_broker_listen_address(UID_MIN), "127.129.0.0")
+        self.assertEqual(vm_broker_listen_address(UID_MIN + 3), "127.129.0.3")
+
+    def test_it_is_never_the_two_addresses_that_reopen_the_hole(self):
+        """Both wrong values put one workload's broker where every other
+        workload's inspector is dialling, which is how ADR 007 decision 6's
+        hole grows back. Asserted as negatives rather than only as a positive,
+        because a positive assertion on one uid passes while a constant is
+        wrong for the range."""
+        from vm import UID_MAX, UID_MIN, vm_broker_listen_address
+        for uid in (UID_MIN, UID_MIN + 1, 10500, 42000, UID_MAX):
+            with self.subTest(uid=uid):
+                addr = vm_broker_listen_address(uid)
+                self.assertNotEqual(addr, "127.0.0.1")
+                self.assertNotEqual(addr, "0.0.0.0")
+
+    def test_a_uid_outside_the_workload_range_raises(self):
+        from vm import UID_MAX, UID_MIN, vm_broker_listen_address
+        for uid in (UID_MIN - 1, UID_MAX + 1, 0):
+            with self.subTest(uid=uid):
+                with self.assertRaises(ValueError):
+                    vm_broker_listen_address(uid)
+
+    def test_the_three_uid_derived_planes_never_overlap(self):
+        """Three-way, over the COLLECTION, not over a chosen pair.
+
+        Management (127.128.0.0), broker (127.129.0.0) and responder
+        (127.130.0.0) all run `base + (uid - UID_MIN)` on a range 42,949 wide,
+        so a widened UID_MAX is the change that silently overlaps them --
+        127.128 spills into 127.129 first, which makes the broker the first
+        casualty rather than a bystander. A test naming one pair passes
+        unchanged while a third plane is added and left unchecked, which is the
+        failure TestReservedPlanes states in its own docstring.
+        """
+        from vm import (UID_MAX, UID_MIN, vm_broker_listen_address,
+                        vm_management_address, vm_resolve_address)
+        planes = (vm_management_address, vm_broker_listen_address,
+                  vm_resolve_address)
+        for uid in (UID_MIN, UID_MIN + 1, 42000, UID_MAX):
+            with self.subTest(uid=uid):
+                got = [f(uid) for f in planes]
+                self.assertEqual(len(set(got)), len(planes), got)
+        # And the ranges as wholes, which is what a widened UID_MAX breaks.
+        for f in planes:
+            span = (ipaddress.ip_address(f(UID_MIN)),
+                    ipaddress.ip_address(f(UID_MAX)))
+            others = [g for g in planes if g is not f]
+            for g in others:
+                low, high = (ipaddress.ip_address(g(UID_MIN)),
+                             ipaddress.ip_address(g(UID_MAX)))
+                self.assertFalse(low <= span[0] <= high, (f, g))
+                self.assertFalse(low <= span[1] <= high, (f, g))

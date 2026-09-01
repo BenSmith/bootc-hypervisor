@@ -1046,6 +1046,23 @@ def vm_inspect_policy(net: dict) -> dict:
     simply down. Those are the same OSError without this list, and telling them
     apart is the whole value of the internal-refusal counter.
 
+    `credential` is the credstore NAME of the material a request to this host
+    is brokered with, and it is carried ONLY on the entries that set one --
+    an entry without a credential emits no key at all rather than a null.
+    That sparseness is load-bearing, not tidiness: the document is byte-compared
+    by `collect_policy_drift()` and digested for `diagnose`, so a `"credential":
+    null` on every entry would change the digest of every filtered VM on the
+    fleet and report drift on all of them at upgrade -- which is how a drift
+    signal stops being read. A missing key and a null mean the same thing to the
+    listener (`entry.get("credential")`), so the cheaper side of the trade is
+    the reader's.
+
+    NO ADDRESS is carried with it. The listener derives the broker's address
+    from its own uid, which it already has; putting it here would make the
+    document non-deterministic w.r.t. the TOML and break the byte comparison
+    and the digest. `placeholder` and `env` are not carried either -- they are
+    seed-time and broker-config facts, and the listener decides nothing by them.
+
     NO `reason` OF ANY KIND IS CARRIED -- not the per-host ones, not
     `tls_reason`. A reason is written for a person reviewing the config, and
     the listener decides nothing by it; putting it in the document would give
@@ -1058,10 +1075,12 @@ def vm_inspect_policy(net: dict) -> dict:
         "internal": vm_internal_hosts(net),
         "splice": vm_splice_hosts(net),
         "http2": vm_http2_hosts(net),
-        "policy": [{"host": e.host,
-                    "methods": None if e.methods is None else list(e.methods),
-                    "paths": None if e.paths is None else list(e.paths)}
-                   for e in vm_policy_entries(net)],
+        "policy": [
+            {"host": e.host,
+             "methods": None if e.methods is None else list(e.methods),
+             "paths": None if e.paths is None else list(e.paths),
+             **({"credential": e.credential} if e.credential else {})}
+            for e in vm_policy_entries(net)],
     }
 
 
@@ -2098,6 +2117,41 @@ NFT_BROKER_MAP = "wl_broker_dest"
 # line of cloud-init and belongs with the software that has an opinion.
 VM_BROKER_ENV_VAR = "WORKLOAD_BROKER_URL"
 
+# Base of the per-workload broker listener addresses (ADR 007). 127.129.0.0, by
+# the same offset arithmetic vm_management_address uses against 127.128.0.0 and
+# the responder uses against 127.130.0.0 -- and, like the responder, deliberately
+# inside VM_MGMT_NETWORK (127.128.0.0/9), which is why there is no ReservedPlane
+# of its own: the /9 was cut wide precisely so the planes hung on loopback after
+# the management one would inherit the reservation. `ports` already cannot bind
+# here, and the entry that used to reserve 127.0.0.1:8081 is gone with the
+# host-wide listener it named.
+#
+# One address per workload is the whole of ADR 007 decision 6. A shared
+# 127.0.0.1 with one listener is what made the old broker's caller identity a
+# peer-uid lookup on a socket every workload could reach; here each instance
+# answers on an address only its own inspector is told about, so a second
+# workload dialling it reaches its OWN loopback and finds nothing.
+VM_BROKER_ADDR_BASE = 0x7F810000  # 127.129.0.0
+
+
+def vm_broker_listen_address(uid: int) -> str:
+    """The workload's own loopback address for its credential broker instance.
+
+    Derived from the uid, so uniqueness is inherited from the uid allocator:
+    no registry, no allocation step, and no collision. uid 10000 -> 127.129.0.0,
+    uid 10003 -> 127.129.0.3.
+
+    Never 127.0.0.1 and never 0.0.0.0. Both put one workload's broker where
+    every other workload's inspector is dialling, which is how the hole ADR 007
+    decision 6 closes grows back -- so the render gate asserts those two
+    negatives explicitly rather than only asserting the positive.
+    """
+    if uid < UID_MIN or uid > UID_MAX:
+        raise ValueError(
+            f"UID {uid} is outside the workload range {UID_MIN}-{UID_MAX}; "
+            f"no broker listen address is derivable for it")
+    return str(ipaddress.IPv4Address(VM_BROKER_ADDR_BASE + (uid - UID_MIN)))
+
 
 def vm_uses_broker(config: dict) -> bool:
     """Whether this workload gets a broker map element.
@@ -2925,6 +2979,7 @@ class VmPolicyEntry(NamedTuple):
     host: str
     methods: tuple | None
     paths: tuple | None
+    credential: str | None = None
 
     def permits(self, method: str, path: str) -> bool:
         """Whether this entry permits one method on one path.
@@ -2958,11 +3013,67 @@ def vm_policy_entries(net: dict) -> list[VmPolicyEntry]:
         host = item.get("host")
         if not isinstance(host, str) or not host.strip():
             continue
+        credential = item.get("credential")
+        if not isinstance(credential, str) or not credential.strip():
+            credential = None
+        else:
+            credential = credential.strip()
         entries.append(VmPolicyEntry(
             host=host.strip(),
             methods=_normalise_policy_list(item.get("methods"), upper=True),
-            paths=_normalise_policy_list(item.get("paths"))))
+            paths=_normalise_policy_list(item.get("paths")),
+            credential=credential))
     return entries
+
+
+class VmCredential(NamedTuple):
+    """One [[vm.network.credential]] block, normalised.
+
+    `placeholder` and `env` are properties OF THE CREDENTIAL, not of the policy
+    entry that selects it, and that is the whole reason this table exists rather
+    than two more keys on the entry. Stated on the entry, each would need an
+    "entries naming the same credential must agree" rule, and there would be two
+    of them; stated here, each is stated once and the rule is unwritable.
+
+    `name` is the credstore name, and `env` is the guest variable the placeholder
+    is seeded into. They are separate keys on purpose: collapsing them would bind
+    the sealed material's path to a provider-owned string, so a provider renaming
+    its variable would force a re-seal.
+
+    NOTHING HERE TRAVELS ON THE WIRE. The inspector sends no name and no
+    selector; the broker's whole dispatch key is (uid, Host), per ADR 007
+    decision 9. These three fields decide which material a generated broker
+    instance loads and what the guest is seeded with, and nothing else.
+    """
+
+    name: str
+    placeholder: str
+    env: str
+
+
+def vm_credential_entries(net: dict) -> list[VmCredential]:
+    """The [[vm.network.credential]] blocks, normalised, in file order.
+
+    Shape-tolerant for the reason vm_policy_entries is: validate_vm_network owns
+    the shape and the boot generator skips a workload that does not validate.
+    """
+    creds: list[VmCredential] = []
+    raw = net.get("credential", [])
+    if not isinstance(raw, list):
+        return creds
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        values = []
+        for key in ("name", "placeholder", "env"):
+            value = item.get(key)
+            if not isinstance(value, str) or not value.strip():
+                values = []
+                break
+            values.append(value.strip())
+        if values:
+            creds.append(VmCredential(*values))
+    return creds
 
 
 def _normalise_policy_list(value, *, upper: bool = False) -> tuple | None:
@@ -3172,8 +3283,112 @@ def _validate_policy_methods(item, host: str) -> tuple[tuple | None, list[str]]:
     return tuple(out), errors
 
 
+# What a credential `name` may be. The same character class cmd_secret enforces,
+# because the name IS the credstore filename -- the material lands at
+# /etc/credstore.encrypted/broker/<workload>/<name>. The absence of `/` from this
+# class is load-bearing twice over: it keeps a name from escaping the workload's
+# own subtree, and it is the same absence that makes the scoped path unnameable
+# from ${SECRET:...} in workload env (secrets_template.SECRET_PATTERN has no `/`
+# either), so broker material cannot be pulled into a container's environment by
+# spelling its path.
+_CREDENTIAL_NAME_RE = re.compile(r"^[a-zA-Z0-9_-]+$")
+
+# What a credential `env` may be. POSIX shell name, because it is written into an
+# EnvironmentFile the guest seed reads: a name with `=` or a space in it would
+# produce a line the reader silently drops or, worse, mis-splits.
+_CREDENTIAL_ENV_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _validate_credentials(net: dict) -> tuple[list[VmCredential], list[str]]:
+    """Validate [[vm.network.credential]]. Returns (credentials, errors).
+
+    Shape only, plus uniqueness. Whether a block is USED, and whether a policy
+    entry names one that exists, are relations between the two tables and live
+    in _validate_policy, which is the one place that has both.
+
+    Whether the credstore actually HOLDS the named material is not checked here
+    and deliberately: this function is called from the boot generator, where
+    /etc is not the authority it is at config time, and a rule that read the
+    credstore would make a validation result depend on host state. `workloadctl
+    validate` performs that check, beside the one it already performs for
+    ${SECRET:} names.
+    """
+    errors: list[str] = []
+    raw = net.get("credential", [])
+    if not isinstance(raw, list):
+        return [], [f"[vm.network].credential must be an array of "
+                    f"[[vm.network.credential]] tables, got "
+                    f"{type(raw).__name__}"]
+
+    known = {"name", "placeholder", "env"}
+    creds: list[VmCredential] = []
+    seen: set[str] = set()
+    for item in raw:
+        if not isinstance(item, dict):
+            errors.append(
+                f"[vm.network].credential entries are tables with `name`, "
+                f"`placeholder` and `env`, got {item!r}")
+            continue
+        unknown = sorted(set(item) - known)
+        if unknown:
+            errors.append(
+                f"[vm.network].credential: unknown key(s) "
+                f"{', '.join(unknown)}; a credential block carries `name`, "
+                f"`placeholder` and `env` only")
+        values = {}
+        for key in ("name", "placeholder", "env"):
+            value = item.get(key)
+            if not isinstance(value, str) or not value.strip():
+                # All three are required, and `placeholder` is the one whose
+                # absence would otherwise fail invisibly: with no placeholder
+                # the guest is seeded with nothing, its client sends no
+                # Authorization header at all, and the broker's substitution
+                # has nothing to replace -- which surfaces as the provider
+                # returning 401 on a request the inspector considers fully
+                # authorised. The seed is where the fiction is maintained, so
+                # a credential with no fiction is not a credential.
+                errors.append(
+                    f"[vm.network].credential: entry {item!r} has no `{key}`; "
+                    f"a block carries all three -- `name` selects the sealed "
+                    f"material, `placeholder` is the fiction the guest holds "
+                    f"in its place, and `env` is the variable it is seeded "
+                    f"into")
+                values = {}
+                break
+            values[key] = value.strip()
+        if not values:
+            continue
+        name, placeholder, env = (values["name"], values["placeholder"],
+                                  values["env"])
+        if not _CREDENTIAL_NAME_RE.match(name):
+            errors.append(
+                f"[vm.network].credential: {name!r} is not a usable credstore "
+                f"name -- letters, numbers, underscore and hyphen only. The "
+                f"name is the filename the sealed material lands under, and a "
+                f"`/` in it would put one workload's credential outside its "
+                f"own subtree")
+            continue
+        if not _CREDENTIAL_ENV_RE.match(env):
+            errors.append(
+                f"[vm.network].credential: {name!r} has `env` = {env!r}, "
+                f"which is not a shell variable name. It is written into the "
+                f"guest's environment as `{env}=...`, so a name with a space "
+                f"or an `=` in it produces a line the guest silently drops")
+            continue
+        if name in seen:
+            errors.append(
+                f"[vm.network].credential: {name!r} is declared twice. A "
+                f"policy entry selects a credential by name, so two blocks "
+                f"sharing one make the selector ambiguous -- and the file "
+                f"states two placeholders for material that has one")
+            continue
+        seen.add(name)
+        creds.append(VmCredential(name=name, placeholder=placeholder, env=env))
+    return creds, errors
+
+
 def _validate_policy(net: dict, splice_hosts, http2_hosts, egress: str,
-                     tls) -> tuple[list[VmPolicyEntry], list[str]]:
+                     tls, credentials=()) -> tuple[list[VmPolicyEntry], list[str]]:
     """Validate [[vm.network.policy]]. Returns (entries, errors).
 
     NO `hosts` PARAMETER, and its absence is the decision rather than a rule
@@ -3192,14 +3407,22 @@ def _validate_policy(net: dict, splice_hosts, http2_hosts, egress: str,
                     f"[[vm.network.policy]] tables, got "
                     f"{type(raw).__name__}"]
 
-    known = {"host", "methods", "paths"}
-    # Rung 6 (ADR 007). Named rather than reported as an unknown key, for the
-    # reason VM_TLS_UNBUILT gives: an operator who wrote `credential` should be
-    # told when it arrives, not sent hunting for a typo that is not there.
-    unbuilt = {
-        "credential": "rung 6 (ADR 007), where the broker attaches it",
-        "placeholder": "rung 6 (ADR 007), beside `credential`",
+    known = {"host", "methods", "paths", "credential"}
+    # `placeholder` was on the entry in the design's §3 draft and moved onto the
+    # [[vm.network.credential]] block when the guest variable name had to land
+    # somewhere too. Named rather than reported as an unknown key, for the reason
+    # VM_TLS_UNBUILT gives: an operator who wrote it followed a document that
+    # said to, and should be told where it went rather than sent hunting for a
+    # typo that is not there.
+    misplaced = {
+        "placeholder": (
+            "it is a property of the CREDENTIAL, not of the entry -- two "
+            "entries selecting one credential cannot disagree about it if "
+            "there is nowhere for them to disagree. Put it on the "
+            "[[vm.network.credential]] block that declares the name this "
+            "entry selects"),
     }
+    credential_names = {c.name for c in credentials}
     entries: list[VmPolicyEntry] = []
     for item in raw:
         if not isinstance(item, dict):
@@ -3207,17 +3430,15 @@ def _validate_policy(net: dict, splice_hosts, http2_hosts, egress: str,
                 f"[vm.network].policy entries are tables with `host` and "
                 f"optional `methods`/`paths`, got {item!r}")
             continue
-        for key in sorted(set(item) & set(unbuilt)):
+        for key in sorted(set(item) & set(misplaced)):
             errors.append(
-                f"[vm.network].policy: `{key}` is not built yet — it lands in "
-                f"{unbuilt[key]}. Accepting it now would give the request a "
-                f"disposition the config did not ask for while the file "
-                f"claimed a credential was attached")
-        unknown = sorted(set(item) - known - set(unbuilt))
+                f"[vm.network].policy: `{key}` does not belong on an entry — "
+                f"{misplaced[key]}")
+        unknown = sorted(set(item) - known - set(misplaced))
         if unknown:
             errors.append(
                 f"[vm.network].policy: unknown key(s) {', '.join(unknown)}; an "
-                f"entry carries `host`, `methods` and `paths`")
+                f"entry carries `host`, `methods`, `paths` and `credential`")
         if "host" not in item:
             errors.append(f"[vm.network].policy: entry {item!r} has no `host`")
             continue
@@ -3246,11 +3467,65 @@ def _validate_policy(net: dict, splice_hosts, http2_hosts, egress: str,
                         f"[vm.network].policy: {host!r} has an empty `paths` "
                         f"list, which permits no path at all. Omit the key to "
                         f"mean any path")
-        entries.append(VmPolicyEntry(host=host, methods=methods, paths=paths))
+        credential = None
+        if "credential" in item:
+            value = item["credential"]
+            if not isinstance(value, str) or not value.strip():
+                errors.append(
+                    f"[vm.network].policy: {host!r} `credential` must be the "
+                    f"name of a [[vm.network.credential]] block, got "
+                    f"{value!r}")
+            else:
+                credential = value.strip()
+                if credential not in credential_names:
+                    # Not a warning and not silently inert. An entry naming a
+                    # credential that does not exist is a host the operator
+                    # believes is brokered and is not: the request goes
+                    # straight to the provider carrying the guest's own
+                    # placeholder, and the provider answers 401 on a request
+                    # this layer considers fully authorised.
+                    errors.append(
+                        f"[vm.network].policy: {host!r} selects credential "
+                        f"{credential!r}, which no [[vm.network.credential]] "
+                        f"block declares. Declare it with `name`, "
+                        f"`placeholder` and `env`, or drop the key and let "
+                        f"the guest reach this host with whatever it holds")
+        entries.append(VmPolicyEntry(host=host, methods=methods, paths=paths,
+                                     credential=credential))
+
+    # A block nothing selects is material sealed, loaded into a broker instance
+    # and never attached to anything -- which reads, in the file and in
+    # `diagnose`, as a credential that IS in use. The reverse of the rule above
+    # and refused on the same terms.
+    for cred in credentials:
+        if not any(e.credential == cred.name for e in entries):
+            errors.append(
+                f"[vm.network].credential: {cred.name!r} is declared but no "
+                f"[[vm.network.policy]] entry selects it, so it is sealed, "
+                f"loaded and attached to nothing while the file reads as "
+                f"though a host were brokered. Add `credential = "
+                f"{cred.name!r}` to the entry for the host it belongs to, or "
+                f"drop the block")
 
     if not entries:
         return entries, errors
 
+    if tls == "splice" and any(e.credential for e in entries):
+        # Reported ALONGSIDE the entries-are-inert message below, not instead of
+        # it, and the redundancy is the point: that message tells the operator
+        # `methods` and `paths` cannot run, which is a lost restriction. This one
+        # tells them the credential is not attached, which is a lost REQUEST --
+        # the guest reaches the provider holding a placeholder and gets a 401 it
+        # cannot explain. An operator who read only the first message would fix
+        # the wrong half.
+        errors.append(
+            "[vm.network].policy: `credential` with tls = 'splice' — a spliced "
+            "connection is never decrypted, so there is no request for the "
+            "broker to attach a credential to and the guest reaches the "
+            "provider carrying its placeholder. Set tls = 'inspect' (the "
+            "default) for this workload and exempt only the hosts that cannot "
+            "take the CA with [[vm.network.splice]] entries, or drop the "
+            "credential and give the guest a real key.")
     if tls == "splice":
         errors.append(
             "[vm.network].policy with tls = 'splice' — a spliced connection is "
@@ -3300,6 +3575,43 @@ def _validate_policy(net: dict, splice_hosts, http2_hosts, egress: str,
                     f"enforced by name alone")
                 break
 
+    # The per-host twins of the two rules above, for the credential rather than
+    # for the rules. Kept separate for the same reason: the sibling messages
+    # name a lost restriction, and what is lost here is the request itself.
+    for entry in entries:
+        if not entry.credential:
+            continue
+        for spliced in splice_hosts:
+            if _patterns_overlap(entry.host, spliced):
+                errors.append(
+                    f"[vm.network].policy: {entry.host!r} selects credential "
+                    f"{entry.credential!r} and is also in .splice "
+                    f"({spliced!r}) — a spliced connection is never "
+                    f"decrypted, so nothing can be attached to the request "
+                    f"and the guest reaches the provider carrying its "
+                    f"placeholder. Drop the splice entry so the host is "
+                    f"inspected, or drop the credential")
+                break
+        for h2_host in http2_hosts:
+            # ADR 007's decision 4, which neither the design's validation list
+            # nor the ADR names -- both name the splice case, which is this
+            # one's exact twin. An h2 host is relayed at the frame level with
+            # its headers left HPACK-compressed, so there is no `Host`, no
+            # method and no path; and (uid, Host) is the ENTIRE dispatch key of
+            # a broker instance, which is an HTTP/1.1 server. A credential here
+            # cannot be attached at all, not merely attached less precisely.
+            if _patterns_overlap(entry.host, h2_host):
+                errors.append(
+                    f"[vm.network].policy: {entry.host!r} selects credential "
+                    f"{entry.credential!r} and is also in .http2 "
+                    f"({h2_host!r}) — an h2 connection is relayed at the frame "
+                    f"level with its headers HPACK-compressed, so there is no "
+                    f"`Host` for the broker to dispatch on and no request for "
+                    f"it to attach a credential to. Drop the .http2 entry for "
+                    f"this host and let it be inspected as HTTP/1.1, or move "
+                    f"the credential to a host that is not relayed")
+                break
+
     # §3's widening trap. Where more than one entry matches a host BY PATTERN,
     # every one of those entries must state both keys -- one entry omitting
     # `paths` permits every path on that host and silently defeats every
@@ -3327,16 +3639,71 @@ def _validate_policy(net: dict, splice_hosts, http2_hosts, egress: str,
                 f"file looks more restrictive than it is. State both keys on "
                 f"every overlapping entry")
 
+    # The credential's own widening trap, and it is TWO rules because the two
+    # shapes need different remedies.
+    #
+    # Entries union, so where several match one name every one of them governs
+    # it -- and the broker attaches at most one credential to a request. Two
+    # entries naming DIFFERENT credentials for one host make which key goes
+    # upstream a function of match order, which the file does not state; and one
+    # entry naming a credential beside one that does not means a request the
+    # narrow entry would have brokered can be admitted by the wide one and leave
+    # unbrokered. Both fail in the same silent direction: the guest's own
+    # placeholder reaches the provider and the 401 comes back from a request
+    # this layer considers fully authorised.
+    for i, entry in enumerate(entries):
+        siblings = [o for j, o in enumerate(entries)
+                    if j != i and _patterns_overlap(entry.host, o.host)]
+        if not siblings:
+            continue
+        # Reported from the EARLIER entry of the pair only (`j > i`), so a
+        # disagreement produces one message rather than one per participant --
+        # the same pair read from both ends is the same finding.
+        disagreeing = [o for j, o in enumerate(entries)
+                       if j > i and _patterns_overlap(entry.host, o.host)
+                       and o.credential and entry.credential
+                       and o.credential != entry.credential]
+        if disagreeing:
+            errors.append(
+                f"[vm.network].policy: {entry.host!r} selects credential "
+                f"{entry.credential!r} and {disagreeing[0].host!r} selects "
+                f"{disagreeing[0].credential!r}, and the two patterns match "
+                f"the same host. Entries union and at most one credential is "
+                f"attached, so which key goes upstream depends on match order "
+                f"rather than on this file. Give the overlapping entries one "
+                f"credential, or narrow their `host` patterns so they do not "
+                f"cover the same name")
+        unbrokered = [o for o in siblings if not o.credential]
+        if entry.credential and unbrokered:
+            # THE REMEDY THAT IS NOT ONE is named explicitly, because it is the
+            # first thing a reader reaches for: adding the credential to the
+            # wider entry does not narrow anything -- it brokers every request
+            # the wide entry admits, which is the opposite of what the narrow
+            # entry was written to do.
+            errors.append(
+                f"[vm.network].policy: {entry.host!r} selects credential "
+                f"{entry.credential!r} but {unbrokered[0].host!r} matches the "
+                f"same host and selects none. Entries union, so a request the "
+                f"wider entry admits leaves unbrokered carrying the guest's "
+                f"placeholder, and the file reads as though the host were "
+                f"brokered. Demote the unbrokered entry to a .hosts pattern if "
+                f"it exists only to allowlist the name, or narrow its `host` "
+                f"so it no longer covers this one. Adding the credential to it "
+                f"as well is NOT a fix: that brokers everything the wide entry "
+                f"admits, which is what the narrow entry exists to avoid")
+
     # A copy-paste a reader will assume does something.
     seen: dict = {}
     for entry in entries:
         key = (vm_normalise_hostname(entry.host),
                None if entry.methods is None else tuple(sorted(set(entry.methods))),
-               None if entry.paths is None else tuple(sorted(set(entry.paths))))
+               None if entry.paths is None else tuple(sorted(set(entry.paths))),
+               entry.credential)
         if key in seen:
             errors.append(
                 f"[vm.network].policy: {entry.host!r} appears twice with the "
-                f"same `methods` and `paths`. Entries union, so the duplicate "
+                f"same `methods`, `paths` and `credential`. Entries union, so "
+                f"the duplicate "
                 f"permits nothing the first does not — which a reader will "
                 f"assume it does. Drop one")
         seen[key] = entry
@@ -3566,8 +3933,13 @@ def _validate_egress(net: dict) -> list[str]:
                     f"the host can take this workload's CA")
                 break
 
+    # Before `policy`, because a policy entry selects a credential by name and
+    # the "no block declares it" rule needs the blocks.
+    credentials, credential_errors = _validate_credentials(net)
+    errors.extend(credential_errors)
+
     policy_entries, policy_errors = _validate_policy(
-        net, splice_hosts, http2_hosts, egress, tls)
+        net, splice_hosts, http2_hosts, egress, tls, credentials)
     errors.extend(policy_errors)
     policy_hosts = [e.host for e in policy_entries]
 
@@ -3644,7 +4016,7 @@ def _validate_egress(net: dict) -> list[str]:
     # guest's data path — no host socket, so no uid to match on.
     if "bridge" in net:
         for key in ("egress", "allow", "tls", "tls_reason", "internal",
-                    "splice", "http2", "policy"):
+                    "splice", "http2", "policy", "credential"):
             if key in net:
                 errors.append(
                     f"[vm.network].{key} has no effect with .bridge set — a "
@@ -3703,6 +4075,10 @@ def _validate_egress(net: dict) -> list[str]:
         for key in ("tls", "tls_reason", "internal", "splice", "http2"):
             # `policy` is not in this list: _validate_policy names it itself,
             # with a sentence about requests rather than about redirection.
+            # `credential` is not either, and for a stronger version of the same
+            # reason: a credential block is unusable without a policy entry
+            # selecting it, so the entry's own message has already fired and a
+            # second one about redirection would describe the wrong layer.
             if key in net:
                 errors.append(
                     f"[vm.network].{key} has no effect with .egress = "
@@ -3910,14 +4286,17 @@ VM_RESERVED_PLANES = (
         "198.18.0.0/16 carrying the same numbers. Refusing one family and not "
         "the other refuses half of every address, and the half left open is "
         "the one clients try first"),
-    ReservedPlane(
-        ipaddress.ip_network(f"{VM_BROKER_LISTEN_ADDR}/32"),
-        VM_BROKER_LISTEN_PORT,
-        "the credential broker's listener, where the uid of the connecting "
-        "socket is what selects a caller's credentials. Publishing a guest "
-        "port there is a guest answering in a credential boundary's place, "
-        "decided by start order"),
 )
+# The credential broker had a fourth entry here, 127.0.0.1:8081, when there was
+# one host-wide listener on an address operators publish on freely. Rung 6 moved
+# it to a per-workload address at VM_BROKER_ADDR_BASE, which is INSIDE
+# VM_MGMT_NETWORK -- so the reservation is inherited from the /9 rather than
+# stated, exactly as the synthesising responder's is. Deleted rather than
+# retargeted: an entry naming 127.129.0.0/9 would restate the first entry, and
+# one naming a single workload's address would need a uid this list does not
+# have. tests/test_vm_egress.py asserts the inheritance, because a test that
+# stopped checking the reservation would be indistinguishable from one that
+# never did.
 
 
 def vm_reserved_plane(addr: str, port: int | None = None) -> ReservedPlane | None:
