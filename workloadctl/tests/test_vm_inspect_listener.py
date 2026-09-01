@@ -102,6 +102,10 @@ def _serve_line(test, local, peer=("192.0.2.1", 1024)):
     return out.getvalue()
 
 
+# Policy fields that are deliberately NOT keys of the policy document. See
+# test_every_key_the_helper_writes_is_a_key_the_listener_reads.
+NON_DOCUMENT_FIELDS = {"digest"}
+
 class TestPlaneDetection(unittest.TestCase):
     """The plane is the accepting port, from getsockname() on the inherited fd.
 
@@ -575,6 +579,13 @@ class TestPolicyLoading(unittest.TestCase):
         DROP_REASONS and PER_HOST_REASONS are for the counters. A key added to
         the document with no field behind it fails here, and the fix is to
         decide deliberately whether the listener should be reading it.
+
+        NON_DOCUMENT_FIELDS is the one exemption and it is enumerated rather
+        than tolerated, so a field added later without thought still fails
+        here. `digest` is in it because rung 5 decision 3 puts the digest in
+        the STATUS file and never in the policy document: a document carrying
+        its own digest would stop being a pure function of the TOML, and every
+        drift comparison would then have to know to ignore one of its own keys.
         """
         mod = _mod()
         doc = vm_inspect_policy({
@@ -583,7 +594,13 @@ class TestPolicyLoading(unittest.TestCase):
             "splice": [{"host": "pinned.example.com", "reason": "pinned"}],
             "http2": [{"host": "grpc.example.com", "reason": "gRPC"}],
             "policy": [{"host": "api.example.com", "methods": ["GET"]}]})
-        self.assertEqual(set(doc), set(mod.Policy._fields))
+        self.assertEqual(set(doc),
+                         set(mod.Policy._fields) - NON_DOCUMENT_FIELDS)
+        # The other direction of the exemption: a digest that leaked INTO the
+        # document is the thing decision 3 refuses, and it would pass the line
+        # above unnoticed.
+        for field in NON_DOCUMENT_FIELDS:
+            self.assertNotIn(field, doc)
 
     def test_the_document_carries_the_internal_list_through(self):
         """The listener's copy of [[vm.network.internal]] authorises nothing --

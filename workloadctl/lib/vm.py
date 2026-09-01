@@ -512,7 +512,7 @@ NFT_SET_INTERNAL_OK6 = "wl_internal_ok6"
 # the arming path can refuse an element the drop would never have caught.
 #
 # Duplicating them is the lesser evil and the test is what makes it safe:
-# tests/test_vm_egress.py asserts these against the elements the .nft actually
+# tests/test_cmd_egress.py asserts these against the elements the .nft actually
 # arms, so a range added on one side and not the other fails rather than
 # silently making the refusal wrong. Parsing the .nft at runtime was the
 # alternative and it puts a parser on the start path of every VM to answer a
@@ -846,6 +846,65 @@ VM_INSPECT_RECORD_DECISIONS = ("forward", "drop")
 # the paths that carry requests this design never decodes.
 VM_INSPECT_RECORD_MODES = ("forward", "terminate", "splice", "h2")
 
+# The two planes a record can have arrived on, which is the port the guest
+# dialled and not what the listener then did with the connection.
+VM_INSPECT_RECORD_PLANES = ("tls", "cleartext")
+
+# Every value the record's `reason` field can carry -- the listener's own
+# DROP_REASONS, restated whole rather than the four VM_DROP_* keys `diagnose`
+# happened to need.
+#
+# THE WHOLE SET, because `workloadctl egress --reason` validates against it.
+# A closed set is the point: a reason value that matches nothing renders
+# identically to a guest that never hit that refusal, so `--reason
+# "not allowed"` for `not allowlisted` would print an empty report and an
+# operator would conclude the denial never happened. Validated, it is an
+# argparse error naming the valid values instead.
+#
+# This matters more since the guest-facing refusal body was made generic: the
+# guest is told nothing about WHY, so `reason` here is the only place a
+# not-allowlisted denial is distinguishable from a not-permitted one.
+#
+# tests/test_cmd_egress.py pins this against the listener's DROP_REASONS in both
+# directions -- a reason the listener writes and this omits is a filter that
+# cannot select a real refusal, and one this carries that the listener never
+# writes is a filter that always returns nothing.
+VM_DROP_NOT_ALLOWLISTED = "not allowlisted"
+VM_DROP_NO_NAME = "no readable name"
+VM_DROP_UNREADABLE_REQUEST = "unreadable request"
+VM_DROP_UNREACHABLE = "upstream unreachable"
+VM_DROP_INTERNAL = "internal destination"
+VM_DROP_CEILING = "connection ceiling reached"
+VM_DROP_RELAY_FAILED = "relay failed"
+VM_DROP_TIMED_OUT = "timed out"
+VM_DROP_UNVERIFIED = "upstream certificate unverified"
+VM_DROP_CLIENT_CERT = "upstream wants a client certificate"
+VM_DROP_THROTTLED = "mint rationed"
+VM_DROP_MINT_FAILED = "could not mint a leaf"
+VM_DROP_NOT_H2 = "not HTTP/2"
+VM_DROP_NOT_PERMITTED = "not permitted by policy"
+
+VM_INSPECT_RECORD_REASONS = (
+    VM_DROP_NOT_ALLOWLISTED,
+    VM_DROP_NO_NAME,
+    VM_DROP_UNREADABLE_REQUEST,
+    VM_DROP_UNREACHABLE,
+    VM_DROP_INTERNAL,
+    VM_DROP_CEILING,
+    VM_DROP_RELAY_FAILED,
+    VM_DROP_TIMED_OUT,
+    VM_DROP_UNVERIFIED,
+    VM_DROP_CLIENT_CERT,
+    VM_DROP_MISDIRECTED,
+    VM_DROP_MISDIRECTED_LISTED,
+    VM_DROP_THROTTLED,
+    VM_DROP_MINT_FAILED,
+    VM_DROP_NOT_HTTP,
+    VM_DROP_NOT_HTTP_POLICY,
+    VM_DROP_NOT_H2,
+    VM_DROP_NOT_PERMITTED,
+)
+
 
 def vm_inspect_status_path(name: str) -> str:
     """Where one workload's inspector writes its counters.
@@ -1017,6 +1076,43 @@ def vm_inspect_policy_text(net: dict) -> str:
     every hunk.
     """
     return json.dumps(vm_inspect_policy(net), indent=2, sort_keys=True) + "\n"
+
+
+# How much of the digest an operator is shown. Twelve hex characters is enough
+# to tell two documents apart by eye in a diagnostic line and short enough to
+# sit inside one; the full value stays in the status file, where the comparison
+# is actually made.
+VM_INSPECT_DIGEST_SHORT = 12
+
+# The key the listener echoes its loaded document's digest under. Named here
+# rather than spelled at both ends: the writer is the listener and the reader
+# is `diagnose`, and a typo in either would read as "an older listener that
+# does not report a digest", which is the one state the check treats as
+# silence.
+VM_INSPECT_DIGEST_KEY = "policy_digest"
+
+
+def vm_inspect_policy_digest(text: str) -> str:
+    """The digest of one rendered policy document.
+
+    THE ONE PRODUCER, for the same reason vm_inspect_policy_text is: the
+    listener digests the bytes it loaded and `diagnose` digests the bytes on
+    disk, and the two are compared for equality. A hashlib call at each end
+    would be two definitions of that comparison, and the failure mode of a
+    disagreement is not a missed alarm -- it is a PERMANENT one, on every
+    inspected workload on the host, which is how a signal stops being read.
+
+    Over the text rather than over the parsed document, because the text is
+    what both sides have: the listener holds the string it read, and the
+    reader holds the file. Digesting a re-parsed structure would also make the
+    value depend on this Python's dict ordering rather than on the file.
+    """
+    return hashlib.sha256(text.encode()).hexdigest()
+
+
+def vm_inspect_digest_short(digest: str | None) -> str:
+    """A digest as it is shown to a person, or `unknown` for a missing one."""
+    return digest[:VM_INSPECT_DIGEST_SHORT] if digest else "unknown"
 
 
 def vm_normalise_hostname(host: str) -> str:
@@ -1659,6 +1755,13 @@ VM_CA_VALIDITY_DAYS = 3650
 # permanently. The backdate is not what makes pauses survivable; the mint-time
 # clock check is. See tests/manual/clock_rig.py.
 VM_CA_BACKDATE_SECONDS = 3600
+
+# The window VM_CA_VALIDITY_DAYS' comment already promised: `diagnose` warns
+# inside the last year. A year rather than a month because the remedy is a
+# RE-PROVISION -- cloud-init runs once per instance-id, so the guest is rebuilt,
+# not restarted -- and a month's notice for that is notice of an outage rather
+# than of a decision.
+VM_CA_EXPIRY_WARN_DAYS = 365
 
 
 def vm_ca_dir(state_dir) -> Path:

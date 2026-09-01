@@ -72,8 +72,10 @@ answer; until a wlresolve_t module ships, that check failing IS the finding.
 """
 
 import argparse
+import hashlib
 import json
 import shutil
+import stat
 import subprocess
 import sys
 import time
@@ -126,6 +128,27 @@ RESOLVE_STATUS = "resolve-status.json"
 RESOLVE_PROBE = "rig-probe.example.net"
 
 AUDIT_LOG = "/var/log/audit/audit.log"
+
+# The record's home, its filename, its join field and the one reason the plain
+# arm must produce. Spelled out rather than imported from lib/vm.py for the
+# reason the run dir and the ports are: a rig that computes both sides from one
+# constant cannot notice them drifting apart.
+RECORD_ROOT = "/var/log/workloadctl/egress"
+RECORD_FILE = "requests.log"
+LOG_ID_FIELD = "id"
+NOT_ALLOWLISTED = "not allowlisted"
+
+# A uid that is emphatically not root and not any workload's. `nobody` is 65534
+# on every Fedora host, and the assertion it serves is that the record's 0600
+# under a 0700 under a 0700 is real rather than argued.
+NOBODY_UID = 65534
+INSPECT_POLICY = "inspect.json"
+DIGEST_KEY = "policy_digest"
+# /var/lib/workloads, NOT /etc/workloads.d: the bundle directory holds the
+# TOML, the state subtree holds the PKI. A rig pointed at the config root
+# finds no certificate and reports the fingerprint check as unarmed.
+WORKLOADS_STATE = "/var/lib/workloads"
+CA_REL = "state/ca/egress-ca.crt"
 
 # The listener's STATUS_INTERVAL, spelled out for the usual reason. The file is
 # written once before the accept loop and then on this cadence, so a check that
@@ -486,6 +509,285 @@ def probes():
                + (log.strip().splitlines() or ["<no journal line>"])[-1])
 
 
+def egress(name, *flags, as_uid=None, timeout=60):
+    """`workloadctl egress`, optionally as somebody who should not be able to."""
+    argv = ["workloadctl", "egress", name, *flags]
+    if as_uid is not None:
+        argv = ["setpriv", "--reuid", str(as_uid), "--regid", str(as_uid),
+                "--clear-groups"] + argv
+    return subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
+
+
+def records():
+    """THE SEAM T1 AND T2 ONLY HAVE TOGETHER — rung 5.
+
+    A live guest makes a request, and an operator reads it back. Nothing in the
+    unit suite reaches this: the record's writer is exercised against a fake
+    listener and its reader against a fixture directory, and both are green on
+    a host where the file is never created because the unit's LogsDirectory=
+    is wrong, or its label is, or the listener's write is denied and swallowed
+    by the OSError handler that must never let a diagnostic kill a request.
+
+    THE REQUEST UNDER TEST IS AN ALLOWED ONE, deliberately. Refusals already
+    log to the journal today, so a record containing only refusals would be a
+    green reading that means nothing about whether the allowed path records at
+    all — and the allowed path is the one the private sink exists for, since a
+    denied request never reached anything.
+
+    The plain arm supplies the other half: `reason` is now the ONLY place a
+    not-allowlisted denial is distinguishable from a not-permitted one, because
+    the guest-facing refusal body was made generic and names neither.
+    """
+    say("== the record ==")
+    allowed, plain = "wlri-hosts", "wlri-plain"
+    marker = f"/rig-{int(time.time())}"
+
+    d = Path(RECORD_ROOT) / allowed
+    f = d / RECORD_FILE
+
+    mark = time.strftime("%Y-%m-%d %H:%M:%S")
+    time.sleep(1.2)
+    r = guest(allowed, f"curl -sS -m 25 -o /dev/null -w '%{{http_code}}' "
+                       f"http://{ALLOWED_HOST}{marker} ; echo ' rc='$?",
+              timeout=60)
+    time.sleep(2)
+
+    # THE ACL, on hardware. The mode argument in the plan is only an argument
+    # until a real listener has created the file as its own uid under a
+    # LogsDirectory= systemd made.
+    try:
+        dst, fst = d.stat(), f.stat()
+    except OSError as exc:
+        record(f"{allowed}: the record file exists", False, str(exc))
+        record(f"{allowed}: the record's modes are 0700/0600", False, "no file")
+        record(f"{allowed}: an allowed request is recorded", False, "no file")
+        record(f"{allowed}: the record's id joins to a journal line", False,
+               "no file")
+        record(f"{allowed}: --id selects that connection alone", False, "no file")
+        record(f"{plain}: a denial's reason names which denial it was", False,
+               "no file")
+        record(f"{allowed}: a non-root read is refused with a sentence", False,
+               "no file")
+        record("egress: an unknown --reason is an error, not an empty report",
+               False, "no file")
+        return
+
+    uid = uid_of(allowed)
+    record(f"{allowed}: the record file exists", True, str(f))
+    record(f"{allowed}: the record's modes are 0700/0600",
+           stat.S_IMODE(dst.st_mode) == 0o700
+           and stat.S_IMODE(fst.st_mode) == 0o600
+           and dst.st_uid == uid and fst.st_uid == uid,
+           f"dir {oct(stat.S_IMODE(dst.st_mode))} uid {dst.st_uid}, "
+           f"file {oct(stat.S_IMODE(fst.st_mode))} uid {fst.st_uid}, "
+           f"workload uid {uid}")
+
+    # Read it back the way an operator would, through the shipped CLI.
+    got = egress(allowed, "--json", "--lines", "0")
+    try:
+        doc = json.loads(got.stdout)
+    except ValueError:
+        doc = None
+    hit = None
+    for rec in (doc or {}).get("records", []):
+        if rec.get("path") == marker and rec.get("decision") == "forward":
+            hit = rec
+            break
+    record(f"{allowed}: an allowed request is recorded", hit is not None,
+           (f"{hit}" if hit else
+            f"curl: {parse_probe(r)} | egress rc={got.returncode} "
+            f"{(got.stderr or got.stdout).strip()[:300]}"))
+
+    if hit:
+        # THE JOIN, in the direction an operator walks it: the id in the record
+        # is the id on the journal line for the same connection. Asserted
+        # against real output on both sides rather than against the constant,
+        # because the constant agreeing with itself is what the unit pin
+        # already covers.
+        cid = hit.get(LOG_ID_FIELD)
+        log = journal_since(allowed, mark)
+        record(f"{allowed}: the record's id joins to a journal line",
+               bool(cid) and f"{LOG_ID_FIELD}={cid}" in log,
+               f"{LOG_ID_FIELD}={cid} | "
+               + (log.strip().splitlines() or ["<no journal line>"])[-1])
+
+        sel = egress(allowed, "--json", "--lines", "0",
+                     "--id", f"{LOG_ID_FIELD}={cid}")
+        try:
+            picked = json.loads(sel.stdout).get("records", [])
+        except ValueError:
+            picked = []
+        record(f"{allowed}: --id selects that connection alone",
+               bool(picked) and all(p.get(LOG_ID_FIELD) == cid for p in picked),
+               f"{len(picked)} record(s), ids "
+               f"{sorted({p.get(LOG_ID_FIELD) for p in picked})}")
+    else:
+        record(f"{allowed}: the record's id joins to a journal line", False,
+               "no allowed record to join from")
+        record(f"{allowed}: --id selects that connection alone", False,
+               "no allowed record to select")
+
+    # The plain arm dialled hosts nothing allowlists, so its record must say
+    # WHICH refusal that was. The guest was told nothing.
+    denied = egress(plain, "--json", "--lines", "0", "--decision", "drop")
+    try:
+        reasons = {x.get("reason")
+                   for x in json.loads(denied.stdout).get("records", [])}
+    except ValueError:
+        reasons = set()
+    record(f"{plain}: a denial's reason names which denial it was",
+           NOT_ALLOWLISTED in reasons,
+           f"egress rc={denied.returncode}, reasons seen: "
+           f"{sorted(x for x in reasons if x)}")
+
+    # THE ACL AGAIN, from the other side: the mode bits above are a claim about
+    # what a non-root reader gets, and this is that reader.
+    nobody = egress(allowed, as_uid=NOBODY_UID)
+    record(f"{allowed}: a non-root read is refused with a sentence",
+           nobody.returncode != 0
+           and "root" in (nobody.stderr or "") and "Traceback" not in
+           (nobody.stderr or ""),
+           f"rc={nobody.returncode} {(nobody.stderr or '').strip()[:200]}")
+
+    # A filter value that matches nothing renders identically to a guest that
+    # never hit that refusal. Asserted against the shipped CLI, not the module.
+    bad = egress(allowed, "--reason", "not allowed")
+    record("egress: an unknown --reason is an error, not an empty report",
+           bad.returncode != 0 and NOT_ALLOWLISTED in (bad.stderr or ""),
+           f"rc={bad.returncode} {(bad.stderr or '').strip()[:200]}")
+
+
+def diagnose(name, timeout=120):
+    """`workloadctl diagnose <name>` as an operator runs it."""
+    return subprocess.run(["workloadctl", "diagnose", name],
+                          capture_output=True, text=True, timeout=timeout)
+
+
+def staleness():
+    """THE SEAMS T4, T5 AND T7 ONLY HAVE ON A LIVE HOST — rung 5.
+
+    All three are cross-process comparisons between a value a RUNNING process
+    holds and a value on disk, and every one of them is green in the unit suite
+    against injected observations. What the unit suite cannot reach:
+
+      T4  the digest has to survive the trip. The listener computes it at its
+          own start and writes it into a status file in a RuntimeDirectory a
+          confined domain may not be able to write -- and that write is
+          guaranteed never to raise, so a denial produces a missing key, which
+          the reader is REQUIRED to treat as silence. Absent this check, a
+          policy comparison that never runs and a policy comparison that always
+          agrees are the same green line.
+
+      T5  the four filter-table sets have to be readable by name from the CLI's
+          own domain. A drifted name, a set that moved tables, or an `nft`
+          the CLI may not exec all produce "unreadable", which is also silence.
+
+      T7  the fingerprint the minter reports has to equal the one computed off
+          the file. Both come from vm_mint.pem_fingerprint, but only here do
+          they come from two different PROCESSES reading two different copies
+          -- the listener's remembered value against a fresh read.
+
+    Each destructive step is undone before the next assertion, and the undo is
+    asserted rather than assumed: a rig that breaks the product and dies leaves
+    the next run measuring the break. See tests/manual/README.md.
+    """
+    say("== staleness (T4/T5/T7) ==")
+    name = "wlri-hosts"
+    uid = uid_of(name)
+    policy = str(Path(VM_RUN_DIR) / name / INSPECT_POLICY)
+
+    # --- T4: the digest reaches the status file, and it is the RIGHT one ---
+    doc, detail = read_status(name, INSPECT_STATUS)
+    running = (doc or {}).get(DIGEST_KEY)
+    record("the listener reports a policy digest",
+           bool(running), f"{DIGEST_KEY}={running!r} ({detail})")
+
+    try:
+        on_disk = hashlib.sha256(Path(policy).read_bytes()).hexdigest()
+    except OSError as exc:
+        on_disk = None
+        say(f"  could not read {policy}: {exc}")
+    record("the reported digest is of the document on disk",
+           bool(running) and running == on_disk,
+           f"running={running} disk={on_disk}")
+
+    # A healthy workload must not be reported stale. Asserted before the
+    # break, because a check that fires on everything would "pass" the break
+    # below for the wrong reason.
+    clean = diagnose(name)
+    record("a current listener is not reported stale",
+           "DIFFERENT policy" not in clean.stdout,
+           clean.stdout[-400:] if "DIFFERENT policy" in clean.stdout else "quiet")
+
+    # --- T4: make the disk copy differ, and require diagnose to say so ---
+    saved = None
+    try:
+        saved = Path(policy).read_bytes()
+        doc_on_disk = json.loads(saved)
+        doc_on_disk["hosts"] = list(doc_on_disk.get("hosts") or []) + [
+            "rig-added.invalid"]
+        Path(policy).write_text(json.dumps(doc_on_disk, indent=2,
+                                          sort_keys=True) + "\n")
+        stale = diagnose(name)
+        record("an edited document is reported as a stale listener",
+               "DIFFERENT policy" in stale.stdout, stale.stdout[-400:])
+        record("the stale remedy names the VM, not the socket",
+               "DIFFERENT policy" in stale.stdout
+               and f"restart workload-{name}.service" in stale.stdout,
+               stale.stdout[-400:])
+    except (OSError, ValueError) as exc:
+        record("an edited document is reported as a stale listener",
+               False, f"could not rewrite {policy}: {exc}")
+    finally:
+        if saved is not None:
+            # NOT a best-effort restore: leaving the document edited would make
+            # the next run of this rig measure the edit, and the arm would look
+            # broken in a way that reads exactly like the product being broken.
+            Path(policy).write_bytes(saved)
+    after = diagnose(name)
+    record("the document was restored",
+           "DIFFERENT policy" not in after.stdout, after.stdout[-400:])
+
+    # --- T5: the four filter-table sets, read by the names diagnose uses ---
+    for set_name in ("wl_inspect_dst", "wl_inspect_dst6",
+                     "wl_inspect_self", "wl_inspect_self6"):
+        # "workload_filter", not "inet workload_filter": set_elements matches
+        # nft's own `table` field, which carries the name alone. The family is
+        # a sibling key. Getting this wrong reads as an unarmed set, which is
+        # indistinguishable from the failure under test.
+        elems = set_elements("workload_filter", set_name)
+        # On the FIRST component, not a substring of the rendered element: uid
+        # 10001 is a substring of 100010 and of the port list, so the loose
+        # test guards() uses for the maps would pass here on a set belonging to
+        # a different workload entirely.
+        armed = elems is not None and any(
+            isinstance(e, dict) and isinstance(e.get("concat"), list)
+            and e["concat"] and str(e["concat"][0]) == str(uid)
+            for e in elems)
+        record(f"{set_name} carries uid {uid}", armed,
+               f"elements={elems!r}"[:200])
+
+    # --- T7: the minter's CA fingerprint equals a fresh read of the file ---
+    ca = ((doc or {}).get("mint") or {}).get("ca") or {}
+    reported = ca.get("sha256") if isinstance(ca, dict) else None
+    cert = Path(WORKLOADS_STATE) / name / CA_REL
+    fresh = None
+    if cert.exists():
+        out = subprocess.run(
+            ["openssl", "x509", "-in", str(cert), "-noout",
+             "-fingerprint", "-sha256"],
+            capture_output=True, text=True, timeout=30)
+        if out.returncode == 0:
+            fresh = out.stdout.strip().partition("=")[2].strip()
+    record("the minter's CA fingerprint matches the file on disk",
+           bool(reported) and reported == fresh,
+           f"reported={reported} openssl={fresh} cert={cert}")
+    record("the CA report carries an expiry",
+           isinstance(ca, dict) and isinstance(
+               ca.get("not_after"), (int, float)),
+           f"ca={ca!r}")
+
+
 def status_path(name, filename):
     return Path(VM_RUN_DIR) / name / filename
 
@@ -752,9 +1054,18 @@ def main():
         guards()
         mark = audit_mark()
         probes()
+        # After the probes, so there is traffic to have recorded, and before
+        # the restart, which is where the counters (and only the counters) are
+        # cleared -- the record file deliberately outlives a restart, which is
+        # why its ids are minted rather than counted.
+        records()
         # After the probes, so both producers have been socket-activated and
         # have something to report. Before the restart, which clears them.
         exemptions()
+        # After exemptions, so the minter has certainly run and the CA report
+        # exists; before domains(), because the deliberate policy edit below is
+        # undone in a finally and must not be left standing by a later failure.
+        staleness()
         domains()
         before = status_files(mark)
         restart_clears_status(before)

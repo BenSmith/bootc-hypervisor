@@ -231,7 +231,8 @@ class TestTheFiguresReachTheLine(unittest.TestCase):
         elems = [{"concat": [10001, 80]}, {"concat": [10001, 443]}]
         return self.mod.vm_inspect_check(
             cfg, elements4=elems, elements6=elems, socket_active=True,
-            v6_route=True, self_dials=None, status=status)
+            v6_route=True, self_dials=None, status=status,
+            filter_sets={})
 
     def test_both_figures_are_on_the_line(self):
         name, ok, detail = self._line({

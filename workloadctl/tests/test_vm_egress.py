@@ -1384,6 +1384,10 @@ class TestInspectDiagnose(unittest.TestCase):
         # the reading on a host where the set cannot be read, which is what
         # every test that is not about this counter should see.
         kw.setdefault("self_dials", None)
+        # Same reason, for rung 5's four filter-table sets: an empty mapping
+        # reads as "none of them could be read", which is the silent branch and
+        # the right default for every test that is not about them.
+        kw.setdefault("filter_sets", {})
         return self.mod.vm_inspect_check(self._config(tls=tls), **kw)
 
     # --- applicability ---
@@ -2020,7 +2024,7 @@ class TestSelfDialCounterIsReported(unittest.TestCase):
         elems = [{"concat": [10001, 80]}, {"concat": [10001, 443]}]
         return self.mod.vm_inspect_check(
             cfg, elements4=elems, elements6=elems, socket_active=True,
-            v6_route=True, self_dials=self_dials)
+            v6_route=True, self_dials=self_dials, filter_sets={})
 
     def test_a_nonzero_count_is_named_with_its_remedy(self):
         name, ok, detail = self._line((12, 720))

@@ -304,7 +304,7 @@ class LeafCache:
         path = self.path_for(name)
         if not path.exists():
             return None
-        not_after = _pem_not_after(path)
+        not_after = pem_not_after(path)
         if not_after is None:
             path.unlink(missing_ok=True)
             return None
@@ -337,8 +337,14 @@ class LeafCache:
             return name in self._entries
 
 
-def _pem_fingerprint(path: Path) -> str | None:
+def pem_fingerprint(path: Path) -> str | None:
     """The SHA-256 fingerprint of the certificate in a PEM, or None.
+
+    Public, and it was not always: `diagnose` compares the CA a running
+    listener is minting with against the one on disk, and a second
+    implementation of "the fingerprint of a PEM" is the one thing that
+    comparison cannot survive -- two spellings of the same certificate report
+    a mismatch forever, on every workload.
 
     Decoded here rather than shelled out to openssl. A fingerprint is a hash of
     the DER, the DER is what the base64 between the PEM markers decodes to, and
@@ -369,7 +375,7 @@ def _pem_fingerprint(path: Path) -> str | None:
     return ":".join(digest[i:i + 2] for i in range(0, len(digest), 2))
 
 
-def _pem_not_after(path: Path) -> float | None:
+def pem_not_after(path: Path) -> float | None:
     """The notAfter of the certificate in a PEM, as a unix timestamp.
 
     `ssl.cert_time_to_seconds` on the text openssl prints, rather than parsing
@@ -541,8 +547,8 @@ class Minter:
         if self._ca_identity is None:
             cert = vm_ca_cert_path(self.state_dir)
             self._ca_identity = {
-                "sha256": _pem_fingerprint(cert),
-                "not_after": _pem_not_after(cert),
+                "sha256": pem_fingerprint(cert),
+                "not_after": pem_not_after(cert),
             }
         return dict(self._ca_identity)
 
@@ -621,7 +627,7 @@ class Minter:
                 f"{exc}") from exc
 
         self._bump(*(("mints", "denied_mints") if denied else ("mints",)))
-        not_after = _pem_not_after(target)
+        not_after = pem_not_after(target)
         if not_after is None:
             # A leaf we just minted and cannot read back is not a leaf.
             target.unlink(missing_ok=True)

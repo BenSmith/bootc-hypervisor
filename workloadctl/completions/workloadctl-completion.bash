@@ -5,7 +5,7 @@ _workload_ctl_completion() {
     local cur prev words cword
     _init_completion || return
 
-    local commands="backup build catalog cleanup clone cp create diagnose disable doctor drift duplicate edit enable exec health images incant info init install list logs pcap reboot recreate restart restore rollback secret shell start stats status stop update validate"
+    local commands="backup build catalog cleanup clone cp create diagnose disable doctor drift duplicate edit egress enable exec health images incant info init install list logs pcap reboot recreate restart restore rollback secret shell start stats status stop update validate"
     local workload_dir="/etc/workloads.d"
     local credstore_dir="/etc/credstore.encrypted"
     local bundles_dir="/usr/share/workloadctl/workloads"
@@ -128,6 +128,25 @@ _workload_ctl_completion() {
         doctor)
             if [[ "$cur" == -* ]]; then
                 COMPREPLY=( $(compgen -W "--json" -- "$cur") )
+            else
+                COMPREPLY=( $(compgen -W "$workloads" -- "$cur") )
+            fi
+            return 0
+            ;;
+        egress)
+            # Flags, then the workload. The closed vocabularies are completed
+            # from the same values cmd_egress validates against; --reason takes
+            # a substring, so there is nothing finite to offer for it.
+            if [[ "$prev" == "--decision" ]]; then
+                COMPREPLY=( $(compgen -W "forward drop" -- "$cur") )
+            elif [[ "$prev" == "--mode" ]]; then
+                COMPREPLY=( $(compgen -W "forward terminate splice h2" -- "$cur") )
+            elif [[ "$prev" == "--plane" ]]; then
+                COMPREPLY=( $(compgen -W "tls cleartext" -- "$cur") )
+            elif [[ "$cur" == -* ]]; then
+                COMPREPLY=( $(compgen -W "-n --lines -g --group --json --id
+                    --decision --mode --plane --reason --host --method
+                    --status --since --until" -- "$cur") )
             else
                 COMPREPLY=( $(compgen -W "$workloads" -- "$cur") )
             fi

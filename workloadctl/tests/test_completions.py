@@ -119,6 +119,64 @@ class OfferedFlagsTest(unittest.TestCase):
         self.assertEqual(bad, {}, f"flags offered but not accepted: {bad}")
 
 
+class OfferedChoiceValuesTest(unittest.TestCase):
+    """Every VALUE offered for a flag is one that flag's `choices=` accepts.
+
+    Flags were checked, values were not — so `egress`'s arm restated three
+    closed vocabularies (`forward drop`, `forward terminate splice h2`,
+    `tls cleartext`) as bash literals under a comment claiming they came from
+    the values cmd_egress validates against. They did not; they were a fourth
+    copy, and the next value added to VM_INSPECT_RECORD_MODES would simply
+    never be offered.
+
+    Derived the same way the flag test is, from argparse's own rendering:
+    a `choices=` flag prints as `--flag {a,b,c}` in --help. One direction only,
+    for the reason stated at the top of this file — an arm may omit a value as
+    noise; offering one the parser will reject is always a bug.
+    """
+
+    def _offered(self, blk):
+        """{flag: {values}} for each `$prev == "--flag"` arm that offers a -W list."""
+        out = {}
+        for flag, words in re.findall(
+                r'"\$prev" == "(--[a-zA-Z][a-zA-Z0-9-]*)"[^\n]*\n[^\n]*'
+                r'-W "([^"]+)"', blk):
+            out[flag] = set(words.split())
+        return out
+
+    def test_offered_values_are_accepted_choices(self):
+        bad = {}
+        for cmd, blk in sorted(_branches().items()):
+            if cmd == "secret":
+                continue
+            help_text = _cli_help(cmd)
+            declared = {f"--{name}": set(values.split(","))
+                        for name, values in re.findall(
+                            r"--([a-zA-Z][a-zA-Z0-9-]*) \{([^}]+)\}", help_text)}
+            for flag, offered in self._offered(blk).items():
+                if flag not in declared:
+                    # No `choices=` on that flag: it takes free text (--host,
+                    # --reason), and whatever the arm offers is a hint, not a
+                    # claim about a closed set.
+                    continue
+                if offered - declared[flag]:
+                    bad[f"{cmd} {flag}"] = sorted(offered - declared[flag])
+        self.assertEqual(bad, {}, f"values offered but not accepted: {bad}")
+
+    def test_the_check_can_see_at_least_one_closed_vocabulary(self):
+        """A selector that matches nothing passes vacuously — check it bites.
+
+        The regex above walks bash, and bash is not a language this file
+        parses reliably; an arm reformatted onto different lines would make
+        every command contribute an empty dict and the test above go green
+        having compared nothing.
+        """
+        found = {flag for cmd, blk in _branches().items()
+                 if cmd != "secret"
+                 for flag in self._offered(blk)}
+        self.assertIn("--decision", found)
+
+
 class SecretSubcommandTest(unittest.TestCase):
     """`secret`'s nested verbs, checked against the nested parser."""
 

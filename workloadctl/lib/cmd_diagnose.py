@@ -16,6 +16,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 
 from workload_lib import (
     derived_subid_range,
@@ -33,6 +34,7 @@ from workload_lib import (
     workload_data_dir,
     workload_env_dir,
     workload_root_dir,
+    workload_state_dir,
     WORKLOADCTL_VERSION,
     WORKLOADS_BASE,
 )
@@ -58,7 +60,11 @@ from vm import (
     vm_owned_elements,
     NFT_PROXY_TABLE,
     NFT_MAP_INSPECT4, NFT_MAP_INSPECT6, NFT_SET_INSPECT_SELF,
-    NFT_SET_INSPECT_SELF6, VM_INSPECT_PORT_CLEARTEXT,
+    NFT_SET_INSPECT_SELF6, NFT_SET_INSPECT_DST, NFT_SET_INSPECT_DST6,
+    VM_INSPECT_DIGEST_KEY, vm_inspect_policy_digest,
+    VM_CA_EXPIRY_WARN_DAYS, vm_ca_cert_path,
+    vm_inspect_policy_path, vm_inspect_digest_short, VM_INSPECT_DIGEST_SHORT,
+    VM_INSPECT_PORT_CLEARTEXT,
     VM_INSPECT_PORT_TLS, VM_INSPECT_ORIG_CLEARTEXT, VM_INSPECT_ORIG_TLS,
     VM_TLS_DEFAULT,
     vm_inspect_address, vm_inspect_status_path, vm_uses_inspect,
@@ -67,6 +73,7 @@ from vm import (
     VM_RESOLVE_PORT, vm_resolve_address, vm_resolve_policy_path,
     vm_uses_resolve,
 )
+from vm_mint import pem_fingerprint
 from vm_status import OTHER_KEY
 from vm_provision import (
     PROVISION_DONE, PROVISION_FAILED, PROVISION_UNVERIFIED,
@@ -1426,7 +1433,8 @@ def _not_http_fragments(status) -> list[str]:
 
 def vm_inspect_check(config, *, elements4=PROBE, elements6=PROBE,
                      socket_active=PROBE, v6_route=PROBE, self_dials=PROBE,
-                     status=PROBE) -> tuple[str, bool, str] | None:
+                     status=PROBE, filter_sets=PROBE, disk_digest=PROBE,
+                     disk_ca=PROBE) -> tuple[str, bool, str] | None:
     """Report whether a VM's egress is actually being redirected to its inspector.
 
     Returns None for workloads the redirect does not apply to (not a VM,
@@ -1499,6 +1507,30 @@ def vm_inspect_check(config, *, elements4=PROBE, elements6=PROBE,
                 f"A probe on the armed family passes and shows nothing wrong. "
                 f"Re-arm both: {restart}")
 
+    if filter_sets is PROBE:
+        filter_sets = _inspect_filter_sets(uid)
+
+    # The accept sets, checked BEFORE the socket. Their failure and the
+    # socket's are the same symptom from inside the guest -- HTTP and HTTPS
+    # die, DNS and SSH keep working -- so an operator handed the socket
+    # sentence for a missing accept element restarts a unit that was already
+    # listening and watches nothing change.
+    #
+    # None (unreadable) is not missing: the table's absence is already the
+    # first branch of this check, so a None here means one `nft list set`
+    # failed on a table that answered a moment ago, and inventing a failure out
+    # of that would fire on a host under an nft upgrade.
+    missing_accept = [name for name in INSPECT_ACCEPT_SETS
+                      if filter_sets.get(name) is False]
+    if missing_accept:
+        return ("vm_inspect", False,
+                f"uid {uid} is redirected to the inspector but is missing from "
+                f"{' and '.join(missing_accept)}, so the redirected connection "
+                f"is rewritten to the listener and then DROPPED by the default "
+                f"deny — inside the guest this looks exactly like the "
+                f"inspector being down, and the socket is fine. Re-arm both "
+                f"tables: {restart}")
+
     if socket_active is PROBE:
         # Unpack, exactly as capture_check has to: service_active returns
         # (active, state) and a bare tuple is always truthy, so the arm below
@@ -1513,6 +1545,79 @@ def vm_inspect_check(config, *, elements4=PROBE, elements6=PROBE,
                 f"listening — this guest's HTTP and HTTPS are being sent to a "
                 f"host address where nothing accepts, while its DNS and SSH "
                 f"keep working. Start it: {restart}")
+
+    # THE LISTENER'S LOADED POLICY vs. THE ONE ON DISK -- rung 5 T4.
+    #
+    # A different question from `workloadctl drift`, which compares the
+    # document on disk against a re-render from the TOML. That is disk vs.
+    # intent; this is memory vs. disk, and the two have no overlap: both sides
+    # of the drift comparison match while this one fails.
+    #
+    # It is reachable through THIS COMMAND'S OWN REMEDY. Every re-arm branch
+    # above ends in `systemctl restart <name>-inspect.socket`; that socket's
+    # ExecStartPre is `workload-vm-inspect up`, which rewrites the policy
+    # document -- and the listener is PartOf= the VM, not of the socket, so it
+    # is not stopped and keeps enforcing what it read at its own start. An
+    # operator who follows the instruction printed here to fix a missing
+    # element lands in exactly this state, with every other signal green.
+    #
+    # Silence, not a warning, in all three unknown cases: no status file (a
+    # socket-activated inspector a guest has never dialled), no digest key (a
+    # listener from before this rung), or an unreadable document (T3's report,
+    # not this one). A diagnostic must not manufacture a failure out of a
+    # missing diagnostic.
+    if status is PROBE:
+        status = _inspect_status(config.name)
+    running_digest = (status or {}).get(VM_INSPECT_DIGEST_KEY)
+    if running_digest:
+        if disk_digest is PROBE:
+            disk_digest = _policy_digest_on_disk(config.name)
+        if disk_digest and disk_digest != running_digest:
+            # DIFFERENT, not "older". Inequality is the whole of what this
+            # comparison establishes, and the usual cause does put the newer
+            # document on disk -- but a state restore under a running listener,
+            # which is the very scenario the CA check below is written for,
+            # puts the older one there instead. The remedy is the same either
+            # way; naming a direction the check cannot see would send an
+            # operator looking for a config edit that never happened.
+            return ("vm_inspect", False,
+                    f"the running inspector is enforcing a DIFFERENT policy "
+                    f"than the one on disk (loaded "
+                    f"{vm_inspect_digest_short(running_digest)}, on disk "
+                    f"{vm_inspect_digest_short(disk_digest)}) — the lists in "
+                    f"force are not the lists in the file, in one direction or "
+                    f"the other. Restarting the socket does NOT fix this: the "
+                    f"listener stops with the VM, not with the socket. Restart "
+                    f"the VM: systemctl restart workload-{config.name}.service")
+
+    # THE CA THE LISTENER MINTS WITH vs. THE ONE ON DISK -- rung 5 T7, and the
+    # same memory-vs-disk shape as the policy comparison above.
+    #
+    # ADR 008 decision 4 says the CA does not rotate, and Minter.ca_identity
+    # reads it once and remembers it, so under a running listener the two can
+    # only diverge by something outside the design touching the file.
+    # Generational rollback is that something: the CA lives in the state tree,
+    # so restoring a system.qcow2.gen-N can put an older CA under a listener
+    # still minting from the newer one. Every leaf then chains to an anchor the
+    # guest does not trust, which reaches the operator as nothing at all -- the
+    # failure is inside the guest, in a TLS library, on a host where every line
+    # of this command passes.
+    running_ca = _ca_report(status).get("sha256")
+    if running_ca:
+        if disk_ca is PROBE:
+            disk_ca = _ca_fingerprint_on_disk(config.name)
+        if disk_ca and disk_ca != running_ca:
+            return ("vm_inspect", False,
+                    f"the running inspector is minting with a DIFFERENT CA "
+                    f"than the one on disk (minting with "
+                    f"{_short_fingerprint(running_ca)}, on disk "
+                    f"{_short_fingerprint(disk_ca)}) — every certificate this "
+                    f"guest is being "
+                    f"handed chains to an anchor it does not trust, so its "
+                    f"HTTPS is failing validation inside the guest while every "
+                    f"line here passes. The state tree was restored under a "
+                    f"running listener; restart the VM: "
+                    f"systemctl restart workload-{config.name}.service")
 
     addr = vm_inspect_address(uid)
     tail = ""
@@ -1542,6 +1647,23 @@ def vm_inspect_check(config, *, elements4=PROBE, elements6=PROBE,
     # Reported only when non-zero. Zero is the healthy reading and says
     # nothing an operator can act on, unlike the conntrack figure above, where
     # the number itself is the answer to "why do transfers die part-way".
+    # The wrong-port sets, reported differently from the accept sets above and
+    # the difference is the whole reason they are two branches: nothing the
+    # guest does breaks when one of these is missing. What is lost is the
+    # counter's per-workload attribution -- the drop rule is in the skeleton
+    # either way, so the packets still die, and the figure the next paragraph
+    # reads simply never moves for this uid. A zero that means "never armed"
+    # and a zero that means "never happened" are the same zero, which is what
+    # this fragment exists to separate.
+    missing_self = [name for name in INSPECT_SELF_SETS
+                    if filter_sets.get(name) is False]
+    if missing_self:
+        tail += (f"; uid {uid} is missing from "
+                 f"{' and '.join(missing_self)}, so this guest's wrong-port "
+                 f"self-dials are still dropped but are not counted against it "
+                 f"— the figure below reads 0 whether or not any happened. "
+                 f"Re-arm: {restart}")
+
     if self_dials is PROBE:
         self_dials = _inspect_self_counter(uid)
     if self_dials and self_dials[0]:
@@ -1568,11 +1690,13 @@ def vm_inspect_check(config, *, elements4=PROBE, elements6=PROBE,
     # no second definition of any figure is the property being built. These two
     # land with the policy they measure because their whole value is an
     # operator's next move, and a figure nothing prints is a figure nobody has.
-    if status is PROBE:
-        status = _inspect_status(config.name)
+    # Already resolved above, by the loaded-policy comparison -- which reads
+    # the same document and must run before any of the tail, because it can
+    # return a verdict.
     if status:
         for fragment in (_binding_fragments(status)
-                         + _not_http_fragments(status)):
+                         + _not_http_fragments(status)
+                         + _ca_fragments(status)):
             tail += f"; {fragment}"
 
     # The TLS mode is named because the two are different security postures
@@ -1766,6 +1890,180 @@ def _inspect_map_elements(map_name):
     """Elements of one inspect map, or None if the table could not be read."""
     payload = _nft_json("list", "map", *NFT_PROXY_TABLE.split(), map_name)
     return None if payload is None else nft_set_elements(payload)
+
+
+# The four objects vm_inspect_element_commands arms in the FILTER table, which
+# nothing here read until rung 5. The two DNAT maps above are only half of the
+# six: the accept sets hold the DNAT-rewritten tuple the filter chain sees, and
+# without one the redirect still happens and the redirected connection is then
+# dropped by the default deny. vm_inspect_element_commands' own docstring names
+# that state -- "the redirect without the accept set drops the redirected
+# connection" -- and before this it rendered as `egress inspected on both
+# families`, green, on a guest whose web traffic was dying.
+INSPECT_ACCEPT_SETS = (NFT_SET_INSPECT_DST, NFT_SET_INSPECT_DST6)
+INSPECT_SELF_SETS = (NFT_SET_INSPECT_SELF, NFT_SET_INSPECT_SELF6)
+
+
+def _inspect_filter_sets(uid: int) -> dict:
+    """Which of the inspector's filter-table sets carry this uid.
+
+    `{set_name: True | False | None}` -- armed, absent, or unreadable. One
+    observation covering all four rather than four PROBE parameters: they are
+    read in one pass and reported as one sentence, and four more injectables
+    would make this the widest signature in the file for no gain.
+
+    Membership by UID, not by comparing against vm_inspect_dst_elements()'s
+    exact strings. An exact comparison would be stricter and would also fire on
+    any nft version that renders a concatenation differently -- which is not
+    hypothetical here: see _map_key_uid, where exactly that mismatch reported a
+    working proxy redirect as missing on every host.
+
+    ONE `nft list table`, not four `nft list set`. This runs on the healthy
+    path of every inspected VM, and `doctor` multiplies it by the number of
+    workloads on the host, so four execs each was four times the cost of the
+    same answer. The table document carries every set with its elements, and
+    the two states the caller distinguishes survive the change: a set the
+    document does not contain at all stays None -- unreadable, and therefore
+    silence -- exactly as a failed `list set` did, because a set object that is
+    not there is a different fault from a uid missing out of one that is.
+    """
+    payload = _nft_json("list", "table", *NFT_TABLE.split())
+    out = {}
+    for set_name in INSPECT_ACCEPT_SETS + INSPECT_SELF_SETS:
+        found, elements = _named_set_elements(payload, set_name)
+        out[set_name] = (bool(vm_owned_elements(uid, elements))
+                         if found else None)
+    return out
+
+
+def _named_set_elements(payload, name: str) -> tuple[bool, list]:
+    """`(found, elements)` for one named set or map in a `list table` document.
+
+    Not nft_set_elements, which answers the different question a `list set`
+    document asks: it returns the FIRST set it finds, because there is only one
+    there. Handed a whole table it would return whichever set nft happened to
+    print first, for every name asked -- so all four names would report the
+    membership of one of them, and three of the four checks would be reading
+    someone else's answer.
+    """
+    for item in (payload or {}).get("nftables", []):
+        if not isinstance(item, dict):
+            continue
+        for kind in ("set", "map"):
+            obj = item.get(kind)
+            if isinstance(obj, dict) and obj.get("name") == name:
+                return True, obj.get("elem", []) or []
+    return False, []
+
+
+def _short_fingerprint(fingerprint: str | None) -> str:
+    """A certificate fingerprint as it is shown to a person.
+
+    The same amount of digest VM_INSPECT_DIGEST_SHORT shows for a policy, cut
+    on a byte boundary rather than mid-pair: pem_fingerprint returns 95
+    characters of colon-separated uppercase hex, and two of those in one
+    sentence is a three-hundred-character line an operator scrolls past. There
+    is one notion of "how much of a digest is enough to tell two apart by eye"
+    in this file and this is the certificate spelling of it.
+    """
+    if not fingerprint:
+        return "unknown"
+    groups = fingerprint.split(":")
+    keep = VM_INSPECT_DIGEST_SHORT // 2
+    if len(groups) <= keep:
+        return fingerprint
+    return ":".join(groups[:keep]) + ":…"
+
+
+def _ca_report(status) -> dict:
+    """The inspector's CA block out of its status document, or `{}`.
+
+    THE ONE READER of that path, and it is defensive at every level on
+    purpose. `_inspect_status` guarantees only that the top level is a dict;
+    a truthy non-dict under `mint` or `ca` -- which only a bug in the writer
+    produces, but a bug in the writer is exactly when this command is run --
+    would otherwise raise an AttributeError out of vm_inspect_check, and
+    nothing wraps that call. Twenty other checks would not run, over a figure
+    that is a footnote.
+    """
+    mint = (status or {}).get("mint")
+    ca = mint.get("ca") if isinstance(mint, dict) else None
+    return ca if isinstance(ca, dict) else {}
+
+
+def _ca_fingerprint_on_disk(name: str) -> str | None:
+    """The fingerprint of this workload's CA as it currently sits on disk.
+
+    vm_mint.pem_fingerprint, which is why that name lost its underscore: the
+    running listener's copy of this figure comes from the same function through
+    Minter.ca_identity(), and the two are compared for equality. A second
+    implementation of "the fingerprint of a PEM" -- a different digest, a
+    different hex case, a different separator -- would report a mismatch on
+    every workload forever.
+
+    STDLIB, no subprocess: the fingerprint is a hash of the DER and the DER is
+    the base64 between the PEM markers. `pem_not_after` is the one that shells
+    out to openssl, and this command deliberately does not call it (see
+    _ca_fragments) -- the expiry it reports is the one the MINTER read.
+    """
+    try:
+        return pem_fingerprint(vm_ca_cert_path(workload_state_dir(name)))
+    except OSError:
+        return None
+
+
+def _ca_fragments(status) -> list[str]:
+    """What the inspector's CA report says that an operator can act on.
+
+    NOT a rendering of the CA. The fingerprint's routine reader is `doctor`'s
+    aggregation and the exporter surface, where one producer per figure is the
+    property being built; here it appears only when it is the answer to
+    something -- which is the expiry, inside the window
+    VM_CA_VALIDITY_DAYS' own comment already promised.
+
+    The expiry is read out of the status document rather than off the disk, and
+    that is a deliberate limit as well as a saving. The saving: pem_not_after
+    shells out to openssl, so reading it here would put a subprocess and a new
+    file read into this command's SELinux domain for a figure another process
+    has already read. The limit: a workload whose minter has never run -- a
+    `splice` workload, which has no CA in play at all, or an `inspect` one
+    whose guest has not yet dialled anything -- reports nothing here. Both are
+    silent for the reason every other unknown in this check is silent, and the
+    second resolves itself the moment the VM does any work.
+    """
+    not_after = _ca_report(status).get("not_after")
+    if not isinstance(not_after, (int, float)):
+        return []
+    remaining = (not_after - time.time()) / 86400
+    if remaining > VM_CA_EXPIRY_WARN_DAYS:
+        return []
+    when = time.strftime("%Y-%m-%d", time.gmtime(not_after))
+    if remaining <= 0:
+        return [f"this workload's egress CA EXPIRED on {when} — every HTTPS "
+                f"request from this guest is now failing certificate "
+                f"validation inside the guest, which no line here can see. "
+                f"The CA cannot be replaced in place: cloud-init runs once per "
+                f"instance-id, so the guest must be re-provisioned"]
+    return [f"this workload's egress CA expires on {when} "
+            f"({int(remaining)} day(s)) — replacing it means RE-PROVISIONING "
+            f"the guest, because the anchor is seeded by cloud-init and "
+            f"cloud-init runs once per instance-id. Schedule that before the "
+            f"date, not after it"]
+
+
+def _policy_digest_on_disk(name: str) -> str | None:
+    """The digest of the policy document as it currently sits on disk.
+
+    None when the document cannot be read, and the caller treats that as
+    silence rather than as drift: an absent document is already T3's report
+    (`workloadctl drift`), and a second line about it here would send an
+    operator to the same fix twice.
+    """
+    try:
+        with open(vm_inspect_policy_path(name)) as fh:
+            return vm_inspect_policy_digest(fh.read())
+    except OSError:
+        return None
 
 
 def subid_derived_check(

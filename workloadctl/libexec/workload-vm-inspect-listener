@@ -129,6 +129,7 @@ from vm import (
     VM_INSPECT_ORIG_CLEARTEXT, VM_INSPECT_ORIG_TLS, VM_INSPECT_PORT_CLEARTEXT, VM_INSPECT_PORT_TLS,
     VM_TLS_DEFAULT, LeafRefused, vm_ca_cert_path, vm_ca_key_path,
     vm_hostname_control_character, vm_hostname_match,
+    VM_INSPECT_DIGEST_KEY, vm_inspect_policy_digest,
     vm_inspect_policy_path, vm_inspect_record_path, vm_inspect_status_path,
     vm_normalise_hostname,
     VmPolicyEntry, vm_policy_governs,
@@ -342,6 +343,13 @@ class Policy(NamedTuple):
     splice: tuple = ()
     http2: tuple = ()
     policy: tuple = ()
+    # The digest of the document text this was parsed from, echoed into the
+    # status file so `diagnose` can tell a listener enforcing the file on disk
+    # from one enforcing an older one it still holds in memory. Defaulted so
+    # every Policy() a test constructs by hand keeps working; the empty string
+    # reads downstream as "this listener does not report a digest", which is a
+    # state the check is required to pass over in silence anyway.
+    digest: str = ""
 
     @property
     def summary(self) -> str:
@@ -425,7 +433,15 @@ def load_policy(path):
     the strictest reading of a policy it never read.
     """
     with open(path) as f:
-        doc = json.load(f)
+        text = f.read()
+    # Digested from the TEXT THIS PARSED, never from a re-read of the path.
+    # The whole value of the figure is that it says what this process is
+    # enforcing; a second open() would report the file as it is now, so a
+    # rewrite landing between the two would give a listener that advertises the
+    # new document's digest while enforcing the old one -- green on the one
+    # case the comparison exists for.
+    digest = vm_inspect_policy_digest(text)
+    doc = json.loads(text)
     if not isinstance(doc, dict):
         raise ValueError(f"{path}: expected a JSON object, got {type(doc).__name__}")
     hosts = doc.get("hosts") or []
@@ -485,7 +501,7 @@ def load_policy(path):
     return Policy(tls=doc.get("tls") or VM_TLS_DEFAULT, hosts=tuple(hosts),
                   internal=tuple(vm_normalise_hostname(h) for h in internal),
                   splice=tuple(splice), http2=tuple(http2),
-                  policy=tuple(policy))
+                  policy=tuple(policy), digest=digest)
 
 
 # --- the ClientHello peek ---
@@ -4144,6 +4160,16 @@ class Listener:
         """This listener's counters, as they would be written right now."""
         snap = self.counters.snapshot(open_now=self._ceiling.held,
                                       refused=self.rejected)
+        # The digest of the document THIS PROCESS loaded. It is not a
+        # counter and it never moves, which is exactly why it belongs here:
+        # the status file is the only channel from a running listener to the
+        # host, and the question `diagnose` cannot otherwise answer is which
+        # policy the process behind the socket is actually enforcing. Written
+        # unconditionally, empty string included -- a key that appeared only
+        # when non-empty would make "no digest" and "an older listener"
+        # indistinguishable to the reader, and the reader treats one of those
+        # as silence.
+        snap[VM_INSPECT_DIGEST_KEY] = self._policy.digest
         if self._minter is not None:
             # The minter's own figures, live sizes and CA identity included.
             # `hits` against `mints` says whether the working set is doing its

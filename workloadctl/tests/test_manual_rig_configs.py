@@ -102,6 +102,34 @@ class TestGeneratedConfigs(unittest.TestCase):
                     self.assertEqual(
                         errors, [], f"{name} arm {_arm_name(arm)}: {errors}")
 
+    def test_every_generated_config_validates_whole(self):
+        """The whole document, not only its network section.
+
+        `_validate_egress` above reads `[vm.network]` and nothing else, so
+        every field a rig writes OUTSIDE it -- `local_image`, `vcpus`,
+        `memory`, `user`, `rollback_keep`, and the whole `[workload]` block --
+        was ungated, and a value the schema rejects there produces the same
+        symptom the bare-string `allow` spelling did: refused at enable, no VM
+        ever booted, indistinguishable from a policy gap. Measured by breaking
+        it: `memory = 99` fails here and passes every other test in this file.
+
+        WHAT IT STILL CANNOT SEE is a key that is merely RENAMED.
+        validate_workload_config does not reject unknown keys -- measured, on
+        `[vm]` and `[vm.network]` both -- so a rig carrying a retired spelling
+        of a live field is accepted here and then simply ignored on the host,
+        which is a quieter failure than a refusal and one no unit test in this
+        tree can currently reach. The narrower check above is kept because its
+        failure message names the egress field directly.
+        """
+        from validation import validate_workload_config
+        for name, mod, arms in _rigs():
+            for arm in arms:
+                with self.subTest(rig=name, arm=_arm_name(arm)):
+                    doc = tomllib.loads(_generate(mod, arm))
+                    errors = validate_workload_config(doc)
+                    self.assertEqual(
+                        errors, [], f"{name} arm {_arm_name(arm)}: {errors}")
+
     def test_network_scalars_precede_the_allow_table(self):
         """The ordering trap, asserted on the generated TEXT rather than on the
         parsed document -- because a scalar written below [[vm.network.allow]]

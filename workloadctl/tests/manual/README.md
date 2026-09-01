@@ -152,6 +152,50 @@ check stays — an inspector missing from the set dials into itself, and **no
 unit test can see that fail**, because the element resolves a cgroup id at add
 time — but it now covers inspectors and responders rather than proxies.
 
+**The record's seam, added at rung 5 T2.** A live guest makes an *allowed*
+cleartext request to an allowlisted host with a per-run marker in its path, and
+the rig then reads it back through `workloadctl egress` — the same command an
+operator would type. Seven assertions: the file exists with the modes and owner
+the design claims (`0700` directory, `0600` file, both `_wl-<name>`), the
+allowed request is in it, its `id` is the id on the journal line for the same
+connection, `--id` selects that connection alone, the plain arm's denial
+carries the `reason` that says *which* denial it was, a non-root read is
+refused with a sentence rather than a traceback, and an unknown `--reason` is
+an error rather than an empty report.
+
+Nothing in `just test` reaches any of that. The writer is unit-tested against a
+fake listener and the reader against a fixture directory, and **both stay green
+on a host where the file is never created** — a wrong `LogsDirectory=`, a
+missing SELinux label, or a denied write swallowed by the handler that must
+never let a diagnostic kill a guest request all look identical from there. The
+*allowed* request is the one under test on purpose: refusals already reach the
+journal, so a record holding only refusals would be a green reading that says
+nothing about the path the private sink exists for.
+
+**The staleness seams, added at rung 5 T4/T5/T7.** Three comparisons between a
+value a *running* process holds and a value on disk, which is a shape the unit
+suite can only test against injected observations. Ten assertions: the listener
+reports a policy digest at all, that digest is the digest of the document on
+disk, a healthy workload is *not* reported stale, an edited document *is* — and
+its remedy names the VM rather than the socket — the edit is then restored and
+the report goes quiet again, all four filter-table sets carry the workload's
+uid, and the CA fingerprint the minter reports equals a fresh `openssl x509
+-fingerprint -sha256` of the file, with an expiry beside it.
+
+The reason none of that is reachable from `just test` is the same reason the
+status-file checks exist at all: **every one of these comparisons treats an
+unknown as silence**, deliberately, so that a diagnostic never manufactures a
+failure out of a missing diagnostic. A digest the listener could not write, a
+set name that drifted, an `nft` the CLI's domain may not exec — each produces
+exactly what a healthy host produces. A comparison that never runs and a
+comparison that always agrees are the same green line, and only a live host
+distinguishes them.
+
+The policy edit is destructive and is undone in a `finally`, with the undo
+*asserted* rather than assumed. A rig that breaks the product and then dies
+leaves the next run measuring the break, and a break that looks like the
+feature under test is the worst kind to inherit.
+
 **What only a real boot showed.** Both defects this rig found were ordering
 against user creation, and both passed every unit test. The generator called
 `getpwnam` for `_wl-<name>` having only just written the sysusers config, so on

@@ -18,6 +18,7 @@ import cli_log
 from cmd_create import cmd_create
 from cmd_diagnose import cmd_diagnose
 from cmd_edit import cmd_edit
+from cmd_egress import add_arguments as egress_arguments, cmd_egress
 from cmd_validate import cmd_validate
 from cmd_catalog import cmd_catalog, cmd_duplicate, cmd_init, cmd_install
 from cmd_backup import cmd_backup, cmd_restore
@@ -196,6 +197,16 @@ def main():
         "-y", "--yes", action="store_true",
         help="Apply changes without the interactive confirmation prompt",
     )
+
+    # egress — the reader for the per-request record the inspector writes.
+    # A read verb, so its --json means "print the records" rather than the
+    # mutating verbs' result object, and it takes no --quiet: it emits output,
+    # not prose. The flags live in cmd_egress so the closed vocabularies stay
+    # beside the code that validates against them.
+    egress_parser = subparsers.add_parser(
+        "egress", help="Read a filtered VM's per-request egress record")
+    egress_parser.set_defaults(func=cmd_egress)
+    egress_arguments(egress_parser)
 
     enable_parser = subparsers.add_parser("enable", help="Enable and start a workload",
                                           parents=[mutating])
