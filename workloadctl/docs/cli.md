@@ -14,9 +14,11 @@
 | [`create`](#create) | Scaffold a from-scratch workload TOML (no bundle) |
 | [`diagnose`](#diagnose) | Check runtime setup: user, subuid/subgid, linger, SELinux label |
 | [`disable`](#disable) | Stop the service and remove the `.enabled` marker (optionally `--purge`) |
+| [`doctor`](#doctor) | One-shot aggregate report: generator journal, unit states, setup checks, drift, health |
 | [`drift`](#drift) | Diff running systemd units against what would be generated from current TOMLs |
 | [`duplicate`](#duplicate-alias-clone) / `clone` | Copy a live workload's TOML under a new name |
 | [`edit`](#edit) | Edit the workload TOML, or copy-on-write override a bundle control file |
+| [`egress`](#egress) | Read a filtered VM's per-request egress record — what the guest actually sent |
 | [`enable`](#enable) | Create user, transfer image, start service (idempotent) |
 | [`exec`](#exec) | Run a command inside a container or VM (via SSH) |
 | [`health`](#health) | Show container health check status |
@@ -27,11 +29,13 @@
 | [`install`](#install) | Promote a local workload directory into `/etc/workloads.d/` |
 | [`list`](#list) | List all workloads and their enabled/running state |
 | [`logs`](#logs) | View workload logs via `journalctl` |
+| [`pcap`](#pcap) | Capture packets from a workload's host or guest vantage |
 | [`reboot`](#reboot) | Soft-reboot a workload (systemd re-exec inside container or VM) |
 | [`recreate`](#recreate) | Regenerate units and restart (apply TOML edits or post-build) |
 | [`restart`](#restart) | Bounce a workload service, keeping its overlay/disk (does not apply TOML edits) |
 | [`restore`](#restore) | Restore a workload from a `backup` archive (optionally `--force`, `--enable`) |
 | [`rollback`](#rollback) | Revert to the previous container image or VM disk generation |
+| [`rules`](#rules) | Report a filtered VM's effective egress rules for a host, or enumerate them |
 | [`secret`](#secret-management) | Manage encrypted systemd credentials (subcommands: `create list show rotate delete export import`) |
 | [`shell`](#shell) | Open an interactive shell in a container or VM (SSH or serial console) |
 | [`start`](#start) | Start a workload service without changing its `enabled` state |
@@ -452,6 +456,36 @@ This restarts the workload's main unit and nothing else. **Container workloads:*
 [↑ top](#workloadctl-command-reference)
 
 ---
+
+### `pcap`
+
+Capture packets from a workload's network vantages. Wraps `tcpdump`, decoding to stdout by default or writing pcapng with `-w`.
+
+```
+sudo workloadctl pcap [-i host|guest] [-Q in|out|inout] [-w PATH] [--detach]
+                      [-c N] [--duration D] [--max-size S] [-n] [--json]
+                      [--dry-run] [--list] [--stop] <workload>[/<container>] [FILTER ...]
+```
+
+| Option | Description |
+|---|---|
+| `-i`, `--interface` | Vantage: `host` or `guest`. Repeatable (default: `host`) |
+| `-D`, `--list-interfaces` | List this workload's vantages and exit |
+| `-Q`, `--direction` | `in`, `out` or `inout` (default: `inout`) |
+| `-s`, `--snapshot-length` | Bytes kept per packet, or per-vantage as `guest:1500,host:0`. `0` means no truncation |
+| `-w`, `--write` | Write pcapng instead of decoding. `-` is stdout; a directory when capturing more than one vantage |
+| `--detach` | Start the capture and return (requires `-w`) |
+| `-c`, `--packet-count` | Stop after N packets |
+| `-C` / `-W` / `-G` | Rotate at N million bytes / keep N files / rotate every N seconds |
+| `--duration`, `--max-size` | Stop after a wall-clock duration or an output size |
+| `--list`, `--stop` | List or stop detached captures |
+| `--dry-run` | Print the `tcpdump` command that would run |
+
+`FILTER` is ordinary tcpdump BPF syntax and everything after the workload is passed through.
+
+**Two vantages, and they are not the same traffic.** For a VM the `host` vantage sees the re-originated sockets passt opens on the host, already carrying the workload user's uid; the `guest` vantage sees the guest's own stack before passt touches it. A guest that believes it is talking to `93.184.216.34` and a host socket connecting to an inspector on loopback are the same connection seen from the two ends, and only the `guest` side shows what the guest thinks is happening.
+
+[↑ top](#workloadctl-command-reference)
 
 ### `reboot`
 
@@ -911,6 +945,26 @@ installed deliberately.
 
 [↑ top](#workloadctl-command-reference)
 
+### `doctor`
+
+One-shot aggregate diagnosis. Collapses the manual failure-hunt — generator journal → unit states → setup checks → drift → health — into a single skimmable report. Read-only; `doctor` never mutates state.
+
+```
+sudo workloadctl doctor [--json] <workload>
+```
+
+| Option | Description |
+|---|---|
+| `--json` | Emit the whole report as one JSON object |
+
+Exit 0 when healthy, 1 when any problem was found, 1 with a one-line reason if the config will not load at all — which is deliberate, since `doctor` is what you reach for when something is *already* broken.
+
+A journal tail is attached only to units that have a problem, so a healthy report stays short. `NRestarts > 0` counts as a problem even when the unit is active: that is the silent restart-loop class which `is-active` alone hides.
+
+For a VM with `egress = "filtered"` the report gains an **Egress (inspected)** section carrying the inspector's counters — connections by disposition, drop reasons, the minter's figures, the resolver's. Those figures are **evidence, never a verdict**: they add nothing to the problem count, because a guest being denied is the filter working. The inspector's actual faults — a listener enforcing a different policy than the one on disk, a CA mismatch, a missing nft element — arrive through the setup checks like everything else.
+
+[↑ top](#workloadctl-command-reference)
+
 ### `cleanup`
 
 Find (and optionally remove) orphaned workload users and home directories — system users in the `_wl-*` range whose config file no longer exists.
@@ -958,6 +1012,67 @@ workloadctl drift [--json] [<workload>]
 | `--json` | Output diff as JSON instead of unified diff text |
 
 Useful after editing a TOML without running `recreate`, or to verify that the running units match the current config after a `bootc upgrade`.
+
+[↑ top](#workloadctl-command-reference)
+
+---
+
+## Egress Inspection
+
+For VM workloads with `[vm.network].egress = "filtered"`. The pair answers the operator's two questions about one filter: `rules` is what the guest *may* do, `egress` is what it *did*. Both are read-only. See [the walkthrough](vm-egress-walkthrough.md) for how the filter is built.
+
+### `rules`
+
+Report a filtered VM's **effective** egress rules — which is not the same as reading its TOML. Host patterns union among themselves, so `*.example.com` and `api.example.com` both govern `api.example.com` and neither overrides the other; and a host any `[[vm.network.policy]]` entry matches is governed by *those entries alone*, with `hosts` not consulted for it. `rules` calls the same matcher the listener does, so the report cannot disagree with the filter.
+
+```
+sudo workloadctl rules [--json] <workload> [HOST]
+```
+
+| Option | Description |
+|---|---|
+| `HOST` | A hostname to ask about. Omit to enumerate every non-wildcard name in the document |
+| `--json` | Print the report as a JSON object |
+
+**Two forms, because there is no host set to iterate.** Every host field is an fnmatch pattern, so "the rules per host" has nothing to loop over.
+
+- The **query** form names a host and reports what applies to it. It answers *why was this denied*, and it works for a name the file does not mention at all.
+- The **enumeration** form walks every non-wildcard name anywhere in the document and gives each the query form's verdict. It says how many wildcards it could not expand, so an all-wildcard document reads as that rather than as "no rules".
+
+Pattern subsumption — which patterns overlap which — is deliberately not computed. Query a name directly to see which wildcards cover it.
+
+The report names which document it read: `/run/workload-vm/<name>/inspect.json` for a running workload (what the listener was *given*), or a render from `[vm.network]` for one that has not started this boot. Neither is "what the listener is enforcing right now" — a listener started before an edit holds the previous document in memory with both files agreeing. `diagnose` is where that is checked.
+
+[↑ top](#workloadctl-command-reference)
+
+### `egress`
+
+Read the per-request record the inspector writes for a filtered VM: one line per request with its host, method, path, status, upstream address actually dialled, timing, and connection id. The record is private to the host — it is not in the journal, and the guest cannot read it.
+
+```
+sudo workloadctl egress [-n N] [-g] [--json] [--id ID] [--decision forward|drop]
+                        [--mode forward|terminate|splice|h2] [--plane tls|cleartext]
+                        [--reason REASON] [--host PATTERN] [--method METHOD]
+                        [--status STATUS] [--since TIME] [--until TIME] <workload>
+```
+
+| Option | Description |
+|---|---|
+| `-n`, `--lines` | Show the last N records; `0` for all (default: 50) |
+| `-g`, `--group` | Group by connection, showing the query and the drop reason |
+| `--json` | Print the record objects verbatim |
+| `--id` | Connection id, as pasted from a journal line. Repeatable |
+| `--decision` | `forward` or `drop`. Repeatable |
+| `--mode` | `forward`, `terminate`, `splice` or `h2`. Repeatable |
+| `--plane` | `tls` or `cleartext`. Repeatable |
+| `--reason` | Drop reason, or an unambiguous part of one. Repeatable |
+| `--host` | Host, as an fnmatch pattern. Repeatable |
+| `--method`, `--status` | HTTP method / response status. Repeatable |
+| `--since`, `--until` | Time bounds |
+
+**Allows are recorded as well as drops.** "What did this agent send" is not answerable from denials alone, and a denied path is evidence too. The journal keeps the decision, the host and the remedy sentence for an operator watching in real time; the record keeps the per-request detail.
+
+Bodies are never recorded, and records are redacted at construction rather than at rendering — a record redacted on the way to the screen is one `--verbose` away from being the thing it was written not to be.
 
 [↑ top](#workloadctl-command-reference)
 

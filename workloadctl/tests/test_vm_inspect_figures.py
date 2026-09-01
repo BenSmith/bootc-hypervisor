@@ -458,5 +458,58 @@ class DoctorSectionTest(unittest.TestCase):
         self.assertIsNone(json.loads(text)["egress"])
 
 
+class DocumentedMetricTest(unittest.TestCase):
+    """Every metric name a tracked doc prints must be one that exists.
+
+    ONE DIRECTION ONLY, like test_completions' flag check and for the same
+    reason: omitting a series from a doc is an editorial choice — the
+    walkthrough's table says out loud that it is a selection — while NAMING one
+    that does not exist is always a bug, and the worst kind, because a
+    dashboard built on it silently graphs nothing forever. Nothing else in the
+    tree parses a metric name out of prose, so a rename lands, the suite stays
+    green, and the doc points at a series that no longer exists.
+    """
+
+    # The two series the exporter emits that are not FIGURES rows: a gauge
+    # about the document rather than from it, and the labelled family whose
+    # samples are the drop breakdown.
+    NON_FIGURE_SERIES = {"workload_vm_inspect_status_present",
+                         "workload_vm_inspect_drop_events_total"}
+
+    def _named(self):
+        """Full metric names in every tracked doc, `_`-suffix shorthand aside.
+
+        The digit in `h2_unrecorded` is why the character class is not [a-z_]:
+        a name-shaped regex that stops at a digit reports a real metric as
+        fictional, which is how this check first accused the docs it was
+        written to guard.
+        """
+        found = {}
+        for path in sorted(REPO.glob("docs/**/*.md")):
+            if "wip" in path.parts:      # gitignored; nothing tracked cites it
+                continue
+            for name in re.findall(r"workload_vm_(?:inspect|resolve)_[a-z0-9_]+",
+                                   path.read_text()):
+                found.setdefault(name, path.name)
+        return found
+
+    def test_every_documented_metric_exists(self):
+        real = {f.metric for f in fig.FIGURES if f.metric} | self.NON_FIGURE_SERIES
+        bad = {name: where for name, where in self._named().items()
+               if name not in real}
+        self.assertEqual(bad, {}, f"documented metrics that do not exist: {bad}")
+
+    def test_the_check_can_see_the_docs_at_all(self):
+        """A glob that matches nothing passes vacuously — the failure this
+        whole file's TableTest exists to make impossible, one level up."""
+        self.assertGreater(len(self._named()), 5)
+
+    def test_the_non_figure_exceptions_are_still_not_figures(self):
+        """If either becomes a FIGURES row, this set shrinks rather than
+        quietly excusing a name the table now owns."""
+        self.assertEqual(
+            self.NON_FIGURE_SERIES & {f.metric for f in fig.FIGURES}, set())
+
+
 if __name__ == "__main__":
     unittest.main()

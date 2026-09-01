@@ -412,6 +412,29 @@ the two new refusals. The keys are pinned against the listener's own constants
 in `tests/test_vm_inspect_diagnose.py`; what no static test can say is whether
 anything ever *increments* them, since a counter that is declared, exported,
 pinned and never written reads 0 and 0 passes every assertion.
+**Reading a filter, from the host.** Three verbs, and they answer different
+questions on purpose. `workloadctl rules <wl> [HOST]` reports the *effective*
+rules — not the file's entries, because host patterns union among themselves
+and a host any `[[vm.network.policy]]` entry matches is governed by **those
+entries alone**, with `hosts` not consulted for it; it calls the shipped matcher
+(`vm_policy_governs`/`vm_hostname_match`) rather than reimplementing one, so the
+report cannot disagree with the listener, and it names which document it read
+(`/run/workload-vm/<n>/inspect.json` vs a render from the TOML). `workloadctl
+egress <wl>` reads the private per-request record — allows as much as drops,
+since "what did this agent send" is not answerable from denials alone.
+`workloadctl doctor <wl>` prints the counters as an **Egress (inspected)**
+section that adds nothing to its problem count: a guest being denied is the
+filter working, and the inspector's real faults come through
+`vm_inspect_check`'s verdicts instead. `lib/vm_inspect_figures.py` is the single
+producer behind `doctor` and `libexec/workload-exporter` — a `FIGURES` table
+carrying each figure's source path, metric name, type, help and human label
+together, walked by both, so a Prometheus label cannot become a second
+definition. Its two sums (`connections_total`, `drops_total`) are deliberately
+*not* published: `sum by (workload)` computes them from series already on the
+wire without a total that can disagree with its own parts.
+`tests/manual/rung5_rig.py` is the seam those three cannot test themselves —
+whether the document they read is the one a live listener wrote.
+
 Through rung 1 this was a per-workload tinyproxy the guest was *configured* to
 use via `https_proxy` at an advertised literal. That is gone. Its weakness was
 never the filtering, it was the configuring: a proxy is advisory, so a process
@@ -615,7 +638,7 @@ generators/workload-generate       # Python script run by workload-generate.serv
 libexec/workload-ensure-user       # Per-workload user setup (ExecStartPre)
 libexec/workload-vm-*              # VM helpers (build-disk, qmp, shutdown, notify, netdev)
 libexec/agent-broker               # The credential broker: a standalone program, not a helper (shipped disabled)
-libexec/workload-metrics           # Prometheus metrics exporter
+libexec/workload-exporter          # Prometheus metrics exporter (textfile drop)
 lib/workloadctl_core.py            # WorkloadConfig / WorkloadManager (TOML loading, paths, lifecycle field)
 lib/workload_lib.py                # Shared library (config parsing, UID allocation, paths)
 lib/podman.py                      # Typed Podman wrapper (JSON output, PodmanError, root/user modes)

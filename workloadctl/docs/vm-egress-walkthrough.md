@@ -462,6 +462,77 @@ or a named counter per uid — exactly the machinery a single set-guarded rule w
 chosen to avoid — so `diagnose` prints the figure and says it is shared, rather
 than attributing a sibling's dropped traffic to the VM being diagnosed.
 
+### What may it do: `workloadctl rules`
+
+`diagnose` says the filter is armed. It does not say what the filter *permits*,
+and reading the TOML is not the same as knowing: host patterns union among
+themselves, so `*.example.com` and `api.example.com` both govern
+`api.example.com` and neither overrides the other — and a host any
+`[[vm.network.policy]]` entry matches is governed by **those entries alone**,
+with `hosts` not consulted for it.
+
+```
+sudo workloadctl rules web api.example.com   # what applies to one name
+sudo workloadctl rules web                   # every non-wildcard name in the document
+```
+
+It calls the same matcher the listener does, so the report cannot disagree with
+the filter — and it says which document it read: the one the listener was given
+(`/run/workload-vm/web/inspect.json`) for a running workload, or a render from
+`[vm.network]` for one that has not started this boot.
+
+### What did it do: `workloadctl egress`
+
+The per-request record — host, method, path, status, the upstream address
+actually dialled, timing, connection id — for allows as much as for drops.
+"What did this agent send" is not answerable from denials alone, and a denied
+path is evidence too.
+
+```
+sudo workloadctl egress web -n 20            # the last 20 requests
+sudo workloadctl egress web --decision drop  # only what was refused
+sudo workloadctl egress web -g --host '*.github.com'
+```
+
+The record is private to the host: not in the journal, and unreadable by the
+guest. The journal keeps the decision, the host and the remedy sentence for an
+operator watching in real time; this keeps the detail.
+
+### The figures: `doctor` and Prometheus
+
+`workloadctl doctor web` gains an **Egress (inspected)** section for a filtered
+VM — connections by disposition, the drop breakdown by reason, the minter's
+figures, the resolver's. They are **evidence, never a verdict**: they add
+nothing to `doctor`'s problem count, because a guest being denied is the filter
+working. The inspector's actual faults arrive through the setup checks.
+
+The same figures are published by `workload-exporter` for scraping, from the
+same producer — `lib/vm_inspect_figures.py` — so the two cannot disagree. Every
+series is labelled `workload="<name>"`, and only filtered VMs get any:
+
+| Series | Meaning |
+|---|---|
+| `workload_vm_inspect_status_present` | 1 once the listener has written its status document, 0 before a guest has dialled it |
+| `workload_vm_inspect_spliced_total` / `_terminated_total` / `_forwarded_total` / `_dropped_total` | Connections by disposition |
+| `workload_vm_inspect_drop_events_total{reason=...}` | Drops by reason. One connection can raise several, so this is not a count of dropped connections |
+| `workload_vm_inspect_open` / `_ceiling_refused_total` | Live connections, and connections turned away at the per-process ceiling |
+| `workload_vm_inspect_mints_total` / `_mint_hits_total` | Leaves signed, and lookups served from cache |
+| `workload_vm_inspect_denied_mints_total` / `_denied_mint_hits_total` | The denial-only **subsets** of those two, not a second dimension |
+| `workload_vm_inspect_mint_throttled_total` | Mints refused by the rate limit — the only figure that says why a guest under sustained abuse stopped getting readable refusals |
+| `workload_vm_inspect_clock_unavailable_total` | Mint-time clock checks with no guest agent to ask. Non-zero means the clock remedy is **inert** in this guest |
+| `workload_vm_inspect_record_failures_total` | Records the sink could not take. Non-zero means the `egress` record above is **incomplete** |
+| `workload_vm_inspect_h2_unrecorded_total` | Spliced h2 sessions recorded as one connection with no per-request detail |
+| `workload_vm_inspect_ech_seen_total` / `_ech_alarm_total` | ClientHellos offering encrypted client hello, and those where the name was not readable |
+| `workload_vm_resolve_synthesised_total` / `_static_total` / `_nodata_total` / `_unlisted_total` | What the synthesising resolver answered |
+
+That table is a selection, not the whole surface — the full set, with its help
+text, is the `FIGURES` table in `lib/vm_inspect_figures.py`, which is what both
+`doctor` and the exporter walk.
+
+There is deliberately **no** published total for connections or for drops: both
+are sums of series already on the wire, and `sum by (workload)` computes them
+without a second definition that could disagree with its own parts.
+
 ## Teardown and break-glass
 
 `ExecStopPost` runs `workload-vm-filter down` and `workload-vm-inspect down`,
