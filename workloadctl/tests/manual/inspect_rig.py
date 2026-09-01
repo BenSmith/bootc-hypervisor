@@ -663,6 +663,31 @@ def diagnose(name, timeout=120):
                           capture_output=True, text=True, timeout=timeout)
 
 
+def _concat_of(elem):
+    """The concat tuple of one nft set element, whatever shape it arrived in.
+
+    TWO SHAPES, and the difference is not cosmetic. A set declared with a
+    per-element `counter` renders each element WRAPPED --
+    {"elem": {"val": {"concat": [...]}, "counter": {...}}} -- while a plain set
+    renders the bare {"concat": [...]}. wl_inspect_self/self6 carry counters
+    (deliberately: see workload-filter.nft) and wl_inspect_dst/dst6 do not, so
+    a reader that knows only the bare shape passes on the maps and fails on the
+    sets, reporting a set that is armed as unarmed. Measured that way on a KVM
+    host 2026-08-31: the elements printed in the failure detail plainly
+    contained the uid the assertion said was missing.
+
+    Returns None for anything that is neither shape, so an nft output this does
+    not understand reads as "no match" rather than raising inside the loop.
+    """
+    if not isinstance(elem, dict):
+        return None
+    if isinstance(elem.get("elem"), dict):
+        val = elem["elem"].get("val")
+        elem = val if isinstance(val, dict) else {}
+    concat = elem.get("concat")
+    return concat if isinstance(concat, list) and concat else None
+
+
 def staleness():
     """THE SEAMS T4, T5 AND T7 ONLY HAVE ON A LIVE HOST — rung 5.
 
@@ -761,9 +786,7 @@ def staleness():
         # test guards() uses for the maps would pass here on a set belonging to
         # a different workload entirely.
         armed = elems is not None and any(
-            isinstance(e, dict) and isinstance(e.get("concat"), list)
-            and e["concat"] and str(e["concat"][0]) == str(uid)
-            for e in elems)
+            str(c[0]) == str(uid) for c in map(_concat_of, elems) if c)
         record(f"{set_name} carries uid {uid}", armed,
                f"elements={elems!r}"[:200])
 

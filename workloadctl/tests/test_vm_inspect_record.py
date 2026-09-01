@@ -274,15 +274,53 @@ class TestWhereTheRecordGoes(unittest.TestCase):
             Path("/var/log") / vm_inspect_logs_directory("demo"),
             vm_inspect_record_dir("demo"))
 
-    def test_the_root_is_created_0700_by_tmpfiles(self):
-        """systemd applies LogsDirectoryMode= to the LEAF only and creates the
-        parents 0755, so the per-workload directories would sit 0700 under a
-        root anyone could list."""
+    def _root_line(self):
         conf = (ROOT / "systemd" / "workloads-dirs.conf").read_text()
         line = [ln for ln in conf.splitlines()
                 if ln.split()[1:2] == [str(VM_INSPECT_RECORD_ROOT)]]
         self.assertEqual(len(line), 1, conf)
-        self.assertEqual(line[0].split()[2], "0700")
+        return line[0].split()
+
+    def test_the_root_is_created_by_tmpfiles(self):
+        """systemd applies LogsDirectoryMode= to the LEAF only and creates the
+        parents 0755, so without this line the per-workload directories would
+        sit 0700 under a root anyone could list."""
+        fields = self._root_line()
+        self.assertEqual(fields[3:5], ["root", "root"], fields)
+
+    def test_the_root_is_traversable_by_the_workload_user(self):
+        """THE SEARCH BIT IS LOAD-BEARING, and its absence is silent.
+
+        The listener runs as User=_wl-<name>. It does not merely write inside
+        its leaf -- it has to walk THROUGH this directory to get there, and a
+        0700 root-owned parent refuses that walk to every uid but root. The
+        write is guaranteed never to raise, so what a missing search bit
+        produces is not an error: it is a journal warning, no record file, and
+        `workloadctl egress` reporting a workload that made no requests. That
+        is indistinguishable from a guest that made none.
+
+        Measured on a KVM host 2026-08-31 as exactly that: 47 assertions green,
+        eight failing on a file that could not be created, and no AVC -- the
+        failure was DAC, not policy, which is why the SELinux harvest said
+        nothing.
+
+        Asserted as `others may search`, not as the literal 0711, because what
+        is required is the traversal; the mode that grants it is a detail.
+        Read but not listable stays pinned by the sibling test below.
+        """
+        mode = int(self._root_line()[2], 8)
+        self.assertTrue(mode & 0o001,
+                        f"the record root is {oct(mode)}: the workload user "
+                        f"cannot traverse it to reach its own leaf")
+
+    def test_the_root_is_not_readable_by_others(self):
+        """The other half, and the reason this is not simply 0755: the search
+        bit alone grants no read, so the set of workloads that have a record
+        cannot be enumerated by a local user. Losing THIS is the disclosure the
+        record was kept out of the journal to avoid."""
+        mode = int(self._root_line()[2], 8)
+        self.assertFalse(mode & 0o044,
+                         f"the record root is {oct(mode)}: it can be listed")
 
 
 class TestTheUnitCarriesTheDirectory(unittest.TestCase):

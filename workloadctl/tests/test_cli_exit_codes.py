@@ -23,6 +23,60 @@ from tests import load_script
 cli = load_script("bin/workloadctl", "workloadctl_bin")
 
 
+class HandlerReturnCodeTest(unittest.TestCase):
+    """A handler that RETURNS a code exits with it.
+
+    The exception ladder _run_cli tests below is not the only way a command
+    reports failure. `egress` and `pcap` return an int instead, and main()'s
+    dispatch dropped it -- so both printed a correct diagnostic to stderr and
+    exited 0. Found on a KVM host 2026-08-31 by a rig that asserted the exit
+    status rather than the message, which is the only thing that separates
+    "refused" from "reported nothing".
+
+    Driven through main() with a stub handler rather than through a real
+    subcommand, so this pins the DISPATCH and does not move if either of those
+    two commands changes which codes it returns.
+    """
+
+    def _dispatch(self, returned):
+        argv = ["workloadctl", "list"]
+        handler = mock.Mock(return_value=returned)
+        buf, out = io.StringIO(), io.StringIO()
+        with mock.patch.object(sys, "argv", argv), \
+                mock.patch.object(cli, "WorkloadManager", mock.Mock()), \
+                redirect_stderr(buf), redirect_stdout(out):
+            with mock.patch.object(cli.argparse.ArgumentParser, "parse_args",
+                                   return_value=mock.Mock(
+                                       func=handler, command="list",
+                                       json=False, quiet=False)):
+                try:
+                    cli.main()
+                except SystemExit as exc:
+                    return exc.code
+        return None
+
+    def test_a_nonzero_return_becomes_the_exit_code(self):
+        self.assertEqual(self._dispatch(2), 2)
+
+    def test_a_one_return_becomes_the_exit_code(self):
+        self.assertEqual(self._dispatch(1), 1)
+
+    def test_none_still_falls_off_the_end(self):
+        """The shape nearly every handler has. It must not start exiting."""
+        self.assertIsNone(self._dispatch(None))
+
+    def test_zero_still_falls_off_the_end(self):
+        """`return 0` is a handler saying it succeeded, not asking to exit."""
+        self.assertIsNone(self._dispatch(0))
+
+    def test_a_non_integer_return_is_not_an_exit_code(self):
+        """A handler that returns something that is not a number is not asking
+        for an exit status, and treating it as one would exit with a value the
+        shell cannot represent. Named here because it is also what a test that
+        stands a handler up as a bare Mock produces."""
+        self.assertIsNone(self._dispatch(mock.Mock()))
+
+
 class RunCliExitCodeTest(unittest.TestCase):
     """Each exception main() can surface maps to the documented exit code."""
 

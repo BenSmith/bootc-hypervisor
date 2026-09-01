@@ -495,9 +495,28 @@ def main():
 
     # Each subparser above sets its own `func` default (set_defaults(func=...)),
     # so dispatch is just calling whichever handler argparse resolved.
+    #
+    # AND EXITING WITH WHAT IT RETURNS. Most handlers report failure by raising
+    # one of the typed errors _run_cli maps, or by calling sys.exit directly --
+    # but `egress` and `pcap` report theirs by RETURNING a code, and for as
+    # long as that return value was dropped here they printed a correct
+    # diagnostic to stderr and exited 0. Measured on a KVM host 2026-08-31:
+    # `workloadctl egress <vm> --reason 'not allowed'` printed "'not allowed'
+    # is not a drop reason" and succeeded, so a script checking `$?` treats an
+    # unknown filter value as a report with nothing in it.
+    #
+    # A nonzero INT, rather than any truthy value, and not sys.exit(code or 0):
+    # a handler that returns None -- which is nearly all of them -- keeps
+    # falling off the end of main() exactly as before, so this changes the
+    # behavior of only the handlers that were already trying to say something.
+    # The isinstance is not decoration either: a test that stands a handler up
+    # as a Mock gets a truthy Mock back, and `sys.exit(<Mock>)` would turn
+    # every such test into an exit whose code is not a number.
     handler = getattr(args, "func", None)
     if handler:
-        handler(args, manager)
+        code = handler(args, manager)
+        if isinstance(code, int) and code:
+            sys.exit(code)
     else:
         print(f"Command '{args.command}' not yet implemented", file=sys.stderr)
         sys.exit(1)

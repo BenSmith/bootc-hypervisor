@@ -949,7 +949,7 @@ def vm_resolve_status_path(name: str) -> str:
 # a rollback of the state tree. The MODES are the access decision:
 #
 #   /var/log/workloadctl/               root:root  0755
-#   /var/log/workloadctl/egress/        root:root  0700
+#   /var/log/workloadctl/egress/        root:root  0711
 #   /var/log/workloadctl/egress/<name>/ _wl-<name> 0700
 #   .../requests.log                    _wl-<name> 0600
 #
@@ -957,8 +957,13 @@ def vm_resolve_status_path(name: str) -> str:
 # option. The per-workload directory is owned by the workload rather than by
 # root because the listener recreates the file itself after a rotation (see the
 # logrotate snippet's `nocreate`), and a process running as _wl-<name> cannot
-# create a name in a directory root owns at 0700. The 0700 on egress/ is what
-# keeps the ACL argument intact one level up.
+# create a name in a directory root owns at 0700.
+#
+# egress/ is 0711 and NOT 0700, which is the same distinction: the listener has
+# to traverse it as _wl-<name> to reach its own leaf at all. It was 0700 until
+# a KVM host measured what that costs -- EACCES on every record write, silent,
+# because the write may never raise. The search bit grants no read, so the ACL
+# argument one level up is intact: the directory still cannot be listed.
 VM_INSPECT_RECORD_ROOT = Path("/var/log/workloadctl/egress")
 VM_INSPECT_RECORD_FILE = "requests.log"
 
