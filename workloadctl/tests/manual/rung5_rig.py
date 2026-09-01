@@ -90,6 +90,16 @@ STATUS_INTERVAL = 30.0
 STATUS_SETTLE = STATUS_INTERVAL + 6
 
 EXPORTER = "/usr/libexec/workloadctl/workload-exporter"
+# Where the SHIPPED producer drops its file, and the unit that runs it. Checked
+# in addition to invoking the binary by hand, because they are not the same
+# test: the unit is a root oneshot with no User= and no SELinuxContext=, so it
+# runs in a service domain, while a rig running the binary from a root shell
+# runs it unconfined. A read the service domain is denied succeeds by hand and
+# fails in production, and [[unused-permission-vs-unexercised-path]] is that
+# gap -- a path nothing exercises and a permission nothing needs look identical
+# in the audit log.
+EXPORTER_UNIT = "workload-exporter.service"
+EXPORTER_DROP = Path("/run/workload-exporter/workloads.prom")
 
 
 @dataclass(frozen=True)
@@ -520,6 +530,26 @@ def exporter_checks(doctor_figs):
             break
     record("every inspector family carries HELP and TYPE", headered,
            "all headered" if headered else f"{metric} has none")
+
+    # THE SHIPPED PATH, which the invocation above is not. Starting the unit
+    # runs the same code in the domain systemd gives it, writing the real drop
+    # file that node_exporter globs -- the only form of this test that says
+    # anything about production.
+    run(["systemctl", "start", EXPORTER_UNIT], check=False, timeout=300)
+    try:
+        dropped = EXPORTER_DROP.read_text()
+    except OSError as exc:
+        dropped = ""
+        say(f"  could not read {EXPORTER_DROP}: {exc}")
+    drop_samples, _order = parse_exposition(dropped)
+    unit_series = [m for (m, l) in drop_samples
+                   if m.startswith("workload_vm_inspect_")
+                   and f'workload="{NAME}"' in l]
+    record("the exporter UNIT — not just the binary — writes the inspector "
+           "series to the real drop file",
+           bool(unit_series),
+           f"{len(unit_series)} series in {EXPORTER_DROP}, "
+           f"{len(dropped)} bytes total")
 
     # THE CROWN JEWEL, and the only check here that needs both surfaces at once:
     # decision 9 says one producer, and the unit suite proves the two renderers

@@ -579,3 +579,71 @@ line on this rig still passes in that state.
 
 This arm needs the host to have real internet, unlike the rest of the rig — it
 dials two names on the workload's allowlist.
+
+---
+
+## rung5_rig.py — do rung 5's reporting surfaces tell the truth about a live guest?
+
+Rung 5's T6 (`workloadctl rules`), T8 (`doctor`'s egress section) and T9 (the
+exporter's inspector series). Needs root, `/dev/kvm` and the installed RPM —
+`workloadctl` and `workload-exporter` are invoked by name, off PATH and out of
+`/usr/libexec`, exactly as an operator gets them. Two throwaway VMs: one
+filtered, one with `egress = "open"`.
+
+```bash
+sudo python3 tests/manual/rung5_rig.py
+sudo python3 tests/manual/rung5_rig.py --quiet   # failures and the tally only
+```
+
+**Why it exists when every figure has a unit test.** All three surfaces are
+tested against documents written by hand. What no unit test can reach is
+whether the document those readers open is the one a *live listener* wrote, at
+the path it really writes it to, with the permissions it really writes it with,
+and whether the numbers in it move when a guest actually dials something. Three
+claims only a host settles:
+
+- **`rules` reports origin `disk`.** Off a host every test takes the `config`
+  fall-back, because there is no `/run/workload-vm/<name>/inspect.json` to
+  prefer — so the preferred branch, and the 0640 root-owned read that goes with
+  it, had never executed against a file the listener wrote.
+- **`doctor` and the exporter agree.** Decision 9 says one producer, and the
+  unit suite proves the two renderers agree about a hand-written document.
+  Agreeing about a live one is a different claim: both must have opened the
+  same file, through their own code paths, and come back with the same numbers.
+- **The counters move.** A reader stuck at zero passes every assertion written
+  against a document full of zeros. The rig drives an allowed request and a
+  refused one and insists the figures changed.
+
+**The policy is two entries over one host, and both state both keys.** Two
+entries are the point — they union, neither overrides the other, and `rules`
+has to print both against the one name, which is the §3 composition rule the
+report exists to make visible. Both entries state `methods` *and* `paths`
+because `validate` refuses overlapping entries that omit one: an omitted key
+means ANY, so the omitting entry silently permits everything its sibling was
+narrowed to forbid. Written the natural way — one entry for methods, one for
+paths — the rig fails at `enable` with no VM ever booted, which looks nothing
+like the thing under test. `tests/test_manual_rig_configs.py` caught exactly
+that before this file first reached a host.
+
+**Admission is read off two status codes, not asserted directly.** Nothing
+serves `api.example.com`, so the governed probes end 502 at the dial rather
+than as policy decisions — and that is the signal, not a flaw: reaching the
+upstream at all is what proves the host was admitted, while the unlisted probe
+never gets that far and is refused at the allowlist with a 403. Whether a
+permitted request is permitted and a forbidden one forbidden is `policy_rig`'s
+question, against a stub origin built to answer it.
+
+**The unlisted probe uses `--resolve`, not DNS.** The synthesising resolver
+answers only for names the lists carry, so an unlisted name never resolves and
+never becomes a connection — the drop would be the *resolver's*, and the
+inspector's `not allowlisted` counter would stay at zero. Every egress port is
+redirected, so any address reaches the listener and the SNI decides.
+
+### Reading a failure
+
+Every probe's result is recorded, pass or fail. The first version of this rig
+ignored `curl`'s result, so a guest that had not finished booting produced no
+traffic, no socket activation and no status document — and the rig reported
+that as eight failures about `doctor` and the exporter, none of which named the
+cause. If the traffic line says a probe returned nothing, read no further down:
+everything below it is measuring an inspector that was never dialled.
