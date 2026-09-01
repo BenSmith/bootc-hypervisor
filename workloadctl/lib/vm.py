@@ -512,7 +512,7 @@ NFT_SET_INTERNAL_OK6 = "wl_internal_ok6"
 # the arming path can refuse an element the drop would never have caught.
 #
 # Duplicating them is the lesser evil and the test is what makes it safe:
-# tests/test_cmd_egress.py asserts these against the elements the .nft actually
+# tests/test_vm_egress.py asserts these against the elements the .nft actually
 # arms, so a range added on one side and not the other fails rather than
 # silently making the refusal wrong. Parsing the .nft at runtime was the
 # alternative and it puts a parser on the start path of every VM to answer a
@@ -811,7 +811,8 @@ VM_DROP_NOT_HTTP_POLICY = "not HTTP (policy entry)"
 # The two field names that tie one of the inspector's journal lines to the
 # per-request record written beside it. Second definitions for the same reason
 # the four keys above are, and pinned the same way by
-# tests/test_vm_inspect_diagnose.py.
+# tests/test_vm_inspect_record.py, which asserts each against the listener's
+# own LOG_ID_FIELD/LOG_REQ_FIELD.
 #
 # `id` is per CONNECTION and `req` is the ordinal within it, so a reader
 # selecting on `id` alone gets every decision taken on one connection in order.

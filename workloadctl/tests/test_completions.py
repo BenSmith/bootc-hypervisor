@@ -130,9 +130,22 @@ class OfferedChoiceValuesTest(unittest.TestCase):
     never be offered.
 
     Derived the same way the flag test is, from argparse's own rendering:
-    a `choices=` flag prints as `--flag {a,b,c}` in --help. One direction only,
-    for the reason stated at the top of this file — an arm may omit a value as
-    noise; offering one the parser will reject is always a bug.
+    a `choices=` flag prints as `--flag {a,b,c}` in --help.
+
+    BOTH DIRECTIONS HERE, unlike the flag test above, and the difference is
+    what a `choices=` flag is. The one-direction rule at the top of this file
+    was written for FLAGS, where omitting `--verbose` is a judgement about
+    noise. A closed vocabulary is not a judgement: an arm that enumerates one
+    at all is claiming to BE the vocabulary, and a value missing from it is a
+    completion that has gone stale — which is the drift this whole file exists
+    to catch, and the drift that motivated this test. Checking only the subset
+    direction would have left the defect in the docstring above unguarded:
+    the next value added to VM_INSPECT_RECORD_MODES would still never be
+    offered, and nothing would say so.
+
+    Only for flags that HAVE an arm. A `choices=` flag the completion does not
+    mention at all is the flag test's business, not this one's — declining to
+    complete a flag is still a legitimate judgement about noise.
     """
 
     def _offered(self, blk):
@@ -159,9 +172,14 @@ class OfferedChoiceValuesTest(unittest.TestCase):
                     # --reason), and whatever the arm offers is a hint, not a
                     # claim about a closed set.
                     continue
-                if offered - declared[flag]:
-                    bad[f"{cmd} {flag}"] = sorted(offered - declared[flag])
-        self.assertEqual(bad, {}, f"values offered but not accepted: {bad}")
+                if offered != declared[flag]:
+                    bad[f"{cmd} {flag}"] = {
+                        "offered but not accepted":
+                            sorted(offered - declared[flag]),
+                        "accepted but not offered":
+                            sorted(declared[flag] - offered),
+                    }
+        self.assertEqual(bad, {}, f"offered values are not the choices: {bad}")
 
     def test_the_check_can_see_at_least_one_closed_vocabulary(self):
         """A selector that matches nothing passes vacuously — check it bites.

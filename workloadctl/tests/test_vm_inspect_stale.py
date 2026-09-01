@@ -27,6 +27,7 @@ a manufactured failure.
 """
 
 import io
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
@@ -337,6 +338,67 @@ class TestTheStatusReadIsDefensiveEverywhere(unittest.TestCase):
                 cfg, elements4=elems, elements6=elems, socket_active=True,
                 v6_route=True, self_dials=None, status=status,
                 filter_sets={}, disk_digest="", disk_ca="AA:BB")
+
+
+class TestTheDiskReadsAreDefensiveToo(unittest.TestCase):
+    """The other half of TestTheStatusReadIsDefensiveEverywhere.
+
+    That class hardens the STATUS side and then injects `disk_digest` and
+    `disk_ca`, so the two functions that actually touch the filesystem were
+    never exercised with a damaged file. Both read TEXT at the locale's
+    encoding, so a byte the codec rejects raises UnicodeDecodeError -- a
+    ValueError, not an OSError, and `except OSError` let it straight out. There
+    is no wrapper around vm_inspect_check, so that ends the whole command and
+    every later check with it.
+
+    The reachable one is the CA. `_ca_fingerprint_on_disk` runs whenever the
+    minter reported a fingerprint, and a CA file left truncated or garbage
+    under a running listener is precisely the state T7 was written to report --
+    so the check died of the fault it exists for.
+    """
+
+    GARBAGE = b"-----BEGIN CERTIFICATE-----\n\xff\xfe garbage\n-----END CERTIFICATE-----\n"
+
+    def setUp(self):
+        self.dir = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
+
+    def test_a_ca_pem_that_is_not_text_reads_as_unknown(self):
+        cert = self.dir / "ca.crt"
+        cert.write_bytes(self.GARBAGE)
+        with mock.patch.object(cmd_diagnose, "workload_state_dir",
+                               return_value=self.dir), \
+             mock.patch.object(cmd_diagnose, "vm_ca_cert_path",
+                               return_value=cert):
+            self.assertIsNone(cmd_diagnose._ca_fingerprint_on_disk("vm1"))
+
+    def test_a_policy_document_that_is_not_text_reads_as_unknown(self):
+        doc = self.dir / "inspect.json"
+        doc.write_bytes(b'{"hosts": ["\xff\xfe"]}')
+        with mock.patch.object(cmd_diagnose, "vm_inspect_policy_path",
+                               return_value=str(doc)):
+            self.assertIsNone(cmd_diagnose._policy_digest_on_disk("vm1"))
+
+    def test_a_damaged_ca_does_not_end_the_check(self):
+        """The whole point: silence, and the twenty checks after this one still
+        run. A raise here is not one lost line."""
+        cert = self.dir / "ca.crt"
+        cert.write_bytes(self.GARBAGE)
+        cfg = SimpleNamespace(
+            name="vm1", uid=UID, vm_bridge=None,
+            vm_network=dict(NET),
+            config={"vm": {"network": dict(NET)}})
+        elems = [{"concat": [UID, 80]}, {"concat": [UID, 443]}]
+        with mock.patch.object(cmd_diagnose, "workload_state_dir",
+                               return_value=self.dir), \
+             mock.patch.object(cmd_diagnose, "vm_ca_cert_path",
+                               return_value=cert):
+            _name, ok, detail = cmd_diagnose.vm_inspect_check(
+                cfg, elements4=elems, elements6=elems, socket_active=True,
+                v6_route=True, self_dials=None, filter_sets={},
+                disk_digest="", status={"mint": {"ca": {"sha256": "AA:BB"}}})
+        self.assertTrue(ok, detail)
+        self.assertNotIn("DIFFERENT CA", detail)
 
 
 class TestTheFingerprintIsShownShort(unittest.TestCase):

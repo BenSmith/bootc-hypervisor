@@ -2005,10 +2005,19 @@ def _ca_fingerprint_on_disk(name: str) -> str | None:
     the base64 between the PEM markers. `pem_not_after` is the one that shells
     out to openssl, and this command deliberately does not call it (see
     _ca_fragments) -- the expiry it reports is the one the MINTER read.
+
+    ValueError AS WELL AS OSError, and that is not belt-and-braces. A PEM is
+    read as TEXT, at the locale's encoding, so a byte outside it raises
+    UnicodeDecodeError -- a ValueError, which pem_fingerprint's own `except
+    OSError` does not catch either. Nothing wraps vm_inspect_check, so that
+    escapes the whole command and the twenty checks after this one never run.
+    The state it fires on is exactly the one this comparison exists for: a CA
+    file that a restore left truncated or garbage under a running listener.
+    A diagnostic must not die of the fault it was written to report.
     """
     try:
         return pem_fingerprint(vm_ca_cert_path(workload_state_dir(name)))
-    except OSError:
+    except (OSError, ValueError):
         return None
 
 
@@ -2058,11 +2067,20 @@ def _policy_digest_on_disk(name: str) -> str | None:
     silence rather than as drift: an absent document is already T3's report
     (`workloadctl drift`), and a second line about it here would send an
     operator to the same fix twice.
+
+    ValueError for the reason _ca_fingerprint_on_disk gives: the document is
+    read as text and a byte the locale's codec rejects is a UnicodeDecodeError,
+    which is a ValueError and not an OSError. The document is pure ASCII by
+    construction -- vm_inspect_policy_text goes through json.dumps, whose
+    ensure_ascii defaults true, which is also what makes this digest
+    comparable across a systemd-launched listener and an operator's shell --
+    so reaching this needs the file itself to have been damaged. That is a
+    state somebody runs `diagnose` in.
     """
     try:
         with open(vm_inspect_policy_path(name)) as fh:
             return vm_inspect_policy_digest(fh.read())
-    except OSError:
+    except (OSError, ValueError):
         return None
 
 

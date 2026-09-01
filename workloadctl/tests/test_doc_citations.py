@@ -77,6 +77,33 @@ EXTERNAL = {
 }
 
 
+def _resolves_against(tracked, citing: Path, cite: str) -> bool:
+    """Does `cite`, as written in `citing`, name a tracked file?"""
+    bare = cite.lstrip("/")
+    if "/" in bare:
+        # A path is resolved against each ancestor directory of the citing
+        # file, innermost first: `docs/workloads.md` inside workloadctl/
+        # means workloadctl/docs/workloads.md, and the same string at the
+        # repo root means the root docs/. Both are legitimate.
+        for base in citing.parents:
+            candidate = (base / bare).resolve()
+            try:
+                rel = candidate.relative_to(GIT_ROOT).as_posix()
+            except ValueError:
+                continue
+            if rel in tracked:
+                return True
+            if base == GIT_ROOT:
+                break
+        return False
+    # A bare filename is a relative link whose base depends on where the
+    # reader is (a docs/ index row, a "see cli.md" in a sibling doc), so it
+    # is enough that some tracked file has that name. Case-sensitive on
+    # purpose: `readme.md` does not resolve to `README.md` on the
+    # case-sensitive filesystems this ships to.
+    return any(t.rsplit("/", 1)[-1] == bare for t in tracked)
+
+
 def _git(*args):
     return subprocess.run(
         ["git", *args], cwd=GIT_ROOT,
@@ -95,30 +122,7 @@ class TestDocCitations(unittest.TestCase):
             raise unittest.SkipTest("no tracked files")
 
     def _resolves(self, citing: Path, cite: str) -> bool:
-        """Does `cite`, as written in `citing`, name a tracked file?"""
-        bare = cite.lstrip("/")
-        if "/" in bare:
-            # A path is resolved against each ancestor directory of the citing
-            # file, innermost first: `docs/workloads.md` inside workloadctl/
-            # means workloadctl/docs/workloads.md, and the same string at the
-            # repo root means the root docs/. Both are legitimate.
-            for base in citing.parents:
-                candidate = (base / bare).resolve()
-                try:
-                    rel = candidate.relative_to(GIT_ROOT).as_posix()
-                except ValueError:
-                    continue
-                if rel in self.tracked:
-                    return True
-                if base == GIT_ROOT:
-                    break
-            return False
-        # A bare filename is a relative link whose base depends on where the
-        # reader is (a docs/ index row, a "see cli.md" in a sibling doc), so it
-        # is enough that some tracked file has that name. Case-sensitive on
-        # purpose: `readme.md` does not resolve to `README.md` on the
-        # case-sensitive filesystems this ships to.
-        return any(t.rsplit("/", 1)[-1] == bare for t in self.tracked)
+        return _resolves_against(self.tracked, citing, cite)
 
     def _link_resolves(self, citing: Path, target: str) -> bool:
         """Does a markdown link target name something a reader can open?
@@ -247,3 +251,151 @@ class TestDocCitations(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# The same policy one file-type over: a comment that names a test module is a
+# citation, and it has to resolve.
+#
+# The `.md` rule above cannot see these — a `tests/test_x.py` in a comment is
+# not a markdown link and does not end in `.md` — and code cites tests
+# constantly in this tree, because "restating this constant is safe, and here
+# is the pin that makes it safe" is the standard justification for a second
+# definition of a listener string. A pin named in a comment and absent from the
+# tree is that justification with nothing behind it.
+CODE_CITATION = re.compile(
+    r"(?<![A-Za-z0-9_./-])(tests/(?:[A-Za-z0-9_]+/)*[A-Za-z0-9_]+\.py)"
+    r"(?![A-Za-z0-9_])")
+
+# Citations to a module that has been DELETED, kept as history rather than as a
+# pointer ("it lived in tests/test_vm_proxy.py until rung 2 deleted that
+# module"). Naming a file in order to say it is gone is not a promise the
+# reader can open it, and rewriting the sentence to avoid the name would lose
+# the only thing that makes the move traceable.
+#
+# Keep this list short, and add to it only for that shape. An entry here is a
+# citation the check can no longer see, so a LIVE citation that drifted onto a
+# retired name would be waved through with it.
+RETIRED = {
+    "tests/test_vm_proxy.py",
+}
+
+
+class TestCodeCitations(unittest.TestCase):
+    """A comment that names a test file must name one that exists.
+
+    WHAT THIS CATCHES is the deletion and rename class: a test module that
+    moves or goes away, leaving every comment that pointed at it claiming a
+    guarantee that is no longer anywhere. Measured before it was written
+    (2026-09-01): 45 such citations across the tracked tree, of which exactly
+    one did not resolve, and that one is the retired-module sentence above.
+
+    WHAT IT DOES NOT CATCH, said plainly because the check was written after
+    two of these and would have caught neither: a citation that resolves to the
+    WRONG tracked file. `lib/vm.py` pointed its internal-prefix pin at
+    `tests/test_cmd_egress.py` (the assertion is in `tests/test_vm_egress.py`)
+    and its log-field pin at `tests/test_vm_inspect_diagnose.py` (it is in
+    `tests/test_vm_inspect_record.py`); both exist, so both pass here. A
+    reciprocity rule — require the cited module to name the definition the
+    comment is attached to — was prototyped against the same 45 and rejected:
+    only 14 yielded a subject at all, and two of the three it flagged were
+    sound citations whose subject the heuristic had misread. A gate with
+    thirty blind spots and a two-thirds false-positive rate teaches people to
+    ignore it. Misdirection stays a thing review finds.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        try:
+            cls.tracked = set(_git("ls-files").split())
+        except (OSError, subprocess.CalledProcessError) as e:
+            raise unittest.SkipTest(f"git unavailable: {e}")
+        if not cls.tracked:
+            raise unittest.SkipTest("no tracked files")
+
+    def _violations(self):
+        found = []
+        own = Path(__file__).resolve().relative_to(GIT_ROOT).as_posix()
+        for rel in sorted(self.tracked):
+            path = GIT_ROOT / rel
+            if not path.is_file() or rel == own:
+                continue
+            try:
+                text = path.read_text()
+            except (UnicodeDecodeError, OSError):
+                continue
+            for lineno, line in enumerate(text.splitlines(), 1):
+                for m in CODE_CITATION.finditer(URL.sub(" ", line)):
+                    cite = m.group(1)
+                    if cite in RETIRED:
+                        continue
+                    if not self._code_resolves(path, cite):
+                        found.append(f"{rel}:{lineno} cites {cite!r}")
+        return found
+
+    def _code_resolves(self, citing: Path, cite: str) -> bool:
+        """The ancestor walk, plus one base the doc rule does not need.
+
+        workloadctl/ is a self-contained project nested in the image repo, and
+        files at the ROOT that discuss it write its paths project-relative,
+        because that is how they read to somebody working in it: the root
+        CLAUDE.md says `tests/test_vm_broker.py` and hypervisor.Containerfile
+        names the modules that need the openssl CLI. Those are followable —
+        the reader is told which project — so resolving them only against the
+        citing file's own ancestors would fail three sound citations and the
+        first person to hit it would delete the check rather than the comment.
+
+        One extra base, not "any directory that has a tests/": the repo has
+        exactly one nested project, and a wildcard would let a citation
+        resolve against a tree it was never about.
+        """
+        return (_resolves_against(self.tracked, citing, cite)
+                or _resolves_against(self.tracked, REPO_ROOT / "x", cite))
+
+    def test_every_cited_test_module_is_tracked(self):
+        violations = self._violations()
+        self.assertEqual(
+            violations, [],
+            "tracked files name test modules that are not tracked — retarget "
+            "at the module that actually holds the assertion, or say plainly "
+            "that it is gone and add it to RETIRED:\n  "
+            + "\n  ".join(violations))
+
+    def test_the_checker_would_notice_a_regression(self):
+        """Vacuous-green guard, for the reason the doc rule has one: this
+        regex walks comments, and a green run over zero matches looks
+        identical to a green run over all of them."""
+        probe = GIT_ROOT / "workloadctl" / "lib" / "vm.py"
+        self.assertFalse(
+            _resolves_against(self.tracked, probe, "tests/test_nonesuch.py"))
+        self.assertTrue(
+            _resolves_against(self.tracked, probe, "tests/test_vm_egress.py"))
+
+    def test_the_scan_actually_finds_citations(self):
+        """The other half of the same guard, on the REGEX rather than on the
+        resolver: a pattern that stopped matching would make _violations()
+        return [] over nothing at all."""
+        text = (GIT_ROOT / "workloadctl" / "lib" / "vm.py").read_text()
+        hits = {m.group(1) for m in CODE_CITATION.finditer(text)}
+        self.assertIn("tests/test_vm_egress.py", hits)
+        self.assertGreater(len(hits), 1)
+
+    def test_a_root_file_may_write_a_workloadctl_relative_path(self):
+        """The root CLAUDE.md and hypervisor.Containerfile both do. Pinned so
+        the extra base is not quietly dropped as redundant."""
+        root_file = GIT_ROOT / "CLAUDE.md"
+        self.assertFalse(
+            _resolves_against(self.tracked, root_file,
+                              "tests/test_vm_broker.py"))
+        self.assertTrue(
+            self._code_resolves(root_file, "tests/test_vm_broker.py"))
+        self.assertFalse(
+            self._code_resolves(root_file, "tests/test_nonesuch.py"))
+
+    def test_a_retired_name_is_exempt_only_by_being_listed(self):
+        """RETIRED is an allowlist, not a wildcard: a second deleted module
+        does not inherit the first one's exemption."""
+        self.assertIn("tests/test_vm_proxy.py", RETIRED)
+        self.assertFalse(
+            _resolves_against(self.tracked,
+                              GIT_ROOT / "workloadctl" / "lib" / "vm.py",
+                              "tests/test_vm_proxy.py"))
