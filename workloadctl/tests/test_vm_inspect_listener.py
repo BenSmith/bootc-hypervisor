@@ -2655,6 +2655,11 @@ class TestCounters(unittest.TestCase):
         # completed handshake -- reaches record_drop through a variable, so the
         # tuple it was built into is where its name actually appears.
         named |= set(re.findall(r"\(\s*(DROP_\w+),", source))
+        # And a reason chosen by an `if` above the call site, which is how the
+        # broker leg picks its own refusal apart from the generic one. Same
+        # shape as the `return` pattern above -- the name appears where the
+        # DECISION is taken, not where the counter is bumped.
+        named |= set(re.findall(r"reason = (DROP_\w+)", source))
         self.assertEqual({getattr(mod, n) for n in named},
                          set(mod.DROP_REASONS))
 
@@ -2682,7 +2687,7 @@ class TestCounters(unittest.TestCase):
         self.assertEqual(lists["http2"], ["grpc.example"])
         self.assertEqual(lists["policy"],
                          [{"host": "api.example", "methods": ["GET"],
-                           "paths": ["/v1/*"]}])
+                           "paths": ["/v1/*"], "credential": None}])
 
     def test_the_reported_policy_carries_the_rules_and_not_just_the_names(self):
         """Which hosts are governed is half the question; what they are

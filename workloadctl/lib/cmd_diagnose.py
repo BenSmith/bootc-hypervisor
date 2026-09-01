@@ -69,6 +69,7 @@ from vm import (
     VM_TLS_DEFAULT,
     vm_inspect_address, vm_uses_inspect,
     VM_DROP_MISDIRECTED, VM_DROP_MISDIRECTED_LISTED,
+    VM_DROP_BROKER_UNREACHABLE,
     VM_DROP_NOT_HTTP, VM_DROP_NOT_HTTP_POLICY,
     VM_RESOLVE_PORT, vm_resolve_address, vm_resolve_policy_path,
     vm_uses_resolve,
@@ -1342,6 +1343,71 @@ def _named_hosts(counts) -> str:
     return ", ".join(parts)
 
 
+def _credential_usage_fragments(status) -> list[str]:
+    """What the inspector's own document says about brokered requests.
+
+    The counterpart to `_credential_fragments`, which reads the BUNDLE and says
+    what is configured. This says what happened, and the two are wanted at
+    different moments: the config fragment answers "is this host brokered at
+    all", this one answers "the provider is refusing me and every unit here is
+    green".
+
+    THE 401/403 LINE IS THE POINT. Every layer of ours succeeded on those
+    requests -- the policy admitted the host, the broker attached material, the
+    origin answered -- so nothing else in this report is going to mention them.
+    The credential NAMES are printed and the material never is; naming them is
+    what turns "a provider said no" into "rotate this key", and on a workload
+    with several they are what says which.
+
+    The plain usage line is emitted only where nothing was brokered at all, and
+    only where some request WAS made: a workload whose brokered hosts the guest
+    has simply not used yet reads as configured-and-idle, which is exactly the
+    state an operator is trying to distinguish from a broker that is not
+    working. A non-zero usage count needs no sentence -- it is the healthy case
+    and the figures already carry it.
+    """
+    # Gated on the LOADED policy, not on the config: this whole function
+    # describes what the running listener did, and a workload whose TOML
+    # declares no credential has nothing here to say. Read from `lists.policy`,
+    # which is the listener reporting what it is enforcing -- the config is the
+    # other fragment's source, deliberately, so that the two can disagree
+    # visibly when a listener is enforcing an older document.
+    entries = ((status.get("lists") or {}).get("policy") or [])
+    if not any(isinstance(e, dict) and e.get("credential") for e in entries):
+        return []
+    out = []
+    unauthorized = status.get("credential_unauthorized")
+    if isinstance(unauthorized, int) and unauthorized:
+        which = _named_hosts(status.get("per_credential"))
+        where = f" using {which}" if which else ""
+        out.append(
+            f"{unauthorized} brokered request(s) were answered 401/403 by the "
+            f"origin{where} — EVERY LAYER HERE SUCCEEDED and the provider "
+            f"said no, so the cause is the material or the placeholder, not "
+            f"the policy: check that the credential in the credstore is "
+            f"current, and that the guest is sending the `placeholder` this "
+            f"workload declares rather than a key of its own")
+    brokered = status.get("credentialed")
+    dropped = (status.get("drop_reasons") or {}).get(VM_DROP_BROKER_UNREACHABLE)
+    if isinstance(dropped, int) and dropped:
+        out.append(
+            f"{dropped} request(s) to a brokered host were dropped because "
+            f"this workload's credential broker did not answer — that is a "
+            f"unit on this host, not a provider outage: check "
+            f"workload-<name>-broker.service, and check audit.log, because a "
+            f"missing SELinux rule on that dial looks identical to a broker "
+            f"that is down")
+    elif (isinstance(brokered, int) and not brokered
+            and isinstance(status.get("dispositions"), dict)
+            and any(status["dispositions"].values())):
+        out.append(
+            "no request has been sent through the credential broker yet, "
+            "though this guest has made requests — either it has not reached "
+            "a brokered host, or it is reaching one by a name the "
+            "[[vm.network.policy]] entry does not match")
+    return out
+
+
 def _binding_fragments(status) -> list[str]:
     """The name-to-`Host` binding rejections, as two readings and never one.
 
@@ -1706,6 +1772,7 @@ def vm_inspect_check(config, *, elements4=PROBE, elements6=PROBE,
     if status:
         for fragment in (_binding_fragments(status)
                          + _not_http_fragments(status)
+                         + _credential_usage_fragments(status)
                          + _ca_fragments(status)):
             tail += f"; {fragment}"
 

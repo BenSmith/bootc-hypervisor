@@ -821,3 +821,592 @@ class TestTheHelperWritesTheConfig(unittest.TestCase):
         with contextlib.redirect_stderr(buf):
             self.assertEqual(self.mod.main(["prog", "config"]), 2)
         self.assertIn("<config|up|down>", buf.getvalue())
+
+
+# ---------------------------------------------------------------------------
+# Rung 6 T5 — the inspector dials the broker.
+#
+# The branch is small (`_upstream_for` already took the dial as an argument),
+# and everything worth pinning is what it does NOT do: it does not consult the
+# origin, it does not re-resolve the host to explain a failure that never
+# touched DNS, and it does not merge its refusal into `upstream unreachable`.
+# Each of those failing is silent -- the request still gets an answer, the
+# counters still reconcile, and only a reader who already suspected the seam
+# would notice ([[unit-gates-dont-see-the-seam]]).
+# ---------------------------------------------------------------------------
+
+import json
+import os
+import socket
+import threading
+import time
+
+from vm import (
+    VM_BROKER_INSTANCE_PORT, VM_DROP_BROKER_UNREACHABLE,
+    VM_DROP_UNREACHABLE, VM_INSPECT_RECORD_FIELDS,
+    VmPolicyEntry, vm_broker_listen_address, vm_inspect_policy,
+    vm_inspect_policy_text,
+)
+import vm_inspect_figures
+
+LISTENER = Path(__file__).resolve().parent.parent / "libexec" / "workload-vm-inspect-listener"
+CIL = Path(__file__).resolve().parent.parent / "security" / "workload-inspect.cil"
+
+_LISTENER_MOD = None
+
+
+def listener_mod():
+    global _LISTENER_MOD
+    if _LISTENER_MOD is None:
+        _LISTENER_MOD = load_script("libexec/workload-vm-inspect-listener")
+    return _LISTENER_MOD
+
+
+# Captured before any test patches it: the rig's own upstream pair is built
+# with create_connection, and the fake dial patches that name globally.
+_REAL_CREATE_CONNECTION = socket.create_connection
+
+_OK = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nhi"
+_UNAUTHORIZED = b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\n\r\n"
+
+# The address this workload's broker would answer on. Injected rather than
+# derived from os.getuid(), because the suite does not run as _wl-<name> and
+# vm_broker_listen_address refuses a uid outside the workload range -- see
+# TestTheBrokerAddressComesFromTheUid for the derivation itself.
+BROKER_ADDR = vm_broker_listen_address(10007)
+
+
+def _pump(sock, buf):
+    try:
+        while True:
+            chunk = sock.recv(65536)
+            if not chunk:
+                return
+            buf += chunk
+    except (TimeoutError, OSError):
+        return
+
+
+class _BrokerRig(unittest.TestCase):
+    """One guest request through the cleartext plane, with every dial captured.
+
+    Real socketpairs on both legs. A mock upstream cannot stand in here: what
+    is under test is which ADDRESS was dialled and which BYTES arrived there,
+    and both are properties of a stream.
+    """
+
+    def _pair(self):
+        a, b = socket.socketpair()
+        self.addCleanup(a.close)
+        self.addCleanup(b.close)
+        a.settimeout(3.0)
+        b.settimeout(3.0)
+        return a, b
+
+    def _tcp_pair(self):
+        """A REAL TCP pair whose near end has a 127.129.x.y peer.
+
+        A socketpair will not do for the upstream leg: `_Record.dialled` reads
+        `getpeername()`, and an AF_UNIX socket answers something that is not an
+        address pair -- so the record's `upstream` stays null and the one field
+        rung 6 decision 6 is about is untested. Bound on the broker's own
+        address, which 127/8 makes free, so the record carries the address
+        family the decision turns on rather than a stand-in for it.
+
+        The PORT is ephemeral and deliberately not asserted anywhere: what
+        create_connection was ASKED for is captured separately, and inventing a
+        rig that could also bind 8081 would need a privileged port-free host
+        and would prove nothing more.
+        """
+        server = socket.socket()
+        self.addCleanup(server.close)
+        server.bind((BROKER_ADDR, 0))
+        server.listen(1)
+        near = _REAL_CREATE_CONNECTION(server.getsockname(), timeout=3.0)
+        self.addCleanup(near.close)
+        far, _ = server.accept()
+        self.addCleanup(far.close)
+        near.settimeout(3.0)
+        far.settimeout(3.0)
+        return near, far
+
+    def _policy(self, entries, hosts=()):
+        mod = listener_mod()
+        return mod.Policy(tls="splice", hosts=tuple(hosts),
+                          policy=tuple(entries))
+
+    def _serve(self, policy, request, responses=(), refuse=False,
+               record=False):
+        """Drive one cleartext connection. Returns (log, dialled, snapshot, records).
+
+        `dialled` is [(address, bytes-that-arrived)] in dial order, which is
+        the assertion this whole class exists to make.
+        """
+        mod = listener_mod()
+        out = io.StringIO()
+        record_path = None
+        if record:
+            tmp = tempfile.TemporaryDirectory(prefix="broker-rec-")
+            self.addCleanup(tmp.cleanup)
+            record_path = str(Path(tmp.name) / "requests.log")
+        listener = mod.Listener([], out, policy=policy,
+                                record_path=record_path,
+                                broker_address=BROKER_ADDR)
+        ours, guest = self._pair()
+        guest.sendall(request)
+        dialled = []
+
+        def dial(addr, timeout=None):
+            if refuse:
+                raise ConnectionRefusedError(111, "Connection refused")
+            near, far = self._tcp_pair()
+            if len(dialled) < len(responses):
+                far.sendall(responses[len(dialled)])
+            buf = bytearray()
+            pump = threading.Thread(target=_pump, args=(far, buf), daemon=True)
+            pump.start()
+            dialled.append((addr, buf, pump))
+            return near
+
+        with unittest.mock.patch.object(
+                socket, "create_connection", side_effect=dial), \
+                unittest.mock.patch.object(mod, "CONNECTION_TIMEOUT", 0.20), \
+                unittest.mock.patch.object(mod, "RELAY_IDLE_TIMEOUT", 0.75):
+            listener._serve_cleartext(ours, _where())
+        for _, _, pump in dialled:
+            pump.join(timeout=3.0)
+        records = []
+        if record_path and Path(record_path).exists():
+            records = [json.loads(line) for line
+                       in Path(record_path).read_text().splitlines() if line]
+        answer = b""
+        try:
+            while chunk := guest.recv(65536):
+                answer += chunk
+        except (TimeoutError, OSError):
+            pass
+        self.answer = answer
+        return (out.getvalue(), [(addr, bytes(buf)) for addr, buf, _ in dialled],
+                listener.counters.snapshot(open_now=0, refused=0), records)
+
+
+def _where():
+    mod = listener_mod()
+    return mod._Where(f"{mod.LOG_ID_FIELD}=abc plane=cleartext",
+                      cid="abc", plane="cleartext")
+
+
+BROKERED = VmPolicyEntry(host="api.provider", methods=None, paths=None,
+                         credential="provider-key")
+PLAIN = VmPolicyEntry(host="plain.example", methods=None, paths=None)
+
+_GET_BROKERED = (b"GET /v1/models HTTP/1.1\r\nHost: api.provider\r\n\r\n")
+_GET_PLAIN = (b"GET / HTTP/1.1\r\nHost: plain.example\r\n\r\n")
+
+
+class TestTheBrokeredRequestGoesToTheBroker(_BrokerRig):
+
+    def test_the_dial_is_the_brokers_address_and_port(self):
+        """Not the origin, and not 127.0.0.1. Both negatives are asserted
+        because the second is the hole ADR 007 decision 6 closes: a broker on
+        127.0.0.1 is reachable by every workload on the box."""
+        _, dialled, _, _ = self._serve(
+            self._policy([BROKERED]), _GET_BROKERED, responses=[_OK])
+        self.assertEqual(len(dialled), 1)
+        addr, _ = dialled[0]
+        self.assertEqual(addr, (BROKER_ADDR, VM_BROKER_INSTANCE_PORT))
+        self.assertNotEqual(addr[0], "127.0.0.1")
+        self.assertNotEqual(addr[0], "api.provider")
+
+    def test_the_host_header_reaches_the_broker_unchanged(self):
+        """Half the broker's `(uid, Host)` key. The other half is the uid on
+        the far end of this socket, which is not ours to send -- so if the
+        Host were rewritten here the broker would dispatch on nothing."""
+        _, dialled, _, _ = self._serve(
+            self._policy([BROKERED]), _GET_BROKERED, responses=[_OK])
+        _, sent = dialled[0]
+        self.assertIn(b"Host: api.provider\r\n", sent)
+        self.assertIn(b"GET /v1/models ", sent)
+
+    def test_a_host_with_no_credential_still_goes_to_the_origin(self):
+        """The branch is per HOST, not per workload: one brokered entry must
+        not divert the rest of the allowlist through the broker."""
+        _, dialled, _, _ = self._serve(
+            self._policy([BROKERED, PLAIN]), _GET_PLAIN, responses=[_OK])
+        addr, _ = dialled[0]
+        self.assertEqual(addr, ("plain.example", 80))
+
+    def test_policy_is_applied_before_the_credential_is_looked_up(self):
+        """A credential cannot widen what a guest may ask for. The entry
+        permits GET only, so a POST is refused and nothing is dialled -- if
+        the branch ran first, the broker would attach a key to a request this
+        workload's own policy denies."""
+        entry = VmPolicyEntry(host="api.provider", methods=("GET",),
+                              paths=None, credential="provider-key")
+        log, dialled, snap, _ = self._serve(
+            self._policy([entry]),
+            b"POST /v1/models HTTP/1.1\r\nHost: api.provider\r\n\r\n")
+        self.assertEqual(dialled, [])
+        self.assertEqual(snap["drop_reasons"]["not permitted by policy"], 1)
+        self.assertEqual(snap["credentialed"], 0)
+
+
+class TestTheRefusalWhenTheBrokerIsDown(_BrokerRig):
+
+    def test_the_reason_is_its_own_and_not_upstream_unreachable(self):
+        """Rung 6 decision 5. 'the provider is down' and 'a unit on this host
+        is not answering' need different operator responses, and
+        `workloadctl egress --reason` validates against a closed set -- so a
+        merged reason is a filter that cannot select this failure."""
+        log, _, snap, _ = self._serve(
+            self._policy([BROKERED]), _GET_BROKERED, refuse=True)
+        self.assertEqual(snap["drop_reasons"][VM_DROP_BROKER_UNREACHABLE], 1)
+        self.assertEqual(snap["drop_reasons"][VM_DROP_UNREACHABLE], 0)
+        self.assertIn(VM_DROP_BROKER_UNREACHABLE, log)
+
+    def test_the_guest_is_told_the_request_was_not_sent(self):
+        """A silent close is the one outcome this listener argues against at
+        length: a guest told 'no' by a dead socket cannot tell a refusal from
+        the host being down. It gets a 502, and the body says the request did
+        NOT reach the origin -- which matters more here than on a dead
+        upstream, because a retry against the same host will do the same thing
+        until an operator touches the host."""
+        self._serve(self._policy([BROKERED]), _GET_BROKERED, refuse=True)
+        self.assertIn(b"502", self.answer)
+        self.assertIn(b"NOT sent", self.answer)
+
+    def test_the_operator_is_pointed_at_the_unit_and_at_audit_log(self):
+        """The AVC and a broker that failed to start are indistinguishable
+        from here -- the counter cannot tell them apart and neither can the
+        502. So the sentence names both remedies rather than asserting one,
+        per this module's own 'a policy gap wearing a network error's
+        clothes'."""
+        self._serve(self._policy([BROKERED]), _GET_BROKERED, refuse=True)
+        self.assertIn(b"broker.service", self.answer)
+        self.assertIn(b"audit.log", self.answer)
+
+    def test_the_failed_host_is_not_re_resolved(self):
+        """_dial_failure_reason exists to tell the wildcard trap from a dead
+        host, and it does that by RE-RESOLVING the name. On this leg the name
+        was never dialled -- a loopback address on this box was -- so running
+        it would attribute a dead broker to whatever api.provider resolves to,
+        and would pay a synchronous getaddrinfo for the wrong answer."""
+        mod = listener_mod()
+        with unittest.mock.patch.object(
+                mod.Listener, "_dial_failure_reason") as failure:
+            self._serve(self._policy([BROKERED]), _GET_BROKERED, refuse=True)
+        failure.assert_not_called()
+
+    def test_an_unbrokered_host_still_gets_the_resolving_reason(self):
+        """The guard for the test above: the generic path must keep the
+        behaviour the broker path opts out of."""
+        mod = listener_mod()
+        with unittest.mock.patch.object(
+                mod.Listener, "_dial_failure_reason",
+                return_value=VM_DROP_UNREACHABLE) as failure:
+            self._serve(self._policy([PLAIN]), _GET_PLAIN, refuse=True)
+        failure.assert_called_once()
+
+
+    def test_a_uid_outside_the_workload_range_is_a_refusal_not_a_traceback(self):
+        """A listener started by hand, outside its unit, derives no broker
+        address. That has to reach the caller's broker arm as a legible
+        refusal: a bare ValueError kills the connection thread with a
+        traceback and tells the operator nothing about what is wrong."""
+        mod = listener_mod()
+        listener = mod.Listener([], io.StringIO(),
+                                policy=self._policy([BROKERED]))
+        with unittest.mock.patch.object(os, "getuid", return_value=0):
+            with self.assertRaises(OSError) as caught:
+                listener._dial_broker("api.provider")
+        self.assertIn("outside the workload range", str(caught.exception))
+
+
+class TestTheRecordOfABrokeredRequest(_BrokerRig):
+    """Rung 6 decision 6: `upstream` stays honest and `credential` is what
+    makes it readable."""
+
+    def _one(self, request=_GET_BROKERED, responses=(_OK,), policy=None):
+        _, _, _, records = self._serve(
+            policy or self._policy([BROKERED]), request,
+            responses=list(responses), record=True)
+        self.assertEqual(len(records), 1, records)
+        return records[0]
+
+    def test_the_credential_name_is_recorded(self):
+        self.assertEqual(self._one()["credential"], "provider-key")
+
+    def test_the_upstream_is_the_broker_and_not_the_origin(self):
+        """`upstream` is documented as the address actually dialled, and on a
+        brokered request that is a loopback address. Recording the origin
+        instead would put a second, false definition of 'what this request
+        touched' in the one document rung 5 built to be evidence."""
+        rec = self._one()
+        self.assertTrue(rec["upstream"].startswith("127.129."), rec["upstream"])
+        self.assertNotIn("api.provider", rec["upstream"])
+
+    def test_the_host_is_still_the_name_that_was_authorised(self):
+        """Which is what makes the loopback `upstream` readable rather than
+        mysterious: `host` says where the request went, `credential` says why
+        `upstream` is a local address."""
+        self.assertEqual(self._one()["host"], "api.provider")
+
+    def test_an_unbrokered_request_records_a_null_credential(self):
+        """Absent and null are different facts everywhere in this record, and
+        this field is no exception -- a reader must be able to tell 'not
+        brokered' from 'the writer dropped the key'."""
+        rec = self._one(request=_GET_PLAIN,
+                        policy=self._policy([BROKERED, PLAIN]))
+        self.assertIn("credential", rec)
+        self.assertIsNone(rec["credential"])
+
+    def test_the_field_is_in_the_shared_vocabulary(self):
+        self.assertIn("credential", VM_INSPECT_RECORD_FIELDS)
+        self.assertIn("credential", listener_mod().RECORD_FIELDS)
+
+
+class TestTheCredentialFigures(_BrokerRig):
+    """[[counter-with-no-writer-reads-zero]]: 0 is a legal value for every one
+    of these, so a row in the FIGURES table proves nothing on its own. Each
+    test here makes the writer fire."""
+
+    def test_a_brokered_request_moves_the_total(self):
+        _, _, snap, _ = self._serve(
+            self._policy([BROKERED]), _GET_BROKERED, responses=[_OK])
+        self.assertEqual(snap["credentialed"], 1)
+
+    def test_the_breakdowns_name_the_host_and_the_credential(self):
+        """Two breakdowns of one total, because the two questions differ:
+        which brokered host is the guest using, and is this key used at all.
+        The second is what catches a policy entry pointing at a credential
+        nothing triggers -- the one to read before rotating a key."""
+        _, _, snap, _ = self._serve(
+            self._policy([BROKERED]), _GET_BROKERED, responses=[_OK])
+        self.assertEqual(snap["credentialed_hosts"]["api.provider"], 1)
+        self.assertEqual(snap["per_credential"]["provider-key"], 1)
+
+    def test_a_dead_broker_is_not_counted_as_a_credential_used(self):
+        """The request reached no provider and carried no key. Counting it
+        would report a credential as used on a request that reached nobody --
+        and the drop reason already says what happened."""
+        _, _, snap, _ = self._serve(
+            self._policy([BROKERED]), _GET_BROKERED, refuse=True)
+        self.assertEqual(snap["credentialed"], 0)
+        self.assertEqual(snap["drop_reasons"][VM_DROP_BROKER_UNREACHABLE], 1)
+
+    def test_a_401_from_the_origin_is_counted(self):
+        """§11's second named failure, and the reason it is a counter rather
+        than a note: every layer of ours succeeded. The record says
+        decision=forward, the policy admitted the host, the broker attached
+        material -- and the provider said no."""
+        _, _, snap, _ = self._serve(
+            self._policy([BROKERED]), _GET_BROKERED, responses=[_UNAUTHORIZED])
+        self.assertEqual(snap["credential_unauthorized"], 1)
+
+    def test_a_200_is_not(self):
+        _, _, snap, _ = self._serve(
+            self._policy([BROKERED]), _GET_BROKERED, responses=[_OK])
+        self.assertEqual(snap["credential_unauthorized"], 0)
+
+    def test_a_401_on_an_unbrokered_host_is_not_counted(self):
+        """The figure's whole meaning is 'the credential was wrong'. An
+        origin that wants authorisation the guest was always going to supply
+        itself is an ordinary 401 and not this."""
+        _, _, snap, _ = self._serve(
+            self._policy([BROKERED, PLAIN]), _GET_PLAIN,
+            responses=[_UNAUTHORIZED])
+        self.assertEqual(snap["credential_unauthorized"], 0)
+
+    def test_every_new_figure_reads_from_a_key_the_listener_writes(self):
+        """The table is the mechanism, and a row whose `path` does not exist
+        in the document renders 0 forever -- indistinguishable from a figure
+        that is measured and idle."""
+        _, _, snap, _ = self._serve(
+            self._policy([BROKERED]), _GET_BROKERED, responses=[_UNAUTHORIZED])
+        for key in ("credentialed", "credential_unauthorized"):
+            figure = vm_inspect_figures.FIGURES_BY_KEY[key]
+            self.assertEqual(len(figure.path), 1)
+            self.assertIn(figure.path[0], snap)
+            self.assertEqual(snap[figure.path[0]], 1)
+
+
+class TestTheListenerReadsTheCredentialFromTheDocument(unittest.TestCase):
+    """The seam T1 wrote the key at and T5 reads it at. Neither half is
+    exercised by the other's tests, and a document that carries the key while
+    the listener drops it is a workload whose every request quietly reaches
+    the origin unbrokered."""
+
+    def _load(self, net):
+        mod = listener_mod()
+        with tempfile.TemporaryDirectory(prefix="policy-") as tmp:
+            path = Path(tmp) / "policy.json"
+            path.write_text(vm_inspect_policy_text(net))
+            return mod.load_policy(str(path))
+
+    def test_the_credential_survives_the_round_trip(self):
+        policy = self._load({
+            "policy": [{"host": "api.provider", "credential": "provider-key"}],
+            "credential": [{"name": "provider-key", "env": "PROVIDER_KEY",
+                            "placeholder": "sk-placeholder"}],
+        })
+        self.assertEqual(policy.credential_for("api.provider"), "provider-key")
+
+    def test_a_host_with_no_entry_has_no_credential(self):
+        policy = self._load({"hosts": ["plain.example"]})
+        self.assertIsNone(policy.credential_for("plain.example"))
+
+    def test_an_unbrokered_entry_has_no_credential(self):
+        policy = self._load({
+            "policy": [{"host": "plain.example", "methods": ["GET"]}]})
+        self.assertIsNone(policy.credential_for("plain.example"))
+
+    def test_a_hand_edited_document_with_a_non_string_does_not_kill_the_start(self):
+        """The listener reads a FILE. A refusal here fails the START, which
+        takes the whole workload's egress down for a typo -- worse than one
+        host reaching the origin unbrokered and saying so in the record."""
+        mod = listener_mod()
+        with tempfile.TemporaryDirectory(prefix="policy-") as tmp:
+            path = Path(tmp) / "policy.json"
+            path.write_text(json.dumps({
+                "tls": "inspect", "hosts": [],
+                "policy": [{"host": "api.provider", "credential": 7}]}))
+            policy = mod.load_policy(str(path))
+        self.assertIsNone(policy.credential_for("api.provider"))
+
+    def test_the_first_governing_entry_that_carries_one_wins(self):
+        """`validate` refuses two entries that match one host and disagree, so
+        this is unreachable from a generated document. It is reached from a
+        hand-edited one, and first-match is deterministic and matches the
+        order the file states -- an arbitrary pick would make an editing
+        mistake behave differently on different boots."""
+        mod = listener_mod()
+        policy = mod.Policy(
+            tls="inspect", hosts=(),
+            policy=(VmPolicyEntry("api.provider", None, ("/a",), None),
+                    VmPolicyEntry("api.provider", None, ("/b",), "second")))
+        self.assertEqual(policy.credential_for("api.provider"), "second")
+
+
+class TestTheBrokerAddressComesFromTheUid(unittest.TestCase):
+
+    def test_the_listener_derives_it_from_its_own_uid(self):
+        """No registry and no allocation step: the inspector and the broker's
+        unit reach the same address from the same uid, so the two halves
+        cannot drift."""
+        mod = listener_mod()
+        listener = mod.Listener([], io.StringIO())
+        with unittest.mock.patch.object(os, "getuid", return_value=10007), \
+                unittest.mock.patch.object(
+                    socket, "create_connection") as dial:
+            listener._dial_broker("api.provider")
+        dial.assert_called_once()
+        self.assertEqual(dial.call_args[0][0],
+                         (BROKER_ADDR, VM_BROKER_INSTANCE_PORT))
+
+    def test_it_is_derived_once_and_kept(self):
+        mod = listener_mod()
+        listener = mod.Listener([], io.StringIO())
+        with unittest.mock.patch.object(os, "getuid", return_value=10007), \
+                unittest.mock.patch.object(socket, "create_connection"):
+            listener._dial_broker("api.provider")
+            listener._dial_broker("api.provider")
+        self.assertEqual(listener._broker_address, BROKER_ADDR)
+
+
+class TestTheReasonIsPinnedAcrossTheTwoHalves(unittest.TestCase):
+    """lib/vm.py restates the listener's string because the listener is an
+    extension-less entrypoint nothing in lib/ can import. Restating is only
+    safe with the pin."""
+
+    def test_the_string_is_the_same_on_both_sides(self):
+        self.assertEqual(VM_DROP_BROKER_UNREACHABLE,
+                         listener_mod().DROP_BROKER_UNREACHABLE)
+
+    def test_egress_can_filter_on_it(self):
+        from vm import VM_INSPECT_RECORD_REASONS
+        self.assertIn(VM_DROP_BROKER_UNREACHABLE, VM_INSPECT_RECORD_REASONS)
+        self.assertIn(VM_DROP_BROKER_UNREACHABLE, listener_mod().DROP_REASONS)
+
+
+class TestTheSelinuxRuleShipsWithTheDial(unittest.TestCase):
+    """F2, and the reason it is here rather than harvested at tier 3: without
+    the rule the first credential-backed request on an enforcing host is an
+    AVC, and every test above still passes
+    ([[silent-selinux-denials-pass-functional-tests]])."""
+
+    def test_the_inspector_may_connect_to_the_brokers_port_type(self):
+        text = CIL.read_text()
+        self.assertIn(
+            "(allow wlinspect_t transproxy_port_t (tcp_socket (name_connect)))",
+            text)
+
+    def test_the_port_the_rule_was_read_for_is_the_port_the_code_dials(self):
+        """8081 is transproxy_port_t on a real host, and the specific type
+        wins over unreserved_port_t. Moving the port silently invalidates the
+        rule above -- so the constant is pinned to the number the comment was
+        written about."""
+        self.assertEqual(VM_BROKER_INSTANCE_PORT, 8081)
+        self.assertIn("8081 is", CIL.read_text())
+
+
+class TestWhatDiagnoseSaysAboutBrokeredTraffic(unittest.TestCase):
+    """The runtime counterpart to `_credential_fragments`, which reads the
+    bundle. This reads the inspector's own document, and the two are wanted at
+    different moments: one answers 'is this host brokered at all', this one
+    answers 'the provider is refusing me and every unit here is green'."""
+
+    BROKERED_LISTS = {"policy": [{"host": "api.provider", "methods": None,
+                                  "paths": None,
+                                  "credential": "provider-key"}]}
+
+    def _fragments(self, **status):
+        import cmd_diagnose
+        doc = {"lists": self.BROKERED_LISTS, "dispositions": {"forwarded": 1},
+               "drop_reasons": {}, "credentialed": 1,
+               "credential_unauthorized": 0, "per_credential": {}}
+        doc.update(status)
+        return cmd_diagnose._credential_usage_fragments(doc)
+
+    def test_a_workload_that_brokers_nothing_says_nothing(self):
+        """Gated on the LOADED policy, not on the config: this function
+        describes what the running listener did, and on a workload with no
+        credential there is nothing here to describe. Ungated, the idle line
+        below would fire on every filtered VM on the fleet."""
+        import cmd_diagnose
+        self.assertEqual(
+            cmd_diagnose._credential_usage_fragments(
+                {"lists": {"policy": [{"host": "a", "credential": None}]},
+                 "dispositions": {"forwarded": 3}, "credentialed": 0}),
+            [])
+
+    def test_the_healthy_case_is_silent(self):
+        self.assertEqual(self._fragments(), [])
+
+    def test_a_401_names_the_credential_and_says_the_layers_succeeded(self):
+        out = self._fragments(credential_unauthorized=2,
+                              per_credential={"provider-key": 2})
+        self.assertEqual(len(out), 1)
+        self.assertIn("provider-key", out[0])
+        self.assertIn("401/403", out[0])
+        self.assertIn("EVERY LAYER HERE SUCCEEDED", out[0])
+
+    def test_a_dead_broker_points_at_the_unit_and_at_audit_log(self):
+        out = self._fragments(
+            drop_reasons={VM_DROP_BROKER_UNREACHABLE: 4}, credentialed=0)
+        self.assertEqual(len(out), 1)
+        self.assertIn("broker.service", out[0])
+        self.assertIn("audit.log", out[0])
+        self.assertNotIn("no request has been sent", out[0])
+
+    def test_a_configured_but_unused_broker_is_named_once_traffic_exists(self):
+        """Configured-and-idle is exactly the state an operator is trying to
+        tell apart from a broker that is not working, and neither produces a
+        drop. It is said only where the guest HAS made requests -- before that
+        there is nothing to conclude."""
+        out = self._fragments(credentialed=0)
+        self.assertEqual(len(out), 1)
+        self.assertIn("has made requests", out[0])
+
+    def test_a_guest_that_has_done_nothing_yet_is_not_accused(self):
+        out = self._fragments(credentialed=0, dispositions={"forwarded": 0})
+        self.assertEqual(out, [])

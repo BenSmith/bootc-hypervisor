@@ -143,6 +143,39 @@ FIGURES = (
            "refused for naming an internal destination",
            "Connections refused for resolving to an internal address",
            path=("internal_refusals_total",)),
+    # --- credentials (rung 6; zero on a workload that brokers nothing) ---
+    #
+    # IN `connections` RATHER THAN A GROUP OF THEIR OWN, deliberately. A group
+    # is present or absent as a whole and its absence asserts something -- no
+    # minter, no synthesising resolver. These figures reading 0 asserts nothing
+    # false: a workload with no [[vm.network.credential]] block genuinely
+    # brokered nothing, and the listener writes the keys either way. Adding a
+    # group and gating it would make "this workload has no credentials" and
+    # "this workload's inspector has never run" look the same, which is the
+    # confusion _GROUP_GATE exists to create only where it is true.
+    #
+    # THE PER-HOST AND PER-CREDENTIAL BREAKDOWNS ARE NOT HERE, and that is the
+    # same choice `internal_refusals` made one row up: the table carries
+    # scalars, the status document carries the maps, and `doctor` renders the
+    # maps from the document. A Figure per host is not expressible and a
+    # Prometheus label per credential name would put the name in a series an
+    # exporter publishes -- bounded, but published far more widely than the
+    # 0600 status file, for a breakdown an operator reads while holding the
+    # workload's own TOML.
+    Figure("credentialed", CONNECTIONS,
+           "workload_vm_inspect_credentialed_total", "counter",
+           "requests sent through the credential broker",
+           "Requests forwarded to this workload's credential broker rather "
+           "than to the origin",
+           path=("credentialed",)),
+    Figure("credential_unauthorized", CONNECTIONS,
+           "workload_vm_inspect_credential_unauthorized_total", "counter",
+           "brokered requests the origin answered 401/403",
+           "Brokered requests the origin refused for want of authorisation. "
+           "NON-ZERO MEANS EVERY LAYER HERE SUCCEEDED AND THE PROVIDER SAID NO "
+           "— the usual cause is a placeholder whose shape the provider does "
+           "not accept, or material it has retired",
+           path=("credential_unauthorized",)),
 
     # --- certificates (present only where the listener terminates) ------
     Figure("mints", CERTIFICATES, "workload_vm_inspect_mints_total", "counter",

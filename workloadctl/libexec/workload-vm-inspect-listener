@@ -133,6 +133,7 @@ from vm import (
     vm_inspect_policy_path, vm_inspect_record_path, vm_inspect_status_path,
     vm_normalise_hostname,
     VmPolicyEntry, vm_policy_governs,
+    VM_BROKER_INSTANCE_PORT, vm_broker_listen_address,
 )
 from vm_clock import vm_resync_guest_clock_if_skewed
 from vm_mint import MintFailed, MintThrottled, Minter
@@ -421,6 +422,30 @@ class Policy(NamedTuple):
         """
         return vm_hostname_match(host, self.http2)
 
+    def credential_for(self, host: str):
+        """The credstore NAME this host's requests are brokered with, or None.
+
+        Asked once per authorised request, and it decides only WHERE the
+        request is sent -- to this workload's broker instance instead of to the
+        origin. Nothing about the credential itself is known here and nothing
+        needs to be: ADR 007 decision 9 keys the broker's table by `(uid,
+        Host)`, so the name travels on no wire and exists in this process for
+        one purpose, which is naming the credential in the record and the
+        figures.
+
+        THE FIRST governing entry that carries one, not a merge. `validate`
+        already refuses two entries that match the same host and disagree about
+        `credential`, so on a document written by the generator there is at most
+        one answer -- but this reads a FILE, which an operator can edit, and a
+        reader that raised or picked arbitrarily on a hand-edited document would
+        turn an editing mistake into a dead workload. First-match is
+        deterministic and matches the order the file states.
+        """
+        for entry in vm_policy_governs(host, self.policy):
+            if entry.credential:
+                return entry.credential
+        return None
+
 
 def load_policy(path):
     """Read the policy document, or raise.
@@ -492,12 +517,26 @@ def load_policy(path):
         # permitting it. Fails closed, and therefore in silence.
         methods = item.get("methods")
         paths = item.get("paths")
+        # `.get`, not `[...]`: the document emits the key only on the entries
+        # that carry one (vm_inspect_policy explains why the sparseness is
+        # load-bearing there), so absent and null mean the same thing here and
+        # the reader is the side that pays for it. A non-string is dropped to
+        # None rather than refused -- the value's only use is as a name, and a
+        # document that named a number would otherwise fail the listener's
+        # START, which is a worse outcome than one brokered host reaching the
+        # origin unbrokered and saying so in the record.
+        credential = item.get("credential")
+        if not isinstance(credential, str) or not credential.strip():
+            credential = None
+        else:
+            credential = credential.strip()
         policy.append(VmPolicyEntry(
             host=item["host"],
             methods=None if methods is None else tuple(
                 m.upper() for m in methods if isinstance(m, str)),
             paths=None if paths is None else tuple(
-                p for p in paths if isinstance(p, str))))
+                p for p in paths if isinstance(p, str)),
+            credential=credential))
     return Policy(tls=doc.get("tls") or VM_TLS_DEFAULT, hosts=tuple(hosts),
                   internal=tuple(vm_normalise_hostname(h) for h in internal),
                   splice=tuple(splice), http2=tuple(http2),
@@ -1951,6 +1990,16 @@ DROP_NOT_HTTP_POLICY = "not HTTP (policy entry)"
 DROP_NOT_PERMITTED = "not permitted by policy"
 DROP_NOT_H2 = "not HTTP/2"
 
+# The dial to this workload's own credential broker failed, and it is NOT
+# DROP_UNREACHABLE. See lib/vm.py's twin for the argument; the short version is
+# that the block below headed "THE UPSTREAM DIAL" records what a missing
+# SELinux rule looks like on this exact path -- an OSError caught by the relay
+# and counted as a dead upstream -- and the broker leg is the same shape with a
+# different remedy. `upstream unreachable` says "the provider is down, wait";
+# this says "a unit on this host is not answering, look at
+# workload-<name>-broker.service and at audit.log".
+DROP_BROKER_UNREACHABLE = "credential broker unreachable"
+
 DROP_REASONS = (
     DROP_NOT_ALLOWLISTED,
     DROP_NO_NAME,
@@ -1970,6 +2019,7 @@ DROP_REASONS = (
     DROP_NOT_HTTP_POLICY,
     DROP_NOT_H2,
     DROP_NOT_PERMITTED,
+    DROP_BROKER_UNREACHABLE,
 )
 
 # The reasons that also get a PER-HOST figure, and the only ones that do.
@@ -2038,7 +2088,7 @@ DROP_UNCLASSIFIED = "(unclassified)"
 RECORD_FIELDS = (
     LOG_ID_FIELD, LOG_REQ_FIELD, "ts", "plane", "mode", "host", "method",
     "path", "query", "http", "decision", "reason", "status", "upstream",
-    "duration_ms",
+    "credential", "duration_ms",
 )
 
 # `forward` and `drop` ARE THE JOURNAL'S OWN VERBS, and there is deliberately
@@ -2416,6 +2466,39 @@ class Counters:
         self.ech_alarm = 0
         self.per_host = {reason: BoundedCounts(top_n)
                          for reason in PER_HOST_REASONS}
+        # THE CREDENTIAL FIGURES (rung 6, §11). Two breakdowns of one total,
+        # because the two questions an operator has are different: `per_host`
+        # answers "which of my brokered hosts is the guest actually using", and
+        # `per_credential` answers "is this key being used at all" -- which is
+        # the one that catches a policy entry pointing at a credential the guest
+        # never triggers, and the one worth reading before rotating a key.
+        #
+        # BoundedCounts on both, like every other per-name figure here, and the
+        # bound is free rather than defensive: unlike the guest-chosen names in
+        # `per_host`, both key spaces come off this workload's own file and are
+        # already bounded by it.
+        #
+        # NEVER THE CREDENTIAL ITSELF, only its credstore name. The material is
+        # in the broker's process and this one has never seen it, which is the
+        # whole of ADR 007 -- a figure carrying it would put it in a file the
+        # exporter publishes.
+        self.credentialed = 0
+        self.credentialed_hosts = BoundedCounts(top_n)
+        self.per_credential = BoundedCounts(top_n)
+        # A brokered request the ORIGIN refused for want of authorisation, on a
+        # request this inspector considers fully authorised. §11 names it as
+        # the failure worth counting rather than merely naming: the guest sent
+        # a placeholder whose shape the provider does not accept, or the broker
+        # attached material the provider has retired, and every layer of ours
+        # reports success. Without this figure that is an hour of reading a
+        # record whose every line says `decision=forward`.
+        #
+        # 401 AND 403 BOTH, and no other status. 401 is the shape a provider
+        # that wants a credential returns; 403 is the shape one that got a
+        # credential without the right scope returns, which is the same
+        # operator question with a different remedy. A 5xx is the provider
+        # failing and is not this.
+        self.credential_unauthorized = 0
         # The rung 2 name for one of them, kept because it is the one an
         # operator may already have grepped for.
         self.internal_refusals = self.per_host[DROP_INTERNAL]
@@ -2442,7 +2525,13 @@ class Counters:
             "policy": [
                 {"host": e.host,
                  "methods": None if e.methods is None else list(e.methods),
-                 "paths": None if e.paths is None else list(e.paths)}
+                 "paths": None if e.paths is None else list(e.paths),
+                 # Unconditional here, unlike the policy DOCUMENT, which emits
+                 # the key only where it is set. The sparseness there buys a
+                 # stable digest across a fleet; this file is digested by
+                 # nobody, and an operator asking "which hosts are brokered"
+                 # should not have to tell a missing key from a null one.
+                 "credential": e.credential}
                 for e in policy.policy
             ] if policy else [],
         }
@@ -2523,6 +2612,24 @@ class Counters:
             if host and reason in self.per_host:
                 self.per_host[reason].add(host)
 
+    def record_credentialed(self, host: str, credential: str) -> None:
+        """One request sent to the broker instead of to the origin.
+
+        Counted where the dial SUCCEEDS, not where the policy says a credential
+        applies: a broker that is down raises DROP_BROKER_UNREACHABLE and the
+        request reached no provider, so counting it here would report a
+        credential as used on a request that never carried one.
+        """
+        with self._lock:
+            self.credentialed += 1
+            self.credentialed_hosts.add(host)
+            self.per_credential.add(credential)
+
+    def record_credential_unauthorized(self) -> None:
+        """One brokered request the origin answered 401 or 403."""
+        with self._lock:
+            self.credential_unauthorized += 1
+
     def snapshot(self, *, open_now: int, refused: int) -> dict:
         with self._lock:
             reasons = dict(self.drop_reasons)
@@ -2542,6 +2649,10 @@ class Counters:
                 "per_host_totals": {reason: counts.total
                                     for reason, counts in
                                     self.per_host.items()},
+                "credentialed": self.credentialed,
+                "credentialed_hosts": self.credentialed_hosts.snapshot(),
+                "per_credential": self.per_credential.snapshot(),
+                "credential_unauthorized": self.credential_unauthorized,
                 "concurrency": {"open": open_now, "refused": refused},
                 "lists": dict(self.lists),
             }
@@ -2601,7 +2712,8 @@ class Listener:
     """Accept on the inherited listeners and act on each connection by plane."""
 
     def __init__(self, sockets, out=None, limit=MAX_CONNECTIONS, policy=None,
-                 status_path=None, minter=None, record_path=None):
+                 status_path=None, minter=None, record_path=None,
+                 broker_address=None):
         self._sockets = list(sockets)
         self._out = out if out is not None else sys.stdout
         self._ceiling = Ceiling(limit)
@@ -2651,6 +2763,12 @@ class Listener:
         # gives a host the offer another host asked for.
         self._upstream_ctx_h2 = ssl.create_default_context()
         self._upstream_ctx_h2.set_alpn_protocols(list(ALPN_H2))
+        # None means "derive it from this process's uid on first use", which is
+        # what the unit does. Injectable because the derivation refuses a uid
+        # outside the workload range -- the suite does not run as _wl-<name> --
+        # and because a test that had to fake getuid() to reach the broker
+        # branch would be testing the fake.
+        self._broker_address = broker_address
 
     def stop(self):
         """Ask the accept loop to end; called from the SIGTERM handler."""
@@ -3662,11 +3780,29 @@ class Listener:
         # and is not put in the map for the next one to find.
         transient = req.version == "HTTP/1.0"
         rec.request(req)
+        # THE BROKER BRANCH (ADR 007, rung 6). An authorised request to a host
+        # whose policy entry names a credential goes to this workload's own
+        # broker instance instead of to the origin -- and that is the whole of
+        # the change here, because `_upstream_for` already takes the dial as an
+        # argument. Everything downstream is unchanged: the head that goes up is
+        # the same `rebuild_request(req)`, carrying the same `Host`, which is
+        # half of the broker's `(uid, Host)` key. The other half is the uid on
+        # the far end of the socket, which is this process's own and is not
+        # ours to send.
+        #
+        # The credential NAME is recorded and the material is not seen. It also
+        # decides nothing about the request: policy was applied above, on the
+        # same terms as an unbrokered host, so a credential cannot widen what a
+        # guest may ask for -- it only changes who attaches the authorisation.
+        credential = self._policy.credential_for(req.host)
+        if credential:
+            rec.set(credential=credential)
         try:
             up = self._upstream_for(
                 req.host, upstreams, reusable=not transient,
-                dial=self._dial_upstream_tls if pinned_host is not None
-                else self._dial_upstream_cleartext)
+                dial=self._dial_broker if credential
+                else (self._dial_upstream_tls if pinned_host is not None
+                      else self._dial_upstream_cleartext))
         except ssl.SSLError as exc:
             # BEFORE the OSError arm: ssl.SSLError IS an OSError, so a single
             # generic arm reported a certificate that would not verify as a
@@ -3685,13 +3821,34 @@ class Listener:
                       f"reason='{reason}: {exc}'")
             return self._refuse(client, conn, req, 502, "Bad Gateway", text)
         except OSError as exc:
-            reason = self._dial_failure_reason(req.host)
+            # THE BROKER LEG GETS ITS OWN REASON AND ITS OWN SENTENCE, and does
+            # NOT go through _dial_failure_reason: that helper re-resolves the
+            # HOST to decide whether the wildcard trap fired, and the name that
+            # failed here was never dialled -- a loopback address on this box
+            # was. Running it would attribute a dead broker to whatever
+            # `req.host` happens to resolve to, which is the most confusing
+            # possible answer, and would pay a synchronous getaddrinfo for it.
+            if credential:
+                reason = DROP_BROKER_UNREACHABLE
+                text = (f"{req.host} is brokered and this workload's "
+                        f"credential broker did not answer ({exc}). The "
+                        f"request was NOT sent to {req.host}: check "
+                        f"workload-<name>-broker.service on the host, and "
+                        f"check audit.log -- a missing SELinux rule on this "
+                        f"dial presents exactly like a broker that is down.")
+            else:
+                reason = self._dial_failure_reason(req.host)
+                text = f"{req.host} could not be reached: {exc}"
             self.counters.record_drop(reason, req.host)
             rec.set(decision="drop", reason=reason, status=502)
             self._log(f"drop {where} host={req.host} "
                       f"reason='{reason}: {exc}'")
-            return self._refuse(client, conn, req, 502, "Bad Gateway",
-                                f"{req.host} could not be reached: {exc}")
+            return self._refuse(client, conn, req, 502, "Bad Gateway", text)
+        if credential:
+            # After the dial and not before it: a request whose broker never
+            # answered carried no credential, and counting it above would
+            # report a key as used on a request that reached nobody.
+            self.counters.record_credentialed(req.host, credential)
         # Authorised: the socket leaves the decision timeout and joins the
         # relay's. Everything from here is transfer -- a body up, a body back
         # -- and transfer is bounded by idleness, not by a five-second clock
@@ -3772,7 +3929,17 @@ class Listener:
             self.counters.record_forward()
             rec.set(decision="forward")
             self._log(f"forward {where} host={req.host} method={req.method}")
-            return self._relay_response(up, client, conn, req, where, rec)
+            keep = self._relay_response(up, client, conn, req, where, rec)
+            if credential and rec.fields.get("status") in (401, 403):
+                # §11's second named failure, and the reason it is counted
+                # rather than merely documented: every layer of ours succeeded.
+                # The policy admitted the host, the broker attached material,
+                # the origin answered -- and it answered "no". Read from the
+                # record, not from a second parse: `_relay_response` has
+                # already put the FINAL status there, past any interim head,
+                # so there is one definition of what the origin said.
+                self.counters.record_credential_unauthorized()
+            return keep
         except (RequestUnreadable, OSError) as exc:
             self.counters.record_drop(DROP_RELAY_FAILED, req.host)
             # OVERWRITES the `forward` set above, and follows the counter,
@@ -3848,6 +4015,42 @@ class Listener:
             except OSError:
                 pass
         return up
+
+    def _dial_broker(self, host):
+        """A plain connection to THIS workload's credential broker instance.
+
+        Cleartext, and on loopback, which is not a downgrade: the leg the guest
+        cares about is the broker's own, which is TLS to the provider and
+        verified there. This hop never leaves the host, and the address it goes
+        to is derived from this process's uid -- so a second workload's
+        inspector, deriving from its own uid, reaches its own broker and finds
+        nothing here. That derivation is the whole of ADR 007 decision 6; the
+        old single-listener broker on 127.0.0.1 was reachable by every workload
+        on the box.
+
+        `host` is unused for ADDRESSING and is deliberately still the argument,
+        because `_upstream_for` calls every dial the same way. It is not
+        discarded either -- it rides the request head as `Host`, which is half
+        the broker's dispatch key.
+
+        A uid outside the workload range raises ValueError from
+        vm_broker_listen_address, and it is converted to OSError so it lands in
+        the caller's broker arm as a legible refusal. That is not a theoretical
+        case: it is what a listener started by hand, outside its unit, would
+        hit, and a bare ValueError there kills the connection thread with a
+        traceback instead of telling the operator what is wrong.
+        """
+        addr = self._broker_address
+        if addr is None:
+            try:
+                addr = vm_broker_listen_address(os.getuid())
+            except ValueError as exc:
+                raise OSError(str(exc)) from exc
+            self._broker_address = addr
+        sock = socket.create_connection(
+            (addr, VM_BROKER_INSTANCE_PORT), timeout=CONNECTION_TIMEOUT)
+        sock.settimeout(RELAY_IDLE_TIMEOUT)
+        return _Stream(sock)
 
     def _dial_upstream_cleartext(self, host):
         """A plain connection to an authorised name, as a _Stream."""

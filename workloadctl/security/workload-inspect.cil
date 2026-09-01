@@ -274,6 +274,43 @@
 ; is the same port on the same resolver.
 (allow wlinspect_t dns_port_t (tcp_socket (name_connect)))
 
+; AND THE BROKER DIAL, which is the same class of gap as the block above, on
+; the same code path, added in the same commit as the dial itself rather than
+; harvested later. Rung 6 puts an authorised request to a credential-backed
+; host through this workload's own broker instance on 127.129.x.y:8081 instead
+; of sending it to the origin -- so the inspector opens a connection to a THIRD
+; port type, and without this rule the first credential-backed request on an
+; enforcing host is an AVC while every unit test stays green
+; ([[silent-selinux-denials-pass-functional-tests]] is the standing shape of
+; that, and the block above is this module's own instance of it).
+;
+; Read off a real host 2026-09-01 rather than assumed: tcp/8081 is
+; transproxy_port_t. http_cache_port_t is 8080, 8118, 8123 and 10001-10010;
+; http_port_t is 80, 81, 443, 488, 8008, 8009, 8443 and 9000. 8081 is in
+; neither, so this is a new type and not a reuse of one already granted.
+;
+; THE PORT NUMBER IS LOAD-BEARING AND MOVING IT IS NOT FREE. 8081 is also
+; inside unreserved_port_t (tcp 1024-32767), and the specific type wins. On an
+; UNLABELED port the only grant available would have been unreserved_port_t --
+; name_connect to every non-system port on the box, from the one domain whose
+; entire value is that its outbound reach is narrow. A future change to
+; VM_BROKER_INSTANCE_PORT has to check `semanage port -l` for the new number
+; and accept whatever it widens.
+;
+; (`semanage port -l` needs root. Without it, it fails with "SELinux policy is
+; not managed or store cannot be accessed" on STDERR and prints nothing on
+; stdout -- so a `2>/dev/null | grep` reads as "no such port", a false negative
+; shaped exactly like the answer.)
+;
+; A denial here is silent in precisely the way the block above describes, with
+; one difference that is the whole reason rung 6 decision 5 exists: the drop is
+; counted as `credential broker unreachable` rather than `upstream
+; unreachable`, so an operator can at least tell "a unit on this host is not
+; answering" from "the provider is down". It still cannot tell a denied
+; connect() from a broker that failed to start -- audit.log is the only thing
+; that can, which is why the rig asserts on it rather than on the counter.
+(allow wlinspect_t transproxy_port_t (tcp_socket (name_connect)))
+
 ; And a third thing getaddrinfo does that neither the harvest nor the first two
 ; enforcing runs could show: before it returns, glibc's __check_pf opens a
 ; NETLINK_ROUTE socket to enumerate the host's own addresses, so it can order

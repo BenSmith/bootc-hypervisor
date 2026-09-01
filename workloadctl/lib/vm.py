@@ -830,10 +830,20 @@ VM_INSPECT_LOG_REQ_FIELD = "req"
 # is safe only because tests/test_vm_inspect_record.py pins each against the
 # listener's own constant -- without that pin a renamed field turns a column
 # into a permanent blank, which reads exactly like a guest that did nothing.
+#
+# `credential` is the NAME of the credstore material the request was brokered
+# with, or null on a request that was not brokered -- never the material, and
+# never an address. It is here because `upstream` is honestly the broker's
+# address on a brokered request (rung 6 decision 6): `upstream` is documented
+# as the address actually dialled, and recording the origin there instead would
+# put a second, false definition of "what this request touched" in the one
+# document rung 5 built to be evidence. What makes the honest value readable is
+# this field naming which credential rode along, so `host` says where the
+# request went and `credential` says why `upstream` is a loopback address.
 VM_INSPECT_RECORD_FIELDS = (
     VM_INSPECT_LOG_ID_FIELD, VM_INSPECT_LOG_REQ_FIELD, "ts", "plane", "mode",
     "host", "method", "path", "query", "http", "decision", "reason", "status",
-    "upstream", "duration_ms",
+    "upstream", "credential", "duration_ms",
 )
 
 # `forward` and `drop`, the journal's own verbs, and deliberately no third
@@ -884,6 +894,17 @@ VM_DROP_THROTTLED = "mint rationed"
 VM_DROP_MINT_FAILED = "could not mint a leaf"
 VM_DROP_NOT_H2 = "not HTTP/2"
 VM_DROP_NOT_PERMITTED = "not permitted by policy"
+# NOT VM_DROP_UNREACHABLE, and the split is rung 6 decision 5. "the provider is
+# down" and "this workload's credential broker is down" need different operator
+# responses -- the first is somebody else's outage, the second is a unit on this
+# host that failed to start, or an SELinux rule missing from
+# security/workload-inspect.cil, which is the failure that module's own
+# "THE UPSTREAM DIAL" block records as "a policy gap wearing a network error's
+# clothes". Merged into the generic reason, this rung's AVC would be
+# indistinguishable from a provider outage in exactly that way, and
+# `workloadctl egress --reason` -- which validates against this closed set --
+# would have no filter that selects it.
+VM_DROP_BROKER_UNREACHABLE = "credential broker unreachable"
 
 VM_INSPECT_RECORD_REASONS = (
     VM_DROP_NOT_ALLOWLISTED,
@@ -904,6 +925,7 @@ VM_INSPECT_RECORD_REASONS = (
     VM_DROP_NOT_HTTP_POLICY,
     VM_DROP_NOT_H2,
     VM_DROP_NOT_PERMITTED,
+    VM_DROP_BROKER_UNREACHABLE,
 )
 
 
