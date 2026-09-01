@@ -2113,7 +2113,8 @@ def _credential_fragments(config) -> list[str]:
     discard and does NOT change what the guest sends, and the guest's requests
     keep working -- the broker replaces whatever arrives. What breaks is the
     reverse edit an operator makes next, and the third occurrence of this same
-    shape (the egress mode and WORKLOAD_BROKER_URL were the first two) is worth
+    shape (the egress mode and the retired broker endpoint were the first
+    two) is worth
     one line here rather than an evening.
     """
     entries = vm_broker_hosts(config.config)

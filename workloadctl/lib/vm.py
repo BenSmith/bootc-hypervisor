@@ -519,7 +519,8 @@ NFT_SET_INTERNAL_OK6 = "wl_internal_ok6"
 # question about a constant.
 VM_INTERNAL_PREFIXES4 = (
     "0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8",
-    "169.254.0.0/16", "172.16.0.0/12", "192.168.0.0/16", "255.255.255.255",
+    "169.254.0.0/16", "172.16.0.0/12", "192.0.2.0/24", "192.168.0.0/16",
+    "255.255.255.255",
 )
 VM_INTERNAL_PREFIXES6 = (
     "::/128", "::1/128", "::ffff:0.0.0.0/96", "64:ff9b::/96",
@@ -610,26 +611,26 @@ NFT_SETS = (NFT_SET_FILTERED, NFT_SET_ALLOW4, NFT_SET_ALLOW6)
 # which reads the Host header or the SNI and applies the same `hosts` patterns.
 # The guest's cooperation is no longer part of the enforcement path.
 #
-# The advertised address survives the proxy. It is still the address every
-# guest is told to use — now for the credential broker alone — and still the
-# same address for every workload on purpose: the broker redirect is keyed on
-# uid, so one advertised endpoint reaches N private listeners and every guest's
-# cloud-init is identical. Two host addresses are ruled out by §3.5 — host
-# loopback is unreachable by design, and the host's default-route address is
-# structurally unreachable because passt assigns the guest that same address —
-# so it has to be some other host address.
+# THE ADVERTISED ADDRESS DID NOT SURVIVE. Through rung 5 this paragraph said it
+# outlived the proxy -- "still the address every guest is told to use, now for
+# the credential broker alone" -- and rung 6 deleted that last consumer. ADR 007
+# decision 6 gave every workload its own broker instance on a uid-derived
+# loopback address that the GUEST is never told, so there is nothing left for a
+# shared advertised endpoint to reach and 192.0.2.1 is no longer put on the
+# link.
 #
-# TEST-NET-1 is reserved for documentation and can never be a destination a
-# guest legitimately wants, and a dummy link keeps it off every real NIC and
-# inert when nothing is running.
+# The dummy link itself stays. It carries each filtered workload's own
+# 198.18.x.y/32 and 2001:2::/128 inspector addresses, which is now its whole
+# job; only the address half of ensure_advertised_interface went.
 #
-# Deliberately a constant rather than a schema key, which is a documented
-# deviation from the design: the address belongs to a host-global interface, so
-# a per-workload key would let two workloads disagree about a shared object —
-# the last-write-wins hazard ADR 002 exists to describe and this design deleted
-# along with the bridge. A site that genuinely uses TEST-NET-1 internally should
-# use `allow` and skip hostname policy; see docs/workloads.md.
-VM_ADVERTISED_ADDR = "192.0.2.1"
+# The consequence is one range moving in the other direction: 192.0.2.0/24 was
+# excluded from the internal drop BECAUSE the advertised address lived there,
+# and with no consumer TEST-NET-1 becomes exactly what that drop exists to
+# refuse -- a documentation range no guest can legitimately want. It is in
+# VM_INTERNAL_PREFIXES4 and in the skeleton now, both, because that list is also
+# what decides whether an operator may write a [[vm.network.internal]] exemption
+# (_internal_refusal): armed on one side only, a site that genuinely routes
+# TEST-NET-1 internally would be refused with no writable escape hatch.
 
 # What [vm.cloud_init].seed_provides may name — the concerns a custom seed can
 # declare it handles itself, suppressing the matching completeness check in
@@ -791,7 +792,7 @@ VM_RESOLVE_STATUS_FILE = "resolve-status.json"
 # inspector's status document.
 #
 # SECOND DEFINITIONS OF STRINGS THE LISTENER OWNS, and stated here for the
-# reason VM_BROKER_LISTEN_ADDR is: `libexec/workload-vm-inspect-listener` is an
+# reason vm_broker_listen_address's twin is: `libexec/workload-vm-inspect-listener` is an
 # extension-less entrypoint, so nothing in lib/ can import it. A reader either
 # restates the key or matches on a substring -- and a substring is worse, since
 # `not HTTP` is a prefix of `not HTTP (policy entry)` and `host does not match
@@ -1244,9 +1245,11 @@ def vm_inspect_map_elements(uid: int) -> dict[str, list[str]]:
     Two per family, one per redirected port: the concatenated key is uid .
     ORIGINAL port, so the map itself selects the listener port and the socket
     that accepted the connection tells the inspector whether it is TLS or
-    cleartext. The value is (listener address, listener port); the advertised
-    address never appears in an element, for the reason
-    vm_broker_element's carries.
+    cleartext. The value is (listener address, listener port), and BOTH halves
+    are per-workload: the address is derived from the uid, so the element is the
+    only thing that says where this workload's listener is, and no shared
+    literal appears in it. The advertised address that once did is gone with the
+    broker redirect that was its last consumer.
     """
     addr = vm_inspect_address(uid)
     return {
@@ -2099,45 +2102,19 @@ def vm_leaf_openssl_argv(name: str, ca_key_path, ca_cert_path,
 
 # --- The credential broker endpoint ---
 #
-# A host-side service that holds a provider API key and forwards to exactly one
-# upstream, so a sandboxed agent inside a guest never receives a credential. The
-# guest points its client at an advertised endpoint; the broker attaches the
-# real key on the way out.
+# There is no advertised endpoint and no host-side service any more. ADR 007
+# decision 6 replaced the one broker on 127.0.0.1:8081, reached by a uid-keyed
+# nft redirect from an advertised literal, with one INSTANCE PER WORKLOAD bound
+# to an address derived from that workload's uid -- so the constants that
+# described the old shape (the advertised port, the shared listen address, the
+# redirect table and its map, and the WORKLOAD_BROKER_URL variable a guest was
+# told) are deleted rather than retained beside the new path.
 #
-# workloadctl owns reachability and nothing else. It does not start the broker,
-# ship it, or know what a credential is: it adds this workload's element to the
-# redirect map and tells the guest where to dial. The broker is one host service
-# with its own unit and its own lifecycle.
-#
-# The broker is now the ONLY thing at the advertised address. Through rung 1 it
-# shared that address with the per-workload proxy, distinguished by port; rung 2
-# deleted the proxy and left the port distinguishing the broker from nothing.
-# The address is kept rather than collapsed into a bare port: it is what a
-# guest's seed already names, and moving it would re-seed every workload to buy
-# tidiness.
-VM_BROKER_PORT = 8081
-
-# Where the broker actually listens. This is the value every element carries, so
-# it has to agree with the defaults `libexec/agent-broker` applies when an
-# operator sets neither `listen_address` nor `listen_port` in broker.toml. That
-# used to be a cross-repo constant checked by neither side; the broker ships in
-# this package now, and tests/test_vm_broker.py asserts the two agree. Keep it
-# that way -- a mismatch shows up as a guest connection refused after
-# translation, which looks identical to the broker being down.
-VM_BROKER_LISTEN_ADDR = "127.0.0.1"
-VM_BROKER_LISTEN_PORT = 8081
-
-NFT_BROKER_SKELETON = "/usr/share/workloadctl/workload-broker.nft"
-NFT_BROKER_TABLE = "inet workload_broker"
-NFT_BROKER_MAP = "wl_broker_dest"
-
-# What the guest is told. Deliberately neutral rather than a provider's own
-# base-URL variable: there is no universal spelling of one -- Node and Python
-# clients disagree, and providers disagree with each other -- so naming a
-# specific client's variable here would make workloadctl wrong for every other
-# client. The guest image maps this to whatever its agent reads, which is one
-# line of cloud-init and belongs with the software that has an opinion.
-VM_BROKER_ENV_VAR = "WORKLOAD_BROKER_URL"
+# The guest is told nothing at all now, which is the point: it dials the name it
+# always wanted, the inspector recognises the host as credential-backed and
+# sends that request to this workload's broker instead of to the origin. A guest
+# that cannot name the broker cannot choose to use it, and cannot be pointed at
+# somebody else's.
 
 # Base of the per-workload broker listener addresses (ADR 007). 127.129.0.0, by
 # the same offset arithmetic vm_management_address uses against 127.128.0.0 and
@@ -2173,45 +2150,6 @@ def vm_broker_listen_address(uid: int) -> str:
             f"UID {uid} is outside the workload range {UID_MIN}-{UID_MAX}; "
             f"no broker listen address is derivable for it")
     return str(ipaddress.IPv4Address(VM_BROKER_ADDR_BASE + (uid - UID_MIN)))
-
-
-def vm_uses_broker(config: dict) -> bool:
-    """Whether this workload gets a broker map element.
-
-    A bridged VM is outside this for the same reason it is outside egress
-    policy and inspection (§5.3): nothing of ours is in its data path, so there
-    is no uid to key the redirect on and no advertised address it can reach.
-    """
-    vm_cfg = config.get("vm", {}) or {}
-    net = vm_cfg.get("network", {}) or {}
-    if not isinstance(net, dict) or net.get("bridge"):
-        return False
-    return bool(net.get("broker"))
-
-
-def vm_broker_element(uid: int) -> str:
-    """This workload's element in the uid -> broker listener map."""
-    return f"{uid} : {VM_BROKER_LISTEN_ADDR} . {VM_BROKER_LISTEN_PORT}"
-
-
-def vm_broker_map_command(uid: int, action: str) -> list[str]:
-    """`nft add|delete element` for one workload's broker redirect."""
-    return [NFT_BIN, action, "element", *NFT_BROKER_TABLE.split(), NFT_BROKER_MAP,
-            "{ " + vm_broker_element(uid) + " }"]
-
-
-def vm_broker_env(config: dict) -> dict[str, str]:
-    """The broker endpoint a guest is told to use, or {} if it has none.
-
-    An IP literal, so reaching the broker never depends on DNS -- which is what
-    a compromised guest would attack to escape policy. It is also why the broker
-    is advertised at an address and not a name: a name would be resolved by the
-    synthesising responder, which answers for allowlisted hosts and would have
-    to be taught about this one.
-    """
-    if not vm_uses_broker(config):
-        return {}
-    return {VM_BROKER_ENV_VAR: f"http://{VM_ADVERTISED_ADDR}:{VM_BROKER_PORT}"}
 
 
 # --- The generated broker instance (ADR 007 decision 6, HLD detail 7.8) ---
@@ -2311,10 +2249,14 @@ def vm_broker_credential(name: str, credential: str) -> tuple[Path, str]:
 
 # The guest variables workloadctl seeds itself, and therefore the ones a
 # credential's `env` may not be. Derived from the two producers rather than
-# listed, so a sixth CA variable or a renamed broker one cannot leave this
-# behind: the failure a stale copy produces is a silent overwrite in the seed,
-# not an error anywhere.
-VM_RESERVED_GUEST_ENV = frozenset(VM_CA_ENV_VARS) | {VM_BROKER_ENV_VAR}
+# listed, so a sixth CA variable cannot leave this behind: the failure a stale
+# copy produces is a silent overwrite in the seed, not an error anywhere.
+#
+# WORKLOAD_BROKER_URL used to be the second producer and is not reserved any
+# more, because nothing seeds it: the guest is never told a broker address (ADR
+# 007 decision 6). A credential whose `env` is WORKLOAD_BROKER_URL is now an
+# ordinary name and overwrites nothing.
+VM_RESERVED_GUEST_ENV = frozenset(VM_CA_ENV_VARS)
 
 
 def vm_credential_env(config: dict) -> dict[str, str]:
@@ -2476,37 +2418,30 @@ def vm_host_resolver_addresses(resolv_conf: str = "/etc/resolv.conf") -> list[st
 
 
 def ensure_advertised_interface(run) -> None:
-    """Create the dummy link carrying the advertised address, idempotently.
+    """Create the dummy link the inspector's addresses hang on, idempotently.
+
+    THE LINK ONLY. It used to add 192.0.2.1/32 as well, and rung 6 deleted that
+    half with the broker redirect that was the address's last consumer (see the
+    hostname-policy preamble above). What the link carries now is each filtered
+    workload's own inspector addresses, put on by
+    vm_inspect_link_address_commands -- so this creates the object those `ip
+    addr add`s need to exist and nothing more. The name is historical, like
+    nftables/workload-proxy.nft's.
 
     `run(argv)` is injected rather than imported so this module stays free of
-    subprocess; the proxy, broker and inspect helpers each pass their own. They
-    all need this and none can import the other -- libexec entrypoints have no
-    extension, so they are not importable.
+    subprocess; the inspect helper passes its own. libexec entrypoints have no
+    extension, so they are not importable and cannot share one.
 
-    Both steps tolerate "already exists" because two VMs starting concurrently
+    Creation tolerates "already exists" because two VMs starting concurrently
     race here -- there is no lock and deliberately no owning unit. Anything else
-    is fatal: without the address the redirect's destination is unroutable and
-    the guest's connection fails with no useful diagnostic.
+    is fatal: without the link the inspector's addresses cannot be assigned and
+    the redirect's destination is unroutable, which the guest sees as a
+    connection that fails with no useful diagnostic.
     """
     result = run([IP_BIN, "link", "add", VM_ADVERTISED_IFACE, "type", "dummy"])
     if result.returncode != 0 and "File exists" not in result.stderr:
         raise RuntimeError(
             f"could not create {VM_ADVERTISED_IFACE}: {result.stderr.strip()}")
-
-    # Query, then add. Not "add and tolerate the error": iproute2 answers a
-    # duplicate address with "Address already assigned", not the "File exists"
-    # the duplicate-link case produces, so a string match on the wrong phrase
-    # fails only on the SECOND start of a workload — which is how this was
-    # found, and not by any test.
-    shown = run([IP_BIN, "-o", "addr", "show", "dev", VM_ADVERTISED_IFACE])
-    if VM_ADVERTISED_ADDR not in shown.stdout:
-        result = run([IP_BIN, "addr", "add", f"{VM_ADVERTISED_ADDR}/32",
-                      "dev", VM_ADVERTISED_IFACE])
-        if result.returncode != 0 and "xist" not in result.stderr \
-                and "assigned" not in result.stderr:
-            raise RuntimeError(
-                f"could not add {VM_ADVERTISED_ADDR} to {VM_ADVERTISED_IFACE}: "
-                f"{result.stderr.strip()}")
 
     result = run([IP_BIN, "link", "set", VM_ADVERTISED_IFACE, "up"])
     if result.returncode != 0:
@@ -4566,11 +4501,15 @@ class ReservedPlane(NamedTuple):
     and a number for one that owns a single socket on an address operators
     otherwise use freely. The distinction is not cosmetic: 127.0.0.1:8080 is a
     normal thing to publish on and the management range is not a normal thing
-    to publish on at all, so a check that treated the broker's address the way
-    it treats the management range would refuse most of what `ports` is for.
+    to publish on at all, so a check that treated an ordinary loopback socket
+    the way it treats the management range would refuse most of what `ports` is
+    for. No plane currently needs the `port` form -- the last one that did was
+    the host-wide broker on 127.0.0.1:8081, deleted in rung 6 -- and the field
+    stays because the distinction it draws is the reason the list can hold both
+    kinds at all.
 
-    `what` is a sentence, not a label, because the four collisions want four
-    different explanations and reciting the range explains none of them.
+    `what` is a sentence, not a label, because the collisions want different
+    explanations and reciting the range explains none of them.
     """
     network: ipaddress.IPv4Network | ipaddress.IPv6Network
     port: int | None
@@ -4712,20 +4651,28 @@ def validate_vm_network(net: dict) -> list[str]:
             "has its own LAN address, so reach its services there directly")
 
     if "broker" in net:
-        broker = net["broker"]
-        if not isinstance(broker, bool):
-            errors.append(
-                f"[vm.network].broker must be true or false, got {broker!r}")
-        elif broker and "bridge" in net:
-            # Same reasoning as .hosts and .egress: a bridged guest reaches the
-            # LAN on its own address with nothing of ours in the path, so there
-            # is no uid to key the redirect on and the advertised address is not
-            # reachable from it. Silently ignoring the key would leave an
-            # operator believing a credential boundary exists.
-            errors.append(
-                "[vm.network].broker has no effect with .bridge set — the "
-                "redirect is keyed on the uid of a host socket, and a bridged "
-                "VM has none. Drop .bridge to use the broker")
+        # A HARD ERROR, AND NOT A DEPRECATION (ADR 007 decision 11, premise 3).
+        # The key used to mean "add this workload's uid to a redirect map so the
+        # guest can dial one host-wide broker at an advertised literal". Every
+        # object in that sentence is gone: the map, the table, the literal and
+        # the single listener. Accepting the key and ignoring it would leave an
+        # operator believing a credential boundary exists where there is none,
+        # which is the same failure the old .bridge check above was written to
+        # prevent -- so it fails, by name, and names the replacement.
+        #
+        # The two are not a rename. `broker = true` was a reachability switch
+        # that said nothing about WHICH credential or WHICH host; `credential`
+        # is per policy entry and is the authority for both. So the message
+        # points at the pair of tables an operator now writes rather than
+        # offering a one-line substitution that does not exist.
+        errors.append(
+            "[vm.network].broker was removed: there is no host-wide credential "
+            "broker and no advertised endpoint for a guest to dial. Each "
+            "workload now gets its own broker instance, and which hosts it "
+            "serves is stated per policy entry -- declare the material in a "
+            "[[vm.network.credential]] table and name it with `credential = "
+            "\"<name>\"` on the [[vm.network.policy]] entries it applies to. "
+            "See docs/agent-broker.md")
 
     outbound_if = net.get("outbound_if")
     if outbound_if is not None:

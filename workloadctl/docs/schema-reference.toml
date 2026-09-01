@@ -299,8 +299,6 @@ name = "schema-reference"
 #   198.18.0.0/16   the egress inspector's IPv4 listener plane, where every
 #   2001:2::/48     filtered VM's redirected 80 and 443 land, and its IPv6 twin
 #                   carrying the same numbers.
-#   127.0.0.1:8081  the credential broker's listener — one socket, not a range,
-#                   so only that port on that address is refused.
 # In every case the collision is decided by start order and reported by neither
 # side: the loser fails to bind, which surfaces as the address being missing
 # rather than as a conflict, and the winner serves a plane it does not own.
@@ -514,35 +512,15 @@ name = "schema-reference"
 # tried terminating" are the same line without it.
 # tls_reason = "appliance image; its trust store cannot be modified"
 #
-# Optional: give this VM a path to a host-side credential broker, so software
-# inside it can call an API it holds no key for. The host rewrites one advertised
-# endpoint per uid, so a guest can reach its own broker and no other; a workload
-# without this key gets no translation and nothing is listening where it would
-# dial, which makes the boundary structural rather than a rule to misconfigure.
-#
-# workloadctl provides reachability only. It does not run the broker or know
-# what a credential is — that is a separate service (agent-broker.service, which
-# this package ships and does not enable). If it is not running, a guest sees a
-# connection refused.
-#
-# The endpoint is handed to the guest as WORKLOAD_BROKER_URL. Deliberately not a
-# provider's own base-URL variable: clients disagree about the spelling, so the
-# guest image maps this to whatever its software reads. As with .hosts, only the
-# built-in cloud-config sets it — a workload supplying its own user_data_file
-# must carry it across itself.
-#
-# SETTING THIS ON AN EXISTING VM ONLY GETS YOU HALF OF IT. The host side follows
-# the config: the next start adds the map element and the guest becomes able to
-# reach the broker. The guest side does not. WORKLOAD_BROKER_URL is written by
-# cloud-init, which runs once per instance-id, so an already-provisioned guest
-# never sees the variable and its agent has nothing to point at. Either set it
-# before first boot, or write the variable into the guest yourself — the value
-# is the same fixed literal for every guest (VM_BROKER_ENV_VAR and the address
-# built in lib/vm.py).
-#
-# Rejected with .bridge set: the redirect is keyed on the uid of a host socket,
-# and a bridged VM does not create one.
-# broker = true
+# REMOVED: broker = true. `validate` refuses this key by name rather than
+# ignoring it. It used to mean "translate an advertised endpoint to the one
+# host-side broker for this uid" -- there is no advertised endpoint and no
+# host-side broker now. Each workload gets its own broker instance, and which
+# hosts it serves is stated per policy entry: declare the material in a
+# [[vm.network.credential]] table and name it with `credential = "<name>"` on
+# the [[vm.network.policy]] entries it applies to. The guest is told nothing and
+# needs no WORKLOAD_BROKER_URL -- it dials the real host, and the inspector
+# sends that request to the broker. See docs/agent-broker.md.
 #
 # Optional: destinations this VM may reach when egress = "filtered".
 # Type: array of [[vm.network.allow]] tables, each with `address` and `reason`
@@ -589,7 +567,7 @@ name = "schema-reference"
 # given its own resolver is a coherent thing to want.
 #
 # WHERE IT GOES IN THE FILE. Every [vm.network] scalar -- egress, hosts,
-# resolver, ports, bridge, tls, tls_reason, broker -- must be written ABOVE
+# resolver, ports, bridge, tls, tls_reason -- must be written ABOVE
 # this table and the [[vm.network.internal]] one below it, because the first
 # array-of-tables
 # ends the [vm.network] section. A scalar written after it is read by TOML as
@@ -601,7 +579,7 @@ name = "schema-reference"
 # Everything above this point is a scalar and everything below it is a table,
 # so this document is in valid file order: reading it top-to-bottom and writing
 # as you go produces a file that parses the way it reads. That was NOT true
-# until 2026-08-25 -- .hosts, .tls and .broker were documented below here, so
+# until 2026-08-25 -- .hosts and .tls were documented below here, so
 # the natural reading order built the broken file this note warns about.
 #
 # [[vm.network.allow]]
@@ -1017,7 +995,6 @@ name = "schema-reference"
 #                                   # (the default; the guest must trust the
 #                                   # workload's CA). "splice" is SNI-matched
 #                                   # and decrypts nothing.
-# broker = true                     # path to a host-side credential broker
 #                                   # Scalars first: the table below ends the
 #                                   # [vm.network] section (see above).
 #
@@ -1037,7 +1014,7 @@ name = "schema-reference"
 # This VM uses passt, which is the default and what every key above assumes.
 # `bridge = "br0"` is the other shape and it is NOT a line to add to the
 # example: a bridged VM has its own LAN address and no host socket, so egress,
-# hosts, tls, allow and broker all become inapplicable and `validate` refuses
+# hosts, tls, allow and credentials all become inapplicable and `validate` refuses
 # each of them by name. A bridged VM's [vm.network] is the bridge, the ports it
 # publishes, and nothing on this page below .resolver.
 

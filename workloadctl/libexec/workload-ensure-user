@@ -41,7 +41,7 @@ from vm import (VM_SOCKET_DIR, VM_DEFAULT_GUEST_USER, VM_GUEST_HOME_BASE,
                 VM_CA_ENV_VARS,
                 VM_HOME_SELINUX_CONTEXT, VM_HOME_SELINUX_TYPES,
                 VM_SEED_CONTRACT_EXIT, SeedContractError, find_ovmf_vars,
-                vm_broker_env, vm_ca_env, vm_ca_cert_path, vm_ca_dir,
+                vm_ca_env, vm_ca_cert_path, vm_ca_dir,
                 vm_credential_env,
                 vm_denial_dir, vm_leaf_dir,
                 vm_ca_key_path, vm_ca_openssl_argv,
@@ -1262,8 +1262,11 @@ def _render_default_user_data(name: str, guest_user: str, pubkey: str,
     # bypass. Those variables are gone. Egress filtering is now transparent — a
     # uid-keyed redirect the guest is not told about and cannot opt out of — so
     # NOTHING written here affects whether the guest is filtered. What remains
-    # is the credential broker's endpoint and the CA bundle the inspector's
-    # spliced connections will be presented under: conveniences, not controls.
+    # is the CA bundle the inspector's spliced connections are presented under
+    # and the credential PLACEHOLDERS a guest's client library needs in order to
+    # send a request at all: conveniences, not controls. The broker endpoint used
+    # to be here too and is not, because rung 6 stopped telling the guest where
+    # the broker is -- a guest that cannot name it cannot choose to use it.
     #
     # That is worth stating because the block LOOKS the same and its failure
     # mode inverted. A guest missing this block used to be a guest reaching
@@ -1302,8 +1305,9 @@ def _render_default_user_data(name: str, guest_user: str, pubkey: str,
         lines.append("    content: |")
         for key, value in guest_env.items():
             lines.append(f"      {key}={value}")
-        # Filename kept as -proxy though it now carries the broker endpoint and
-        # the CA bundle and no proxy variable at all: renaming it would leave the
+        # Filename kept as -proxy though it now carries the CA bundle and the
+        # credential placeholders and no proxy variable at all: renaming it
+        # would leave the
         # old file behind on every existing guest, still exporting the retired
         # https_proxy, since cloud-config runs once at first boot. A guest that
         # keeps that stale export dials an address where nothing listens -- which
@@ -1651,11 +1655,12 @@ def build_cloud_init_iso(pw, config: dict, name: str, config_path: Path | None =
         live = _uncommented(user_data_text)
 
         # The CA contract, which replaced the proxy contract this check used to
-        # be. It is pinned on the BUNDLE PATH rather than on the advertised
-        # address: the address is still in the seed of any workload that uses
-        # the broker, so pinning on it would pass a seed that mentions the
-        # broker and configures no anchor at all -- the exact false green the
-        # substring style has to be watched for.
+        # be. It is pinned on the BUNDLE PATH rather than on an address: when
+        # this was written the advertised broker address was in the seed of any
+        # workload using the broker, so pinning on it would have passed a seed
+        # that mentioned the broker and configured no anchor at all -- the exact
+        # false green the substring style has to be watched for. That address is
+        # gone, and the rule it taught is why this still pins the path.
         # Gated on VM_CA_BUNDLE_AVAILABLE for the reason that flag exists: until
         # rung 3 mints the CA, default mode writes no bundle either, and a
         # contract that refused custom seeds for omitting a file the built-in
@@ -1776,8 +1781,7 @@ def build_cloud_init_iso(pw, config: dict, name: str, config_path: Path | None =
             # visible. Seeded once per instance-id like every other variable in
             # this block -- so a CHANGED placeholder does not reach a running
             # guest, which is what `diagnose` says out loud.
-            guest_env={**vm_ca_env(config), **vm_broker_env(config),
-                       **vm_credential_env(config)},
+            guest_env={**vm_ca_env(config), **vm_credential_env(config)},
             # Unconditional for a filtered VM, NOT gated on tls = "inspect".
             # The seed is fingerprinted over its rendered text and the
             # cloud-init instance-id rotates with it, so gating would make an

@@ -1,61 +1,49 @@
 #!/usr/bin/python3
 """
-workload-vm-broker: open or close one VM's path to the credential broker.
+workload-vm-broker: write one workload's broker.toml.
 
-Usage: workload-vm-broker <config|up|down> <name>
+Usage: workload-vm-broker config <name>
 
-`config` runs as an ExecStartPre of the workload's own broker instance and
-writes that instance's broker.toml. `up` runs as an ExecStartPre of the VM unit
-and `down` as an ExecStopPost; between them they own the shared advertised
-endpoint (a dummy interface and an nftables nat chain) and this workload's
-element in the uid -> broker map.
+Runs as the ExecStartPre of that workload's own broker instance
+(workload-<name>-broker.service) and writes the instance's config into the
+RuntimeDirectory= systemd has already created as the unit's dynamic user -- so
+the file is written unprivileged, at 0600 inside a 0700 directory, and there is
+no window in which it is wider than it ends up.
 
-`up`/`down` are the reachability half, and ADR 007 deletes what they reach: with
-the broker moved behind the inspector there is no advertised endpoint for a
-guest to dial and no map to translate it. They are removed with the rest of that
-mechanism; `config` is what this helper is for afterwards.
+Regenerated at every start rather than installed once, which is what
+/run buys over /etc (ADR 007 decision 2 as amended): the config cannot drift
+from the bundle it is a pure function of, and it cannot serve the previous
+boot's credential set.
 
-`up` runs for every VM, entitled or not: for an entitled one it installs the
-element, and for the rest it makes sure no element is there. A uid is reused as
-soon as it is free, so "no element" is a thing that has to be enforced rather
-than assumed — and that includes bridged VMs, which are never entitled but do
-own a uid a previously entitled workload may have held.
+WHAT USED TO BE HERE
 
-WHY THIS RIDES THE VM UNIT AND NOT A UNIT OF ITS OWN
+`up` and `down`, an ExecStartPre/ExecStopPost pair on the VM unit that owned a
+shared advertised endpoint (a dummy interface plus an nftables nat chain) and
+this workload's element in a uid -> broker map. ADR 007 deleted what they
+reached: with one broker instance per workload, bound to an address derived from
+that workload's uid and dialled by the inspector, there is no advertised
+endpoint for a guest to name and no map to translate it. They went with the
+mechanism rather than being left inert, so this helper is one verb now.
 
-The egress inspector has one instance per workload, so its element lifecycle
-belongs to that instance's unit. The broker does not: it is a single host service
-with its own unit, its own credentials and its own restart policy, and nothing
-about it is per-workload except the entitlement recorded here. There is no
-per-workload process to hang this on, so it hangs on the VM.
-
-WHAT THIS DELIBERATELY DOES NOT DO
-
-Start, stop, install or check the broker. If it is down, a guest's connection is
-refused after translation — the same symptom as an unentitled workload, and the
-right place to notice it is the broker's own unit, not every VM that might use
-it. Coupling the two would make a VM fail to start because an unrelated host
-service was being restarted.
+The uid-reuse sweep those verbs performed went too, and nothing replaces it
+because nothing needs to: the entitlement it was scrubbing lived in a
+host-global map keyed by a uid the allocator reuses, and the entitlement now
+lives in the workload's own generated unit, which is deleted with the workload.
 
 EXIT CODES
 
-`up` fails loudly, on the same reasoning as workload-vm-filter: a guest told to
-reach a broker at an address nothing translates gets a connection refused, and
-an agent inside it reports an unreachable API rather than a missing entitlement.
-Better to fail the start than to boot a sandbox that cannot work and does not
-say why. `down` is tolerant: its element is legitimately absent whenever the
-start failed before installing it.
+`config` fails loudly. A broker started against a stale config serves the wrong
+credentials, and one started against no config serves none -- both are worse
+than a start that does not happen, and the unit's ExecStartPre is deliberately
+not `-` prefixed for the same reason.
 """
 import os
 import pwd
-import subprocess
 import sys
 
 sys.dont_write_bytecode = True
 
 from vm import (
-    NFT_BIN, NFT_BROKER_SKELETON, VM_BROKER_PORT, VM_ADVERTISED_ADDR,
-    ensure_advertised_interface, vm_broker_map_command, vm_uses_broker,
     render_vm_broker_config, vm_broker_config_path, vm_uses_credentials,
 )
 from workload_lib import workload_config_path
@@ -68,11 +56,6 @@ except ModuleNotFoundError:  # pragma: no cover - 3.11+ everywhere we ship
 
 def log(msg):
     print(msg, flush=True)
-
-
-def run(argv, check=False):
-    return subprocess.run(argv, capture_output=True, text=True, check=check,
-                          timeout=30)
 
 
 def load_config(name: str) -> dict:
@@ -128,62 +111,11 @@ def write_config(name: str) -> int:
     return 0
 
 
-def up(name: str) -> int:
-    config = load_config(name)
-    uid = pwd.getpwnam(f"_wl-{name}").pw_uid
-
-    if not vm_uses_broker(config):
-        # Not entitled: make sure nothing says otherwise. This is the reason the
-        # unentitled case does work rather than returning early.
-        #
-        # Elements are keyed by uid, and get_next_uid() hands out the lowest
-        # free one — so uids are reused as a matter of course. An element that
-        # outlives its workload (a `down` that never ran, a host killed between
-        # the two) would then belong to whoever inherits the uid, and that
-        # workload runs no broker code of its own to notice. The broker still
-        # refuses it, because [sandboxes] is keyed by NAME and the name will not
-        # match — unless allow_unknown_callers is set, at which point the map is
-        # the only thing left. Clearing it here means the entitlement cannot
-        # outlive the workload that was granted it, whatever the broker's config
-        # says.
-        #
-        # Tolerant throughout: with no table, no map or no element there is
-        # nothing to clear, which is the overwhelmingly common case.
-        run(vm_broker_map_command(uid, "delete"))
-        return 0
-
-    ensure_advertised_interface(run)
-    run([NFT_BIN, "-f", NFT_BROKER_SKELETON], check=True)
-
-    # Purge before adding: an element for this uid may name a stale listener if
-    # the broker was ever moved, and `add element` on an existing key does not
-    # overwrite it.
-    run(vm_broker_map_command(uid, "delete"))
-    run(vm_broker_map_command(uid, "add"), check=True)
-
-    log(f"  Broker reachable for uid {uid} at "
-        f"{VM_ADVERTISED_ADDR}:{VM_BROKER_PORT}")
-    return 0
-
-
-def down(name: str) -> int:
-    try:
-        uid = pwd.getpwnam(f"_wl-{name}").pw_uid
-    except KeyError:
-        return 0
-    # nft matches on the key, so the value in the command is immaterial here.
-    run(vm_broker_map_command(uid, "delete"))
-    return 0
-
-
 def main(argv):
-    if len(argv) != 3 or argv[1] not in ("config", "up", "down"):
-        print(f"usage: {argv[0]} <config|up|down> <name>", file=sys.stderr)
+    if len(argv) != 3 or argv[1] != "config":
+        print(f"usage: {argv[0]} config <name>", file=sys.stderr)
         return 2
-    action, name = argv[1], argv[2]
-    if action == "config":
-        return write_config(name)
-    return up(name) if action == "up" else down(name)
+    return write_config(argv[2])
 
 
 if __name__ == "__main__":
@@ -191,9 +123,9 @@ if __name__ == "__main__":
         sys.exit(main(sys.argv))
     except Exception as e:  # noqa: BLE001
         print(f"  ERROR: {e}", file=sys.stderr)
-        # `config` fails as loudly as `up`, and for a sharper reason: `up`
-        # leaves a guest with an unreachable endpoint, while a config that did
-        # not get written leaves the broker reading whatever is there -- or
-        # nothing. Only `down` is tolerant.
-        sys.exit(1 if len(sys.argv) > 1 and sys.argv[1] in ("up", "config")
-                 else 0)
+        # Always 1. There is no tolerant verb left: `down` was the one, and it
+        # was tolerant because its element was legitimately absent whenever a
+        # start had failed before installing it. A config that did not get
+        # written has no such benign case -- it leaves the broker reading a
+        # stale file or none.
+        sys.exit(1)

@@ -356,14 +356,39 @@ class TestInternalDestinationGuard(unittest.TestCase):
                   f"element line for {NFT_SET_INTERNAL6}")
         self.assertNotIn("2001::/32", v6)
 
-    def test_the_advertised_address_is_not_blocked(self):
-        """The guest's flow reaches the credential broker FROM 192.0.2.1, so
-        the broker's replies are addressed to it. Listing that prefix takes the
-        broker down completely -- every request hangs and nothing logs. It did
-        the same to the retired proxy, which shared the address."""
+    def test_the_advertised_address_is_now_blocked(self):
+        """INVERTED at rung 6 (D10), and worth saying so rather than editing
+        quietly.
+
+        It used to assert 192.0.2.0/24 was ABSENT: the guest reached the
+        credential broker at 192.0.2.1, so the broker's replies were addressed
+        from it and listing the prefix took the broker down completely -- every
+        request hanging, nothing logged. That was true of the retired proxy
+        before it, which shared the address.
+
+        Nothing carries the range now. Each workload's broker is an instance on
+        a uid-derived loopback address the guest is never told, so TEST-NET-1 is
+        what it says on the RFC: a documentation range no guest can legitimately
+        want, which is the definition of what this set drops.
+        """
         elems = " ".join(ln for ln in self.text.splitlines()
                          if ln.startswith("add element"))
-        self.assertNotIn("192.0.2.", elems)
+        self.assertIn("192.0.2.0/24", elems)
+
+    def test_the_exemption_for_it_is_writable(self):
+        """The half that makes the inversion safe, per D10.
+
+        A site really routing TEST-NET-1 internally needs a
+        [[vm.network.internal]] entry, and vm_internal_ok_elements refuses an
+        element that excepts a drop which never fires -- so arming the drop in
+        the .nft alone would refuse the guest with no escape hatch. The escape
+        hatch and the drop are the same list twice; this is the second copy.
+        """
+        import ipaddress
+        from vm import VM_INTERNAL_PREFIXES4, vm_internal_ok_elements
+        self.assertIn("192.0.2.0/24", VM_INTERNAL_PREFIXES4)
+        self.assertTrue(vm_internal_ok_elements(
+            10007, [ipaddress.ip_address("192.0.2.5")]))
 
     def test_the_drop_only_covers_connections_the_exempt_processes_open(self):
         """Without `ct direction original` this drops the reply direction of
@@ -780,8 +805,8 @@ class TestProxySkeletonNamesAgree(unittest.TestCase):
     and the cgroup `return` carry those same names. A rename on either side
     leaves the other pointing at a set or map that does not exist — which looks
     exactly like the redirect being off rather than a bug, so the file is read
-    and checked against the constants rather than trusted, the way
-    test_vm_broker.py does for VM_BROKER_LISTEN_ADDR.
+    and checked against the constants rather than trusted, the way the
+    internal-drop ranges are checked against VM_INTERNAL_PREFIXES4 below.
     """
 
     def test_the_skeleton_declares_each_object_with_its_constant_name(self):

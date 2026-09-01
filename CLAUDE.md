@@ -92,22 +92,35 @@ Virtiofs volumes have their own design doc, `workloadctl/docs/vm-virtiofs.md` �
 
 `libexec/agent-broker` holds a provider API key that a sandboxed coding-agent VM
 is never given, and attaches it to outbound requests the guest makes through it.
-It is a whole program (stdlib only, ~600 lines), shipped by the workloadctl RPM
-as `agent-broker.service` but **not enabled** — it has no config until an
-operator writes `/etc/agent-broker/broker.toml`. Callers are identified by the
-uid owning the far end of the connection, so two guests dialling the same
-advertised literal get different credentials.
+It is a whole program (stdlib only, ~600 lines) shipped by the workloadctl RPM.
+Callers are identified by the uid owning the far end of the connection.
 
-Do not confuse it with `libexec/workload-vm-broker`, which is the per-VM nft map
-element that lets one guest reach it. Two constants must agree across those two
-halves — the broker's `listen_address`/`listen_port` defaults and
-`VM_BROKER_LISTEN_ADDR`/`VM_BROKER_LISTEN_PORT` in `lib/vm.py`; a drift looks
-exactly like the broker being down, and `tests/test_vm_broker.py` asserts it.
-Design, threat model and operating instructions: `workloadctl/docs/agent-broker.md`.
-The end-to-end seam (a real guest dialling a real broker) is proven by
-`tests/manual/broker_rig.py` — four throwaway VM workloads, 18 assertions,
-last green 2026-08-14 against the installed RPM. It needs root and a KVM host,
-so it runs by hand, not in `just test` or the runtime rung.
+**One instance per workload, and the guest is never told where it is.** A
+workload declaring `[[vm.network.credential]]` material gets
+`workload-<name>-broker.service` — written by the generator, `DynamicUser=yes`,
+bound to `vm_broker_listen_address(uid)` (`127.129.0.0` + the uid offset), with
+a `broker.toml` regenerated into `/run` at every start. Its only caller is that
+workload's own egress inspector, which recognises a host whose
+`[[vm.network.policy]]` entry names a `credential` and sends that request to the
+broker instead of to the origin. So a guest cannot name the broker, cannot
+choose to use it, and cannot be pointed at another workload's.
+
+`libexec/workload-vm-broker` is not the broker: it is the one-verb helper that
+writes an instance's `broker.toml` (`workload-vm-broker config <name>`), run as
+that unit's `ExecStartPre`. `tests/test_vm_broker.py` covers both halves.
+
+There was a host-wide `agent-broker.service` reached by every guest at an
+advertised `192.0.2.1:8081` through a uid-keyed nft map. All of it is deleted —
+the unit, the map, the skeleton, `WORKLOAD_BROKER_URL`, and `[vm.network].broker`,
+which is now a validation error naming `credential` as the replacement. Design,
+threat model and operating instructions: `workloadctl/docs/agent-broker.md`.
+
+**The end-to-end seam is currently unproven for this shape.** The rig that
+proved the old one (`broker_rig.py`, 18/18 on 2026-08-14) was built entirely
+around the advertised endpoint and was deleted with it; its replacement is
+described in `workloadctl/tests/manual/README.md` and has not been written yet.
+Unit gates cover the branch, the render and the refusal — they do not cover a
+real guest reaching a real broker ([[unit-gates-dont-see-the-seam]]).
 
 ## Docs policy: tracked files may not cite untracked docs
 
@@ -246,7 +259,7 @@ rtk gain --history      # View command history with savings
 rtk discover            # Analyze Claude Code sessions for missed RTK usage
 rtk proxy <cmd>         # Run command without filtering (for debugging)
 rtk init                # Add RTK instructions to CLAUDE.md
-rtk init --global       # Add RTK to ~/.claude/CLAUDE.md
+rtk init --global       # Add RTK to the global (home) CLAUDE.md
 ```
 
 ## Token Savings Overview

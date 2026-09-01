@@ -2396,8 +2396,9 @@ def generate_vm_resolve_service(config, user_name: str) -> str:
 def generate_vm_broker_service(config, uid: int) -> str:
     """Generate the credential broker instance for one VM workload.
 
-    Modelled on systemd/agent-broker.service, which is the shape this replaces
-    -- NOT on _harden_vm_sidecar. The two sandboxes differ in the one directive
+    Modelled on the host-wide agent-broker.service this replaces -- deleted in
+    the same rung, so read it from git history if the derivation matters -- and
+    NOT on _harden_vm_sidecar. The two sandboxes differ in the one directive
     that matters most here: this unit is DynamicUser=yes, and that is the whole
     of ADR 007's protection. The inspector runs as _wl-<name>, the uid QEMU runs
     as, so a guest escape obtains everything that uid can read; the broker's
@@ -2886,46 +2887,6 @@ def generate_vm_service(config, user_name: str, uid: int, vfs_tags=None) -> str:
         svc.add("ExecStopPost",
                 f"-+/usr/libexec/workloadctl/workload-vm-filter down {dq(name)}")
 
-        # Reachability for the host-side credential broker. This rides the VM
-        # unit rather than a unit of its own because the broker is a single host
-        # service — unlike the inspector and the responder, there is no
-        # per-workload process whose lifecycle the map element could follow.
-        #
-        # Emitted for every non-bridged VM, not only the entitled ones. The
-        # helper installs an element when [vm.network].broker is set and removes
-        # any element for this uid when it is not — and the second half is the
-        # point: uids are reused (lowest free first), so a VM with no broker
-        # would otherwise inherit an entitlement left behind by a deleted
-        # workload that had one. A guest cannot see whether it was granted the
-        # entitlement or inherited it.
-        #
-        # NOT `-` prefixed, for the filter's reason in a different shape: a
-        # guest told to reach a broker that nothing translates for it sees a
-        # connection refused, and the agent inside reports an unreachable API
-        # rather than a missing entitlement.
-        svc.add("ExecStartPre",
-                f"+/usr/libexec/workloadctl/workload-vm-broker up {dq(name)}")
-        svc.add("ExecStopPost",
-                f"-+/usr/libexec/workloadctl/workload-vm-broker down {dq(name)}")
-    else:
-        # A bridged VM gets no element — nothing of ours is in its data path,
-        # so vm_uses_broker() is False for it — but it still owns a uid, and
-        # that is what the map is keyed by. Uids are handed out lowest-free
-        # first, so an element left behind by a deleted workload (a `down` that
-        # never ran, a host killed between the two) passes to whoever inherits
-        # the uid. The sweep that exists to stop precisely that ran only for
-        # VMs that were themselves non-bridged, which left the inheriting VM
-        # able to be the one case it does not cover.
-        #
-        # Tolerant, unlike the non-bridged `up`. There it is a precondition:
-        # the guest has been told a broker address and a missing translation
-        # looks to the agent like an unreachable API. Here the guest is never
-        # told anything, so this is hygiene — and a purely bridged host needs
-        # nftables for nothing else, so it must not lose its VMs to a sweep.
-        svc.add("ExecStartPre",
-                f"-+/usr/libexec/workloadctl/workload-vm-broker up {dq(name)}")
-        svc.add("ExecStopPost",
-                f"-+/usr/libexec/workloadctl/workload-vm-broker down {dq(name)}")
     svc.add("ExecStart",
             f"/usr/libexec/workloadctl/workload-vm-notify {dq(name)} \\\n"
             f"    {qemu_cmd}")

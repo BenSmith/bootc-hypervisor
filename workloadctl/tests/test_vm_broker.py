@@ -1,9 +1,20 @@
-"""The uid-keyed redirect to a host-side credential broker.
+"""The per-workload credential broker instance (ADR 007).
 
-Values that appear in a shipped .nft file are spelled out here rather than
-imported and re-derived: the point of the test is that the file and the module
-agree, and a test that computes both sides from the same constant cannot fail
-when they drift apart.
+Values that appear in a shipped file -- a generated unit, a rendered
+broker.toml -- are spelled out here rather than imported and re-derived: the
+point of the test is that the file and the module agree, and a test that
+computes both sides from the same constant cannot fail when they drift apart.
+
+WHAT USED TO BE AT THE TOP OF THIS FILE, and why it is worth a line rather than
+a silent deletion: ~255 lines about a uid-keyed nft map that translated one
+advertised endpoint (192.0.2.1:8081) to one host-wide broker on 127.0.0.1:8081,
+plus the WORKLOAD_BROKER_URL the guest was told. Rung 6 deleted that whole
+mechanism. The gates that survive it are elsewhere and are deliberately not
+re-created here: `[vm.network].broker` is now a hard error, asserted in
+tests/test_vm_egress.py with the other retired-key refusals; the reservation
+that entry needed is inherited from 127.128.0.0/9 and asserted by
+TestReservedPlanes; and the sweep the generator ran on every VM's stop is gone
+with the map, asserted below by its absence.
 """
 
 import contextlib
@@ -14,292 +25,12 @@ from pathlib import Path
 
 from tests import load_script
 from vm import (
-    NFT_BROKER_MAP, NFT_BROKER_SKELETON, NFT_BROKER_TABLE, VM_BROKER_ENV_VAR,
-    VM_BROKER_LISTEN_ADDR, VM_BROKER_LISTEN_PORT, VM_BROKER_PORT,
-    VM_ADVERTISED_ADDR, validate_vm_network, vm_broker_element,
-    vm_broker_env, vm_broker_map_command, vm_uses_broker,
-)
-
-NFT_FILE = Path(__file__).resolve().parent.parent / "nftables" / "workload-broker.nft"
-
-
-def config(**net):
-    return {"vm": {"network": net}}
-
-
-class TestUsesBroker(unittest.TestCase):
-
-    def test_absent_key_means_no_broker(self):
-        self.assertFalse(vm_uses_broker(config()))
-
-    def test_false_means_no_broker(self):
-        self.assertFalse(vm_uses_broker(config(broker=False)))
-
-    def test_true_means_broker(self):
-        self.assertTrue(vm_uses_broker(config(broker=True)))
-
-    def test_a_bridged_vm_is_outside_this(self):
-        """Nothing of ours is in a bridged guest's data path, so there is no uid
-        to key the redirect on."""
-        self.assertFalse(vm_uses_broker(config(broker=True, bridge="br0")))
-
-    def test_a_container_workload_has_no_vm_section(self):
-        self.assertFalse(vm_uses_broker({"container": {"image": "x"}}))
-
-
-class TestElements(unittest.TestCase):
-
-    def test_the_element_carries_the_listener_not_the_advertised_address(self):
-        """The key is the uid and the value is where the broker actually is;
-        the advertised address never appears in an element."""
-        self.assertEqual(vm_broker_element(10000), "10000 : 127.0.0.1 . 8081")
-
-    def test_add_and_delete_name_the_same_map(self):
-        add = vm_broker_map_command(10000, "add")
-        delete = vm_broker_map_command(10000, "delete")
-        self.assertEqual(add[1], "add")
-        self.assertEqual(delete[1], "delete")
-        self.assertEqual(add[2:], ["element", "inet", "workload_broker",
-                                   "wl_broker_dest", "{ 10000 : 127.0.0.1 . 8081 }"])
-
-    def test_the_table_and_map_names_are_what_the_nft_file_declares(self):
-        text = NFT_FILE.read_text()
-        self.assertIn("add table inet workload_broker", text)
-        self.assertIn("add map inet workload_broker wl_broker_dest", text)
-        self.assertEqual(NFT_BROKER_TABLE, "inet workload_broker")
-        self.assertEqual(NFT_BROKER_MAP, "wl_broker_dest")
-
-
-class TestAdvertisedEndpoint(unittest.TestCase):
-    """The endpoint the guest dials has to match the rule byte for byte -- the
-    rule is a literal so the file stays applicable with a bare `nft -f`."""
-
-    def test_the_rule_matches_the_advertised_address_and_port(self):
-        text = NFT_FILE.read_text()
-        self.assertIn("ip daddr 192.0.2.1 tcp dport 8081", text)
-        self.assertEqual(VM_ADVERTISED_ADDR, "192.0.2.1")
-        self.assertEqual(VM_BROKER_PORT, 8081)
-
-    def test_it_is_the_only_thing_at_the_advertised_address(self):
-        """Through rung 1 the advertised address carried two services and the
-        port was what separated them -- a collision would have routed a guest's
-        broker traffic into the hostname proxy. Rung 2 deleted the proxy, so
-        this asserts the weaker thing that is now true: the skeleton has exactly
-        one rule matching the advertised address, and it is the broker's."""
-        rules = [ln for ln in NFT_FILE.read_text().splitlines()
-                 if ln.startswith("add rule") and VM_ADVERTISED_ADDR in ln]
-        self.assertEqual(len(rules), 1, rules)
-        self.assertIn(f"tcp dport {VM_BROKER_PORT}", rules[0])
-
-    def test_the_listener_is_not_the_advertised_address(self):
-        """If these were equal the rule would translate to itself and loop."""
-        self.assertNotEqual(VM_BROKER_LISTEN_ADDR, VM_ADVERTISED_ADDR)
-        self.assertEqual((VM_BROKER_LISTEN_ADDR, VM_BROKER_LISTEN_PORT),
-                         ("127.0.0.1", 8081))
-
-    def test_the_skeleton_path_is_the_packaged_one(self):
-        self.assertEqual(NFT_BROKER_SKELETON,
-                         "/usr/share/workloadctl/workload-broker.nft")
-        self.assertTrue(NFT_FILE.exists())
-
-
-class TestGuestEnv(unittest.TestCase):
-
-    def test_no_broker_means_no_env(self):
-        self.assertEqual(vm_broker_env(config()), {})
-
-    def test_the_guest_is_told_the_advertised_endpoint(self):
-        self.assertEqual(vm_broker_env(config(broker=True)),
-                         {"WORKLOAD_BROKER_URL": "http://192.0.2.1:8081"})
-
-    def test_the_url_is_an_ip_literal(self):
-        """Reaching the broker must not depend on DNS -- which is exactly what
-        a compromised guest would attack to escape policy."""
-        url = vm_broker_env(config(broker=True))[VM_BROKER_ENV_VAR]
-        self.assertNotIn("localhost", url)
-        host = url.split("//", 1)[1].split(":", 1)[0]
-        self.assertTrue(all(part.isdigit() for part in host.split(".")))
-
-    def test_a_bridged_vm_is_told_nothing(self):
-        self.assertEqual(vm_broker_env(config(broker=True, bridge="br0")), {})
-
-
-class TestValidation(unittest.TestCase):
-
-    def test_a_bool_is_accepted(self):
-        self.assertEqual(
-            [e for e in validate_vm_network({"broker": True}) if "broker" in e],
-            [])
-
-    def test_a_string_is_rejected(self):
-        errors = validate_vm_network({"broker": "yes"})
-        self.assertTrue(any("must be true or false" in e for e in errors))
-
-    def test_broker_with_bridge_is_rejected(self):
-        """Silently ignoring it would leave an operator believing a credential
-        boundary exists."""
-        errors = validate_vm_network({"broker": True, "bridge": "br0"})
-        self.assertTrue(any("no effect with .bridge" in e for e in errors))
-
-    def test_broker_false_with_bridge_is_not_an_error(self):
-        errors = validate_vm_network({"broker": False, "bridge": "br0"})
-        self.assertEqual([e for e in errors if "broker" in e], [])
-
-    def test_broker_is_independent_of_egress_mode(self):
-        """Unlike .hosts, this does not require filtering. The broker holds the
-        credential either way, so an open VM still cannot obtain one -- there is
-        no misreport to prevent."""
-        for mode in ("filtered", "open"):
-            errors = validate_vm_network({"broker": True, "egress": mode})
-            self.assertEqual([e for e in errors if "broker" in e], [], mode)
-
-
-class TestEveryVmRunsTheHelper(unittest.TestCase):
-    """The entitlement is withdrawn as deliberately as it is granted.
-
-    Emitting the ExecStartPre only for entitled VMs was the obvious reading and
-    it leaves a hole: map elements are keyed by uid, get_next_uid() reuses the
-    lowest free one, and an element that outlives its workload then belongs to
-    whichever workload inherits that uid — one that runs no broker code and so
-    never notices. The helper decides; the unit only has to call it.
-
-    Which is why *every* VM calls it, bridged included. A bridged VM is never
-    entitled, but it owns a uid like any other, and being outside the map is
-    not the same as being outside the reuse that makes stale elements possible.
-    Skipping the sweep for it left the inheriting workload as the one case the
-    sweep did not cover.
-    """
-
-    @classmethod
-    def setUpClass(cls):
-        cls.gen = load_script("generators/workload-generate")
-
-    def unit(self, **net):
-        return self.gen.generate_vm_service(
-            {"workload": {"name": "web"}, "vm": {"network": net}},
-            "_wl-web", 10005)
-
-    def test_an_entitled_vm_calls_it(self):
-        self.assertIn('ExecStartPre=+/usr/libexec/workloadctl/workload-vm-broker up "web"',
-                      self.unit(broker=True))
-
-    def test_a_vm_without_a_broker_calls_it_too(self):
-        """So that a uid inherited from a workload that had one is cleared."""
-        self.assertIn('ExecStartPre=+/usr/libexec/workloadctl/workload-vm-broker up "web"',
-                      self.unit())
-
-    def test_the_call_is_not_tolerant(self):
-        """A guest told to reach a broker nothing translates for it reports an
-        unreachable API, not a missing entitlement."""
-        unit = self.unit(broker=True)
-        self.assertNotIn("ExecStartPre=-+/usr/libexec/workloadctl/workload-vm-broker",
-                         unit)
-
-    def test_the_element_is_withdrawn_on_stop_kill_and_failure(self):
-        self.assertIn('ExecStopPost=-+/usr/libexec/workloadctl/workload-vm-broker down "web"',
-                      self.unit(broker=True))
-
-    def test_a_bridged_vm_sweeps_too(self):
-        """It can never hold an element of its own — vm_uses_broker is False for
-        it — but it can inherit one, which is what the sweep is for."""
-        unit = self.unit(bridge="br0")
-        self.assertIn('workload-vm-broker up "web"', unit)
-        self.assertIn('ExecStopPost=-+/usr/libexec/workloadctl/workload-vm-broker '
-                      'down "web"', unit)
-
-    def test_a_bridged_vm_is_not_failed_by_the_sweep(self):
-        """The one place tolerance is right. A bridged guest is never told a
-        broker address, so nothing it does depends on this running — and a
-        purely bridged host needs nftables for nothing else, so a missing nft
-        must not take its VMs down."""
-        self.assertIn('ExecStartPre=-+/usr/libexec/workloadctl/workload-vm-broker '
-                      'up "web"', self.unit(bridge="br0"))
-
-    def test_a_bridged_vm_still_gets_no_element(self):
-        """The sweep is not an entitlement: the helper reads the config and a
-        bridged VM never qualifies, whatever `broker` says."""
-        self.assertFalse(vm_uses_broker(config(broker=True, bridge="br0")))
-
-
-class TestRedirectLandsWhereTheBrokerListens(unittest.TestCase):
-    """The destination of the redirect and the broker's own listener.
-
-    These are two independent definitions of one address: VM_BROKER_LISTEN_ADDR
-    and VM_BROKER_LISTEN_PORT are what every map element sends a guest's packet
-    to, and the broker's config defaults are where it accepts one. They were a
-    cross-repo constant that neither side checked until the broker moved into
-    this package -- which is most of the reason it moved.
-
-    A drift here is invisible from either side alone and produces a guest
-    connection refused *after* translation: identical, from the guest, to the
-    broker being down, to the workload having no map element, and to the
-    advertised address not existing.
-
-    THE ADDRESS HALF IS RETIRED, and it is retired rather than moved. It pinned
-    VM_BROKER_LISTEN_ADDR against the broker's `listen_address` DEFAULT, and
-    that default is gone: an instance now binds the address derived from its own
-    workload's uid, and defaulting it to 127.0.0.1 is the specific mistake ADR
-    007 names as growing the hole decision 6 closes. So there is no second
-    definition left to compare against -- the reconciliation is a render
-    assertion on the generated config, and lives with the generator.
-
-    What replaces it here is the assertion that the default is ABSENT, because
-    "the pin was retired" and "the pin was quietly deleted along with the
-    property" are the two ways this class could stop mentioning the address, and
-    only one of them is correct.
-    """
-
-    def defaults(self):
-        """The broker's effective config when the operator sets neither key."""
-        broker = load_script("libexec/agent-broker")
-        with tempfile.NamedTemporaryFile("w", suffix=".toml") as fh:
-            fh.write('listen_address = "127.129.0.3"\n'
-                     'upstream = "https://api.example.invalid"\n'
-                     'credential = "unused"\n'
-                     '[sandboxes.agent.hosts."api.example.invalid"]\n')
-            fh.flush()
-            return broker.load_config(fh.name)
-
-    def test_there_is_no_listen_address_default_to_agree_with(self):
-        broker = load_script("libexec/agent-broker")
-        with tempfile.NamedTemporaryFile("w", suffix=".toml") as fh:
-            fh.write('upstream = "https://api.example.invalid"\n'
-                     'credential = "unused"\n'
-                     '[sandboxes.agent.hosts."api.example.invalid"]\n')
-            fh.flush()
-            with contextlib.redirect_stderr(io.StringIO()):
-                with self.assertRaises(SystemExit) as caught:
-                    broker.load_config(fh.name)
-        self.assertIn("no safe default", str(caught.exception))
-        self.assertNotEqual(VM_BROKER_LISTEN_ADDR, "")
-
-    def test_port_matches(self):
-        """The port half survives, and has to: the map elements this file is
-        about still carry VM_BROKER_LISTEN_PORT, and the broker still defaults
-        to 8081. The two go together, and both go in the same commit."""
-        self.assertEqual(int(self.defaults()["listen_port"]), VM_BROKER_LISTEN_PORT)
-
-
-if __name__ == "__main__":
-    unittest.main()
-
-
-# ---------------------------------------------------------------------------
-# Rung 6 T4: the generated per-workload instance
-#
-# Everything above this line is about the RETIRED shape -- one host-wide broker
-# reached at an advertised endpoint through a uid-keyed nft map. Everything
-# below is about the instance that replaces it: generated per workload, bound to
-# an address derived from that workload's uid, and dialled only by that
-# workload's inspector. The two coexist for one rung; T6 deletes the first.
-# ---------------------------------------------------------------------------
-
-from vm import (  # noqa: E402  (deliberately after the retired-shape imports)
     UID_MIN, VM_BROKER_BIN, VM_BROKER_INSTANCE_PORT, VM_CA_ENV_VARS,
     VM_RESERVED_GUEST_ENV,
     render_vm_broker_config, vm_broker_config_path, vm_broker_credential,
     vm_broker_hosts, vm_broker_listen_address, vm_broker_upstream_addresses,
-    vm_credential_env, vm_host_resolver_addresses, vm_uses_credentials,
+    validate_vm_network, vm_credential_env, vm_host_resolver_addresses,
+    vm_uses_credentials,
 )
 import tomllib
 
@@ -635,8 +366,16 @@ class TestTheGuestHalf(unittest.TestCase):
         self.assertTrue(any("used by two" in e for e in errors), errors)
 
     def test_the_reserved_set_is_derived_from_its_producers(self):
-        self.assertTrue(set(VM_CA_ENV_VARS) <= VM_RESERVED_GUEST_ENV)
-        self.assertIn(VM_BROKER_ENV_VAR, VM_RESERVED_GUEST_ENV)
+        """One producer now, and it used to be two.
+
+        WORKLOAD_BROKER_URL was the other, and rung 6 stopped seeding it -- the
+        guest is told no broker address at all. Derived rather than listed for
+        exactly this reason: the set exists to refuse a credential `env` that
+        would silently overwrite a variable workloadctl writes, so a name kept
+        in it after its writer went refuses a legal name for a collision that
+        cannot happen.
+        """
+        self.assertEqual(set(VM_RESERVED_GUEST_ENV), set(VM_CA_ENV_VARS))
 
 
 class TestAWildcardHostCannotBeBrokered(unittest.TestCase):
@@ -820,7 +559,18 @@ class TestTheHelperWritesTheConfig(unittest.TestCase):
         buf = io.StringIO()
         with contextlib.redirect_stderr(buf):
             self.assertEqual(self.mod.main(["prog", "config"]), 2)
-        self.assertIn("<config|up|down>", buf.getvalue())
+        self.assertIn("config <name>", buf.getvalue())
+
+    def test_the_retired_verbs_are_rejected_rather_than_ignored(self):
+        """`up` and `down` were the reachability half and are gone with the
+        map. An ExecStartPre left behind on a hand-edited unit must fail rather
+        than silently do nothing, since doing nothing is what the old `up` did
+        for an unentitled workload -- indistinguishable from success."""
+        for verb in ("up", "down"):
+            with self.subTest(verb):
+                buf = io.StringIO()
+                with contextlib.redirect_stderr(buf):
+                    self.assertEqual(self.mod.main(["prog", verb, "agent"]), 2)
 
 
 # ---------------------------------------------------------------------------
@@ -1410,3 +1160,189 @@ class TestWhatDiagnoseSaysAboutBrokeredTraffic(unittest.TestCase):
     def test_a_guest_that_has_done_nothing_yet_is_not_accused(self):
         out = self._fragments(credentialed=0, dispositions={"forwarded": 0})
         self.assertEqual(out, [])
+
+
+class TestTheRetiredKeyIsARefusal(unittest.TestCase):
+    """`[vm.network].broker` fails by name; it is not ignored (ADR 007 d11).
+
+    A deprecation was the alternative and is refused by premise 3: the key was
+    a REACHABILITY switch for a mechanism that no longer exists, so accepting
+    it and doing nothing would leave an operator believing a credential
+    boundary exists where there is none. That is the same failure the key's own
+    old .bridge check was written to prevent, so it is held to the standard it
+    set.
+    """
+
+    def _errors(self, **net):
+        from vm import validate_vm_network
+        return [e for e in validate_vm_network(net) if "broker" in e]
+
+    def test_true_is_refused(self):
+        errors = self._errors(broker=True)
+        self.assertTrue(errors, "broker = true must not validate")
+        self.assertTrue(any("was removed" in e for e in errors), errors)
+
+    def test_false_is_refused_too(self):
+        """The value is immaterial: the KEY names a mechanism that is gone.
+
+        `broker = false` used to be a legal way to say nothing, so a check that
+        only refused the truthy form would let the most likely leftover through
+        -- an operator who turned it off rather than deleting the line.
+        """
+        self.assertTrue(self._errors(broker=False))
+
+    def test_the_message_names_the_replacement_and_both_tables(self):
+        """Naming the removal without naming the successor sends an operator
+        to the schema doc for a key that is no longer in it."""
+        message = " ".join(self._errors(broker=True))
+        self.assertIn("[[vm.network.credential]]", message)
+        self.assertIn("[[vm.network.policy]]", message)
+        self.assertIn("credential", message)
+
+    def test_it_is_refused_on_a_bridged_vm_as_well(self):
+        """The old check made this case its own error ("no effect with
+        .bridge"). It must not survive as a softer path: a bridged VM carrying
+        the key is the same stale config as any other."""
+        self.assertTrue(self._errors(broker=True, bridge="br0"))
+
+
+class TestTheMapSweepIsGone(unittest.TestCase):
+    """The generator's SECOND broker block, which no grep for a config key
+    finds.
+
+    It emitted `workload-vm-broker up`/`down` on EVERY VM -- bridged ones
+    included -- to scrub an element a reused uid could inherit from a deleted
+    workload. That sweep was load-bearing while the map existed and is deleted
+    with it: the entitlement now lives in the workload's own generated unit,
+    which goes away with the workload, so there is nothing a uid can inherit.
+
+    Asserted by absence, which is the shape [[unit-gates-dont-see-the-seam]]
+    warns about -- so it is pinned against the verb that DOES survive rather
+    than against the string `workload-vm-broker`, which would pass just as
+    happily if the helper were deleted outright.
+    """
+
+    def _unit(self, config):
+        gen = load_script("generators/workload-generate")
+        return gen.generate_vm_service(config, "_wl-agent", 10007)
+
+    def test_no_vm_arms_a_broker_map_element(self):
+        for label, net in (("filtered", {"egress": "filtered",
+                                         "hosts": ["example.test"]}),
+                           ("open", {"egress": "open"}),
+                           ("bridged", {"bridge": "br0"})):
+            with self.subTest(label):
+                unit = self._unit({"workload": {"name": "agent"},
+                                   "vm": {"network": net}})
+                self.assertNotIn("workload-vm-broker up", unit)
+                self.assertNotIn("workload-vm-broker down", unit)
+
+    def test_the_helper_still_has_its_config_verb(self):
+        """The negative above is only meaningful while the helper exists.
+
+        Deleting libexec/workload-vm-broker entirely would satisfy every
+        assertion in the class above and break the broker instance's
+        ExecStartPre, which is the one caller left.
+        """
+        source = (Path(__file__).resolve().parent.parent
+                  / "libexec" / "workload-vm-broker").read_text()
+        self.assertIn("def write_config(", source)
+        self.assertNotIn("def up(", source)
+        self.assertNotIn("def down(", source)
+
+
+class TestTheAdvertisedAddressIsNotAdded(unittest.TestCase):
+    """D10: the dummy link survives, the 192.0.2.1 on it does not.
+
+    Both halves are asserted, because each alone is the wrong change. Dropping
+    the link would break every filtered workload's inspector addresses, which
+    is what the link carries now; keeping the address leaves a host answering
+    on a documentation range that nothing listens on and that the internal drop
+    now refuses.
+    """
+
+    def _argvs(self):
+        from vm import ensure_advertised_interface
+
+        class Result:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+
+        seen = []
+
+        def run(argv):
+            seen.append(argv)
+            return Result()
+
+        ensure_advertised_interface(run)
+        return seen
+
+    def test_the_link_is_still_created_and_brought_up(self):
+        argvs = self._argvs()
+        self.assertTrue(any("link" in a and "add" in a for a in argvs))
+        self.assertTrue(any(a[1:3] == ["link", "set"] and "up" in a
+                            for a in argvs), argvs)
+
+    def test_no_address_is_added(self):
+        for argv in self._argvs():
+            self.assertNotIn("addr", argv, argv)
+            self.assertFalse(any("192.0.2" in str(part) for part in argv), argv)
+
+    def test_the_constant_is_gone_rather_than_unused(self):
+        """An unused constant is the residue this rung exists to stop leaving,
+        and it is what a later reader would wire back up."""
+        import vm
+        self.assertFalse(hasattr(vm, "VM_ADVERTISED_ADDR"))
+
+    def test_test_net_1_is_now_an_internal_destination(self):
+        """The consequence, and the reason the range moves rather than simply
+        losing its exclusion comment: with nothing carrying it, TEST-NET-1 is
+        exactly what the internal drop exists to refuse."""
+        from vm import VM_INTERNAL_PREFIXES4
+        self.assertIn("192.0.2.0/24", VM_INTERNAL_PREFIXES4)
+
+
+class TestTheRetiredMechanismLeavesNoSymbols(unittest.TestCase):
+    """Every name F3 lists, asserted absent from lib/vm.py.
+
+    One test rather than eight, and by attribute rather than by grep: a
+    half-deleted mechanism is what leaves a caller importing a name that still
+    resolves, and this is the cheapest thing that notices.
+    """
+
+    def test_none_of_them_resolve(self):
+        import vm
+        for name in ("VM_BROKER_PORT", "VM_BROKER_LISTEN_ADDR",
+                     "VM_BROKER_LISTEN_PORT", "VM_BROKER_ENV_VAR",
+                     "NFT_BROKER_SKELETON", "NFT_BROKER_TABLE",
+                     "NFT_BROKER_MAP", "vm_uses_broker", "vm_broker_element",
+                     "vm_broker_map_command", "vm_broker_env"):
+            with self.subTest(name):
+                self.assertFalse(hasattr(vm, name))
+
+    def test_the_guest_is_told_nothing_about_a_broker(self):
+        """VM_RESERVED_GUEST_ENV loses its second producer.
+
+        Not cosmetic: the set is what refuses a credential's `env` for
+        colliding with a variable workloadctl seeds. Nothing seeds
+        WORKLOAD_BROKER_URL any more, so continuing to reserve it would refuse
+        a legal name for a collision that cannot happen.
+        """
+        self.assertEqual(set(VM_RESERVED_GUEST_ENV), set(VM_CA_ENV_VARS))
+        self.assertNotIn("WORKLOAD_BROKER_URL", VM_RESERVED_GUEST_ENV)
+
+    def test_the_skeleton_and_the_host_wide_unit_are_gone(self):
+        root = Path(__file__).resolve().parent.parent
+        self.assertFalse((root / "nftables" / "workload-broker.nft").exists())
+        self.assertFalse((root / "systemd" / "agent-broker.service").exists())
+
+    def test_the_spec_ships_neither(self):
+        """Deleting a file the spec still installs makes the RPM fail to build,
+        which is a late and confusing way to learn about a missed line."""
+        spec = (Path(__file__).resolve().parent.parent
+                / "rpm" / "workloadctl.spec").read_text()
+        self.assertNotIn("workload-broker.nft", spec)
+        self.assertNotIn("%{_unitdir}/agent-broker.service", spec)
+        self.assertNotIn("systemd/agent-broker.service", spec)
+        self.assertIn("libexec/agent-broker", spec)

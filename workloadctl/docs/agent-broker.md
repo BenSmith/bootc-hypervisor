@@ -518,6 +518,14 @@ answered the open question of where it lives: not a workload — being precisely
 what workloads are not trusted with — but shipped by the thing that manages
 them, on the host, in the image.
 
+**Superseded at rung 6.** What follows records a real run against the shape
+described above, and that shape is gone: the advertised literal, the redirect
+map and the single host-wide listener were deleted, and the rig with them (see
+`tests/manual/README.md`). It is kept because it is the evidence the design
+rested on and deleting it would leave the claims below looking unproven rather
+than re-scoped. Its replacement is being written against the per-workload
+instances; until that has run, the end-to-end claim for the new shape is open.
+
 Proven end to end 2026-08-14 on a KVM host, against the installed RPM rather
 than a checkout: `tests/manual/broker_rig.py`, 18/18. Four guests differing by
 one line of config each, so the claims come apart — two dialled the same

@@ -147,9 +147,9 @@ install -Dpm 0755 %{_sourcedir}/libexec/workload-vm-shutdown \
 # the sandbox makes through it (docs/agent-broker.md).
 #
 # It keeps its own name instead of a workload-* one. libexec already holds
-# workload-vm-broker, which is a different thing entirely -- the per-VM nft
-# element that lets one guest reach this -- and two names a hyphen apart for
-# the entitlement and the service is a confusion nobody needs at 3am.
+# workload-vm-broker, which is a different thing entirely -- the helper that
+# writes one instance's broker.toml -- and two names a hyphen apart for the
+# config writer and the daemon is a confusion nobody needs at 3am.
 #
 # It imports nothing from lib/, so being installed beside those modules costs
 # it nothing and buys the same thing every other entrypoint gets: one directory
@@ -167,11 +167,6 @@ install -Dpm 0644 %{_sourcedir}/systemd/workload-exporter-disk.timer \
     %{buildroot}%{_unitdir}/workload-exporter-disk.timer
 install -Dpm 0644 %{_sourcedir}/systemd/workloads.slice \
     %{buildroot}%{_unitdir}/workloads.slice
-
-# Shipped inert: no preset line enables it, and it cannot start without a
-# /etc/agent-broker/broker.toml the package deliberately does not write.
-install -Dpm 0644 %{_sourcedir}/systemd/agent-broker.service \
-    %{buildroot}%{_unitdir}/agent-broker.service
 
 install -Dpm 0644 %{_sourcedir}/systemd/80-workloadctl.preset \
     %{buildroot}%{_presetdir}/80-workloadctl.preset
@@ -193,8 +188,6 @@ install -Dpm 0644 %{_sourcedir}/nftables/workload-filter.nft \
 # The file name is historical; see the header of the file itself.
 install -Dpm 0644 %{_sourcedir}/nftables/workload-proxy.nft \
     %{buildroot}%{_datadir}/workloadctl/workload-proxy.nft
-install -Dpm 0644 %{_sourcedir}/nftables/workload-broker.nft \
-    %{buildroot}%{_datadir}/workloadctl/workload-broker.nft
 
 # The virtiofsd domain. Host-global and mandatory, so it ships with the package
 # that spawns the sidecar rather than through the per-workload
@@ -225,12 +218,13 @@ install -Dpm 0644 %{_sourcedir}/docs/workloads.md \
 install -Dpm 0644 %{_sourcedir}/docs/schema-reference.toml \
     %{buildroot}%{_docdir}/workloadctl/schema-reference.toml
 
-# The broker's design doc and its annotated config. The unit's Documentation=
-# points at the first; the second is what an operator copies to
-# /etc/agent-broker/broker.toml and edits. It ships as an example under docdir
-# rather than as a %%config in /etc precisely so upgrades never touch a real
-# broker.toml -- that file names an upstream and a credential, and RPM
-# replacing it is an outage.
+# The broker's design doc and its annotated config. The generated units'
+# Documentation= points at the first; the second documents the shape of the
+# broker.toml that workload-vm-broker now RENDERS, and an operator no longer
+# copies or edits it -- the config is a pure function of the workload TOML,
+# written into /run at every start. It ships under docdir, where it always did,
+# and the reason has changed from "so upgrades never touch a real broker.toml"
+# to "there is no real broker.toml to touch".
 install -Dpm 0644 %{_sourcedir}/docs/agent-broker.md \
     %{buildroot}%{_docdir}/workloadctl/agent-broker.md
 
@@ -277,18 +271,16 @@ install -Dpm 0644 %{_sourcedir}/LICENSE %{buildroot}%{_datadir}/licenses/workloa
 
 install -dm 0755 %{buildroot}%{_sysconfdir}/workloads.d
 
-# The broker's config directory, root-only: it holds broker.toml and the
-# encrypted credential blobs beside it. The blobs are safe at rest and
-# systemd-creds reads them as root before the sandbox exists, so nothing needs
-# to traverse this but PID 1.
-install -dm 0700 %{buildroot}%{_sysconfdir}/agent-broker
-
 # The timers are the enabled units; each oneshot service is pulled in by its
-# timer, not enabled on its own. agent-broker.service is listed so the preset is
-# applied to it and the daemon reloaded — the preset says nothing about it, so
-# the vendor default `disable *` stands and a fresh install gets it stopped.
+# timer, not enabled on its own.
+#
+# agent-broker.service was listed here and is gone with the host-wide broker.
+# The program it ran still ships; what changed is who starts it. Each workload
+# that declares a credential gets workload-<name>-broker.service, written by
+# the generator into /run at boot — a generated unit, so there is nothing for a
+# preset to apply to and nothing here to enable.
 %post
-%systemd_post workload-exporter.timer workload-exporter-disk.timer agent-broker.service
+%systemd_post workload-exporter.timer workload-exporter-disk.timer
 systemd-tmpfiles --create workloads-dirs.conf 2>/dev/null || :
 # SELinux fcontext rules that name no workload, so they belong at install time.
 #
@@ -461,17 +453,19 @@ EOF
 fi
 
 %preun
-%systemd_preun workload-exporter.timer workload-exporter-disk.timer agent-broker.service
+%systemd_preun workload-exporter.timer workload-exporter-disk.timer
 
 %postun
-# agent-broker.service is restarted with the package, deliberately. It is the
-# one long-running daemon here, it holds a provider credential, and an upgrade
-# that leaves the old process serving from deleted code is the wrong failure to
-# choose. The macro restarts it only if it is running, so a host with no broker
-# configured never notices; a host with one takes a sub-second interruption on
-# every workloadctl upgrade, which is frequent — the release is timestamped per
-# build.
-%systemd_postun_with_restart workload-exporter.timer workload-exporter-disk.timer agent-broker.service
+# The generated broker instances are deliberately NOT restarted here, and could
+# not be: they are per-workload units this macro has no name for. An upgrade
+# therefore leaves a running broker serving from the previous package's code
+# until its workload restarts, which is the same bargain every other
+# per-workload unit takes and a weaker one than the host-wide agent-broker.service
+# had — that unit was named here and restarted on every upgrade. The cost is
+# bounded by the credential never being re-read: broker.toml is regenerated at
+# every start, so a broker that has not restarted is running old code against
+# the config it started with, not against a stale credential set.
+%systemd_postun_with_restart workload-exporter.timer workload-exporter-disk.timer
 # On full uninstall ($1 == 0, not upgrade) reverse the host-global state this
 # package registers, which no per-workload teardown can safely remove (it is
 # shared across workloads while the package is installed): the semanage
@@ -527,7 +521,6 @@ fi
 %{_unitdir}/workload-exporter-disk.service
 %{_unitdir}/workload-exporter-disk.timer
 %{_unitdir}/workloads.slice
-%{_unitdir}/agent-broker.service
 %{_presetdir}/80-workloadctl.preset
 %{_prefix}/lib/tmpfiles.d/workloads-dirs.conf
 %{_datadir}/containers/seccomp-workload-baseline.json
@@ -535,7 +528,6 @@ fi
 %{_docdir}/workloadctl/
 %{_datadir}/workloadctl/
 %dir %{_sysconfdir}/workloads.d
-%attr(0700,root,root) %dir %{_sysconfdir}/agent-broker
 # %%config(noreplace): the retention numbers are defaults to revisit, and an
 # operator who has already revisited them on a host must not lose that to an
 # upgrade.

@@ -128,10 +128,16 @@ add set inet workload_filter wl_egress_cg { typeof socket cgroupv2 level 2 ; }
 # to prevent. Teredo (2001::/32) is deliberately NOT here: it encodes the
 # client's own public address and does not name an internal destination.
 #
-# 192.0.2.0/24 is deliberately ABSENT. That is the advertised address, which
-# still carries the credential broker -- listing it would drop the broker's
-# replies to its own client and take the broker down entirely. It carried the
-# retired proxy on another port for the same reason.
+# 192.0.2.0/24 IS HERE NOW, and the reason is that its exclusion ran out. That
+# is TEST-NET-1, reserved for documentation, and it was excluded because the
+# advertised address 192.0.2.1 lived in it -- first for the retired proxy, then
+# for the host-wide credential broker alone. Rung 6 gave every workload its own
+# broker instance on a uid-derived loopback address, so nothing carries the
+# range and it becomes exactly what this set exists to refuse: a destination no
+# guest can legitimately want. An operator whose site really does route
+# TEST-NET-1 internally writes a [[vm.network.internal]] exemption, which is
+# only writable because lib/vm.py's VM_INTERNAL_PREFIXES4 carries the same
+# addition -- the drop and its escape hatch are the one list stated twice.
 add set inet workload_filter wl_internal4 { type ipv4_addr ; flags interval ; }
 add set inet workload_filter wl_internal6 { type ipv6_addr ; flags interval ; }
 
@@ -154,7 +160,7 @@ add set inet workload_filter wl_internal_ok4 { typeof meta skuid . ip  daddr ; }
 add set inet workload_filter wl_internal_ok6 { typeof meta skuid . ip6 daddr ; }
 flush set inet workload_filter wl_internal4
 flush set inet workload_filter wl_internal6
-add element inet workload_filter wl_internal4 { 0.0.0.0/8, 10.0.0.0/8, 100.64.0.0/10, 127.0.0.0/8, 169.254.0.0/16, 172.16.0.0/12, 192.168.0.0/16, 255.255.255.255 }
+add element inet workload_filter wl_internal4 { 0.0.0.0/8, 10.0.0.0/8, 100.64.0.0/10, 127.0.0.0/8, 169.254.0.0/16, 172.16.0.0/12, 192.0.2.0/24, 192.168.0.0/16, 255.255.255.255 }
 add element inet workload_filter wl_internal6 { ::/128, ::1/128, ::ffff:0.0.0.0/96, 64:ff9b::/96, 64:ff9b:1::/48, 2002::/16, fc00::/7, fe80::/10 }
 
 add chain inet workload_filter output { type filter hook output priority 0; policy accept; }
