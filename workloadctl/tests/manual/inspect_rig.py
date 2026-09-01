@@ -854,6 +854,16 @@ def audit_denials(mark, needles):
     retrying, having survived four enforcing iterations invisibly. Treat an
     empty list as "nothing in the audited set", and do the -DB pass by hand
     before concluding a domain is complete.
+
+    That pass has now been done for wlinspect_t and wlresolve_t, on a KVM host
+    2026-09-01: `semodule -DB`, a full green rig run (57/57), harvest, then
+    `semodule -B`. It raised the run's denial count from 43 to 60 and added
+    NOTHING in either producer domain -- the whole delta was svirt_t and
+    init_t, and all of it the exec-transition triple (siginh, rlimitinh,
+    noatsecure) plus inherited-fd read/write, which upstream policy dontaudits
+    because a domain transition legitimately produces them. So the two domains
+    this rig covers are complete as of that date. It does not generalise: a
+    later grant, or a new domain, re-owes the pass.
     """
     if mark is None:
         return []
