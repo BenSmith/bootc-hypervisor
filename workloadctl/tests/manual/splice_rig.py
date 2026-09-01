@@ -374,8 +374,17 @@ def probe_cleartext(plain, origin, log):
     record("an allowlisted Host is relayed to a real origin",
            b"FROM-ORIGIN" in got and plain.connections == before_plain + 1,
            f"{plain.connections - before_plain} origin connection(s)")
-    record("a Host on no list gets a 403 that names it",
-           b"403" in got and DENIED.encode() in got, repr(got[-80:]))
+    # NAMES NOTHING, and the inversion is the assertion. This once required the
+    # denied host to appear in the body, back when a refusal read
+    # "workloadctl: GET / is not permitted on <host> by this workload's egress
+    # policy". That body made one refused request a reliable oracle for "you are
+    # sandboxed" and what the sandbox was called, before the guest had inspected
+    # a single certificate, so it was stripped to a bare POLICY_REFUSAL_BODY.
+    # The rig kept demanding the name for one commit and failed here on the next
+    # hardware run -- asserting the leak the change closed. Guarding the absence
+    # is what keeps a future edit from putting it back.
+    record("a Host on no list gets a 403 whose body names NOTHING",
+           b"403" in got and DENIED.encode() not in got, repr(got[-80:]))
     record("both decisions were taken on the one connection",
            got.count(b"HTTP/1.1 ") == 2
            and got.index(b"200") < got.index(b"403"),
