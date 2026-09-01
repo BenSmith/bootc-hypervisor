@@ -185,14 +185,58 @@ ARMS = (Arm("wlri-plain", False), Arm("wlri-hosts", True))
 
 results = []
 
+# --quiet: what a run prints when nothing is wrong.
+#
+# A green run is 57 PASS lines, several carrying a whole JSON document, and the
+# reason to want that smaller is not tidiness -- this output is read back
+# through an ssh pipe by a reader that pays for every byte, and the passes tell
+# that reader nothing the tally does not.
+#
+# TWO THINGS ARE DELIBERATELY NOT SUPPRESSED, because a quiet flag that hides a
+# failure is worse than no flag at all:
+#
+#   * every FAIL line verbatim, detail and all. That detail is the entire
+#     product of a hardware run. Three separate times in this tree a rig bug
+#     read as a product bug, and each was told apart by reading the failure's
+#     own printed evidence -- the uid the assertion said was missing was
+#     sitting in the detail it printed.
+#   * the section header the failure sits under, emitted lazily just before the
+#     first FAIL inside it, and again if an exception escapes. Without it a
+#     quiet run's traceback arrives with no indication of which phase produced
+#     it, which is the one thing the chatter was buying.
+QUIET = False
+_section = None
+_section_shown = False
+
 
 def say(msg):
-    print(msg, flush=True)
+    """Progress and section chatter -- silent under --quiet.
+
+    Section headers are still TRACKED when silent: `_show_section` prints the
+    latest one if a failure or an exception makes locality matter.
+    """
+    global _section, _section_shown
+    if msg.startswith("=="):
+        _section, _section_shown = msg, False
+    if not QUIET:
+        print(msg, flush=True)
+
+
+def _show_section():
+    """Print the current section header once, on the first FAIL beneath it."""
+    global _section_shown
+    if QUIET and _section and not _section_shown:
+        print(_section, flush=True)
+        _section_shown = True
 
 
 def record(label, ok, detail):
     results.append((label, ok, detail))
-    say(f"  {'PASS' if ok else 'FAIL'}  {label}: {detail}")
+    if not ok:
+        _show_section()
+    if ok and QUIET:
+        return
+    print(f"  {'PASS' if ok else 'FAIL'}  {label}: {detail}", flush=True)
 
 
 def run(argv, check=True, timeout=120):
@@ -1078,7 +1122,11 @@ def main():
                     help="leave the guests running for inspection")
     ap.add_argument("--no-deploy", action="store_true",
                     help="reuse guests left by an earlier --keep run")
+    ap.add_argument("--quiet", action="store_true",
+                    help="print only failures and the tally")
     args = ap.parse_args()
+    global QUIET
+    QUIET = args.quiet
 
     preflight()
     try:
@@ -1102,14 +1150,26 @@ def main():
         domains()
         before = status_files(mark)
         restart_clears_status(before)
+    except BaseException:
+        # Under --quiet the headers were never printed, so name the phase the
+        # traceback below belongs to. BaseException, not Exception: a
+        # KeyboardInterrupt on a run this long is a normal way to stop it, and
+        # knowing where it was interrupted is worth the same one line.
+        _show_section()
+        raise
     finally:
         if not args.keep:
             teardown()
 
     bad = [r for r in results if not r[1]]
-    say(f"\n{len(results) - len(bad)}/{len(results)} passed")
-    for label, _, detail in bad:
-        say(f"  FAIL  {label}: {detail}")
+    print(f"\n{len(results) - len(bad)}/{len(results)} passed", flush=True)
+    # The replay is for a full run, where 57 PASS lines separate the failures
+    # from each other and from the tally. Under --quiet nothing was printed
+    # between them but other FAIL lines, so it would be a verbatim second copy
+    # of what is already on the screen.
+    if not QUIET:
+        for label, _, detail in bad:
+            print(f"  FAIL  {label}: {detail}", flush=True)
     return 1 if bad else 0
 
 

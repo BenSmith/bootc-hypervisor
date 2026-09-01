@@ -123,7 +123,16 @@ throwaway VM workloads and probes them from inside, then purges them.
 
 ```bash
 sudo python3 tests/manual/inspect_rig.py
+sudo python3 tests/manual/inspect_rig.py --quiet   # failures and the tally only
 ```
+
+`--quiet` is for reading a run back over ssh rather than watching it: a green
+run collapses from 57 PASS lines, several carrying a whole JSON document, to
+one tally line. Failures are never suppressed — each prints in full, under the
+section header naming the phase it was in, and an escaping exception prints
+that header too. `tests/test_manual_rig_quiet.py` pins that, because the branch
+that matters here only runs on a KVM host and only when something is already
+wrong.
 
 **Two guests, differing in one config line.** The `plain` arm is filtered with
 no `hosts`, so nothing is allowlisted and every dial to 80/443 is DNAT'd onto
