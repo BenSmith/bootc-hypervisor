@@ -189,6 +189,116 @@ class ValidateSingleCredentialsTest(unittest.TestCase):
         self.assertGreaterEqual(result["warnings"], 1)
 
 
+class ValidateSingleBrokerCredentialsTest(unittest.TestCase):
+    """The same question one subtree down, and the only check that answers it.
+
+    Broker material cannot be reached by the ${SECRET:} check and never will
+    be: SECRET_PATTERN has no `/`, which is exactly what keeps it out of
+    workload env -- so auto_detect_credentials returns nothing for it by
+    construction and the existing check is silent on a workload whose provider
+    keys are all missing.
+
+    That silence is also what makes this the actionable half of a gap `backup`
+    leaves on purpose. `backup` copies the credentials a config DEMANDS, which
+    is those same ${SECRET:} occurrences, so a restored workload comes back
+    without its provider keys -- and RESTORE says nothing, because the restored
+    config demands no ${SECRET:} the archive lacks. This check is what fires on
+    the restored host and names the material.
+    """
+
+    TOML = """
+[workload]
+name = "{name}"
+
+[vm]
+image = "https://example.invalid/x.qcow2"
+
+[vm.network]
+hosts = ["api.example.com"]
+
+[[vm.network.credential]]
+name = "tok"
+placeholder = "sk-000000000000PLACEHOLDER"
+env = "API_TOKEN"
+
+[[vm.network.policy]]
+host = "api.example.com"
+methods = ["GET"]
+paths = ["/v1/*"]
+credential = "tok"
+"""
+
+    def setUp(self):
+        self.tmp = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.enterContext(mock.patch.object(
+            workload_lib, "WORKLOAD_CONFIG_DIR", self.tmp))
+        self.credstore = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.enterContext(mock.patch.object(
+            cmd_validate, "CREDSTORE_DIR", self.credstore))
+
+    def _validate(self, name, toml=None):
+        (self.tmp / name).mkdir()
+        (self.tmp / name / "workload.toml").write_text(
+            (toml or self.TOML).format(name=name))
+        config = WorkloadConfig(name)
+        manager = mock.Mock(spec=WorkloadManager)
+        manager.user_exists.return_value = False
+        manager.get_all_configs.return_value = []
+        return cmd_validate.validate_single(config, manager, json_mode=True)
+
+    def _checks(self, result):
+        return [c for c in result["checks"] if c["check"] == "broker-credentials"]
+
+    def test_missing_material_is_an_error_naming_the_scoped_name(self):
+        checks = self._checks(self._validate("clitest-brokermissing"))
+        self.assertEqual(len(checks), 1, checks)
+        self.assertFalse(checks[0]["passed"])
+        self.assertIn("tok", checks[0]["message"])
+        # The fix is the command that creates it, at the scoped name -- an
+        # operator on a restored host has no other way to learn the path.
+        self.assertIn("broker/clitest-brokermissing/tok", checks[0]["fix"])
+
+    def test_present_material_passes(self):
+        name = "clitest-brokerpresent"
+        path = self.credstore / "broker" / name / "tok"
+        path.parent.mkdir(parents=True)
+        path.write_bytes(b"sealed")
+        checks = self._checks(self._validate(name))
+        self.assertEqual(len(checks), 1, checks)
+        self.assertTrue(checks[0]["passed"])
+        self.assertIn("tok", checks[0]["message"])
+
+    def test_another_workloads_material_does_not_satisfy_it(self):
+        """The scope is the point. Material under a different workload is not
+        this workload's, and a check reading only the leaf name would call a
+        missing key present on any host where some other workload has one."""
+        name = "clitest-brokerscope"
+        path = self.credstore / "broker" / "someone-else" / "tok"
+        path.parent.mkdir(parents=True)
+        path.write_bytes(b"sealed")
+        checks = self._checks(self._validate(name))
+        self.assertFalse(checks[0]["passed"], checks)
+
+    def test_a_workload_with_no_credential_blocks_gets_no_check(self):
+        """Silence rather than an "ok" row: almost every workload on a host has
+        no broker material, and a passing row on each of them is a line that
+        stops being read."""
+        result = self._validate(
+            "clitest-nobroker",
+            '[workload]\nname = "{name}"\n\n'
+            '[container]\nimage = "x:latest"\n')
+        self.assertEqual(self._checks(result), [])
+
+    def test_the_secret_check_stays_silent_about_broker_material(self):
+        """The two checks must not both claim it: auto_detect_credentials
+        cannot see a credential block, so a "credentials" row mentioning `tok`
+        would mean something started scanning the wrong table."""
+        result = self._validate("clitest-brokeronly")
+        creds = [c for c in result["checks"] if c["check"] == "credentials"]
+        self.assertEqual(len(creds), 1)
+        self.assertNotIn("tok", creds[0]["message"])
+
+
 class ValidateSingleBuildTest(unittest.TestCase):
     """validate_single's [build]/[containers.build] checks: containerfile paths
     must stay inside the build context, per-container containerfiles are checked

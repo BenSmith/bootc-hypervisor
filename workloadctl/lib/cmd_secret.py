@@ -197,6 +197,103 @@ def _strip_trailing_newline(text: str) -> str:
     return text
 
 
+# The one scope below the credstore root, and the only one. Broker material
+# (ADR 007) lives at <credstore>/broker/<workload>/<name>: it is operator-
+# created, encrypted, and has to survive a reboot like everything else here,
+# but it must never be reachable from a workload's environment.
+#
+# THAT UNREACHABILITY IS STRUCTURAL AND COMES FROM ONE CHARACTER, TWICE. `/` is
+# what makes the credential nameable on this CLI, and it is what makes it
+# unnameable from workload env: secrets_template.SECRET_PATTERN is
+# `\$\{SECRET:([a-zA-Z0-9_-]+)}` and has no `/`, so `${SECRET:broker/x/y}`
+# does not match the pattern at all -- it is not refused by a rule that could
+# be relaxed, it is unrepresentable. A future pass that "tidied" the pattern by
+# adding `/` to that class would open this silently, which is why the test for
+# it asserts against SECRET_PATTERN and the resolver rather than against a
+# validation message.
+CREDENTIAL_SCOPES = ("broker",)
+
+# One path segment. The same class the unscoped form has always enforced, and
+# it is what keeps a scoped name inside its own workload's subtree: no `/`, so
+# no traversal, and no `..`, so nothing to normalise away.
+_SEGMENT_RE = re.compile(r"^[a-zA-Z0-9_-]+$")
+
+
+def credential_path(cred_dir: Path, name: str):
+    """(file, seal_name) for one credential name, scoped or not.
+
+    Two forms:
+
+      `<name>`                     -> <credstore>/<name>, sealed --name=<name>
+      `broker/<workload>/<name>`   -> <credstore>/broker/<workload>/<name>,
+                                      sealed --name=broker-<workload>-<name>
+
+    The seal name matters as much as the path. systemd-creds binds the
+    plaintext to the name it was sealed under, so a generated unit that
+    LoadCredentialEncrypted='s another workload's file gets a decryption
+    failure rather than the material -- the path is not the boundary, the seal
+    name is, and it carries the workload.
+
+    Scoping is a NAME FORM and not a flag, deliberately: every verb takes a
+    name already, so this reaches all seven at once with no new argparse
+    option, no completions change, no docs/cli.md matrix row, and nothing for
+    tests/test_completions.py's one-way blindness (it catches offered-but-unreal
+    flags, never unoffered-but-real ones) to miss.
+
+    Raises ValueError with an operator-readable message.
+    """
+    parts = name.split("/")
+    if len(parts) == 1:
+        if not _SEGMENT_RE.match(name):
+            raise ValueError(
+                "Secret name must contain only letters, numbers, underscore "
+                "and hyphen — or be a scoped name like "
+                "'broker/<workload>/<credential>'")
+        return cred_dir / name, name
+    if parts[0] not in CREDENTIAL_SCOPES:
+        raise ValueError(
+            f"Unknown credential scope {parts[0]!r}; the scoped form is "
+            f"'{CREDENTIAL_SCOPES[0]}/<workload>/<credential>'")
+    if len(parts) != 3:
+        raise ValueError(
+            f"A {parts[0]!r} credential is named "
+            f"'{parts[0]}/<workload>/<credential>' — three segments, got "
+            f"{len(parts)}")
+    if not all(_SEGMENT_RE.match(part) for part in parts):
+        raise ValueError(
+            "Each segment of a scoped name must contain only letters, "
+            "numbers, underscore and hyphen")
+    scope, workload, leaf = parts
+    return cred_dir / scope / workload / leaf, f"{scope}-{workload}-{leaf}"
+
+
+def iter_credentials(cred_dir: Path):
+    """(display name, path) for every credential, scoped ones included.
+
+    Scoped material used to be invisible here, because `list` read one
+    directory and kept only files -- so a subtree looked like nothing at all,
+    and an operator checking whether a workload's key was present got "no
+    credentials found" for a key that was sitting right there. Sorted by
+    display name so the scoped entries group under their scope.
+    """
+    if not cred_dir.exists():
+        return []
+    found = []
+    for path in cred_dir.iterdir():
+        if path.is_file():
+            found.append((path.name, path))
+        elif path.is_dir() and path.name in CREDENTIAL_SCOPES:
+            for workload_dir in path.iterdir():
+                if not workload_dir.is_dir():
+                    continue
+                for leaf in workload_dir.iterdir():
+                    if leaf.is_file():
+                        found.append(
+                            (f"{path.name}/{workload_dir.name}/{leaf.name}",
+                             leaf))
+    return sorted(found)
+
+
 # ---------------------------------------------------------------------------
 # cmd_secret
 # ---------------------------------------------------------------------------
@@ -205,23 +302,27 @@ def cmd_secret(args, manager: WorkloadManager):
     """Manage secrets (systemd credentials)"""
     cred_dir = Path(CREDSTORE_DIR)
 
+    # Resolved once for every verb that takes a name, so the scoped form works
+    # on all of them rather than on the three somebody remembered.
+    cred_file = seal_name = None
+    if getattr(args, "name", None) is not None:
+        try:
+            cred_file, seal_name = credential_path(cred_dir, args.name)
+        except ValueError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            sys.exit(1)
+
     if args.subcommand == "create":
         require_root()
         name = args.name
-
-        # Validate secret name
-        if not re.match(r'^[a-zA-Z0-9_-]+$', name):
-            print("Error: Secret name must contain only letters, numbers, underscore, and hyphen", file=sys.stderr)
-            sys.exit(1)
-
-        cred_file = cred_dir / name
 
         if cred_file.exists() and not args.force:
             print(f"Error: Credential '{name}' already exists. Use --force to overwrite.", file=sys.stderr)
             sys.exit(1)
 
-        # Create credstore directory if it doesn't exist (0o700: only root can list)
-        cred_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        # Create the credstore directory, and the scope subtree with it, if
+        # they do not exist (0o700: only root can list).
+        cred_file.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
 
         # Determine encryption key type
         key_type = args.key_type or "tpm2"
@@ -233,7 +334,7 @@ def cmd_secret(args, manager: WorkloadManager):
             cmd = [
                 "systemd-creds", "encrypt",
                 f"--with-key={key_type}",
-                f"--name={name}",
+                f"--name={seal_name}",
                 str(Path(args.file).expanduser()),
                 str(cred_file)
             ]
@@ -244,7 +345,7 @@ def cmd_secret(args, manager: WorkloadManager):
             cmd = [
                 "systemd-creds", "encrypt",
                 f"--with-key={key_type}",
-                f"--name={name}",
+                f"--name={seal_name}",
                 "-", str(cred_file)
             ]
 
@@ -266,13 +367,18 @@ def cmd_secret(args, manager: WorkloadManager):
                 print("No credentials found (directory does not exist)")
             return
 
-        creds = sorted(p for p in cred_dir.iterdir() if p.is_file())
+        # Scoped material included, under its full name. This used to read one
+        # directory and keep only files, so a whole subtree was invisible: an
+        # operator checking whether a workload's broker key was present got "no
+        # credentials found" for material sitting right there, and the natural
+        # next step is to seal it again.
+        creds = iter_credentials(cred_dir)
 
         if args.json:
             print(json.dumps({
                 "credentials": [
-                    {"name": p.name, "size": p.stat().st_size, "modified": int(p.stat().st_mtime)}
-                    for p in creds
+                    {"name": name, "size": p.stat().st_size, "modified": int(p.stat().st_mtime)}
+                    for name, p in creds
                 ]
             }, indent=2))
             return
@@ -281,14 +387,15 @@ def cmd_secret(args, manager: WorkloadManager):
             print("No credentials found")
             return
 
-        print(f"{'NAME':<30} {'SIZE':<10} {'MODIFIED':<20}")
-        print("-" * 60)
-        for cred in creds:
-            name = cred.name
+        # Wide enough for `broker/<workload>/<credential>`, which is the whole
+        # point of showing the scope rather than the leaf.
+        print(f"{'NAME':<44} {'SIZE':<10} {'MODIFIED':<20}")
+        print("-" * 74)
+        for name, cred in creds:
             size = cred.stat().st_size
             mtime = cred.stat().st_mtime
             mod_time = datetime.datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M:%S")
-            print(f"{name:<30} {size:<10} {mod_time:<20}")
+            print(f"{name:<44} {size:<10} {mod_time:<20}")
 
         print(f"\nTotal: {len(creds)} credential(s)")
         print(f"Location: {cred_dir}")
@@ -296,7 +403,6 @@ def cmd_secret(args, manager: WorkloadManager):
     elif args.subcommand == "delete":
         require_root()
         name = args.name
-        cred_file = cred_dir / name
 
         if not cred_file.exists():
             print(f"Error: Credential '{name}' not found", file=sys.stderr)
@@ -314,7 +420,6 @@ def cmd_secret(args, manager: WorkloadManager):
     elif args.subcommand == "show":
         require_root()
         name = args.name
-        cred_file = cred_dir / name
 
         if not cred_file.exists():
             print(f"Error: Credential '{name}' not found", file=sys.stderr)
@@ -339,7 +444,6 @@ def cmd_secret(args, manager: WorkloadManager):
     elif args.subcommand == "rotate":
         require_root()
         name = args.name
-        cred_file = cred_dir / name
 
         if not cred_file.exists():
             print(f"Error: Credential '{name}' not found", file=sys.stderr)
@@ -370,7 +474,7 @@ def cmd_secret(args, manager: WorkloadManager):
         cmd = [
             "systemd-creds", "encrypt",
             f"--with-key={key_type}",
-            f"--name={name}",
+            f"--name={seal_name}",
             "-", str(cred_file)
         ]
 
@@ -403,7 +507,6 @@ def cmd_secret(args, manager: WorkloadManager):
         require_root()
         name = args.name
 
-        cred_file = cred_dir / name
         if not cred_file.exists():
             print(f"Error: Credential '{name}' not found", file=sys.stderr)
             sys.exit(1)
@@ -445,7 +548,6 @@ def cmd_secret(args, manager: WorkloadManager):
             print(f"Error: File not found: {input_file}", file=sys.stderr)
             sys.exit(1)
 
-        cred_file = cred_dir / name
         if cred_file.exists() and not args.force:
             print(f"Error: Credential '{name}' already exists. Use --force to overwrite.", file=sys.stderr)
             sys.exit(1)
@@ -465,11 +567,11 @@ def cmd_secret(args, manager: WorkloadManager):
 
         # Re-encrypt with systemd-creds (TPM-bound)
         key_type = args.key_type or "tpm2"
-        cred_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        cred_file.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         try:
             subprocess.run(
                 ["systemd-creds", "encrypt", f"--with-key={key_type}",
-                 f"--name={name}", "-", str(cred_file)],
+                 f"--name={seal_name}", "-", str(cred_file)],
                 input=plaintext, check=True,
             )
             os.chmod(cred_file, 0o600)

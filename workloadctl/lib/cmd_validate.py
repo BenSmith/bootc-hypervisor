@@ -20,9 +20,9 @@ from workload_lib import (
 )
 from provisioning import shadowed_filecon_paths
 from vm import (
-    parse_memory_mib, vm_internal_hosts, vm_internal_reserved_reason,
-    vm_internal_resolve, vm_mac_address, vm_mac_collisions,
-    vm_uses_inspect,
+    parse_memory_mib, vm_credential_entries, vm_internal_hosts,
+    vm_internal_reserved_reason, vm_internal_resolve, vm_mac_address,
+    vm_mac_collisions, vm_uses_inspect,
 )
 from validation import (
     collect_config_warnings,
@@ -158,6 +158,64 @@ def validate_single(config: WorkloadConfig, manager: WorkloadManager, json_mode=
                     "passed": True,
                     "severity": "ok",
                     "message": f"Credentials present: {', '.join(sorted(demanded))}"
+                })
+
+    # Broker credentials, the same question one subtree down. They cannot be
+    # reached by the check above and never will be: a `${SECRET:}` reference
+    # cannot name the scoped path (SECRET_PATTERN has no `/`), which is exactly
+    # what keeps broker material out of workload env -- so auto_detect_credentials
+    # returns nothing for them by construction.
+    #
+    # This is the actionable half of a gap `backup` leaves on purpose.
+    # lib/backup.py copies the credentials a config DEMANDS, and the demanded
+    # set is those same `${SECRET:}` occurrences -- so a workload backed up and
+    # restored comes back without its provider keys. `backup` warns per missing
+    # credential at backup time; RESTORE says nothing, because the restored
+    # config demands no `${SECRET:}` the archive lacks. This check is what fires
+    # on the restored host and names the material, which is why the docs
+    # sentence about that gap can point at a command rather than only state a
+    # fact. Broker material is deliberately not carried by `backup`: its blast
+    # radius is a live provider account, and stating that is better than
+    # quietly widening it.
+    vm_net = ((config.config.get("vm") or {}).get("network") or {})
+    broker_creds = (vm_credential_entries(vm_net)
+                    if isinstance(vm_net, dict) else [])
+    if broker_creds:
+        workload_name = config.config.get("workload", {}).get("name", config.name)
+        try:
+            missing = sorted(
+                c.name for c in broker_creds
+                if not (CREDSTORE_DIR / "broker" / workload_name / c.name).exists())
+        except OSError:
+            checks.append({
+                "check": "broker-credentials",
+                "passed": True,
+                "severity": "warning",
+                "message": "Cannot verify broker credentials as non-root; "
+                           "re-run with sudo"
+            })
+            warnings += 1
+        else:
+            if missing:
+                for name in missing:
+                    checks.append({
+                        "check": "broker-credentials",
+                        "passed": False,
+                        "severity": "error",
+                        "message": f"Missing broker credential: {name} — this "
+                                   f"workload's broker will refuse every "
+                                   f"request for the host that selects it",
+                        "fix": f"sudo workloadctl secret create "
+                               f"broker/{workload_name}/{name}"
+                    })
+                    errors += 1
+            else:
+                checks.append({
+                    "check": "broker-credentials",
+                    "passed": True,
+                    "severity": "ok",
+                    "message": f"Broker credentials present: "
+                               f"{', '.join(sorted(c.name for c in broker_creds))}"
                 })
 
     # Inlined secrets — the mirror of the check above. That one asks "does the

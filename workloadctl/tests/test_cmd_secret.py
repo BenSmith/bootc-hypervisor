@@ -511,6 +511,175 @@ class ExportImportFlowTest(SecretTestBase):
         self.assertTrue((self.cred_dir / "api").exists())
 
 
+class ScopedCredentialNameTest(SecretTestBase):
+    """`broker/<workload>/<name>` (ADR 007, rung 6 T3).
+
+    A NAME FORM and not a flag, which is why this class checks that every verb
+    honours it: every verb already takes a name, so the scoped form reaches all
+    seven at once -- and the failure mode of doing it verb-by-verb is that the
+    four nobody wrote a test for keep writing to the credstore root.
+    """
+
+    def _seed_scoped(self, workload, name, content=b"blob"):
+        path = self.cred_dir / "broker" / workload / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(content)
+        return path
+
+    def test_the_path_and_the_seal_name_both_carry_the_workload(self):
+        """The path is not the boundary; the seal name is.
+
+        systemd-creds binds the plaintext to the name it was sealed under, so a
+        generated unit that LoadCredentialEncrypted='s another workload's FILE
+        gets a decryption failure rather than the material. A scoped path with
+        an unscoped seal name would look right and protect nothing.
+        """
+        path, seal = cmd_secret.credential_path(
+            self.cred_dir, "broker/agentvm/github-token")
+        self.assertEqual(path,
+                         self.cred_dir / "broker" / "agentvm" / "github-token")
+        self.assertEqual(seal, "broker-agentvm-github-token")
+
+    def test_an_unscoped_name_is_unchanged(self):
+        path, seal = cmd_secret.credential_path(self.cred_dir, "api")
+        self.assertEqual(path, self.cred_dir / "api")
+        self.assertEqual(seal, "api")
+
+    def test_malformed_scoped_names_are_refused(self):
+        for name in ("broker/agentvm",                    # two segments
+                     "broker/agentvm/tok/extra",          # four
+                     "broker//tok",                       # empty segment
+                     "broker/../../etc/shadow",           # traversal
+                     "vault/agentvm/tok",                 # unknown scope
+                     "broker/agent vm/tok",               # space
+                     "/etc/passwd"):
+            with self.subTest(name=name):
+                with self.assertRaises(ValueError):
+                    cmd_secret.credential_path(self.cred_dir, name)
+
+    def test_create_seals_under_the_scoped_name(self):
+        captured = {}
+
+        def fake_run(cmd, **kw):
+            captured["cmd"] = cmd
+            _REAL_PATH(cmd[-1]).write_bytes(b"x")
+            return types.SimpleNamespace(returncode=0)
+
+        with mock.patch.object(cmd_secret.subprocess, "run", fake_run):
+            out, err, code = _run(_ns(subcommand="create",
+                                      name="broker/agentvm/tok",
+                                      force=False, key_type=None, file=None))
+        self.assertIsNone(code, err)
+        self.assertIn("--name=broker-agentvm-tok", captured["cmd"])
+        self.assertEqual(captured["cmd"][-1],
+                         str(self.cred_dir / "broker" / "agentvm" / "tok"))
+
+    def test_create_makes_the_subtree(self):
+        def fake_run(cmd, **kw):
+            _REAL_PATH(cmd[-1]).write_bytes(b"x")
+            return types.SimpleNamespace(returncode=0)
+
+        with mock.patch.object(cmd_secret.subprocess, "run", fake_run):
+            _run(_ns(subcommand="create", name="broker/agentvm/tok",
+                     force=False, key_type=None, file=None))
+        self.assertTrue((self.cred_dir / "broker" / "agentvm" / "tok").exists())
+
+    def test_a_bad_name_is_refused_before_anything_runs(self):
+        called = []
+        with mock.patch.object(cmd_secret.subprocess, "run",
+                               lambda *a, **k: called.append(a)):
+            out, err, code = _run(_ns(subcommand="create", name="broker/x",
+                                      force=False, key_type=None, file=None))
+        self.assertEqual(code, 1)
+        self.assertEqual(called, [])
+        self.assertIn("three segments", err)
+
+    def test_delete_show_and_rotate_all_find_the_scoped_file(self):
+        """The four verbs a per-verb change would have missed."""
+        self._seed_scoped("agentvm", "tok")
+        out, err, code = _run(_ns(subcommand="show", name="broker/agentvm/tok"))
+        # It gets as far as decrypting, which is all this asserts: "not found"
+        # would mean the path was resolved against the credstore root.
+        self.assertNotIn("not found", err)
+
+        self._seed_scoped("agentvm", "tok")
+        out, err, code = _run(_ns(subcommand="delete", name="broker/agentvm/tok",
+                                  force=True))
+        self.assertIsNone(code, err)
+        self.assertFalse((self.cred_dir / "broker" / "agentvm" / "tok").exists())
+
+    def test_a_missing_scoped_credential_reports_the_scoped_name(self):
+        out, err, code = _run(_ns(subcommand="delete",
+                                  name="broker/agentvm/ghost", force=True))
+        self.assertEqual(code, 1)
+        self.assertIn("broker/agentvm/ghost", err)
+
+    def test_list_shows_the_scope_and_stops_hiding_the_subtree(self):
+        """It read one directory and kept only files, so a whole subtree was
+        invisible -- an operator checking whether a workload's key was present
+        got "no credentials found" for material sitting right there, and the
+        natural next step is to seal it again."""
+        self._seed_cred("api")
+        self._seed_scoped("agentvm", "tok")
+        self._seed_scoped("other", "tok")
+        out, err, code = _run(_ns(subcommand="list", json=False))
+        self.assertIn("broker/agentvm/tok", out)
+        self.assertIn("broker/other/tok", out)
+        self.assertIn("api", out)
+        self.assertIn("Total: 3", out)
+
+    def test_list_json_carries_the_full_name(self):
+        self._seed_scoped("agentvm", "tok", b"hello")
+        out, err, code = _run(_ns(subcommand="list", json=True))
+        data = cmd_secret.json.loads(out)
+        self.assertEqual([c["name"] for c in data["credentials"]],
+                         ["broker/agentvm/tok"])
+        self.assertEqual(data["credentials"][0]["size"], 5)
+
+    def test_two_workloads_may_hold_the_same_credential_name(self):
+        """The scope is what makes the leaf name a workload's own. Without it
+        the second `create` would overwrite the first's material and say
+        nothing but "already exists"."""
+        a, b = self._seed_scoped("one", "tok", b"A"), self._seed_scoped("two", "tok", b"B")
+        self.assertNotEqual(a, b)
+        self.assertEqual(a.read_bytes(), b"A")
+        self.assertEqual(b.read_bytes(), b"B")
+
+
+class BrokerMaterialIsUnreachableFromWorkloadEnvTest(unittest.TestCase):
+    """The security property, and it is structural rather than a rule.
+
+    Asserted against SECRET_PATTERN and the resolver, NOT against a validation
+    message -- a rule refusing `${SECRET:broker/...}` could be relaxed by
+    someone who thought it was over-strict, whereas a pattern that cannot match
+    a `/` has nothing to relax. A future pass "tidying" that character class
+    would open this silently, and this is the test that would go red.
+    """
+
+    def test_the_secret_pattern_cannot_express_a_scoped_name(self):
+        from secrets_template import SECRET_PATTERN
+        self.assertIsNone(SECRET_PATTERN.search("${SECRET:broker/agentvm/tok}"))
+        self.assertIsNotNone(SECRET_PATTERN.search("${SECRET:api}"))
+        self.assertNotIn("/", SECRET_PATTERN.pattern)
+
+    def test_auto_detect_never_demands_broker_material(self):
+        """The consequence one layer up: a config referencing the scoped path in
+        env demands nothing, so nothing resolves it and nothing carries it."""
+        from secrets_template import auto_detect_credentials
+        demanded = auto_detect_credentials({
+            "container": {"environment": {
+                "A": "${SECRET:broker/agentvm/tok}",
+                "B": "${SECRET:api}"}}})
+        self.assertNotIn("broker/agentvm/tok", demanded)
+        self.assertIn("api", demanded)
+
+    def test_the_scope_directory_name_is_the_one_the_cli_accepts(self):
+        """Two spellings of the subtree -- the CLI's and the one the generated
+        unit's LoadCredentialEncrypted= will point at -- would be a broker that
+        cannot find material `secret create` reported as written."""
+        self.assertEqual(cmd_secret.CREDENTIAL_SCOPES, ("broker",))
+
+
 class PassphraseFileErrorTest(unittest.TestCase):
     def test_unreadable_file_errors(self):
         args = _ns(passphrase_stdin=False, passphrase_file="/nonexistent/nope.pass")
