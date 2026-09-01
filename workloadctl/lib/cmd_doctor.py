@@ -17,6 +17,15 @@ from cmd_diagnose import collect_diagnose_checks
 from cmd_drift import collect_drift, collect_policy_drift
 from cmd_validate import report_config_load_failure
 from substrate import get_substrate
+from vm import vm_inspect_digest_short, vm_uses_inspect
+from vm_inspect_figures import (
+    drop_reasons,
+    figure_lines,
+    figures,
+    policy_digest,
+    read_inspect_status,
+    read_resolve_status,
+)
 from workload_lib import (
     WORKLOADCTL_VERSION,
     units_from_other_build,
@@ -180,6 +189,30 @@ def cmd_doctor(args, manager):
 
     liveness = get_substrate(config, manager).liveness()
 
+    # The inspector's figures — rung 5 T8, and the reason they are collected
+    # here rather than folded into `checks` is that they carry NO VERDICT and
+    # add NOTHING to `problems` below. Every one of them counts events, and a
+    # guest being denied is the filter working: a doctor that reported
+    # UNHEALTHY over a denial count would teach an operator that the feature
+    # doing its job is a fault, which is how a report stops being read.
+    #
+    # The inspector's fault-shaped conditions are already here, through
+    # `collect_diagnose_checks` — vm_inspect_check compares the loaded policy
+    # against disk, the minting CA against disk, and the nft maps against the
+    # uid. A second pass/fail over the same document would be a second
+    # definition of "is the inspector healthy" that agrees with the first only
+    # until someone edits one of them.
+    egress = None
+    if vm_uses_inspect(config.config):
+        status = read_inspect_status(name)
+        resolve = read_resolve_status(name)
+        egress = {
+            "status_present": status is not None,
+            "policy_digest": policy_digest(status),
+            "figures": figures(status, resolve),
+            "drop_reasons": drop_reasons(status),
+        }
+
     gen_errors = [line for line in gen_lines if "error" in line.lower()]
     unit_problems = [r for r in unit_rows if r["problem"]]
     failing_checks = [c for c in checks if not c["passed"]]
@@ -210,6 +243,7 @@ def cmd_doctor(args, manager):
             "checks": checks,
             "drift": {"error": drift_error, "drifted_units": drifted},
             "health": liveness,
+            "egress": egress,
             "overall": {"healthy": healthy, "problems": problems},
         }, indent=2))
         sys.exit(0 if healthy else 1)
@@ -277,6 +311,26 @@ def cmd_doctor(args, manager):
         if liveness.get("container_running") is False:
             detail += ", container not running"
         print(f"  ✗ UNHEALTHY: {detail}")
+
+    if egress is not None:
+        print("Egress (inspected)")
+        if not egress["status_present"]:
+            # Not a fault and deliberately not marked as one: the inspector is
+            # socket-activated, so a guest that has dialled nothing has never
+            # written the file. Saying which state this is beats printing a
+            # screen of zeros that an operator would read as "nothing was
+            # blocked" rather than as "nothing was measured".
+            print("  · no counters yet — the inspector is socket-activated "
+                  "and this guest has not dialled it since the VM started")
+        else:
+            digest = egress["policy_digest"]
+            if digest:
+                print(f"  · enforcing policy {vm_inspect_digest_short(digest)}")
+            for line in figure_lines(egress["figures"],
+                                     egress["drop_reasons"]):
+                print(line)
+        print("  (evidence, not a verdict — the inspector's faults are in "
+              "Setup checks)")
 
     print()
     if healthy:

@@ -67,7 +67,7 @@ from vm import (
     VM_INSPECT_PORT_CLEARTEXT,
     VM_INSPECT_PORT_TLS, VM_INSPECT_ORIG_CLEARTEXT, VM_INSPECT_ORIG_TLS,
     VM_TLS_DEFAULT,
-    vm_inspect_address, vm_inspect_status_path, vm_uses_inspect,
+    vm_inspect_address, vm_uses_inspect,
     VM_DROP_MISDIRECTED, VM_DROP_MISDIRECTED_LISTED,
     VM_DROP_NOT_HTTP, VM_DROP_NOT_HTTP_POLICY,
     VM_RESOLVE_PORT, vm_resolve_address, vm_resolve_policy_path,
@@ -82,6 +82,7 @@ from vm_provision import (
 )
 from podman import PodmanError
 from workloadctl_core import WorkloadManager, require_root
+from vm_inspect_figures import read_inspect_status
 from substrate import service_active
 from cmd_validate import load_config_or_exit
 from pcap import PCAP_CHAINS, pcap_unit_name
@@ -1310,13 +1311,14 @@ def _inspect_status(name: str) -> dict | None:
     only way to get here is a bug in the writer, and the honest report for that
     is silence on this line rather than a traceback over the twenty other
     checks that were about to run.
+
+    The body moved to `vm_inspect_figures.read_inspect_status` at rung 5 T8,
+    when `doctor` and the exporter became readers of the same file. The name
+    stays because it is what this module's checks call and what their tests
+    patch; what it must not become is a second parse of the same document with
+    its own idea of what a malformed one means.
     """
-    try:
-        with open(vm_inspect_status_path(name)) as fh:
-            doc = json.load(fh)
-    except (OSError, ValueError):
-        return None
-    return doc if isinstance(doc, dict) else None
+    return read_inspect_status(name)
 
 
 def _named_hosts(counts) -> str:

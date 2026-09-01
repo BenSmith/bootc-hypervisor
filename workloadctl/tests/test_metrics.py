@@ -279,7 +279,7 @@ class TestMetricsDiscovery(unittest.TestCase):
 
         workloads = _exporter_get_enabled_workloads(self.config_dir)
         self.assertEqual(len(workloads), 1)
-        name, health_targets, is_vm = workloads[0]
+        name, health_targets, is_vm, _uses_inspect = workloads[0]
         self.assertEqual(name, "multi")
         self.assertTrue(health_targets)
         # A6: the health target must be the container's own podman name
@@ -307,7 +307,7 @@ class TestMetricsDiscovery(unittest.TestCase):
 
         workloads = _exporter_get_enabled_workloads(self.config_dir)
         self.assertEqual(len(workloads), 1)
-        name, health_targets, is_vm = workloads[0]
+        name, health_targets, is_vm, _uses_inspect = workloads[0]
         self.assertFalse(health_targets)
 
 
@@ -1004,7 +1004,7 @@ class TestCollectAll(unittest.TestCase):
     def test_full_workload_collection_path(self):
         with self.mock.patch.object(
                 self.mod, "get_enabled_workloads",
-                return_value=[("app", [("app", "workload-app")], False)]), \
+                return_value=[("app", [("app", "workload-app")], False, False)]), \
              self.mock.patch.object(self.mod, "get_service_metrics", return_value={"active": 1}), \
              self.mock.patch.object(self.mod, "get_cgroup_metrics", return_value={}), \
              self.mock.patch.object(self.mod, "get_container_healths",
@@ -1035,7 +1035,7 @@ class TestCollectAll(unittest.TestCase):
                 return_value=[("multi", [
                     ("web", "workload-multi-web"),
                     ("db", "workload-multi-db"),
-                ], False)]), \
+                ], False, False)]), \
              self.mock.patch.object(self.mod, "get_service_metrics", return_value={"active": 1}), \
              self.mock.patch.object(self.mod, "get_cgroup_metrics", return_value={}), \
              self.mock.patch.object(self.mod, "get_container_healths", side_effect=fake_healths):
@@ -1114,7 +1114,7 @@ class TestDiskProducer(unittest.TestCase):
     def test_collect_disk_walks_each_enabled_workload(self):
         with self.mock.patch.object(
                 self.mod, "get_enabled_workloads",
-                return_value=[("app", [], False), ("big", [], True)]), \
+                return_value=[("app", [], False, False), ("big", [], True, False)]), \
              self.mock.patch.object(self.mod, "workload_root_dir",
                                     side_effect=lambda n: Path(f"/var/lib/workloads/{n}")), \
              self.mock.patch.object(self.mod, "get_workload_disk_bytes",

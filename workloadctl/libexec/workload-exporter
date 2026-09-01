@@ -35,6 +35,14 @@ from pathlib import Path
 from podman import Podman
 from workload_lib import ENABLED_MARKER_NAME, iter_workloads, normalize_containers, workload_container_name, workload_podman_container_name, workload_root_dir, workload_service_name, workload_username
 from vm_metrics import find_vm_cgroup, get_vm_qmp_metrics, systemd_show
+from vm import vm_uses_inspect
+from vm_inspect_figures import (
+    FIGURES,
+    drop_reasons,
+    figures,
+    read_inspect_status,
+    read_resolve_status,
+)
 
 
 WORKLOAD_CONFIG_DIR = Path(
@@ -95,7 +103,8 @@ def get_workload_disk_bytes(home_dir):
 def get_enabled_workloads():
     """Read all enabled workload configs from config directory.
 
-    Returns list of (name, health_targets, is_vm) tuples, where health_targets
+    Returns list of (name, health_targets, is_vm, uses_inspect) tuples, where
+    health_targets
     is a list of (local_container_name, podman_container_name) pairs — one per
     container that declares a health check. The podman name comes from the
     shared workload_podman_container_name() helper (single source of the
@@ -123,6 +132,12 @@ def get_enabled_workloads():
                 config = tomllib.load(f)
             name = config.get("workload", {}).get("name", "")
             is_vm = bool(config.get("vm"))
+            # Derived here because this is where the TOML is already parsed.
+            # The alternative — deciding from the presence of the runtime
+            # directory — cannot tell a filtered VM that has not started this
+            # boot from an unfiltered one, and those two owe opposite output:
+            # zeros for the first, nothing at all for the second.
+            uses_inspect = vm_uses_inspect(config)
             is_multi = "containers" in config
             health_targets = []
             if not is_vm:
@@ -135,7 +150,7 @@ def get_enabled_workloads():
                     )
                     health_targets.append((local_name, podman_name))
             if name:
-                workloads.append((name, health_targets, is_vm))
+                workloads.append((name, health_targets, is_vm, uses_inspect))
         except Exception:
             continue
 
@@ -294,8 +309,11 @@ def get_cgroup_metrics(name, is_vm=False):
     return metrics
 
 
-def format_metrics(all_metrics):
-    """Format metrics in Prometheus exposition format."""
+def format_metrics(all_metrics, inspect_metrics=()):
+    """Format metrics in Prometheus exposition format.
+
+    `inspect_metrics` is collect_inspect()'s output and defaults to empty so a
+    caller that only has the fast metrics still renders."""
     lines = [
         "# Workload metrics collected by workload-exporter",
         f"# Generated at {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}",
@@ -373,6 +391,8 @@ def format_metrics(all_metrics):
                 lines.append(f'workload_vm_vcpu_cpu_seconds_total{{workload="{workload_name}",vcpu="{vcpu_idx}"}} {value:.6f}')
     lines.append("")
 
+    lines.extend(_inspect_metric_lines(inspect_metrics))
+
     lines.append("# HELP workload_enabled_total Total number of enabled workloads")
     lines.append("# TYPE workload_enabled_total gauge")
     lines.append(f"workload_enabled_total {len(all_metrics)}")
@@ -399,7 +419,7 @@ def collect_all():
     handled by the separate --disk producer (collect_disk).
     """
     all_metrics = []
-    for name, health_targets, is_vm in get_enabled_workloads():
+    for name, health_targets, is_vm, _uses_inspect in get_enabled_workloads():
         svc = get_service_metrics(name) or {}
         cgroup = get_cgroup_metrics(name, is_vm)
         if health_targets:
@@ -417,6 +437,102 @@ def collect_all():
     return all_metrics
 
 
+def collect_inspect():
+    """[(name, payload)] for every enabled workload with an inspected egress.
+
+    Rung 5 T9, and it computes nothing: every figure comes from
+    `vm_inspect_figures`, which `doctor` reads the same way. Decision 9's whole
+    point is that this file must not be the place a figure gets a second
+    definition, and a Prometheus label is exactly the convenience that invites
+    one — so the drop breakdown is passed through as the document carries it
+    and the totals over it are left to `sum by`, never added up here.
+
+    A SEPARATE COLLECTOR, not a fifth element on collect_all()'s tuple, because
+    it is a different producer over a different source: collect_all() reads
+    systemd, cgroups and podman, this reads two JSON documents in /run. The
+    cost is one extra parse of each workload's TOML per run, which is noise
+    beside the podman round-trip collect_all() already makes per workload.
+    """
+    out = []
+    for name, _health_targets, _is_vm, uses_inspect in get_enabled_workloads():
+        if not uses_inspect:
+            # Nothing, not zeros. A series for an unfiltered workload asserts
+            # that a filter exists and is idle, which is a different and false
+            # claim from "this workload has no filter".
+            continue
+        status = read_inspect_status(name)
+        out.append((name, {
+            # Zeros ARE emitted for a filtered workload whose inspector has not
+            # been dialled yet, so the series exists from the first scrape:
+            # `record_failures == 0` is only alertable if the absence of data
+            # and the value zero are distinguishable, and this gauge is what
+            # distinguishes them.
+            "status_present": 1 if status is not None else 0,
+            "figures": figures(status, read_resolve_status(name)),
+            "drop_reasons": drop_reasons(status),
+        }))
+    return out
+
+
+def _inspect_metric_lines(inspect_metrics):
+    """The inspector's series, walking FIGURES rather than a list written here.
+
+    One family at a time across all workloads, which Prometheus requires: a
+    HELP/TYPE header followed by every sample of that family. Figures with an
+    empty `metric` are skipped — see Figure's docstring on why a sum belongs to
+    the query language and not to the wire.
+    """
+    lines = []
+    if not inspect_metrics:
+        return lines
+
+    lines.append("# HELP workload_vm_inspect_status_present Whether the egress "
+                 "inspector has written a status document (1) or has not been "
+                 "dialled since the VM started (0)")
+    lines.append("# TYPE workload_vm_inspect_status_present gauge")
+    for name, payload in inspect_metrics:
+        lines.append(f'workload_vm_inspect_status_present{{workload="{name}"}} '
+                     f'{payload["status_present"]}')
+    lines.append("")
+
+    for fig in FIGURES:
+        if not fig.metric:
+            continue
+        samples = [(name, payload["figures"][fig.key])
+                   for name, payload in inspect_metrics
+                   if fig.key in payload["figures"]]
+        if not samples:
+            # The group is absent on every workload (no minter anywhere, no
+            # resolver anywhere). Emitting a bare HELP/TYPE with no samples is
+            # legal but publishes a family that never has one.
+            continue
+        lines.append(f"# HELP {fig.metric} {fig.help}")
+        lines.append(f"# TYPE {fig.metric} {fig.kind}")
+        for name, value in samples:
+            lines.append(f'{fig.metric}{{workload="{name}"}} {value}')
+        lines.append("")
+
+    reason_samples = [(name, reason, count)
+                      for name, payload in inspect_metrics
+                      for reason, count in sorted(payload["drop_reasons"].items())]
+    if reason_samples:
+        lines.append("# HELP workload_vm_inspect_drop_events_total Drop events "
+                     "by reason. One connection can raise several, so this is "
+                     "not a count of dropped connections")
+        lines.append("# TYPE workload_vm_inspect_drop_events_total counter")
+        for name, reason, count in reason_samples:
+            # The reasons are listener constants, not guest input — no guest
+            # string reaches this label. Quotes and backslashes are escaped
+            # anyway: the exposition format has no way to say "trust me", and a
+            # reason worded with an apostrophe one rung from now would produce a
+            # file node_exporter drops in full rather than one bad line.
+            safe = reason.replace("\\", "\\\\").replace('"', '\\"')
+            lines.append(f'workload_vm_inspect_drop_events_total'
+                         f'{{workload="{name}",reason="{safe}"}} {count}')
+        lines.append("")
+    return lines
+
+
 def collect_disk():
     """Collect disk usage for every enabled workload (the slow --disk pass).
 
@@ -425,7 +541,7 @@ def collect_disk():
     """
     return [
         (name, get_workload_disk_bytes(workload_root_dir(name)))
-        for name, _health_targets, _is_vm in get_enabled_workloads()
+        for name, _health_targets, _is_vm, _ins in get_enabled_workloads()
     ]
 
 
@@ -474,7 +590,8 @@ def _write_atomic(output_path, body):
 
 def write_metrics(output_path):
     """Render the fast exposition and write it atomically to output_path."""
-    _write_atomic(output_path, format_metrics(collect_all()))
+    _write_atomic(output_path,
+                  format_metrics(collect_all(), collect_inspect()))
 
 
 def write_disk_metrics(output_path):

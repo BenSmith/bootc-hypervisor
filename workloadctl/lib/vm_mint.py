@@ -441,8 +441,10 @@ class Minter:
             # mint-time clock remedy is INERT here -- the failure it exists to
             # prevent is still possible and nothing else says so. It is read
             # from the inspector's status document (`mint.clock_unavailable`),
-            # which is where every figure in here surfaces; `diagnose` does not
-            # read that document at all yet, and gains a reader at rung 5.
+            # which is where every figure in here surfaces. Rung 5 gave that
+            # document its readers: `vm_inspect_figures` parses it once, and
+            # `doctor` and `workload-exporter` render what it returns --
+            # `workload_vm_inspect_clock_unavailable_total` is this counter.
             "clock_resyncs": 0, "clock_unavailable": 0, "clock_failed": 0,
         }
         self._lock = threading.Lock()

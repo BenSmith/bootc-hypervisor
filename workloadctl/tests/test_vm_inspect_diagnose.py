@@ -29,6 +29,7 @@ from vm import (
     VM_DROP_MISDIRECTED, VM_DROP_MISDIRECTED_LISTED,
     VM_DROP_NOT_HTTP, VM_DROP_NOT_HTTP_POLICY,
 )
+import vm_inspect_figures as figures_mod
 from vm_status import OTHER_KEY
 
 from tests.test_vm_inspect_listener import _mod
@@ -277,7 +278,13 @@ class TestTheFiguresReachTheLine(unittest.TestCase):
             path = Path(tmp) / "inspect-status.json"
             path.write_text(json.dumps(
                 {"drop_reasons": {VM_DROP_MISDIRECTED: 7}}))
-            with mock.patch.object(self.mod, "vm_inspect_status_path",
+            # Patched on vm_inspect_figures, not on cmd_diagnose: rung 5 T8
+            # moved the single read of this document there, because `doctor`
+            # and the exporter became readers of it too and three parses with
+            # three ideas of what a malformed document means is the thing that
+            # module exists to prevent. What is pinned is unchanged — the
+            # reader uses the helper, never a hand-built path.
+            with mock.patch.object(figures_mod, "vm_inspect_status_path",
                                    return_value=str(path)) as spy:
                 _, _, detail = self._line(self.mod.PROBE)
         spy.assert_called_once_with("vm1")
@@ -290,7 +297,7 @@ class TestTheFiguresReachTheLine(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "inspect-status.json"
             path.write_text("{not json")
-            with mock.patch.object(self.mod, "vm_inspect_status_path",
+            with mock.patch.object(figures_mod, "vm_inspect_status_path",
                                    return_value=str(path)):
                 _, ok, detail = self._line(self.mod.PROBE)
         self.assertTrue(ok)
