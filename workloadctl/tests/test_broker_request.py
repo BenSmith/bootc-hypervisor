@@ -40,10 +40,27 @@ def headers(**pairs):
 
 def profile(auth_header="x-api-key", auth_value="REAL-SECRET", host="api.example.com"):
     return broker.Profile(
-        name="agent", host=host, port=443, prefix="/v1",
+        name="agent/api.example.com", host=host, port=443,
         auth_header=auth_header, auth_format="{secret}",
         secret="REAL-SECRET", auth_value=auth_value,
     )
+
+
+def profile_table(prof=None):
+    """A (workload, Host) table covering the hosts these tests dial.
+
+    "x" is in it because most of these send `Host: x` -- they are about framing,
+    budgets and relaying rather than about dispatch, and rewriting their bytes
+    to carry a realistic name would obscure what each one is actually asserting.
+
+    Registering a table rather than stubbing Handler._identify is deliberate:
+    every one of these used to reach the handler through the fallback profile
+    `allow_unknown_callers` produced, and that is gone. A stub would take the
+    real (workload, Host) lookup out of the path, so a change that stopped
+    checking the Host would leave this whole file green.
+    """
+    prof = prof or profile()
+    return {("agent", "x"): prof, ("agent", "api.example.com"): prof}
 
 
 class TestForwardedHeaders(unittest.TestCase):
@@ -224,11 +241,16 @@ class BrokerServerCase(unittest.TestCase):
 
         class H(broker.Handler):
             config = {"connect_timeout": 1.0, "read_timeout": 1.0}
-            profiles = {}
-            fallback = profile()
+            profiles = profile_table()
             overflow = 65534
             if case.handler_timeout is not None:
                 timeout = case.handler_timeout
+
+        # The caller here is the test process, whose uid owns no workload user,
+        # so _identify would refuse it before any of these assertions ran.
+        patcher = mock.patch.object(broker, "workload_name", lambda uid: "agent")
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
         self.server = broker.Server(("127.0.0.1", 0), H)
         self.port = self.server.server_address[1]
@@ -297,10 +319,17 @@ class TestAFailedSpawnDoesNotLeakASlot(unittest.TestCase):
     """
 
     def test_the_slot_comes_back_after_the_thread_fails_to_start(self):
+        # This case builds its own server rather than using BrokerServerCase, so
+        # it needs the same identity stub: without it the probe below is refused
+        # at _identify and answers 403, which would ALSO prove the slot came
+        # back -- and would make the 411 assertion pass for the wrong reason if
+        # it were ever loosened.
+        self.enterContext(
+            mock.patch.object(broker, "workload_name", lambda uid: "agent"))
         with mock.patch.object(broker, "MAX_CONCURRENT", 1):
             class H(broker.Handler):
                 config = {"connect_timeout": 1.0, "read_timeout": 1.0}
-                profiles, fallback, overflow = {}, profile(), 65534
+                profiles, overflow = profile_table(), 65534
 
             server = broker.Server(("127.0.0.1", 0), H)
             self.addCleanup(server.server_close)
@@ -549,6 +578,114 @@ class TestARelayedResponseIsWellFormed(TestAnUpstreamDyingMidResponse):
         self.assertNotIn(b"upstream-edge/2", received,
                          "the provider's edge is named to the sandbox")
         self.assertTrue(received.endswith(b"{}"))
+
+
+class TestTheHostSelectsTheCredential(BrokerServerCase):
+    """ADR 007 decision 3, at the request boundary rather than at config load.
+
+    The key is (workload, Host). What has to hold is that the header SELECTS a
+    row and supplies nothing else: an unlisted Host gets no credential at all
+    rather than the sandbox's other one, and a body claiming a different
+    destination than the header changes neither which key is attached nor where
+    the request goes.
+    """
+
+    def setUp(self):
+        super().setUp()
+        # Two hosts under one sandbox with two different keys -- the shape the
+        # (workload, Host) key exists for, and the one a workload-keyed table
+        # could not represent.
+        cls = type(self.server.RequestHandlerClass.__name__,
+                   (self.server.RequestHandlerClass,), {})
+        cls.profiles = {
+            ("agent", "api.example.com"): profile(auth_value="KEY-FOR-EXAMPLE"),
+            ("agent", "api.github.com"): profile(
+                auth_value="KEY-FOR-GITHUB", host="api.github.com"),
+        }
+        self.server.RequestHandlerClass = cls
+        self.seen = []
+        case = self
+
+        class Recording(DyingUpstream):
+            def __init__(self, host, port, **kwargs):
+                super().__init__()
+                self._host = host
+
+            def request(self, method, path, body=None, headers=None):
+                case.seen.append((self._host, path, dict(headers or {})))
+
+            def getresponse(self):
+                return StubResponse(200, [("content-length", "2")], [b"ok"],
+                                    die=False)
+
+        self.enterContext(mock.patch.object(
+            broker.http.client, "HTTPSConnection", Recording))
+
+    def _get(self, host, extra=b""):
+        # Connection: close so drain() returns on EOF rather than on its own
+        # timeout -- these assertions are about dispatch, and paying five
+        # seconds each to prove keep-alive works is a cost the keep-alive test
+        # below already covers.
+        sock = self.connect()
+        sock.sendall(b"GET /v1/x HTTP/1.1\r\nHost: " + host.encode() +
+                     b"\r\nConnection: close\r\n" + extra + b"\r\n")
+        return self.drain(sock)
+
+    def test_each_host_gets_its_own_credential(self):
+        self._get("api.example.com")
+        self._get("api.github.com")
+        self.assertEqual([h for h, _, _ in self.seen],
+                         ["api.example.com", "api.github.com"])
+        self.assertEqual([hdrs["x-api-key"] for _, _, hdrs in self.seen],
+                         ["KEY-FOR-EXAMPLE", "KEY-FOR-GITHUB"])
+
+    def test_an_unlisted_host_gets_no_credential_rather_than_the_other_one(self):
+        """The failure this refusal prevents is silent in the worst way: the
+        request succeeds, against the wrong provider, carrying a real key."""
+        received = self._get("api.elsewhere.com")
+        self.assertIn(b"403", received.split(b"\r\n")[0])
+        self.assertEqual(self.seen, [], "nothing may reach an upstream")
+
+    def test_a_host_is_matched_lowercased_and_without_its_port(self):
+        self._get("API.Example.com:443")
+        self.assertEqual([h for h, _, _ in self.seen], ["api.example.com"])
+
+    def test_a_missing_host_header_is_refused(self):
+        sock = self.connect()
+        sock.sendall(b"GET /v1/x HTTP/1.0\r\nConnection: close\r\n\r\n")
+        self.assertIn(b"403", self.drain(sock).split(b"\r\n")[0])
+        self.assertEqual(self.seen, [])
+
+    def test_a_body_claiming_another_destination_changes_nothing(self):
+        """§14's assertion shape. The profile is resolved from this instance's
+        own table; the only thing the caller contributes is which row."""
+        sock = self.connect()
+        payload = b'{"host":"api.github.com"}'
+        sock.sendall(b"POST /v1/x HTTP/1.1\r\nHost: api.example.com\r\n"
+                     b"Connection: close\r\nContent-Length: " +
+                     str(len(payload)).encode() + b"\r\n\r\n" + payload)
+        self.drain(sock)
+        self.assertEqual([h for h, _, _ in self.seen], ["api.example.com"])
+        self.assertEqual([hdrs["x-api-key"] for _, _, hdrs in self.seen],
+                         ["KEY-FOR-EXAMPLE"])
+
+    def test_two_hosts_on_one_keep_alive_connection_get_their_own(self):
+        """Identity is per connection and the Host is per REQUEST. Resolving
+        the profile once at setup would give the second request the first's
+        credential, which no test sending one request per connection can see."""
+        sock = self.connect()
+        sock.sendall(b"GET /v1/x HTTP/1.1\r\nHost: api.example.com\r\n\r\n"
+                     b"GET /v1/y HTTP/1.1\r\nHost: api.github.com\r\n"
+                     b"Connection: close\r\n\r\n")
+        self.drain(sock)
+        self.assertEqual([hdrs["x-api-key"] for _, _, hdrs in self.seen],
+                         ["KEY-FOR-EXAMPLE", "KEY-FOR-GITHUB"])
+
+    def test_the_forwarded_path_is_the_callers_own(self):
+        """`prefix` is deleted. A base path would rewrite the very path the
+        inspector's `paths` patterns admitted."""
+        self._get("api.example.com")
+        self.assertEqual([p for _, p, _ in self.seen], ["/v1/x"])
 
 
 if __name__ == "__main__":

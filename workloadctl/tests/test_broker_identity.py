@@ -235,14 +235,23 @@ class TestUnmappableSandboxes(unittest.TestCase):
 
 
 class TestIdentifyRefusals(unittest.TestCase):
-    """allow_unknown_callers must not rescue a broken mechanism.
+    """Nothing rescues a caller the table does not name.
 
-    Both cases below make every caller look alike. Letting the fallback cover
-    them would turn 'I cannot tell you apart' into 'you are all the same
-    permitted sandbox', which is the failure the port exists to remove.
+    There used to be something: `allow_unknown_callers` produced a fallback
+    profile, and these cases pinned that it did NOT cover the two failures
+    meaning the mechanism itself is broken -- no peer socket, and a uid this
+    namespace cannot map -- because both make every caller look alike, which is
+    the failure the port exists to remove.
+
+    The flag is gone (ADR 007 decision 6: an instance serves one workload and
+    its config is generated from that workload's own TOML), so the distinction
+    those tests drew has collapsed into "every unlisted caller is refused". They
+    are kept, with the labels asserted, because the labels are what a log reader
+    uses to tell the three refusals apart -- and "unidentified" logged for all
+    three would be the same erasure by another route.
     """
 
-    def _handler(self, uid):
+    def _handler(self, uid, sandboxes=()):
         """A handler whose connection was admitted with `uid` on the far end.
 
         caller_uid is what Server.process_request resolved when it granted this
@@ -250,28 +259,40 @@ class TestIdentifyRefusals(unittest.TestCase):
         fixture is the uid rather than a patched lookup.
         """
         handler = broker.Handler.__new__(broker.Handler)
-        handler.profiles = {}
-        handler.fallback = "a-permissive-profile"
+        handler.profiles = {(name, "api.example.com"): f"profile-of-{name}"
+                            for name in sandboxes}
         handler.overflow = 65534
         handler.caller_uid = uid
         return handler
 
-    def test_no_peer_socket_is_refused_even_when_unknown_are_allowed(self):
-        profile, label = self._handler(None)._identify()
-        self.assertIsNone(profile)
+    def test_no_peer_socket_is_refused_and_says_so(self):
+        sandbox, label = self._handler(None, ["agent"])._identify()
+        self.assertIsNone(sandbox)
         self.assertEqual(label, "no-peer-socket")
 
-    def test_an_unmapped_uid_is_refused_even_when_unknown_are_allowed(self):
-        profile, label = self._handler(65534)._identify()
-        self.assertIsNone(profile)
+    def test_an_unmapped_uid_is_refused_and_says_so(self):
+        sandbox, label = self._handler(65534, ["agent"])._identify()
+        self.assertIsNone(sandbox)
         self.assertEqual(label, "uid-unmapped")
 
-    def test_an_ordinary_unknown_caller_still_gets_the_fallback(self):
+    def test_an_unlisted_caller_gets_nothing(self):
         with mock.patch.object(broker, "workload_name",
                                return_value="not-in-config"):
-            profile, label = self._handler(10001)._identify()
-        self.assertEqual(profile, "a-permissive-profile")
+            sandbox, label = self._handler(10001, ["agent"])._identify()
+        self.assertIsNone(sandbox)
+        # The label still names the workload, so the log line says WHICH caller
+        # was refused rather than only that one was.
         self.assertEqual(label, "not-in-config")
+
+    def test_a_listed_caller_resolves_to_its_sandbox_and_not_to_a_profile(self):
+        """_identify settles half the key now. Returning a profile here would
+        mean resolving it once per CONNECTION, and one keep-alive connection
+        from an inspector may carry requests for two credential-backed hosts --
+        the second would get the first's credential."""
+        with mock.patch.object(broker, "workload_name", return_value="agent"):
+            sandbox, label = self._handler(10001, ["agent"])._identify()
+        self.assertEqual(sandbox, "agent")
+        self.assertEqual(label, "agent")
 
 
 if __name__ == "__main__":

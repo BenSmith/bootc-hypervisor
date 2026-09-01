@@ -1,17 +1,32 @@
 # agent-broker configuration.
 #
-# The upstream is fixed here and never taken from a request. That is the
-# security property: a compromised sandbox can reach this broker, and through
-# it exactly one provider, and nothing else.
+# The upstream set of a broker instance is fixed here and never taken from a
+# request. That is the security property, and it is now a SET rather than a
+# single value: the profile table is keyed by (workload, Host), so a workload
+# may hold several credentials for several providers. What did not change is
+# that the caller chooses none of it -- a `Host` with no table entry below is
+# refused outright, and a recognised one selects an upstream, a port and a
+# credential all written here at start.
 
-# Bind loopback, never 0.0.0.0. Guests do not route to this address; the host
-# rewrites their fixed advertised endpoint to it, per uid, before the packet
-# reaches anything. See docs/agent-broker.md §7.
-listen_address = "127.0.0.1"
+# Bind the loopback address derived from this workload's own uid. REQUIRED, and
+# deliberately not defaulted: an instance left on 127.0.0.1 would sit where
+# every other workload's inspector also dials. 0.0.0.0 is refused by name. On a
+# host managed by workloadctl this file is generated and this line is filled in
+# for you; see docs/agent-broker.md §7.
+listen_address = "127.129.0.3"
 listen_port = 8081
 
-# --- defaults, inherited by every sandbox below ----------------------------
+# --- defaults, inherited by every host entry below -------------------------
+#
+# All four are optional. A host entry that overrides none of them uses these; a
+# host entry that ends up with no `upstream` or no `credential` from either
+# level is refused at start.
 
+# `upstream` must be an https:// origin and MUST NOT carry a path. A base path
+# would be prepended to every forwarded request, rewriting the path the
+# inspector's [[vm.network.policy]] `paths` patterns admitted -- so the two
+# layers would disagree about what request was made, and the one holding the
+# credential would win.
 upstream = "https://api.anthropic.com"
 
 # Name of the systemd credential holding the real API key. At runtime the
@@ -19,7 +34,10 @@ upstream = "https://api.anthropic.com"
 # LoadCredentialEncrypted= line in the unit.
 credential = "anthropic-api-key"
 
-# How the credential is attached to outbound requests.
+# How the credential is attached to outbound requests. Whatever the caller sent
+# under this header is DISCARDED and replaced -- which is what makes the guest's
+# placeholder work, and what made a forged one useless before placeholders
+# existed.
 #   Anthropic:  auth_header = "x-api-key",       auth_format = "{secret}"
 #   OpenAI:     auth_header = "Authorization",   auth_format = "Bearer {secret}"
 #   Gemini:     auth_header = "x-goog-api-key",  auth_format = "{secret}"
@@ -37,38 +55,44 @@ auth_format = "{secret}"
 connect_timeout = 15.0
 read_timeout = 900.0
 
-# Set true only for local testing, where the caller is your own login rather
-# than a workload user. In production an unregistered caller is a sandbox you
-# did not create. The broker logs a warning at startup while this is on.
-#
-# It also changes what the host-side entitlement is worth. Off, a caller must be
-# both routed here and named in [sandboxes] below, so neither list alone hands
-# out a credential. On, the redirect map is the only thing left — and its
-# elements are keyed by uid, which workloadctl reuses as soon as one is free.
-#
-# Keep it above the [sandboxes] tables. Below them it is parsed into whichever
-# table precedes it, where the broker never reads it: the default applies and
-# nothing says so.
-allow_unknown_callers = false
+# `allow_unknown_callers` USED TO BE HERE and is gone. It named a default
+# profile for a caller the config did not enumerate, which made sense when one
+# host-wide broker fronted guests an operator had not finished listing. An
+# instance serves one workload now and its config is generated from that
+# workload's own [[vm.network.credential]] blocks, so an unenumerated caller is
+# a caller that should not be here -- and the key would have been the one switch
+# that turns off the uid check, on the component whose whole job is the uid
+# check. A file still carrying it is refused rather than defaulted.
 
-# --- sandboxes -------------------------------------------------------------
+# --- sandboxes and their hosts ---------------------------------------------
 #
-# Keyed by WORKLOAD NAME. The broker resolves the caller by the uid owning the
-# far end of the connection -- assigned by the host, unforgeable from inside a
-# guest -- and looks up `_wl-<name>` from it. Anything unlisted gets 403.
+# Keyed by WORKLOAD NAME, then by HOST. The broker resolves the caller by the
+# uid owning the far end of the connection -- assigned by the host, unforgeable
+# from inside a guest -- and looks up `_wl-<name>` from it. The second half of
+# the key is the request's `Host`, matched lowercased and without a port.
 #
-# Each sandbox inherits the settings above and may override any of them, so
-# different sandboxes can hold different keys, or different providers.
+# NEITHER DIMENSION HAS A DEFAULT. An unlisted workload gets 403, and so does a
+# listed workload asking for a host it has no entry for. That is the difference
+# from the pre-rung-6 shape, where a caller that reached the broker at all
+# reached its one upstream with its one credential.
+#
+# Each host entry inherits the settings above and may override any of them.
 
-[sandboxes.agent-scratch]
+[sandboxes.agent-scratch.hosts."api.anthropic.com"]
 credential = "anthropic-cheap-key"
 
-[sandboxes.agent-review]
-# inherits upstream, credential, auth_header, auth_format
+# `placeholder`, optional, and the broker never uses it to serve a request --
+# it discards whatever arrived and sets its own header regardless. It is here
+# for one startup check: if it is byte-identical to the decrypted credential,
+# a real provider key has been pasted into a plain-text workload.toml, and the
+# broker refuses to start rather than let that sit unnoticed.
+[sandboxes.agent-review.hosts."api.anthropic.com"]
+placeholder = "sk-ant-api00-000000000000000000PLACEHOLDER0000000000"
 
-# [sandboxes.agent-local]
-# upstream = "https://inference.internal:8443"
-# credential = "local-inference-key"
+# One workload, two providers -- the shape the (workload, Host) key exists for.
+# [sandboxes.agent-review.hosts."api.github.com"]
+# upstream = "https://api.github.com"
+# credential = "github-token"
 # auth_header = "Authorization"
 # auth_format = "Bearer {secret}"
 

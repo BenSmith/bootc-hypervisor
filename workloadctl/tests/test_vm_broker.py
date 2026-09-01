@@ -6,6 +6,8 @@ agree, and a test that computes both sides from the same constant cannot fail
 when they drift apart.
 """
 
+import contextlib
+import io
 import tempfile
 import unittest
 from pathlib import Path
@@ -232,22 +234,49 @@ class TestRedirectLandsWhereTheBrokerListens(unittest.TestCase):
     connection refused *after* translation: identical, from the guest, to the
     broker being down, to the workload having no map element, and to the
     advertised address not existing.
+
+    THE ADDRESS HALF IS RETIRED, and it is retired rather than moved. It pinned
+    VM_BROKER_LISTEN_ADDR against the broker's `listen_address` DEFAULT, and
+    that default is gone: an instance now binds the address derived from its own
+    workload's uid, and defaulting it to 127.0.0.1 is the specific mistake ADR
+    007 names as growing the hole decision 6 closes. So there is no second
+    definition left to compare against -- the reconciliation is a render
+    assertion on the generated config, and lives with the generator.
+
+    What replaces it here is the assertion that the default is ABSENT, because
+    "the pin was retired" and "the pin was quietly deleted along with the
+    property" are the two ways this class could stop mentioning the address, and
+    only one of them is correct.
     """
 
     def defaults(self):
         """The broker's effective config when the operator sets neither key."""
         broker = load_script("libexec/agent-broker")
         with tempfile.NamedTemporaryFile("w", suffix=".toml") as fh:
-            # upstream and credential are required; nothing here reads them.
-            fh.write('upstream = "https://api.example.invalid"\n'
-                     'credential = "unused"\n')
+            fh.write('listen_address = "127.129.0.3"\n'
+                     'upstream = "https://api.example.invalid"\n'
+                     'credential = "unused"\n'
+                     '[sandboxes.agent.hosts."api.example.invalid"]\n')
             fh.flush()
             return broker.load_config(fh.name)
 
-    def test_address_matches(self):
-        self.assertEqual(self.defaults()["listen_address"], VM_BROKER_LISTEN_ADDR)
+    def test_there_is_no_listen_address_default_to_agree_with(self):
+        broker = load_script("libexec/agent-broker")
+        with tempfile.NamedTemporaryFile("w", suffix=".toml") as fh:
+            fh.write('upstream = "https://api.example.invalid"\n'
+                     'credential = "unused"\n'
+                     '[sandboxes.agent.hosts."api.example.invalid"]\n')
+            fh.flush()
+            with contextlib.redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit) as caught:
+                    broker.load_config(fh.name)
+        self.assertIn("no safe default", str(caught.exception))
+        self.assertNotEqual(VM_BROKER_LISTEN_ADDR, "")
 
     def test_port_matches(self):
+        """The port half survives, and has to: the map elements this file is
+        about still carry VM_BROKER_LISTEN_PORT, and the broker still defaults
+        to 8081. The two go together, and both go in the same commit."""
         self.assertEqual(int(self.defaults()["listen_port"]), VM_BROKER_LISTEN_PORT)
 
 
