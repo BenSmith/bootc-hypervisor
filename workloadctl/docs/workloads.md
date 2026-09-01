@@ -1655,6 +1655,33 @@ reports both:
 the socket can be bound while the guest has no path to it, and every other
 signal looks correct when that happens.
 
+#### Asking what the rules are, and what the guest did
+
+```bash
+sudo workloadctl rules myvm api.example.com   # what applies to one name
+sudo workloadctl rules myvm                   # every literal name in the document
+sudo workloadctl egress myvm -n 20            # the last 20 requests
+sudo workloadctl egress myvm --decision drop  # only what was refused
+```
+
+`rules` reports the **effective** rules, which reading this file will not tell
+you: host patterns union among themselves, so `*.example.com` and
+`api.example.com` both govern `api.example.com` and neither overrides the
+other — and a host any `[[vm.network.policy]]` entry matches is governed by
+**those entries alone**, with `hosts` not consulted for it. It calls the same
+matcher the listener does, so the report cannot disagree with the filter.
+
+`egress` reads the private per-request record — host, method, path, status, the
+upstream actually dialled — for allows as much as for drops, because "what did
+this guest send" is not answerable from denials alone. The guest cannot read
+it, and bodies are never recorded.
+
+`workloadctl doctor <name>` prints the inspector's counters as an **Egress
+(inspected)** section. They are evidence, not a verdict: a guest being denied
+is the filter working, so they add nothing to doctor's problem count. The same
+figures are published for Prometheus by `workload-exporter`; the series are
+listed in the walkthrough below.
+
 The [filtered VM walkthrough](vm-egress-walkthrough.md) traces a single request
 from the guest through the redirect, the inspector's allowlist and the
 inspector's own exempted egress, alongside the paths that are refused.
