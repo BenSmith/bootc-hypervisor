@@ -5,7 +5,7 @@ _workload_ctl_completion() {
     local cur prev words cword
     _init_completion || return
 
-    local commands="backup build catalog cleanup clone cp create diagnose disable doctor drift duplicate edit egress enable exec health images incant info init install list logs pcap reboot recreate restart restore rollback secret shell start stats status stop update validate"
+    local commands="backup build catalog cleanup clone cp create diagnose disable doctor drift duplicate edit egress enable exec health images incant info init install list logs pcap reboot recreate restart restore rollback rules secret shell start stats status stop update validate"
     local workload_dir="/etc/workloads.d"
     local credstore_dir="/etc/credstore.encrypted"
     local bundles_dir="/usr/share/workloadctl/workloads"
@@ -148,6 +148,19 @@ _workload_ctl_completion() {
                     --decision --mode --plane --reason --host --method
                     --status --since --until" -- "$cur") )
             else
+                COMPREPLY=( $(compgen -W "$workloads" -- "$cur") )
+            fi
+            return 0
+            ;;
+        rules)
+            # The workload, then a HOSTNAME -- which is the one thing here that
+            # cannot be completed. The names in the policy document are fnmatch
+            # PATTERNS, so offering them would offer `*.example.com` as if it
+            # were a host to ask about, and the query form's whole point is that
+            # it works for a name the file does not mention.
+            if [[ "$cur" == -* ]]; then
+                COMPREPLY=( $(compgen -W "--json" -- "$cur") )
+            elif [[ $cword -eq 2 ]]; then
                 COMPREPLY=( $(compgen -W "$workloads" -- "$cur") )
             fi
             return 0

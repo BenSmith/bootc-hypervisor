@@ -19,6 +19,7 @@ from cmd_create import cmd_create
 from cmd_diagnose import cmd_diagnose
 from cmd_edit import cmd_edit
 from cmd_egress import add_arguments as egress_arguments, cmd_egress
+from cmd_rules import add_arguments as rules_arguments, cmd_rules
 from cmd_validate import cmd_validate
 from cmd_catalog import cmd_catalog, cmd_duplicate, cmd_init, cmd_install
 from cmd_backup import cmd_backup, cmd_restore
@@ -207,6 +208,17 @@ def main():
         "egress", help="Read a filtered VM's per-request egress record")
     egress_parser.set_defaults(func=cmd_egress)
     egress_arguments(egress_parser)
+
+    # rules — the effective-rules report over the same workload's policy
+    # document. Registered beside `egress` because the pair is the operator's
+    # two questions about one filter: `egress` is what the guest DID, `rules` is
+    # what it is allowed to do. Also a read verb, so the same --json/no --quiet
+    # shape, and its arguments live in cmd_rules for the same reason egress's
+    # live in cmd_egress.
+    rules_parser = subparsers.add_parser(
+        "rules", help="Report a filtered VM's effective egress rules")
+    rules_parser.set_defaults(func=cmd_rules)
+    rules_arguments(rules_parser)
 
     enable_parser = subparsers.add_parser("enable", help="Enable and start a workload",
                                           parents=[mutating])
