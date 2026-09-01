@@ -67,6 +67,20 @@ SCHEME = re.compile(r"^[a-z][a-z0-9+.-]*:")
 # Absolute paths naming a location on a *running host*, not a file in the repo.
 RUNTIME_PREFIXES = ("/usr/", "/etc/", "/var/", "/run/", "/tmp/", "/home/", "/opt/")
 
+# `~/...` is the same idea as RUNTIME_PREFIXES one syntax over: it names a
+# location in whoever-is-reading's home directory, which is by construction not
+# a file in this repo. Stripped from the line rather than guarded against after
+# the match, for the reason URLs are: CITATION starts matching *inside* it
+# (`~/.claude/CLAUDE.md` matches from the slash, yielding `/.claude/CLAUDE.md`),
+# so a check on the text before the match sees only `~/` on a path the regex
+# has already reduced to a repo-shaped one.
+HOME_RELATIVE = re.compile(r"~/\S*")
+
+
+def _scannable(line: str) -> str:
+    """The part of a line that can hold a citation to a file in this repo."""
+    return HOME_RELATIVE.sub(" ", URL.sub(" ", line))
+
 # Citations into someone else's source tree. The policy is about docs *we* own;
 # an upstream filename is a useful pointer even though it is not in this repo.
 # Keep this list short — every entry is a citation a reader cannot follow from a
@@ -181,9 +195,11 @@ class TestDocCitations(unittest.TestCase):
                         continue  # URL, mailto:, in-page anchor
                     if target in EXTERNAL or target.startswith(RUNTIME_PREFIXES):
                         continue
+                    if target.startswith("~/"):
+                        continue  # the reader's home, not this repo
                     if not self._link_resolves(path, target):
                         found.append(f"{rel}:{lineno} links to {target!r}")
-                for m in CITATION.finditer(URL.sub(" ", line)):
+                for m in CITATION.finditer(_scannable(line)):
                     cite = m.group(1)
                     if cite in EXTERNAL or cite.startswith(RUNTIME_PREFIXES):
                         continue
@@ -239,6 +255,24 @@ class TestDocCitations(unittest.TestCase):
         nothing and would make every CI citation a false positive."""
         m = CITATION.search("see .forgejo/workflows/nope.md for details")
         self.assertEqual(m.group(1), ".forgejo/workflows/nope.md")
+
+    def test_a_home_relative_path_is_not_a_citation(self):
+        """`~/.claude/CLAUDE.md` names a file in the reader's home. Left
+        unstripped, CITATION matches from the dot and reports it as the repo
+        path `/.claude/CLAUDE.md`, so the tilde has to come off the line
+        before the scan rather than be inspected after it."""
+        line = "rtk init --global   # Add RTK to ~/.claude/CLAUDE.md"
+        self.assertEqual(CITATION.search(line).group(1), "/.claude/CLAUDE.md")
+        self.assertIsNone(CITATION.search(_scannable(line)))
+        # Only the tilde path is removed: a real citation on the same line
+        # still has to resolve.
+        both = "see docs/workloads.md and ~/.config/notes.md"
+        self.assertEqual(
+            [m.group(1) for m in CITATION.finditer(_scannable(both))],
+            ["docs/workloads.md"])
+        # And a link target is skipped by its own guard, not by _scannable.
+        probe = GIT_ROOT / "workloadctl" / "docs" / "workloads.md"
+        self.assertFalse(self._link_resolves(probe, "~/.claude/CLAUDE.md"))
 
     def test_a_path_inside_a_url_is_not_a_citation(self):
         """A citation regex can match starting mid-URL, so URLs are stripped
@@ -329,7 +363,7 @@ class TestCodeCitations(unittest.TestCase):
             except (UnicodeDecodeError, OSError):
                 continue
             for lineno, line in enumerate(text.splitlines(), 1):
-                for m in CODE_CITATION.finditer(URL.sub(" ", line)):
+                for m in CODE_CITATION.finditer(_scannable(line)):
                     cite = m.group(1)
                     if cite in RETIRED:
                         continue
