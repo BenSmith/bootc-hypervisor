@@ -4,9 +4,9 @@ This is the authoritative definition of the **run-files a single workload owns**
 the per-workload artifacts the Python generator (`generators/workload-generate`)
 materializes under `/run` at boot (and that `workloadctl enable` writes before the
 first boot). Lifecycle and introspection code (`disable`/`--purge`, `drift`,
-`diagnose`, `inspect`, the metrics exporter, backup) must agree on this exact set:
+`diagnose`, `list`/`status`, the metrics exporter, backup) must agree on this exact set:
 a workload's run-files are what `disable` removes, what `drift` diffs against the
-generator's would-be output, and what `inspect`/`diagnose` enumerate.
+generator's would-be output, and what `status`/`diagnose` enumerate.
 
 Getting the *boundary* wrong is a real bug class — under-scoping orphans files on
 `disable`; over-scoping (treating a shared or cross-referenced unit as owned) can
@@ -53,12 +53,20 @@ lifecycle note under "The set").
 ### Conditional on mode / kind
 | File | Condition |
 |------|-----------|
-| `/run/systemd/system/workload-<name>-build.service` | workload declares a declarative build |
+| `/run/systemd/system/workload-<name>-build.service` | **VM workloads only** — the oneshot that creates `system.qcow2`. Unconditional for a VM; no container workload gets one, whatever it declares |
 | `/run/systemd/system/workload-<name>-pod.service` | `pod` mode |
 | `/run/systemd/system/workload-<name>-net.service` | `bridge` mode (the auto-created `workload-<name>-net` network) |
 | `/run/systemd/system/workload-<name>-<cname>.service` | one per container, in `pod`/`bridge`/multi |
 | `/run/systemd/system/workload-<name>-virtiofs-<tag>.service` | one per virtiofs volume, VM workloads |
-| `/run/systemd/system/workload-<name>-proxy.service` | VM workloads with `[vm.network].hosts` (the per-VM filtering proxy). Enumerated for every VM regardless, on the same superset rule as `-pod`/`-net` below |
+| `/run/systemd/system/workload-<name>-inspect.socket` + `-inspect.service` | VM workloads whose egress is inspected (`vm_uses_inspect`). Enumerated for every VM regardless, on the superset rule below |
+| `/run/systemd/system/workload-<name>-resolve.socket` + `-resolve.service` | the synthesising responder — inspected **and** `resolver` not `"none"` (`vm_uses_resolve`). Same superset rule |
+| `/run/systemd/system/workload-<name>-broker.service` | VM workloads declaring `[[vm.network.credential]]` material and inspected (`vm_uses_credentials`). Same superset rule |
+| `/run/systemd/system/workload-<name>-proxy.service` | **Nothing emits this.** A migration entry: the retired hostname-policy proxy, listed so an in-place RPM upgrade's leftover unit has something that knows its name. `emitted=False` always. Deletable once every host has rebooted past the rung-2 upgrade |
+
+The socket/service pairs are listed unconditionally on purpose: a workload that
+switches inspection (or the resolver, or its last credential) *off* has to have
+the stale units unlinked, not left behind arming a listener for a guest that no
+longer expects one.
 
 > **Emitted vs. removable (the deletion superset).** The generator writes exactly the
 > conditional units a given mode/kind needs. The *removal* path, by contrast,
@@ -66,9 +74,10 @@ lifecycle note under "The set").
 > container workload regardless of mode and relies on `missing_ok`, so disabling
 > `foo` can never miss a unit the topology might have produced. Both are correct views
 > of the same set: the **emitted** view (what exists for *this* config — used by the
-> generator, `drift`, `inspect`, metrics) and the **removable** superset (what
-> `disable` may safely `unlink` — the mode-family union). A shared helper must expose
-> both; a single flat set serves neither caller correctly.
+> generator, `drift`, `status`, metrics) and the **removable** superset (what
+> `disable` may safely `unlink` — the mode-family union). A single flat set serves
+> neither caller correctly, which is why `workload_run_files()` tags each entry with
+> `emitted` rather than returning two lists or one.
 
 ### Sysusers config and the cgroup drop-in
 
@@ -96,6 +105,14 @@ units — but they are not `.service` files:
 > claimed one; there is no writer for it in `generators/` or `libexec/`). The only
 > non-unit generated configs are the sysusers `.conf` (above) and, at `enable` time,
 > the sysusers line re-emitted inline by `_provision_user` — the B6 duplication.
+>
+> `/run/sysusers.d/` (`RUN_SYSUSERS_D`) is **read** but never written. UID
+> allocation scans it alongside `/run/systemd/system` so a UID pinned in a
+> pending conf is not handed out twice, and the constant exists for that scan
+> and a staging path that no longer has a writer — the docstring on
+> `_reserved_uids_in_pending_sysusers` still describes `enable` copying a conf
+> there, and nothing in `lib/`, `generators/` or `libexec/` does. Either way it
+> is not a run-file: it is never in the owned set and `disable` does not touch it.
 
 ## Explicitly **not** a workload's run-files
 
@@ -118,21 +135,29 @@ These are easy to blur and enumerating them as workload-owned is a bug:
 
 `lib/workload_lib.py` provides `workload_service_name(name)` →
 `workload-<name>.service` and `workload_container_name(name)` → `workload-<name>`.
-These cover only the two simplest names; the **derived** run-files above
-(`-setup`, `-build`, `-pod`, `-net`, `-proxy`, `-virtiofs-<tag>`, `-<cname>`, the `.wants`
-symlink, the sysusers `.conf`, the `user@<uid>` drop-in, and the `.env` / `.secrets`
-env files) are currently spelled by hand at each call site.
+These cover only the two simplest names. Everything **derived** — `-setup`,
+`-build`, `-pod`, `-net`, `-inspect`, `-resolve`, `-broker`, `-proxy`,
+`-virtiofs-<tag>`, `-<cname>`, the `.wants` symlink, the sysusers `.conf`, the
+`user@<uid>` drop-in and the `.env` / `.secrets` env files — comes from
+`workload_run_files(config)` in the same module, which returns one
+`WorkloadRunFile(path, kind, role, emitted)` per entry in this table. That is
+the single source of truth; do not re-spell a name at a call site.
+
+Its companion is `RUN_TREE_SCANS`, a per-kind glob table for callers that walk
+the whole run tree rather than one config (`workloadctl drift`, which has to
+compare generated-vs-live in both directions and so cannot start from a config).
+`TestRunTreeScansCoverRunFiles` in `tests/test_workload_run_files.py` pins the two together.
 
 ## Maintenance note
 
-Because the derived set is hand-enumerated in several places (`_workload_run_files`
-and `helper_services` in `lib/cmd_disable.py`, plus `cmd_interact`, `cmd_diagnose`,
-`cmd_drift`, `cmd_inspect`, `substrate.py`) **and** re-derived in the generator, the
-mode→run-files membership can drift between copies. Two past bugs (the exporter
-`workload_health` miss and disable/purge-completeness) came from exactly that drift.
+This table used to be hand-enumerated at half a dozen call sites and re-derived
+in the generator, and the mode→run-files membership drifted between the copies —
+two past bugs (the exporter `workload_health` miss and disable/purge
+completeness) came from exactly that. `workload_run_files()` is the durable fix
+and has landed.
 
-**When adding or renaming a per-workload run-file in the generator, treat it as a
-fan-out change:** grep `f"workload-{` across `lib/ generators/ libexec/` and update
-every enumeration. The intended durable fix is a single
-`workload_run_files(config)` family in `workload_lib` that encodes this table once
-and is called by every site *and* the generator.
+**Adding or renaming a per-workload run-file is now a three-place change:** the
+generator that writes it, `workload_run_files()` (with the right `emitted`
+predicate — superset if a config can switch it off), and this table. If the file
+lands under `/run/systemd/system` and its `kind` is new, add a `RUN_TREE_SCANS`
+row too, or `drift` will never look at it.

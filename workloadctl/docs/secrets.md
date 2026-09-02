@@ -423,22 +423,34 @@ sudo cat /run/credentials/workload-jellyfin.service/jellyfin-api-key
 sudo -u _wl-jellyfin podman exec workload-jellyfin env | grep JELLYFIN_API_KEY
 # Should show: JELLYFIN_API_KEY=my-super-secret-value
 
-# Or use workloadctl if available (may not work for all setups)
-# sudo workloadctl exec jellyfin env | grep JELLYFIN_API_KEY
+# Or, equivalently and without needing the workload user's name:
+sudo workloadctl exec jellyfin env | grep JELLYFIN_API_KEY
 ```
 
+Root's own `podman exec` reaches neither form — each workload runs its own
+rootless podman under `_wl-<name>`, so the container is not in root's namespace
+at all.
+
 ### Managing Secrets
+
+`workloadctl secret` owns all of these. The by-hand `systemd-creds` form is
+shown alongside each because it is what the command runs and what you fall back
+to on a host without workloadctl — but prefer the command: it prompts with echo
+off, refuses a trailing newline, and keeps the key type consistent.
 
 #### Rotate a Secret
 
 ```bash
-# 1. Create new encrypted credential (overwrites old one)
+sudo workloadctl secret rotate jellyfin-api-key      # prompts for the new value
+sudo systemctl restart workload-jellyfin.service     # workload picks it up
+
+# By hand — overwrites the same blob:
 echo -n "new-secret-value" | \
   sudo systemd-creds encrypt --with-key=tpm2 --name=jellyfin-api-key - /etc/credstore.encrypted/jellyfin-api-key
-
-# 2. Restart workload to pick up new secret
-sudo systemctl restart workload-jellyfin.service
 ```
+
+`--key-type {tpm2,host,host+tpm2}` re-seals under a different key; omitted, it
+keeps the one already in use.
 
 #### Remove a Secret
 
@@ -451,15 +463,36 @@ sudo workloadctl edit jellyfin
 sudo systemctl daemon-reload
 sudo systemctl restart workload-jellyfin.service
 
-# 3. Optionally delete encrypted file
-sudo rm /etc/credstore.encrypted/jellyfin-api-key
+# 3. Delete the encrypted blob
+sudo workloadctl secret delete jellyfin-api-key      # --force skips the prompt
+# By hand: sudo rm /etc/credstore.encrypted/jellyfin-api-key
 ```
 
 #### List All Encrypted Credentials
 
 ```bash
+sudo workloadctl secret list                         # --json for scripting
+sudo workloadctl secret show jellyfin-api-key        # metadata, not the value
+
+# By hand:
 ls -lh /etc/credstore.encrypted/
 ```
+
+#### Move a Secret to Another Host
+
+A credential sealed to a TPM cannot be copied — the blob is bound to that
+machine. `export` re-wraps it under a passphrase into a portable `.secret` file,
+and `import` re-seals it under the new host's key:
+
+```bash
+sudo workloadctl secret export jellyfin-api-key --output /tmp/jellyfin.secret
+# ...move the file...
+sudo workloadctl secret import jellyfin-api-key /tmp/jellyfin.secret --key-type tpm2
+```
+
+Both take `--passphrase-file PATH` or `--passphrase-stdin` for scripting.
+Format and compatibility: [`docs/cli.md`](cli.md#secret-export) and
+[ADR 004](adr/004-secret-export-versioned-crypto.md).
 
 ### Verifying Secrets Are Securely Injected
 

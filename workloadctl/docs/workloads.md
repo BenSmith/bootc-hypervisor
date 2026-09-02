@@ -764,15 +764,22 @@ For fine-grained control not covered by convenience options:
 cpu_quota = "200%"
 memory_max = "2G"
 
-# Custom systemd directives (escape hatch)
-custom_directives = {
-  LimitNOFILE = "65536",           # Max open file descriptors
-  OOMScoreAdjust = "-500",         # Less likely to be OOM killed
-  CPUAffinity = "0-3",             # Pin to CPU cores 0-3
-  Nice = "-5",                     # Process priority (-20 to 19)
-  IOSchedulingClass = "realtime",  # Real-time I/O scheduling
-  IOSchedulingPriority = "0"       # Highest I/O priority (0-7)
-}
+# Custom systemd directives (escape hatch). A TOML inline table is
+# single-line, so this is one line however long it gets; the sub-table form
+# below is the readable alternative.
+custom_directives = { LimitNOFILE = "65536", OOMScoreAdjust = "-500", Nice = "-5" }
+```
+
+Or, spelled as a sub-table — same keys, same meaning, one per line:
+
+```toml
+[resources.custom_directives]
+LimitNOFILE = "65536"           # Max open file descriptors
+OOMScoreAdjust = "-500"         # Less likely to be OOM killed
+CPUAffinity = "0-3"             # Pin to CPU cores 0-3
+Nice = "-5"                     # Process priority (-20 to 19)
+IOSchedulingClass = "realtime"  # Real-time I/O scheduling
+IOSchedulingPriority = "0"      # Highest I/O priority (0-7)
 ```
 
 **Warning:** Custom directives are passed directly to systemd. Typos or invalid values will cause service failures.
@@ -1018,7 +1025,7 @@ In addition to rootless containers, workloadctl can manage KVM/QEMU virtual mach
 sudo dnf install qemu-kvm edk2-ovmf
 ```
 
-The `workloadctl preflight` command checks these and reports any missing pieces before you try to enable a VM workload.
+`workloadctl enable` runs a pre-flight check first and names anything missing — qemu, `qemu-img`, `socat`, OVMF firmware, `/dev/kvm` — rather than failing later at boot. There is no separate `preflight` subcommand.
 
 ### Scaffolding a new VM {#scaffolding-a-new-vm}
 
@@ -1056,6 +1063,13 @@ cloud_image_url = "https://download.fedoraproject.org/pub/fedora/linux/releases/
 cloud_image_checksum = "sha256:28680fe5b371a5a82ebf43a31926e086a168e59949d03969c5093e7071f90b7f"
 data_disk_size = "50G"
 user = "fedora"
+
+[vm.network]
+# `egress` has no safe default and must be stated. "open" is what a
+# general-purpose Fedora guest needs; a filtered VM with neither `hosts` nor
+# `allow` is a validation error, not a VM that boots and reaches nothing.
+# See "Egress filtering" below.
+egress = "open"
 ```
 
 See [`docs/examples/example-fedora-vm.toml`](examples/example-fedora-vm.toml) for a ready-to-use example, and [`docs/schema-reference.toml`](schema-reference.toml) for all `[vm]` options.
@@ -1322,11 +1336,15 @@ vcpus = 2
 memory = "4096M"
 image = "quay.io/myorg/myapp:latest"
 
-[[vm.volumes]]
-host_path = "/data/myapp"
-guest_path = "/mnt/data"
-tag = "mydata"
+volumes = ["/data/myapp:/mnt/data"]
 ```
+
+Each entry is a `"host:guest[:opts]"` string — the same grammar container
+volumes use, with `opts` defaulting to `rw`. A bare path means host == guest.
+The virtiofs *tag* is not spelled here: it is derived from the guest mountpoint
+(sanitised, truncated to 36 chars, index-suffixed if two mountpoints collide),
+because the sidecar unit name, the QEMU chardev and the guest's fstab entry all
+have to agree on it.
 
 virtiofs requires shared memory (`memory-backend-memfd`). The generator adds this automatically when volumes are configured. The host path is served by a `virtiofsd` sidecar service (`workload-<name>-virtiofs-<tag>.service`) started before the VM.
 
@@ -1382,7 +1400,7 @@ VM workloads run QEMU as `svirt_t`, the domain the distro policy already
 maintains for a hypervisor process hosting an untrusted guest. This is
 unconditional — there is no flag to set — and applies to every VM workload.
 `[security].selinux_policy` is a separate, opt-in mechanism for shipping a
-*delta* on top of it (see [Security](#security)).
+*delta* on top of it (see [Security Considerations](#security-considerations)).
 
 Three things follow that are worth knowing:
 

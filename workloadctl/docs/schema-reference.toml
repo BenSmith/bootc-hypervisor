@@ -105,14 +105,17 @@ name = "schema-reference"
 #   set [vm.network].bridge and provision that bridge yourself. Full detail in
 #   the [vm.network] section below.
 #
-# Disk layout (under /var/lib/workloads/{name}):
-#   system.qcow2        - Writable root disk (built from image source once)
-#   system.qcow2.gen-N  - Previous generations (rollback_keep + 1 retained;
-#                         see rollback_keep below)
-#   data.qcow2          - Optional second disk (formatted by cloud-init)
-#   nvram.fd            - Per-VM UEFI NVRAM (copy of OVMF_VARS.fd)
-#   .ssh/id_ed25519     - Per-workload SSH key (generated once)
-#   .image-cache/       - Downloaded cloud images (deduplicates re-enables)
+# Disk layout (under /var/lib/workloads/{name}), split so `backup` can skip what
+# it can rebuild:
+#   state/              - reconstructible; NOT captured by `backup`. Also $HOME.
+#     system.qcow2        - Writable root disk (built from image source once)
+#     system.qcow2.gen-N  - Previous generations (rollback_keep + 1 retained;
+#                           see rollback_keep below)
+#     nvram.fd            - Per-VM UEFI NVRAM (copy of OVMF_VARS.fd)
+#     .ssh/id_ed25519     - Per-workload SSH key (generated once)
+#     .image-cache/       - Downloaded cloud images (deduplicates re-enables)
+#   data/               - precious; captured by `backup`
+#     data.qcow2          - Optional second disk (formatted by cloud-init)
 #
 # Runtime-only (tmpfs, under /run/workload-vm/{name}, rebuilt every boot):
 #   cloud-init.iso      - Seed ISO with SSH key + virtiofs fstab. On tmpfs (not
@@ -2171,6 +2174,15 @@ ports = ["8080:80", "8443:443"]
 # Reference: man systemd.exec, man systemd.resource-control
 # Use case: Fine-grained control not available via simple options
 # custom_directives = { LimitNOFILE = "65536", Nice = "-5" }
+#
+# A TOML inline table is single-line, so a long list is one long line. The
+# sub-table below is the same key spelled the readable way -- same directives,
+# same meaning -- and must come after every other [resources] key, since a
+# table header ends the section above it.
+#
+# [resources.custom_directives]
+# LimitNOFILE = "65536"
+# Nice = "-5"
 
 # ============================================================================
 # USAGE EXAMPLES

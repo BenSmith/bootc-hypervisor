@@ -734,7 +734,7 @@ workloadctl exec <workload>[/<container>] <command> [args...]
 
 **Container workloads:** Runs the command inside the container. For multi-container workloads, the `/<container>` suffix is required.
 
-**VM workloads:** Runs the command over SSH using the per-workload key at `/var/lib/workloads/<name>/.ssh/id_ed25519`. The guest user defaults to `vm.user` from the workload config (or `root`).
+**VM workloads:** Runs the command over SSH using the per-workload key at `/var/lib/workloads/<name>/state/.ssh/id_ed25519`. The guest user is `[vm].user` from the workload config, defaulting to `workload` — not `root`.
 
 Under passt — the default — the guest has no address of its own to resolve: it is assigned the *host's* address, and `exec`/`shell` reach it on the workload's own management address (`127.128.x.y`, derived from the uid).
 

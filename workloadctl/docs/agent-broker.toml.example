@@ -47,8 +47,18 @@ auth_format = "{secret}"
 # Optional. Serve HTTPS to the guest for agents that refuse plaintext
 # credentials. One certificate for one hostname, signed by a private CA that
 # the guest trusts. Leave both unset to serve plain HTTP.
-# tls_cert = "/etc/agent-broker/broker.crt"
-# tls_key  = "/etc/agent-broker/broker.key"
+# Any path the broker's unit can read; there is no /etc/agent-broker/ any more
+# (retired at rung 6 with the host-wide instance), and the generated per-workload
+# config does not emit these -- an instance that needs TLS is one you are
+# configuring by hand.
+# tls_cert = "/etc/pki/tls/certs/agent-broker.crt"
+# tls_key  = "/etc/pki/tls/private/agent-broker.key"
+
+# Optional. Python 3.13+ enables VERIFY_X509_STRICT, which requires a CA cert to
+# carry keyUsage with keyCertSign; a private root minted without it makes every
+# upstream connection fail to verify. This relaxes that ONE check for THIS
+# broker's upstream connections -- see docs/agent-broker.md §8 before setting it.
+# relax_x509_strict = true
 
 # Timeouts, seconds. read_timeout must tolerate a long idle gap between
 # streamed tokens; connect_timeout should stay short.
