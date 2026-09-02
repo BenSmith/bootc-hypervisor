@@ -3047,6 +3047,14 @@ class Listener:
         dial, so a host that cannot be reached or cannot be verified costs a
         leaf only because the REFUSAL is delivered through one.
 
+        A BROKERED HOST HAS NO LEG TO ESTABLISH, and that does not weaken the
+        invariant: the offer is still configuration, it is just always
+        `http/1.1`. The request goes to this workload's broker, which is dialled
+        per request, so an origin connection opened here would be verified and
+        never written to -- and would make the ORIGIN's reachability and
+        certificate a prerequisite for a request that never reaches it. See the
+        branch below.
+
         EVERY OUTCOME IS BUMPED, denials included. A guest told "no" by a failed
         handshake is told nothing it can distinguish from the host being down;
         told "no" by a 403 through a chain it trusts, it has the name, the
@@ -3063,12 +3071,38 @@ class Listener:
         # nothing to sniff -- the only thing that ever needed a protocol
         # discovered after the fact was the relay path §8 deleted.
         h2 = self._policy.speaks_h2(host)
+        # A BROKERED HOST IS NOT DIALLED HERE AT ALL, and the §6 invariant above
+        # survives that: the offer is still chosen from configuration, it is
+        # simply always `http/1.1` -- the broker leg is cleartext HTTP/1.1, and
+        # `credential` with `http2` on one host is a validation error, so there
+        # is no h2 session to relay and never was.
+        #
+        # WHAT THE DIAL WAS DOING FOR A BROKERED HOST WAS NOTHING GOOD. The
+        # request goes to the broker, so the origin connection was opened,
+        # verified, put in the pool and never written to. Its three purposes all
+        # belong to the origin: hold the upstream leg open before the mint (the
+        # broker leg is opened per request and has its own reason), check that
+        # the origin took an h2 offer (there is no h2 here), and fail early if
+        # the origin is unreachable. That last one is the harm: it made the
+        # ORIGIN's reachability and certificate a prerequisite for a request
+        # that never goes there, and reported the failure against the origin's
+        # name. A provider having an outage failed brokered requests that would
+        # have reached the broker fine, and a private origin behind a CA this
+        # host does not hold failed them permanently.
+        #
+        # The mint does not need it either: `self._minter.leaf(host, ...)` takes
+        # the name and nothing else.
+        brokered = allowed and self._policy.credential_for(host) is not None
+        if brokered:
+            h2 = False
         if not allowed:
             # Generic body, like every policy denial (POLICY_REFUSAL_BODY): the
             # reason is the operator's, carried by the record_drop this refusal
             # triggers, and is not handed to the guest.
             refusal = (DROP_NOT_ALLOWLISTED, 403, "Forbidden",
                        POLICY_REFUSAL_BODY)
+        elif brokered:
+            pass  # no upstream leg at connection time; see above
         else:
             try:
                 upstream = self._dial_upstream_tls(
@@ -3142,9 +3176,10 @@ class Listener:
                       f"reason='could not mint a leaf: {exc}'")
             return
         finally:
-            # The upstream leg is open by now on the allowed path, and every
-            # arm above returns. Closed here rather than in each of them, or a
-            # mint failure leaks a host socket owned by the workload uid.
+            # The upstream leg is open by now on the allowed path -- except a
+            # brokered one, which never opens it -- and every arm above
+            # returns. Closed here rather than in each of them, or a mint
+            # failure leaks a host socket owned by the workload uid.
             if leaf is None and upstream is not None:
                 upstream.sock.close()
         if leaf is None:
@@ -3480,7 +3515,9 @@ class Listener:
         """Authorise every request inside one terminated session.
 
         The same loop the cleartext plane runs, with the upstream already open
-        and the name PINNED to the server name the handshake was completed for.
+        -- except on a brokered host, where there is deliberately none and every
+        request opens the broker leg itself -- and the name PINNED to the server
+        name the handshake was completed for.
         Pinning is not belt-and-braces: this session's certificate was minted
         for one name, and a request inside it naming another is asking to be
         relayed down a connection its Host header did not authorise. It gets a
@@ -3488,7 +3525,12 @@ class Listener:
         every client knows to retry elsewhere.
         """
         client = _Stream(tls_conn)
-        upstreams = {host: upstream}
+        # `upstream` is None for a brokered host: nothing was dialled at
+        # connection time, because the request goes to this workload's broker
+        # and not to the origin (see _serve_tls_inspect). Seeding the pool with
+        # None would hand the first request a non-socket; seeding it with the
+        # origin is what made the broker unreachable in the first place.
+        upstreams = {host: upstream} if upstream is not None else {}
         try:
             if not self._is_http(client, tls_conn, where, host):
                 return

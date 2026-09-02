@@ -523,10 +523,10 @@ described above, and that shape is gone: the advertised literal, the redirect
 map and the single host-wide listener were deleted, and the rig with them (see
 `tests/manual/README.md`). It is kept because it is the evidence the design
 rested on and deleting it would leave the claims below looking unproven rather
-than re-scoped. Its replacement ran on 2026-09-01, 35/35 on a KVM host under
+than re-scoped. Its replacement ran on 2026-09-02, 35/35 on a KVM host under
 enforcing, and closed the end-to-end claim for the new shape — after finding
-two defects that made the brokered path inert on a real guest and that no unit
-test could see. See `tests/manual/README.md`.
+five defects that no unit test could see, two of which made the brokered path
+inert on a real guest. See `tests/manual/README.md`.
 
 Proven end to end 2026-08-14 on a KVM host, against the installed RPM rather
 than a checkout: `tests/manual/broker_rig.py`, 18/18. Four guests differing by

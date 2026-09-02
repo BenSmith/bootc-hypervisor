@@ -753,6 +753,78 @@ name = "schema-reference"
 # tls = "splice" the connection is never decrypted, so there is no request for
 # these rules to govern and they are refused rather than silently ignored.
 #
+# `credential = "<name>"` on an entry makes that host CREDENTIAL-BACKED: the
+# inspector sends its requests to this workload's own broker instead of to the
+# origin, and the broker attaches the sealed material. The name is a
+# [[vm.network.credential]] block below; naming one that no block declares is
+# an error, because the request would otherwise go straight to the provider
+# carrying the guest's placeholder and be refused there, on a request this
+# layer considered fully authorised.
+#
+#   [[vm.network.policy]]
+#   host       = "api.anthropic.com"
+#   methods    = ["POST"]
+#   paths      = ["/v1/messages"]
+#   credential = "anthropic"
+#
+# The credential does not widen anything: `methods` and `paths` are applied
+# first, on the same terms as an unbrokered host, so it only changes WHO
+# attaches the authorisation. And it is per EXACT host — a wildcard `host` with
+# a credential is an error, because the broker's table has no patterns in it
+# and every request matching the pattern would be authorised here and refused
+# there.
+#
+# Optional: the material a credential-backed host's requests are attached with.
+# Type: array of [[vm.network.credential]] tables, each with `name`,
+#       `placeholder` and `env`, and optionally `auth_header`/`auth_format`
+# Default: []
+# The guest NEVER holds the key. It holds `placeholder` in the variable named
+# by `env`, its client sends that, and the broker discards it and sets the real
+# one. The material itself is sealed in the credstore under
+# broker/<workload>/<name> — `workloadctl secret create broker/agent/anthropic`
+# — and is decrypted only into the broker instance's own tmpfs, as a dynamic
+# user disjoint from the workload's.
+#
+#   [[vm.network.credential]]
+#   name        = "anthropic"
+#   placeholder = "sk-ant-placeholder-not-a-real-key"
+#   env         = "ANTHROPIC_API_KEY"
+#
+# `placeholder` is required and is not decoration: with nothing in the
+# variable, an SDK that refuses to send a request without a key fails INSIDE
+# the guest, before a packet, which looks nothing like a policy failure. It
+# must not be a real key — the broker refuses to start if it equals the
+# decrypted material, because that means one was pasted into a world-readable
+# workload.toml.
+#
+# `env` is yours to pick and is separate from `name` on purpose: `name` is the
+# filename the sealed material lands under, so binding it to a provider-owned
+# variable would force a re-seal when the provider renames its variable. It may
+# not be one of the five CA variables workloadctl already seeds.
+#
+# auth_header = "Authorization"
+# auth_format = "Bearer {secret}"
+#
+# Optional, and together they are the PROVIDER'S HTTP CONVENTION. Default to
+# "x-api-key" and "{secret}", which is Anthropic's; a provider wanting a bearer
+# token needs the pair above, and Gemini wants
+# auth_header = "x-goog-api-key" with the default format. `auth_format` must
+# name {secret} exactly once — the broker renders it once at startup and exits
+# on anything it cannot format, so `validate` refuses it here instead. A header
+# name that frames the message or is hop-by-hop (Content-Length, Host,
+# Connection, ...) is refused too: the credential would be overwritten or
+# stripped, and the provider would answer 401 with nothing on this host able to
+# say why.
+#
+# A block nothing selects is an error, and so is a `credential` naming no
+# block. Both are the same mistake in opposite directions: material sealed and
+# loaded into a broker for a host it is never attached to reads, in the file
+# and in `diagnose`, exactly like a credential that is in use.
+#
+# REQUIRES tls = "inspect" and a policy entry that names it. A spliced or h2
+# host cannot be credential-backed — neither is decrypted into a request the
+# broker could dispatch on — and both are refused rather than ignored.
+#
 # Optional: allowlisted hosts that keep HTTP/2.
 # Type: array of [[vm.network.http2]] tables, each with `host` and `reason`
 # Default: []

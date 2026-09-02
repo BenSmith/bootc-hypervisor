@@ -526,8 +526,13 @@ CA goes into the guest and nothing breaks certificate pinning.
   still said a credential was attached); and 127.129.x.y is inside
   `wl_internal4`, whose cgroup-keyed drop sits above the skeleton's `oif lo
   accept`, so the dial to the broker was dropped and presented as a broker that
-  was down. Both are now fixed and gated. See
-  `workloadctl/tests/manual/README.md`.
+  was down. Three more followed from reading what those implied: the render
+  emitted no `auth_header`/`auth_format`, so every instance ran `x-api-key` and
+  a bearer-token provider 401'd a fully authorised request; two policy entries
+  for one host emitted that host's table twice, which TOML refuses, so the
+  broker exited at start; and a brokered host was still dialled at the ORIGIN
+  before the request was read, verified, pooled and never written to. All five
+  are fixed and gated. See `workloadctl/tests/manual/README.md`.
 
 ### Packet capture
 

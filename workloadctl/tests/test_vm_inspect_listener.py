@@ -1937,6 +1937,72 @@ class TestCleartextPerRequest(unittest.TestCase):
         self.assertEqual({}, upstreams)
         del far
 
+    def test_a_brokered_host_is_not_dialled_at_the_origin_at_all(self):
+        """The origin connection a brokered session never uses.
+
+        _serve_tls_inspect dials the origin before reading the request, for
+        three reasons that all belong to the origin: hold the upstream leg open
+        before the mint, check the origin took an h2 offer, and fail early if it
+        is unreachable. On a brokered host the request goes to the broker, so
+        the connection was opened, verified and never written to -- and the
+        third reason did harm, making the ORIGIN's reachability and certificate
+        a prerequisite for a request that never goes there, reported against the
+        origin's name.
+
+        Asserted on the source because reaching the branch needs a full TLS
+        handshake against a minted leaf. What the behavioural half can reach is
+        the consequence, and that is the test below.
+        """
+        source = (ROOT / "libexec" / "workload-vm-inspect-listener").read_text()
+        fn = source[source.index("def _serve_tls_inspect("):
+                    source.index("def _bump_answer(")]
+        self.assertIn("credential_for(host)", fn)
+        # Decided BEFORE the dial, or the dial has already happened.
+        self.assertLess(fn.index("credential_for(host)"),
+                        fn.index("self._dial_upstream_tls("))
+        # And the offer stays a configuration decision: h2 is forced off rather
+        # than read off an origin connection that no longer exists.
+        self.assertIn("h2 = False", fn)
+
+    def test_a_terminated_session_with_no_upstream_seeds_an_empty_pool(self):
+        """The consequence, behaviourally: `upstream` is None on a brokered
+        host, and seeding the pool with None would hand the first request a
+        non-socket -- while seeding it with the origin is the defect this
+        replaced."""
+        mod = _mod()
+        listener = mod.Listener([], io.StringIO(),
+                                policy=mod.Policy(tls="inspect",
+                                                  hosts=("a.example",)))
+        where = mod._Where("t", cid="c0", plane="tls")
+        seen = {}
+
+        def one_request(_self, _client, _conn, _where, upstreams, _first,
+                        **_kw):
+            # The pool is this function's argument, so it is captured without
+            # reaching into a frame. Returning False ends the loop after one.
+            seen["upstreams"] = upstreams
+            return False
+
+        with unittest.mock.patch.object(mod.Listener, "_is_http",
+                                        lambda *a, **k: True), \
+             unittest.mock.patch.object(mod.Listener, "_serve_one_request",
+                                        one_request):
+            listener._serve_terminated(object(), where, "a.example", None)
+        self.assertEqual(seen["upstreams"], {},
+                         "a None upstream was seeded into the pool")
+
+        # And the ordinary path still seeds the origin it was handed, or the
+        # fix has turned reuse off for every non-brokered terminated session.
+        origin, far = self._pair()
+        with unittest.mock.patch.object(mod.Listener, "_is_http",
+                                        lambda *a, **k: True), \
+             unittest.mock.patch.object(mod.Listener, "_serve_one_request",
+                                        one_request):
+            listener._serve_terminated(object(), where, "a.example",
+                                       mod._Stream(origin))
+        self.assertEqual(list(seen["upstreams"]), ["a.example"])
+        del far
+
     def test_a_brokered_request_does_not_get_the_origin_from_the_pool(self):
         """The defect broker_rig.py found on real guests, at its own seam.
 

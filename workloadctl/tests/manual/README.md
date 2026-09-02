@@ -69,10 +69,9 @@ made the way it always is, and the rig leaves no trust anchor behind on a
 machine it borrowed. Nothing about the path under test is weakened — the drop-in
 adds one environment variable and changes no directive.
 
-**Last green 2026-09-01: 35/35, on a KVM host under enforcing, against the
-installed RPM.** It found two defects on that first run, both of which made the
-brokered path inert for a real guest and neither of which any unit test could
-see:
+**Last green 2026-09-02: 35/35, on a KVM host under enforcing, against the
+installed RPM.** It has now found five defects, none of which any unit test
+could see. The first two made the brokered path inert for a real guest:
 
 - `_serve_terminated` seeds the upstream pool with the ORIGIN connection it
   opened before the first request was read, keyed by the host. A brokered
@@ -90,6 +89,32 @@ see:
 The second was predicted in the listener's own refusal text ("a missing SELinux
 rule on this dial presents exactly like a broker that is down") and arrived
 through nftables instead.
+
+Three more came out of reading what the first two implied:
+
+- **The generated config could not name a provider's auth convention.** ADR 007
+  names the profile as `(upstream, credential, auth_header, auth_format)`; the
+  render emitted the first two, so every instance ran `x-api-key: {secret}` and
+  any provider wanting `Authorization: Bearer` answered 401 on a request the
+  inspector had recorded as fully authorised and brokered. The hand-written
+  host-wide config could express it and the generated one could not, which made
+  the new shape a regression for a whole class of provider. Both keys are now
+  optional on `[[vm.network.credential]]`; the two arms differ in exactly this,
+  so one run covers the default and an override.
+- **Two policy entries for one host rendered an unparseable `broker.toml`.**
+  Splitting a host's rules — `/v1/*` for GET, `/v2/*` for POST, one credential
+  — is the ordinary way to write §3 and it validates, but it emitted the host's
+  table twice, which TOML refuses: the broker exited at start and every
+  brokered request 502'd on a config `validate` had just called clean. Both
+  arms now deploy that shape deliberately.
+- **The origin was dialled for a brokered host and never written to.** The
+  connection was opened before the request was read, verified, pooled and
+  abandoned — which made the ORIGIN's reachability and certificate a
+  prerequisite for a request that goes to loopback, and reported the failure
+  against the origin's name. This rig needed a `[[vm.network.internal]]`
+  exemption because of it; **it deliberately no longer carries one**, and that
+  absence is the only check on hardware that says the origin dial is gone. If
+  it comes back, the first probe fails with `internal destination`.
 
 **It also reads two things no probe can show.** The inspector's own record, for
 the rung 6 seam: `upstream` is honestly the broker's loopback address on a

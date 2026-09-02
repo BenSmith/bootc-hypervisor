@@ -115,18 +115,23 @@ the unit, the map, the skeleton, `WORKLOAD_BROKER_URL`, and `[vm.network].broker
 which is now a validation error naming `credential` as the replacement. Design,
 threat model and operating instructions: `workloadctl/docs/agent-broker.md`.
 
-**The end-to-end seam is proven for this shape, and it took two fixes to get
+**The end-to-end seam is proven for this shape, and it took five fixes to get
 there.** The rig that proved the old shape (`broker_rig.py`, 18/18 on
 2026-08-14) was built around the advertised endpoint and was deleted with it;
 its replacement runs on two throwaway workloads and was 35/35 on a KVM host
-under enforcing on 2026-09-01. It found two defects that every unit test
-passed over, both of which made the brokered path inert on a real guest: the
-terminated session seeds the upstream pool with the ORIGIN connection, so a
+under enforcing on 2026-09-02. Every defect it found had passed the whole unit
+suite, and two of them made the brokered path inert on a real guest: the
+terminated session seeded the upstream pool with the ORIGIN connection, so a
 brokered request was handed that socket and the broker was never dialled; and
 the broker's own 127.129.x.y address is inside `wl_internal4`, so once it WAS
 dialled the packet was dropped by the rule that stops a guest reaching the LAN.
-Neither is visible without a real packet ([[unit-gates-dont-see-the-seam]]).
-See `workloadctl/tests/manual/README.md`.
+The other three: the generated config could not name a provider's
+`auth_header`/`auth_format`, so any provider wanting `Authorization: Bearer`
+got a 401 on a fully authorised request; two policy entries for one host
+rendered a `broker.toml` TOML refuses; and a brokered host was dialled at the
+origin and never written to, making the origin's reachability a prerequisite
+for a request that goes to loopback. None is visible without a real packet
+([[unit-gates-dont-see-the-seam]]). See `workloadctl/tests/manual/README.md`.
 
 ## Docs policy: tracked files may not cite untracked docs
 

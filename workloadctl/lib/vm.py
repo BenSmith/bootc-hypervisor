@@ -16,6 +16,7 @@ import json
 import os
 import re
 import socket
+import string
 import time
 from pathlib import Path
 from typing import NamedTuple
@@ -2330,7 +2331,23 @@ def render_vm_broker_config(config: dict, uid: int) -> str:
         f"listen_address = {_toml_basic_string(vm_broker_listen_address(uid))}",
         f"listen_port = {VM_BROKER_INSTANCE_PORT}",
     ]
+    # ONE TABLE PER HOST, not per policy entry, and the difference is a file
+    # that parses. Splitting a host's rules across entries -- `/v1/*` for GET,
+    # `/v2/*` for POST, one credential -- is the ordinary way to write §3, and
+    # it validates: the only per-host credential rule refuses entries that
+    # disagree about WHICH credential. Rendered per entry, that config emitted
+    # `[sandboxes.x.hosts."api"]` twice, which TOML refuses outright, so the
+    # broker exited at start and every brokered request 502'd on a workload
+    # whose config `validate` had just called clean.
+    #
+    # Collapsing on the host is sound because a credentialed host is always a
+    # literal (a wildcard selecting a credential is a validation error) and two
+    # entries for one host cannot name different credentials (also one).
+    seen_hosts: set[str] = set()
     for host, credential in vm_broker_hosts(config):
+        if host in seen_hosts:
+            continue
+        seen_hosts.add(host)
         _path, cred_id = vm_broker_credential(name, credential)
         lines += [
             "",
@@ -2343,17 +2360,33 @@ def render_vm_broker_config(config: dict, uid: int) -> str:
             f"upstream = {_toml_basic_string('https://' + host)}",
             f"credential = {_toml_basic_string(cred_id)}",
         ]
-        placeholder = _placeholder_for(config, credential)
-        if placeholder is not None:
-            lines.append(f"placeholder = {_toml_basic_string(placeholder)}")
+        cred = _credential_named(config, credential)
+        if cred is not None and cred.placeholder is not None:
+            lines.append(
+                f"placeholder = {_toml_basic_string(cred.placeholder)}")
+        # Emitted ONLY when the block states one. An absent key leaves the
+        # broker's own default in force, which keeps the default in one place
+        # -- writing it out here would mean two copies to disagree later.
+        if cred is not None and cred.auth_header:
+            lines.append(
+                f"auth_header = {_toml_basic_string(cred.auth_header)}")
+        if cred is not None and cred.auth_format:
+            lines.append(
+                f"auth_format = {_toml_basic_string(cred.auth_format)}")
     return "\n".join(lines) + "\n"
 
 
-def _placeholder_for(config: dict, credential: str) -> str | None:
+def _credential_named(config: dict, credential: str) -> VmCredential | None:
+    """The declared block a policy entry's `credential` selects, or None.
+
+    Returns the whole block rather than one field: the render needs three of
+    them now, and three lookups walking the same list is how one of them comes
+    to be looked up under a name the other two do not use.
+    """
     net = (config.get("vm", {}) or {}).get("network", {}) or {}
     for cred in vm_credential_entries(net if isinstance(net, dict) else {}):
         if cred.name == credential:
-            return cred.placeholder
+            return cred
     return None
 
 
@@ -3258,15 +3291,35 @@ class VmCredential(NamedTuple):
     the sealed material's path to a provider-owned string, so a provider renaming
     its variable would force a re-seal.
 
-    NOTHING HERE TRAVELS ON THE WIRE. The inspector sends no name and no
-    selector; the broker's whole dispatch key is (uid, Host), per ADR 007
-    decision 9. These three fields decide which material a generated broker
-    instance loads and what the guest is seeded with, and nothing else.
+    `auth_header` and `auth_format` are the provider's HTTP convention, and they
+    are here rather than on the policy entry for the same reason: a credential
+    is minted for one provider, and `docs/agent-broker.toml.example` already
+    documents them per provider beside the key. Both are OPTIONAL and default to
+    the broker's own (`x-api-key`, `{secret}`), which is the Anthropic
+    convention -- so a workload that says nothing gets exactly what it got
+    before these keys existed.
+
+    THEY EXIST BECAUSE THE GENERATOR DROPPED THEM. ADR 007 names the profile as
+    `(upstream, credential, auth_header, auth_format)` and lists "one profile
+    per sandbox" as the limit this rung removes; the first render emitted the
+    first two and defaulted the rest, so every workload got `x-api-key` and any
+    provider wanting `Authorization: Bearer` answered 401 on a request this
+    layer considered fully authorised. The hand-written host-wide config could
+    express it and the generated one could not, which made the new shape a
+    regression for a whole class of provider with no key to fix it with.
+
+    NOTHING HERE TRAVELS ON THE WIRE AS A SELECTOR. The inspector sends no name
+    and no credential hint; the broker's whole dispatch key is (uid, Host), per
+    ADR 007 decision 9. These fields decide which material a generated broker
+    instance loads, what the guest is seeded with, and how the broker spells the
+    header it attaches -- and nothing else.
     """
 
     name: str
     placeholder: str
     env: str
+    auth_header: str | None = None
+    auth_format: str | None = None
 
 
 def vm_credential_entries(net: dict) -> list[VmCredential]:
@@ -3289,8 +3342,19 @@ def vm_credential_entries(net: dict) -> list[VmCredential]:
                 values = []
                 break
             values.append(value.strip())
-        if values:
-            creds.append(VmCredential(*values))
+        if not values:
+            continue
+        # Optional, and absent stays None rather than becoming the default
+        # here: the render emits nothing for an absent key and lets the broker
+        # apply its own, so there is one place the default lives. Writing it in
+        # twice is how the two come to disagree after one of them changes.
+        optional = []
+        for key in ("auth_header", "auth_format"):
+            value = item.get(key)
+            optional.append(value.strip()
+                            if isinstance(value, str) and value.strip()
+                            else None)
+        creds.append(VmCredential(*values, *optional))
     return creds
 
 
@@ -3538,7 +3602,7 @@ def _validate_credentials(net: dict) -> tuple[list[VmCredential], list[str]]:
                     f"[[vm.network.credential]] tables, got "
                     f"{type(raw).__name__}"]
 
-    known = {"name", "placeholder", "env"}
+    known = {"name", "placeholder", "env", "auth_header", "auth_format"}
     creds: list[VmCredential] = []
     seen: set[str] = set()
     seen_envs: set[str] = set()
@@ -3553,7 +3617,8 @@ def _validate_credentials(net: dict) -> tuple[list[VmCredential], list[str]]:
             errors.append(
                 f"[vm.network].credential: unknown key(s) "
                 f"{', '.join(unknown)}; a credential block carries `name`, "
-                f"`placeholder` and `env` only")
+                f"`placeholder` and `env`, and optionally `auth_header` and "
+                f"`auth_format`")
         values = {}
         for key in ("name", "placeholder", "env"):
             value = item.get(key)
@@ -3625,8 +3690,112 @@ def _validate_credentials(net: dict) -> tuple[list[VmCredential], list[str]]:
                 f"states two placeholders for material that has one")
             continue
         seen.add(name)
-        creds.append(VmCredential(name=name, placeholder=placeholder, env=env))
+        auth_header, auth_format = None, None
+        raw_header = item.get("auth_header")
+        if raw_header is not None:
+            if not isinstance(raw_header, str) or not raw_header.strip():
+                errors.append(
+                    f"[vm.network].credential: {name!r} has `auth_header` = "
+                    f"{raw_header!r}; it is the HTTP header the broker attaches "
+                    f"the material in, and omitting the key means the broker's "
+                    f"own default, {VM_BROKER_DEFAULT_AUTH_HEADER!r}")
+                continue
+            auth_header = raw_header.strip()
+            errors.extend(_validate_auth_header(name, auth_header))
+        raw_format = item.get("auth_format")
+        if raw_format is not None:
+            if not isinstance(raw_format, str) or not raw_format.strip():
+                errors.append(
+                    f"[vm.network].credential: {name!r} has `auth_format` = "
+                    f"{raw_format!r}; it is the value template the material is "
+                    f"substituted into, and omitting the key means the "
+                    f"broker's own default, "
+                    f"{VM_BROKER_DEFAULT_AUTH_FORMAT!r}")
+                continue
+            auth_format = raw_format.strip()
+            errors.extend(_validate_auth_format(name, auth_format))
+        creds.append(VmCredential(name=name, placeholder=placeholder, env=env,
+                                  auth_header=auth_header,
+                                  auth_format=auth_format))
     return creds, errors
+
+
+# The broker's own defaults, restated so an error message can name them. They
+# are NOT applied here: the render emits nothing for an absent key, so the
+# default lives in one place and these two are only ever quoted at an operator.
+# tests/test_vm_broker.py pins them against the broker's own source.
+VM_BROKER_DEFAULT_AUTH_HEADER = "x-api-key"
+VM_BROKER_DEFAULT_AUTH_FORMAT = "{secret}"
+
+# RFC 9110 §5.1: a field name is one or more tchar. Spelled out rather than
+# approximated with \w, because the characters that are NOT here are the whole
+# point -- a colon, a space or a newline in this string writes a header the
+# provider reads as something else, or splits one into two.
+_AUTH_HEADER_RE = re.compile(r"^[!#$%&'*+.^_`|~0-9A-Za-z-]+$")
+
+# Header names the broker must be the only writer of, or that decide how the
+# message is framed. Refused rather than allowed to produce a broken request:
+# `content-length` would be overwritten by a number describing a different
+# body, `host` is set from the upstream and would silently not take, and the
+# hop-by-hop names are stripped on the way out so the credential would simply
+# vanish -- a 401 whose cause is invisible from every layer of ours.
+_AUTH_HEADER_REFUSED = {
+    "content-length": "it frames the message, and the broker sets its own",
+    "transfer-encoding": "it frames the message, and it is hop-by-hop",
+    "host": "the broker sets it from the upstream, so this would not take",
+    "connection": "it is hop-by-hop and is stripped before the request leaves",
+    "upgrade": "it is hop-by-hop and is stripped before the request leaves",
+    "te": "it is hop-by-hop and is stripped before the request leaves",
+    "trailer": "it is hop-by-hop and is stripped before the request leaves",
+    "keep-alive": "it is hop-by-hop and is stripped before the request leaves",
+    "proxy-authorization":
+        "it is hop-by-hop and is stripped before the request leaves",
+    "proxy-authenticate":
+        "it is hop-by-hop and is stripped before the request leaves",
+}
+
+
+def _validate_auth_header(name: str, header: str) -> list[str]:
+    if not _AUTH_HEADER_RE.match(header):
+        return [f"[vm.network].credential: {name!r} has `auth_header` = "
+                f"{header!r}, which is not an HTTP field name (RFC 9110 §5.1 "
+                f"tchar). A colon, a space or a newline here does not produce "
+                f"a header the provider ignores -- it produces a different "
+                f"header, or two"]
+    why = _AUTH_HEADER_REFUSED.get(header.lower())
+    if why:
+        return [f"[vm.network].credential: {name!r} has `auth_header` = "
+                f"{header!r}, which cannot carry a credential: {why}. The "
+                f"request would go upstream with no material on it and the "
+                f"provider would answer 401, on a request every layer here "
+                f"considers fully authorised"]
+    return []
+
+
+def _validate_auth_format(name: str, fmt: str) -> list[str]:
+    """`auth_format` must substitute the material exactly once and name nothing
+    else.
+
+    Checked HERE because the broker renders it at startup with `str.format` and
+    exits on a bad one -- which, for a generated unit, is a workload whose
+    broker will not start and whose only symptom is a restart loop. An operator
+    writing `Bearer {token}` gets the reason at `validate` instead.
+    """
+    fields = []
+    try:
+        for _literal, field, _spec, _conv in string.Formatter().parse(fmt):
+            if field is not None:
+                fields.append(field)
+    except ValueError as exc:
+        return [f"[vm.network].credential: {name!r} has `auth_format` = "
+                f"{fmt!r}, which is not a usable format string ({exc})"]
+    if fields != ["secret"]:
+        return [f"[vm.network].credential: {name!r} has `auth_format` = "
+                f"{fmt!r}, which substitutes {fields or 'nothing'} -- it must "
+                f"name `{{secret}}` exactly once and nothing else. The broker "
+                f"renders this once at startup and exits on anything it cannot "
+                f"format, so a generated instance would not start at all"]
+    return []
 
 
 def _validate_policy(net: dict, splice_hosts, http2_hosts, egress: str,

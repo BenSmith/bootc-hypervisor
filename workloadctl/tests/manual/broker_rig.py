@@ -132,12 +132,12 @@ UNKNOWN_HOST = "elsewhere.wlbrk.test"
 # cannot say whether a request was refused for its Host or for its caller --
 # and those are different claims with different controls. Matching the sentence
 # is what makes each assertion attributable.
-# The header a generated instance attaches the credential in. The generator
-# emits neither `auth_header` nor `auth_format`, so this is the broker's own
-# default and every workload gets it -- restated here because a rig asserting
-# `Authorization` reads a header nothing writes and calls a working
-# substitution a failure. (It did, on the first run of this rewrite.)
-AUTH_HEADER = "x-api-key"
+# The header a generated instance attaches the credential in when the workload
+# says nothing. Restated here because a rig asserting `Authorization` against a
+# default of `x-api-key` reads a header nothing writes and calls a working
+# substitution a failure -- it did, on the first run of this rewrite. An arm
+# that DOES name a convention asserts its own; see Arm.header.
+AUTH_HEADER_DEFAULT = "x-api-key"
 
 DENY_UNKNOWN_CALLER = "caller not registered with the broker"
 DENY_UNKNOWN_HOST = "no credential is configured for that host"
@@ -189,13 +189,33 @@ class Arm:
     credential: str
     placeholder: str
     secret: str
+    # None means "say nothing and get the broker's default", which is what
+    # every workload got before these keys existed. The two arms differ here
+    # so one run covers both the default and an overridden convention.
+    auth_header: str | None = None
+    auth_format: str | None = None
+
+    @property
+    def header(self):
+        return self.auth_header or AUTH_HEADER_DEFAULT
+
+    @property
+    def sent_value(self):
+        """What the provider should see in that header."""
+        fmt = self.auth_format or "{secret}"
+        return fmt.format(secret=self.secret)
 
 
 ARMS = [
     Arm("wlbrk-a", credential="key-a", placeholder="PLACEHOLDER-A",
         secret="SECRET-WLBRK-A"),
+    # The provider convention the generated config could not express until the
+    # keys existed: every instance ran `x-api-key: {secret}`, so an
+    # OpenAI-shaped provider answered 401 on a request the inspector had
+    # recorded as fully authorised and brokered.
     Arm("wlbrk-b", credential="key-b", placeholder="PLACEHOLDER-B",
-        secret="SECRET-WLBRK-B"),
+        secret="SECRET-WLBRK-B",
+        auth_header="Authorization", auth_format="Bearer {secret}"),
 ]
 BY_NAME = {a.name: a for a in ARMS}
 
@@ -533,25 +553,50 @@ def toml_for(arm):
         f'name        = "{arm.credential}"',
         f'placeholder = "{arm.placeholder}"',
         f'env         = "{GUEST_ENV}"',
+    ]
+    # Only when the arm names one, so the other arm keeps proving that saying
+    # nothing still gets the broker's own default.
+    if arm.auth_header:
+        lines.append(f'auth_header = "{arm.auth_header}"')
+    if arm.auth_format:
+        lines.append(f'auth_format = "{arm.auth_format}"')
+    lines += [
+        "",
+        # TWO ENTRIES FOR ONE HOST, sharing one credential, which is the
+        # ordinary way to vary methods by path -- and which rendered the host's
+        # broker table TWICE until the render collapsed on the host. TOML
+        # refuses a table declared twice, so the broker exited at start and
+        # every brokered request 502'd, on a config `validate` had just called
+        # clean. Written here on purpose: the shape is only covered on hardware
+        # if a rig actually deploys it.
+        "[[vm.network.policy]]",
+        f'host       = "{PROVIDER}"',
+        f'credential = "{arm.credential}"',
+        'methods    = ["GET"]',
+        'paths      = ["/v1/*"]',
         "",
         "[[vm.network.policy]]",
         f'host       = "{PROVIDER}"',
         f'credential = "{arm.credential}"',
+        'methods    = ["POST"]',
+        'paths      = ["/v2/*"]',
         "",
-        # THE PREREQUISITE THIS RIG DISCOVERED, and it is a property of the
-        # product rather than of the rig. `_serve_tls_inspect` dials the ORIGIN
-        # over verified TLS before it reads the request -- always, including on
-        # a host the request will then be brokered to -- so a credential-backed
-        # host must be reachable and verifiable from the workload uid even
-        # though nothing is ever sent there. The stub answers on the host's own
-        # loopback, which is an internal destination, so without this entry the
-        # guest gets a 502 reading `internal destination` and naming the
-        # ORIGIN, on a request that would never have gone to it.
-        "[[vm.network.internal]]",
-        f'host   = "{PROVIDER}"',
-        'reason = "the rig\'s stub provider answers on the host\'s own '
-        'loopback, and the inspector dials the origin before it brokers"',
-        "",
+        # NO [[vm.network.internal]] ENTRY, AND THAT IS AN ASSERTION.
+        #
+        # This rig needed one until the origin dial was fixed.
+        # `_serve_tls_inspect` used to dial the ORIGIN over verified TLS before
+        # reading the request -- always, including on a host the request would
+        # then be brokered to -- so a credential-backed host had to be reachable
+        # AND verifiable from the workload uid even though nothing was ever sent
+        # there. The stub answers on the host's own loopback, so without an
+        # exemption the guest got a 502 reading `internal destination`, naming
+        # an origin the request would never have gone to.
+        #
+        # A brokered host is no longer dialled at the origin at all, so the
+        # exemption is unnecessary -- and its absence here is the only check
+        # that says so on hardware. If the origin dial ever comes back, this rig
+        # fails on the first probe with that same `internal destination`, which
+        # is a far better signal than an exemption quietly covering for it.
         "[[vm.network.allow]]",
         f'address = "{DNS_ALLOW}"',
         'reason  = "the rig\'s guests need a resolver to reach at all"',
@@ -693,7 +738,7 @@ def claim_1_and_4():
         # found. The fiction has to be on the wire for its replacement to be
         # observable.
         r = guest(arm.name,
-                  CURL + f'-H "{AUTH_HEADER}: ${GUEST_ENV}" '
+                  CURL + f'-H "{arm.header}: ${GUEST_ENV}" '
                   f'https://{PROVIDER}/v1/models')
         body, code, rc = parse(r)
         doc = stub_body(body)
@@ -702,12 +747,13 @@ def claim_1_and_4():
         # neither `auth_header` nor `auth_format`, so every generated instance
         # runs the broker's own defaults (`x-api-key: {secret}`). A workload
         # cannot currently name a provider that wants `Authorization: Bearer`.
-        auth = (doc or {}).get(AUTH_HEADER, "")
+        auth = (doc or {}).get(arm.header.lower(), "")
         seen[arm.name] = auth
-        record(f"{arm.name} reaches {PROVIDER} and the BROKER's key arrives",
-               code == "200" and auth == arm.secret,
-               f"rc={rc} http={code} {AUTH_HEADER}={auth!r} "
-               f"(want {arm.secret!r})")
+        record(f"{arm.name} reaches {PROVIDER} and the BROKER's key arrives "
+               f"in {arm.header}",
+               code == "200" and auth == arm.sent_value,
+               f"rc={rc} http={code} {arm.header}={auth!r} "
+               f"(want {arm.sent_value!r})")
         record(f"{arm.name} never sent its own placeholder upstream",
                arm.placeholder not in body,
                f"body={body[:160]!r} — the guest DID send the placeholder, so "
@@ -718,8 +764,8 @@ def claim_1_and_4():
     # well as on each, because two instances both serving key-a would satisfy
     # one of the two assertions above and this is what sees it.
     record("the two workloads are told apart",
-           (seen["wlbrk-a"] == BY_NAME["wlbrk-a"].secret
-            and seen["wlbrk-b"] == BY_NAME["wlbrk-b"].secret
+           (seen["wlbrk-a"] == BY_NAME["wlbrk-a"].sent_value
+            and seen["wlbrk-b"] == BY_NAME["wlbrk-b"].sent_value
             and seen["wlbrk-a"] != seen["wlbrk-b"]),
            f"a={seen['wlbrk-a']!r} b={seen['wlbrk-b']!r}")
 

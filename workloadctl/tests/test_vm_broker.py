@@ -29,8 +29,9 @@ from vm import (
     VM_RESERVED_GUEST_ENV,
     render_vm_broker_config, vm_broker_config_path, vm_broker_credential,
     vm_broker_hosts, vm_broker_listen_address, vm_broker_upstream_addresses,
-    validate_vm_network, vm_credential_env, vm_host_resolver_addresses,
-    vm_internal_ok_elements, vm_uses_credentials,
+    VM_BROKER_DEFAULT_AUTH_FORMAT, VM_BROKER_DEFAULT_AUTH_HEADER,
+    validate_vm_network, vm_credential_entries, vm_credential_env,
+    vm_host_resolver_addresses, vm_internal_ok_elements, vm_uses_credentials,
 )
 import ipaddress
 import tomllib
@@ -1396,3 +1397,158 @@ class TestTheBrokerAddressIsExemptedFromTheInternalDrop(unittest.TestCase):
         # And purged with the rest, so dropping the last credential removes it.
         self.assertLess(up.index("purge_internal_exemptions(uid, name)"),
                         up.index("vm_broker_listen_address(uid)"))
+
+
+def _cred_net(policy, credential):
+    return {"egress": "filtered", "credential": credential, "policy": policy}
+
+
+class TestTheProvidersAuthConvention(unittest.TestCase):
+    """`auth_header`/`auth_format` on [[vm.network.credential]].
+
+    ADR 007 names the profile as `(upstream, credential, auth_header,
+    auth_format)` and lists "one profile per sandbox" as the limit this rung
+    removes. The first render emitted the first two and silently defaulted the
+    rest, so every generated instance ran `x-api-key: {secret}` -- and a
+    provider wanting `Authorization: Bearer` answered 401 on a request the
+    inspector had recorded as fully authorised and brokered. The hand-written
+    host-wide config could express it; the generated one could not, which made
+    the new shape a regression for a whole class of provider with no key in
+    workload.toml to fix it with.
+    """
+
+    def _render(self, credential, policy=None):
+        policy = policy or [{"host": "api.x.test", "credential": "k"}]
+        config = {"workload": {"name": "agent"},
+                  "vm": {"network": _cred_net(policy, credential)}}
+        self.assertEqual(
+            validate_vm_network(config["vm"]["network"]), [],
+            "the fixture itself does not validate")
+        return tomllib.loads(render_vm_broker_config(config, UID_MIN + 7))
+
+    def test_a_provider_that_wants_bearer_can_be_named(self):
+        doc = self._render([{"name": "k", "placeholder": "P", "env": "E",
+                             "auth_header": "Authorization",
+                             "auth_format": "Bearer {secret}"}])
+        host = doc["sandboxes"]["agent"]["hosts"]["api.x.test"]
+        self.assertEqual(host["auth_header"], "Authorization")
+        self.assertEqual(host["auth_format"], "Bearer {secret}")
+
+    def test_saying_nothing_emits_nothing_rather_than_the_default(self):
+        """The default belongs to the broker, in one place. Writing it out here
+        would make two copies, and the second one is the one that goes stale
+        after the first changes."""
+        doc = self._render([{"name": "k", "placeholder": "P", "env": "E"}])
+        host = doc["sandboxes"]["agent"]["hosts"]["api.x.test"]
+        self.assertNotIn("auth_header", host)
+        self.assertNotIn("auth_format", host)
+
+    def test_the_defaults_we_quote_are_the_brokers_own(self):
+        """Two copies of a default is exactly what the test above refuses, and
+        these two exist only to be named in an error message -- so they are
+        pinned against the source that applies them."""
+        source = (Path(__file__).resolve().parent.parent
+                  / "libexec" / "agent-broker").read_text()
+        self.assertIn(
+            f'cfg.setdefault("auth_header", "{VM_BROKER_DEFAULT_AUTH_HEADER}")',
+            source)
+        self.assertIn(
+            f'cfg.setdefault("auth_format", "{VM_BROKER_DEFAULT_AUTH_FORMAT}")',
+            source)
+
+    def test_the_broker_accepts_both_keys_where_they_are_written(self):
+        """Rendered into the HOST table, which is the only level that takes
+        them. A key at the wrong level is refused by the broker at startup,
+        which for a generated unit is a restart loop."""
+        source = (Path(__file__).resolve().parent.parent
+                  / "libexec" / "agent-broker").read_text()
+        block = source[source.index("HOST_KEYS = frozenset("):]
+        block = block[:block.index(")")]
+        self.assertIn("auth_header", block)
+        self.assertIn("auth_format", block)
+
+    def test_a_header_that_is_not_a_header_is_refused(self):
+        for bad in ("X-Key: oops", "X Key", "X-Key\nInjected", ""):
+            with self.subTest(header=bad):
+                errors = validate_vm_network(_cred_net(
+                    [{"host": "api.x.test", "credential": "k"}],
+                    [{"name": "k", "placeholder": "P", "env": "E",
+                      "auth_header": bad}]))
+                self.assertTrue(any("auth_header" in e for e in errors), bad)
+
+    def test_a_header_that_cannot_carry_a_credential_is_refused(self):
+        """Framing and hop-by-hop names. Each produces a request that goes
+        upstream with no material on it -- the credential is either overwritten
+        or stripped -- and a 401 whose cause is invisible from every layer
+        here."""
+        for bad in ("Content-Length", "host", "Connection",
+                    "Transfer-Encoding", "Proxy-Authorization"):
+            with self.subTest(header=bad):
+                errors = validate_vm_network(_cred_net(
+                    [{"host": "api.x.test", "credential": "k"}],
+                    [{"name": "k", "placeholder": "P", "env": "E",
+                      "auth_header": bad}]))
+                self.assertTrue(any("auth_header" in e for e in errors), bad)
+
+    def test_a_format_that_the_broker_would_exit_on_is_refused_here(self):
+        """The broker renders auth_format once at startup with str.format and
+        exits on a bad one. For a GENERATED unit that is a workload whose
+        broker will not start, so the same verdict is delivered at `validate`
+        where it names the key."""
+        for bad in ("Bearer {token}", "Bearer", "Bearer {secret} {secret}",
+                    "Bearer {"):
+            with self.subTest(fmt=bad):
+                errors = validate_vm_network(_cred_net(
+                    [{"host": "api.x.test", "credential": "k"}],
+                    [{"name": "k", "placeholder": "P", "env": "E",
+                      "auth_format": bad}]))
+                self.assertTrue(any("auth_format" in e for e in errors), bad)
+
+    def test_an_absent_key_stays_none_rather_than_becoming_the_default(self):
+        creds = vm_credential_entries(
+            {"credential": [{"name": "k", "placeholder": "P", "env": "E"}]})
+        self.assertIsNone(creds[0].auth_header)
+        self.assertIsNone(creds[0].auth_format)
+
+
+class TestOneTablePerHost(unittest.TestCase):
+    """Splitting one host's rules across policy entries must still render.
+
+    `/v1/*` for GET and `/v2/*` for POST, one credential, is the ordinary way
+    to write §3 and it validates -- the per-host credential rule only refuses
+    entries that DISAGREE about which credential. Rendered per entry, it
+    emitted `[sandboxes.agent.hosts."api.x.test"]` twice, which TOML refuses
+    outright: the broker exited at start and every brokered request 502'd, on a
+    workload whose config `validate` had just called clean.
+    """
+
+    def _config(self, policy):
+        return {"workload": {"name": "agent"},
+                "vm": {"network": _cred_net(
+                    policy,
+                    [{"name": "k", "placeholder": "P", "env": "E"}])}}
+
+    def test_two_entries_for_one_host_render_one_table(self):
+        policy = [{"host": "api.x.test", "credential": "k",
+                   "paths": ["/v1/*"], "methods": ["GET"]},
+                  {"host": "api.x.test", "credential": "k",
+                   "paths": ["/v2/*"], "methods": ["POST"]}]
+        config = self._config(policy)
+        self.assertEqual(validate_vm_network(config["vm"]["network"]), [],
+                         "the fixture is refused, so the render is untested")
+        text = render_vm_broker_config(config, UID_MIN + 7)
+        # The assertion is that it PARSES. A count of tables would pass against
+        # a render that emitted the second one under a mangled key.
+        doc = tomllib.loads(text)
+        self.assertEqual(list(doc["sandboxes"]["agent"]["hosts"]),
+                         ["api.x.test"])
+
+    def test_two_hosts_still_get_two_tables(self):
+        """The collapse must be on the host, not on the credential: two hosts
+        sharing one credential are two upstreams."""
+        policy = [{"host": "a.x.test", "credential": "k"},
+                  {"host": "b.x.test", "credential": "k"}]
+        doc = tomllib.loads(
+            render_vm_broker_config(self._config(policy), UID_MIN + 7))
+        self.assertEqual(sorted(doc["sandboxes"]["agent"]["hosts"]),
+                         ["a.x.test", "b.x.test"])
