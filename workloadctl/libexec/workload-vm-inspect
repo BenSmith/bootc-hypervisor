@@ -94,6 +94,7 @@ VM itself looks healthy. `down` is tolerant: its elements are legitimately
 absent whenever the start failed before installing them, and the stop must
 not block.
 """
+import ipaddress
 import json
 import os
 import pwd
@@ -112,6 +113,7 @@ from vm import (
     vm_internal_ok_delete_commands, vm_internal_ok_list_commands,
     vm_internal_ok_uid_elements,
     vm_inspect_status_path, vm_uses_inspect,
+    vm_broker_listen_address, vm_uses_credentials,
 )
 from vm_status import clear_status
 from workload_lib import workload_config_path
@@ -300,6 +302,27 @@ def up(name: str) -> int:
             addresses.extend(vm_internal_resolve(host))
         except ValueError as e:
             raise ValueError(internal_failure(name, host, e)) from None
+    # THE BROKER'S OWN ADDRESS IS AN INTERNAL DESTINATION, and without this
+    # element the brokered path cannot work at all. `vm_broker_listen_address`
+    # is 127.129.x.y, which is inside 127.0.0.0/8 and therefore inside
+    # wl_internal4 -- and the drop keyed on this workload's cgroup sits ABOVE
+    # the `oif lo accept`, so the inspector's dial to its own broker is dropped
+    # by the rule that exists to stop a guest reaching the LAN.
+    #
+    # It presents as a broker that is down: the connect times out, the listener
+    # counts `credential broker unreachable`, and the guest gets a 502 telling
+    # an operator to go and look at a unit that is running perfectly. Found by
+    # tests/manual/broker_rig.py on real guests -- the unit tests could not see
+    # it, because no unit test sends a packet.
+    #
+    # Armed only for a workload that HAS a broker, so a workload with no
+    # credentials gains no exemption; purged by uid with the rest, so dropping
+    # the last credential removes it. Port-less like every other element in
+    # this set (see the skeleton's comment): the address is this workload's
+    # alone, derived from its uid, and its own broker is the only thing bound
+    # there.
+    if vm_uses_credentials({"vm": {"network": net}}):
+        addresses.append(ipaddress.ip_address(vm_broker_listen_address(uid)))
     try:
         add_commands = vm_internal_ok_commands(uid, addresses, "add")
     except ValueError as e:

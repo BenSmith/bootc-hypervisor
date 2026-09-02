@@ -1937,6 +1937,77 @@ class TestCleartextPerRequest(unittest.TestCase):
         self.assertEqual({}, upstreams)
         del far
 
+    def test_a_brokered_request_does_not_get_the_origin_from_the_pool(self):
+        """The defect broker_rig.py found on real guests, at its own seam.
+
+        A terminated session seeds `upstreams` with the ORIGIN connection it
+        opened before the first request was read, keyed by the host. Keyed by
+        the host alone, a brokered request for that same host found that entry
+        and was handed the origin -- `dial` never ran, no credential was ever
+        attached, and the request reached the provider carrying whatever the
+        guest held. Nothing said so: the record had already been told which
+        credential was attached, and every layer downstream is identical.
+
+        Asserted on `_upstream_for` directly rather than through a session,
+        because the seeding and the lookup are the two halves that have to
+        disagree, and a session test that dialled its own origin would pass
+        with the two collapsed back together.
+        """
+        mod = _mod()
+        listener = mod.Listener([], io.StringIO(),
+                                policy=mod.Policy(tls="inspect",
+                                                  hosts=("a.example",)))
+        origin, far = self._pair()
+        upstreams = {"a.example": mod._Stream(origin)}
+        dialled = []
+
+        def dial(host):
+            near, _keep = self._pair()
+            dialled.append((host, near))
+            return mod._Stream(near)
+
+        up = listener._upstream_for(
+            "a.example", upstreams,
+            key=mod.BROKER_UPSTREAM_KEY + "a.example", dial=dial)
+        self.assertEqual([h for h, _ in dialled], ["a.example"],
+                         "the broker was never dialled")
+        self.assertIsNot(up.sock, origin,
+                         "the brokered request was handed the ORIGIN socket")
+        # And the origin entry is still there for anything that wants it: the
+        # fix separates the two slots, it does not evict one with the other.
+        self.assertIn("a.example", upstreams)
+        self.assertIn(mod.BROKER_UPSTREAM_KEY + "a.example", upstreams)
+        del far
+
+    def test_two_brokered_requests_share_one_broker_connection(self):
+        """The other direction: separating the slots must not turn reuse off
+        for the broker leg, or every request on a session redials it."""
+        mod = _mod()
+        listener = mod.Listener([], io.StringIO(),
+                                policy=mod.Policy(tls="inspect",
+                                                  hosts=("a.example",)))
+        upstreams = {}
+        dialled = []
+
+        def dial(host):
+            near, _keep = self._pair()
+            dialled.append(host)
+            return mod._Stream(near)
+
+        key = mod.BROKER_UPSTREAM_KEY + "a.example"
+        first = listener._upstream_for("a.example", upstreams, key=key,
+                                       dial=dial)
+        second = listener._upstream_for("a.example", upstreams, key=key,
+                                        dial=dial)
+        self.assertEqual(dialled, ["a.example"])
+        self.assertIs(first.sock, second.sock)
+
+    def test_the_brokered_slot_is_not_nameable_by_a_guest(self):
+        """The separation is only a separation while no host can spell it. A
+        NUL cannot appear in a hostname, which is why the prefix carries one."""
+        mod = _mod()
+        self.assertIn("\x00", mod.BROKER_UPSTREAM_KEY)
+
     def test_an_http_11_request_still_reuses_one_upstream(self):
         """The other direction of the same change: 1.1 requests carry
         `Connection: keep-alive` upstream and must still share one socket, or

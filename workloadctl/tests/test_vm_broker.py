@@ -30,8 +30,9 @@ from vm import (
     render_vm_broker_config, vm_broker_config_path, vm_broker_credential,
     vm_broker_hosts, vm_broker_listen_address, vm_broker_upstream_addresses,
     validate_vm_network, vm_credential_env, vm_host_resolver_addresses,
-    vm_uses_credentials,
+    vm_internal_ok_elements, vm_uses_credentials,
 )
+import ipaddress
 import tomllib
 
 
@@ -1346,3 +1347,52 @@ class TestTheRetiredMechanismLeavesNoSymbols(unittest.TestCase):
         self.assertNotIn("%{_unitdir}/agent-broker.service", spec)
         self.assertNotIn("systemd/agent-broker.service", spec)
         self.assertIn("libexec/agent-broker", spec)
+
+
+class TestTheBrokerAddressIsExemptedFromTheInternalDrop(unittest.TestCase):
+    """The second defect broker_rig.py found on real guests.
+
+    The broker listens on 127.129.x.y. That is inside 127.0.0.0/8, which is
+    inside `wl_internal4`, and the drop keyed on this workload's cgroup sits
+    ABOVE the skeleton's `oif lo accept` -- so the inspector's dial to its own
+    broker was dropped by the rule that exists to stop a GUEST reaching the
+    LAN. Nothing said so: the connect timed out, the listener counted
+    `credential broker unreachable`, and the guest got a 502 telling an
+    operator to go and look at a unit that was running perfectly.
+
+    Every unit test passed, because no unit test sends a packet. What can be
+    asserted here is the wiring and the premise underneath it, which is what
+    these two do.
+    """
+
+    def _up(self):
+        source = (Path(__file__).resolve().parent.parent
+                  / "libexec" / "workload-vm-inspect").read_text()
+        return source[source.index("def up("):source.index("def down(")]
+
+    def test_the_address_is_one_the_drop_would_match(self):
+        """The premise. If the broker's address were NOT in the internal set,
+        the exemption below would be dead code and this whole class would be
+        asserting a no-op -- so the range membership is asserted rather than
+        assumed."""
+        addr = ipaddress.ip_address(vm_broker_listen_address(UID_MIN + 7))
+        armed = vm_internal_ok_elements(UID_MIN + 7, [addr])
+        self.assertTrue(
+            any(entries for entries in armed.values()),
+            f"{addr} is not in wl_internal4, so the inspector's dial to it "
+            f"was never dropped and this exemption is unnecessary")
+
+    def test_the_arming_helper_adds_it_only_for_a_workload_that_has_one(self):
+        """A workload with no credentials must gain no exemption: the element
+        is a hole in the drop, and one opened for a workload with no broker
+        behind it is a hole with nothing on the other side."""
+        up = self._up()
+        self.assertIn("vm_uses_credentials", up)
+        self.assertIn("vm_broker_listen_address(uid)", up)
+        # Appended to the list the exemptions are built from, and BEFORE the
+        # commands are generated -- after them it would be armed by nothing.
+        self.assertLess(up.index("vm_broker_listen_address(uid)"),
+                        up.index('vm_internal_ok_commands(uid, addresses, "add")'))
+        # And purged with the rest, so dropping the last credential removes it.
+        self.assertLess(up.index("purge_internal_exemptions(uid, name)"),
+                        up.index("vm_broker_listen_address(uid)"))

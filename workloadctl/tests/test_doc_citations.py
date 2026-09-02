@@ -311,11 +311,6 @@ CODE_CITATION = re.compile(
 # retired name would be waved through with it.
 RETIRED = {
     "tests/test_vm_proxy.py",
-    # Deleted at rung 6 with the mechanism it dialled -- a host-wide broker at
-    # an advertised endpoint. The sentences that still name it say plainly that
-    # it is gone and that its replacement is unwritten, which is the condition
-    # this allowlist is for: a citation that is HISTORY, not a live pointer.
-    "tests/manual/broker_rig.py",
 }
 
 

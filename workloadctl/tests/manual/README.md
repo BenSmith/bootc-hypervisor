@@ -4,28 +4,102 @@ Checks that need a real KVM host and cannot run in the normal suites. Nothing
 here runs under `just test` or `just test-runtime`; each is invoked by hand on a
 host that has the workloadctl RPM installed.
 
-## broker_rig.py — REMOVED at rung 6, and being rewritten
+## broker_rig.py — does a guest get a key it never holds, and can two brokers tell each other's callers apart?
 
-The rig that was here booted four throwaway VM workloads and probed a host-wide
-credential broker at an advertised endpoint (192.0.2.1:8081) that every guest
-was told about. ADR 007 deleted that whole shape: each workload now gets its own
-broker instance bound to a uid-derived loopback address, dialled by that
-workload's inspector, and named to the guest not at all.
+Needs root, KVM and the workloadctl RPM installed. Boots **two** throwaway VM
+workloads, runs a stub provider on the host, and probes from inside each guest
+and from the host as each workload's own uid.
 
-Every one of the rig's 18 assertions was about the deleted mechanism, so it was
-removed with it rather than patched. Patching only the `workload.toml` it
-generates would have been worse than deleting it: `tests/test_manual_rig_configs.py`
-would have gone green over a rig that still dialled an address nothing answers,
-and the failure would have looked exactly like the thing under test — which is
-the specific decay that gate exists to catch.
+```bash
+sudo python3 tests/manual/broker_rig.py
+```
 
-The replacement is rung 6 T7 and keeps four claims on **two** workloads rather
-than four: a guest reaching a credential-backed host with a placeholder it holds
-and a key it does not; a guest whose `Host` the broker does not know being
-refused; a guest dialling `127.129.x.y` directly and reaching its own loopback
-rather than a broker; and two workloads getting different credentials from two
-instances. Only the last needs the second workload. The old rig is recoverable
-from git history if the rewrite wants its scaffolding.
+**This is a rewrite, not the rig that was here.** The old one probed a host-wide
+broker at an advertised endpoint (192.0.2.1:8081) that every guest was told
+about, reached through a uid-keyed nft redirect. ADR 007 deleted that whole
+shape, so all 18 of its assertions were about a mechanism that no longer exists
+and it was deleted with them. Patching only the `workload.toml` it generated
+would have been worse than deleting it: `tests/test_manual_rig_configs.py` would
+have gone green over a rig that still dialled an address nothing answers, and
+the failure would have looked exactly like the thing under test — the specific
+decay that gate exists to catch. The old rig is recoverable from git history if
+a future reader wants its scaffolding.
+
+**Four claims, on two workloads rather than four.** The old rig needed four
+because `broker = true`, `hosts` and the credential name were three independent
+config axes and both of its defects lived in their *combinations*. Three of
+those axes are gone. The arms now differ in exactly one line — which credential
+they name — so a difference in what comes back has one available explanation.
+
+1. A guest reaches a credential-backed host holding a placeholder and never the
+   key. Asserted from both ends: the stub reports which `Authorization` arrived,
+   and the guest is asked what its whole environment holds. Either half alone is
+   satisfied by a broker that attached nothing.
+2. A `Host` the broker does not know is refused.
+3. A guest dialling `127.129.x.y` directly reaches its own loopback and finds
+   nothing — which is the whole of "the guest is never told where the broker
+   is", given that the address is derivable by anyone who reads the source.
+4. Two workloads get different credentials from two instances. Only this one
+   needs the second workload.
+
+**Claim 2 is probed from the host as the workload's uid, not from the guest, and
+that is not a shortcut.** A guest cannot construct the request: the inspector
+dials the broker only for hosts the policy names with a credential, and
+validation refuses a wildcard on such an entry, so every `Host` that can reach a
+broker *through a guest* is one the generated config named. The refusal is real
+all the same — it is what stands between a compromised inspector and a key
+attached to a destination of its choosing — so it is probed where it can be
+reached from. Three controls make it mean what it says: the same dial with the
+`Host` the config *does* name must return the credential (or the 403 proves only
+that nothing was listening), the same dial as **root** must be refused *for its
+caller* (or the 403 is consistent with a broker that has stopped checking who is
+calling), and the same dial as the **other workload's** uid must be refused too
+— both instances are on the same host's loopback, so nothing but the uid check
+keeps one workload's caller out of the other's credential. Both refusals are
+403, so each assertion matches the broker's sentence rather than the status.
+
+**What the host-side scaffolding costs.** The broker's upstream is
+`https://<the Host>` with no override — deliberately, so a policy-matched path
+cannot be prefixed on the way out — so the provider has to answer at that name
+on 443. The rig writes one `/etc/hosts` line, binds `127.0.0.1:443`, and removes
+both at teardown. The stub's certificate is handed to each broker instance
+through `SSL_CERT_FILE` in a drop-in rather than installed into the host trust
+store, on `policy_rig.py`'s reasoning: the trust decision stays the broker's,
+made the way it always is, and the rig leaves no trust anchor behind on a
+machine it borrowed. Nothing about the path under test is weakened — the drop-in
+adds one environment variable and changes no directive.
+
+**Last green 2026-09-01: 35/35, on a KVM host under enforcing, against the
+installed RPM.** It found two defects on that first run, both of which made the
+brokered path inert for a real guest and neither of which any unit test could
+see:
+
+- `_serve_terminated` seeds the upstream pool with the ORIGIN connection it
+  opened before the first request was read, keyed by the host. A brokered
+  request for that host found the entry, was handed the origin, and `dial` was
+  never called — so the request reached the provider carrying the guest's own
+  placeholder while the record said a credential had been attached. Fixed by
+  giving the broker leg a pool slot of its own.
+- The broker's address is `127.129.x.y`, which is inside `wl_internal4`, and
+  that drop is keyed on the workload's cgroup and sits ABOVE the skeleton's
+  `oif lo accept`. So once the broker WAS dialled, the packet was dropped by
+  the rule that exists to stop a guest reaching the LAN — presenting exactly as
+  a broker that is down. Fixed by arming the broker's own address as an
+  internal exemption for workloads that have one.
+
+The second was predicted in the listener's own refusal text ("a missing SELinux
+rule on this dial presents exactly like a broker that is down") and arrived
+through nftables instead.
+
+**It also reads two things no probe can show.** The inspector's own record, for
+the rung 6 seam: `upstream` is honestly the broker's loopback address on a
+brokered request and `credential` names the material that rode along, which is
+what makes a loopback upstream legible rather than alarming. And the audit log,
+because a denial on the inspector's *new* access — the dial to the broker's port
+— is silent by construction: the connect fails, the listener counts a dead
+broker, and the guest gets a 502 naming the broker, which is exactly what a
+genuinely dead broker produces. A green run of the four claims does not
+establish that the grant is present, only that nothing needed it yet.
 
 ## self_dial_rig.py — does the wrong-port counter count, and does `diagnose` say so?
 

@@ -193,6 +193,13 @@ INTERIM_MAX = 32
 # connection and far below anything that threatens the fd table.
 UPSTREAMS_MAX = 8
 
+# The prefix that gives a host's BROKER connection a pool slot of its own, so
+# it cannot collide with the ORIGIN connection to the same host. A NUL is used
+# because it cannot occur in a hostname -- validation refuses far more than
+# that -- so no host, however chosen by a guest, can name the brokered slot.
+# See _upstream_for's `key` argument for what went wrong without it.
+BROKER_UPSTREAM_KEY = "broker\x00"
+
 # The ceiling on how much is read looking for a complete ClientHello, in bytes.
 # A real one is a few hundred bytes; post-quantum key shares push it over a
 # single TCP segment but nowhere near this. The bound exists because the read
@@ -3800,6 +3807,17 @@ class Listener:
         try:
             up = self._upstream_for(
                 req.host, upstreams, reusable=not transient,
+                # A KEY OF ITS OWN FOR THE BROKER LEG, and this is not tidiness.
+                # `_serve_terminated` seeds the pool with the ORIGIN connection
+                # it opened before the request was read -- keyed by the host --
+                # so a brokered request found that entry, was handed the origin,
+                # and `dial` was never called. The credential was recorded as
+                # attached and was not: the request reached the provider
+                # carrying whatever the guest held, which for a real client is
+                # the placeholder. Found by tests/manual/broker_rig.py on real
+                # guests; every unit test passed, because none of them seeds the
+                # pool the way a terminated session does.
+                key=BROKER_UPSTREAM_KEY + req.host if credential else req.host,
                 dial=self._dial_broker if credential
                 else (self._dial_upstream_tls if pinned_host is not None
                       else self._dial_upstream_cleartext))
@@ -3963,7 +3981,8 @@ class Listener:
                 except OSError:
                     pass
 
-    def _upstream_for(self, host, upstreams, reusable=True, dial=None):
+    def _upstream_for(self, host, upstreams, reusable=True, dial=None,
+                      key=None):
         """The connection to an authorised name, opened once and reused.
 
         `dial` is what OPENS one, and it is the whole of the difference between
@@ -3989,8 +4008,18 @@ class Listener:
         `reusable=False` opts one exchange out of the map entirely -- see the
         branch below for which requests do that and why. The stream is still
         returned; it is simply the caller's to close.
+
+        `key` SEPARATES THE POOL SLOT FROM THE NAME DIALLED, and it exists
+        because those stopped being the same thing when the broker leg arrived:
+        two connections for one host now go to two different places, and the
+        origin one is already in this map before the first request is read. A
+        pool keyed by the name alone hands a brokered request the origin socket
+        and never calls `dial` -- silently, because everything downstream is
+        identical and the record has already been told a credential is
+        attached. Defaults to the host, so every other caller is unchanged.
         """
-        up = upstreams.pop(host, None)
+        slot = key or host
+        up = upstreams.pop(slot, None)
         if up is None:
             up = (dial or self._dial_upstream_cleartext)(host)
         if not reusable:
@@ -4005,10 +4034,10 @@ class Listener:
             # same name dies as `relay failed` rather than being redialled.
             # The caller closes it after the response.
             return up
-        upstreams[host] = up
+        upstreams[slot] = up
         while len(upstreams) > UPSTREAMS_MAX:
             # The oldest entry, and never the one just returned: the dict holds
-            # at least two here, and `host` is the last key inserted.
+            # at least two here, and `slot` is the last key inserted.
             oldest = next(iter(upstreams))
             try:
                 upstreams.pop(oldest).sock.close()

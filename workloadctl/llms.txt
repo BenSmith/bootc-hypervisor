@@ -515,13 +515,18 @@ CA goes into the guest and nothing breaks certificate pinning.
   protection: one sandbox opening 32 sockets and sending nothing denied the
   broker to every other sandbox, which is measured in
   `tests/test_broker_request.py`.
-- **Proven end to end only by hand, and NOT proven for the current shape.** The
-  rig that proved the host-wide broker booted four real guests against it and
-  was last green 2026-08-14 (18/18, against the installed RPM). Rung 6 replaced
-  that broker with one instance per workload and deleted the rig with the
-  mechanism it dialled; the replacement is not written. Unit gates cover the
-  inspector's branch, the generated unit and the rendered config — nothing
-  covers a real guest reaching a real broker. See
+- **Proven end to end only by hand, and the two defects that proved it matter.**
+  The rig that proved the host-wide broker was deleted with the mechanism it
+  dialled; its replacement — two workloads, four claims, three controls on the
+  refusal — was 35/35 on a KVM host under enforcing on 2026-09-01, against the
+  installed RPM. It found two defects the whole unit suite passed over, and
+  each on its own made the brokered path inert for a real guest: a terminated
+  session seeds the upstream pool with the ORIGIN connection keyed by host, so
+  a brokered request got that socket and `_dial_broker` never ran (the record
+  still said a credential was attached); and 127.129.x.y is inside
+  `wl_internal4`, whose cgroup-keyed drop sits above the skeleton's `oif lo
+  accept`, so the dial to the broker was dropped and presented as a broker that
+  was down. Both are now fixed and gated. See
   `workloadctl/tests/manual/README.md`.
 
 ### Packet capture
