@@ -94,30 +94,64 @@ actually attributes the output.
 ## VM workloads
 
 A `[vm]` section — mutually exclusive with `[container]` — runs the workload as
-raw QEMU/KVM: UEFI/OVMF, split `system.qcow2`/`data.qcow2` with generational
-rollback, virtiofs volumes, a cloud-init seed and a per-workload SSH key.
-`update` rebuilds the system disk and leaves data alone; `rollback` restores the
-previous generation.
+raw QEMU/KVM: UEFI/OVMF, a split `system.qcow2`/`data.qcow2`, a cloud-init seed
+and a per-workload SSH key. It gets the same dedicated user, the same generated
+units and the same commands as a container workload does.
 
-**Networking is passt, not a bridge.** passt terminates the guest's stack in
-userspace and re-originates its traffic as host sockets owned by `_wl-<name>` —
-which is what makes the workload uid an unforgeable selector for egress policy.
-Three consequences catch people out:
+A VM is a first-class workload, and none of what it gets depends on how it is
+networked:
+
+| | |
+|---|---|
+| **image** | a cloud image by URL and checksum, a `local_image`, or a bootc `image` reference |
+| **disks** | `update` rebuilds `system.qcow2` and leaves the data disk alone, keeping `rollback_keep` older generations; `lifecycle = "pet"` never rotates the system disk at all |
+| **shares** | virtiofs `volumes`, every guest id squashed to the workload user on the host |
+| **size** | `vcpus`, `memory`, a virtio-balloon so the host can reclaim idle guest memory, and a `restart` policy |
+| **reaching it** | `exec`, `shell` and `cp` over the per-workload SSH key; `[vm.network].ports` to publish a service; `incant` for the QEMU monitor |
+| **operating it** | `backup` and `restore`, `logs`, `stats`, `health`, `validate`, `diagnose`, `drift`, and Prometheus metrics |
+
+### Networking
+
+**passt, not a bridge.** passt terminates the guest's stack in userspace and
+re-originates its traffic as host sockets owned by `_wl-<name>` — which is what
+makes the workload uid an unforgeable selector for egress policy. Two
+consequences catch people out:
 
 - The guest has **no LAN identity of its own**; it is assigned the host's
   address. Inbound needs an explicit `[vm.network].ports`.
 - `exec` and `shell` reach it on a uid-derived management address that is never
   routable and never configurable.
-- `[vm.network].bridge` is the escape hatch for a VM that genuinely needs a LAN
-  address. The operator provisions that bridge; workloadctl does not.
+
+### Filtered, open, and bridged
+
+Three stances, and they are peers — not a default and two ways of falling short
+of it:
+
+- **`egress = "filtered"`**, the default. The workload uid joins the
+  `wl_filtered` nftables set, and everything it originates is dropped but what
+  policy names. Detailed below. A filtered VM that names no destination at all
+  is a validation error rather than a VM that boots and can reach nothing.
+- **`egress = "open"`.** No filtering: the uid never joins the set, and the drop
+  rule, which is set-guarded, never sees this VM. It is not a filtered VM with
+  the rules taken out — it keeps its own user, its own management address, its
+  published ports, its `outbound_if` pin and every disk and lifecycle guarantee
+  above. It is isolated from the host and from every other workload exactly as
+  much as before; it simply is not egress-policed. Its DNS goes to the host's
+  resolver rather than to a synthesising responder.
+- **`[vm.network].bridge = "<iface>"`.** A real LAN identity: its own address,
+  reachable by other hosts. This is the supported answer for a VM that has to
+  be addressable — one serving TLS on its own name cannot do that under passt.
+  Such a VM is unfiltered by construction, since its traffic never becomes a
+  host socket for `meta skuid` to match, and `exec` reaches it at its own
+  address on port 22 rather than at a management address. You provision the
+  bridge; workloadctl does not.
 
 ### Egress filtering
 
-**A VM is filtered by default** (`egress = "filtered"`; the alternative is
-`"open"`). A filtered guest's DNS and its 80/443 traffic are redirected to a
-per-workload egress inspector, and everything else is denied. The guest is not
-configured to cooperate and is not asked to — there are no proxy variables to
-unset, because the redirect does not consult the guest.
+A filtered guest's DNS and its 80/443 traffic are redirected to a per-workload
+egress inspector, and everything else is denied. The guest is not configured to
+cooperate and is not asked to — there are no proxy variables to unset, because
+the redirect does not consult the guest.
 
 Policy is declared per host, and TLS is terminated for inspection by default
 (`tls = "inspect"`, or `"splice"` to allow a host through on its name alone):
