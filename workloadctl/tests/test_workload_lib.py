@@ -850,10 +850,10 @@ class TestValidateVmConfig(unittest.TestCase):
         self.assertEqual(validate_workload_config(self._base()), [])
 
     def test_shipped_example_validates(self):
-        # Mirrors docs/examples/example-vm-fedora.toml so a regression in the
+        # Mirrors docs/examples/example-fedora-vm.toml so a regression in the
         # validator that rejects the example will fail loudly here.
         cfg = {
-            "workload": {"name": "fedora-vm"},
+            "workload": {"name": "example-fedora-vm"},
             "vm": {
                 "vcpus": 2,
                 "memory": "2048M",

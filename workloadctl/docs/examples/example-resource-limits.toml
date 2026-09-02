@@ -1,0 +1,36 @@
+# Example workload for verifying resource constraints
+# This config demonstrates the resource limit options
+
+[workload]
+name = "example-resource-limits"
+
+[container]
+image = "docker.io/library/alpine:latest"
+command = ["sleep", "infinity"]
+
+[resources]
+# CPU limits - Allow up to 1 full CPU core
+cpu_quota = "100%"
+cpu_weight = 200  # Higher priority when competing
+
+# Memory limits - Max 512MB, start throttling at 384MB.
+# memory_swap_max is not optional if you mean the cap: without it the overflow
+# lands in swap (zram, on a host that has it) instead of being refused.
+memory_max = "512M"
+memory_high = "384M"
+memory_swap_max = "0"  # Disable swap
+
+# I/O limits
+io_weight = 150  # Slightly higher I/O priority
+
+# Process limits - Prevent fork bombs
+tasks_max = 50
+
+# Timeout overrides
+timeout_start_sec = 60
+timeout_stop_sec = 15
+
+# Escape hatch: systemd directives with no first-class key here. Passed through
+# verbatim, so a typo fails the unit rather than this file. TOML inline tables
+# are single-line — there is no multi-line form of this.
+# custom_directives = { LimitNOFILE = "1024", Nice = "5" }

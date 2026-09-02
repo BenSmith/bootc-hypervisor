@@ -2,10 +2,12 @@
 # This workload demonstrates that extra_groups are passed through to the container
 #
 # To test:
-# 1. Enable this workload: sudo workloadctl enable example-groups-test
-# 2. systemctl daemon-reload
-# 3. Check user groups: id _wl-groups-test
-# 4. Check container: podman exec workload-groups-test id
+# 1. Install the bundle: sudo cp -r . /etc/workloads.d/example-groups-test/
+# 2. Enable it: sudo workloadctl enable example-groups-test
+# 3. Check the workload user's groups on the host: id _wl-example-groups-test
+# 4. Check inside the container: sudo workloadctl exec example-groups-test id
+#    (`podman exec` will not reach it — each workload has its own rootless
+#     podman under _wl-<name>, not root's)
 # 5. Should see the workload user's groups plus video, render, and input groups
 
 [workload]
@@ -17,7 +19,9 @@ image = "public.ecr.aws/docker/library/alpine:latest"
 command = ["sleep", "infinity"]  # Keep container running
 
 [security]
-# Add user to system groups - these should be visible in the container
+# Add user to system groups - these should be visible in the container.
+# Each group's GID is also mapped into the user namespace (--gidmap +GID:@GID:1)
+# so the container sees the group, not just the host user.
 extra_groups = ["video", "render", "input"]
 
 [network]

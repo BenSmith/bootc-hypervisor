@@ -1058,7 +1058,7 @@ data_disk_size = "50G"
 user = "fedora"
 ```
 
-See [`docs/examples/example-vm-fedora.toml`](examples/example-vm-fedora.toml) for a ready-to-use example, and [`docs/schema-reference.toml`](schema-reference.toml) for all `[vm]` options.
+See [`docs/examples/example-fedora-vm.toml`](examples/example-fedora-vm.toml) for a ready-to-use example, and [`docs/schema-reference.toml`](schema-reference.toml) for all `[vm]` options.
 
 ### Image Sources
 
