@@ -74,11 +74,24 @@ def _names(text: str) -> tuple[set[str], set[str]]:
     return keys, tables
 
 
+# Beyond docs/: the overview files carry copyable blocks too, and the repo-root
+# README's block is one that had rotted (a flat /etc/workloads.d/<name>.toml,
+# a path nothing globs). Named rather than globbed -- these are the three
+# hand-written overviews, not every README in the tree.
+EXTRA_DOCS = (ROOT / "README.md", ROOT / "llms.txt", ROOT.parent / "README.md")
+
+
 def _tracked_docs() -> list[pathlib.Path]:
     out = subprocess.run(
         ["git", "ls-files", "docs"], cwd=ROOT, capture_output=True, text=True,
     )
-    return [ROOT / p for p in out.stdout.split() if p.endswith(".md")]
+    docs = [ROOT / p for p in out.stdout.split() if p.endswith(".md")]
+    return docs + [p for p in EXTRA_DOCS if p.exists()]
+
+
+def _rel(path: pathlib.Path) -> str:
+    """Repo-relative, since EXTRA_DOCS reaches one level above ROOT."""
+    return path.relative_to(ROOT.parent).as_posix()
 
 
 def _blocks():
@@ -106,7 +119,7 @@ class TestDocTomlBlocks(unittest.TestCase):
 
     def test_blocks_parse(self):
         for path, line, text in _blocks():
-            rel = path.relative_to(ROOT).as_posix()
+            rel = _rel(path)
             if any(marker in text for marker in WONT_PARSE):
                 continue
             with self.subTest(block=f"{rel}:{line}"):
@@ -117,7 +130,7 @@ class TestDocTomlBlocks(unittest.TestCase):
 
     def test_whole_configs_validate(self):
         for path, line, text in _blocks():
-            rel = path.relative_to(ROOT).as_posix()
+            rel = _rel(path)
             if any(marker in text for marker in WONT_PARSE):
                 continue
             config = tomllib.loads(text)
@@ -131,7 +144,7 @@ class TestDocTomlBlocks(unittest.TestCase):
 
     def test_every_name_is_in_the_schema_reference(self):
         for path, line, text in _blocks():
-            rel = path.relative_to(ROOT).as_posix()
+            rel = _rel(path)
             keys, tables = _names(text)
             with self.subTest(block=f"{rel}:{line}"):
                 self.assertEqual(

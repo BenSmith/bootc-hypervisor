@@ -25,8 +25,9 @@ sudo systemctl reboot
 
 **Install from ISO:**
 ```bash
-just build-iso-base
-sudo dd if=output/bootiso/install.iso of=/dev/sdX bs=4M status=progress
+just build-iso-base    # prints the finished path when it's done
+sudo dd if=/var/tmp/hypervisor-build/output/hypervisor-bootc-<tag>.iso \
+  of=/dev/sdX bs=4M status=progress
 # Boot from USB and install
 ```
 
@@ -38,8 +39,12 @@ sudo workloadctl create webserver \
   --enable
 
 workloadctl status webserver
-curl http://localhost:8080
+curl http://<host-lan-ip>:8080   # not localhost — see below
 ```
+
+Ports published by the default `pasta` network answer on the host's LAN address,
+not on the host's own loopback: `curl localhost:8080` from the host itself gets
+connection refused while the workload is perfectly healthy.
 
 ## Images
 
@@ -128,7 +133,7 @@ sudo workloadctl secret list
 Or write a TOML config directly:
 
 ```toml
-# /etc/workloads.d/webserver.toml
+# /etc/workloads.d/webserver/workload.toml
 [workload]
 name = "webserver"
 
@@ -151,10 +156,14 @@ sudo bootc switch ghcr.io/bensmith/hypervisor-bootc:latest
 sudo systemctl reboot
 ```
 
-**From installer ISO** (build locally or download from releases):
+**From installer ISO** (build locally or download from releases). Builds land under
+`$BUILD_DIR` (default `/var/tmp/hypervisor-build`); write the relabelled
+`<image>-<tag>.iso` the recipe names at the end, not the `bootiso/install.iso`
+intermediate it relabels from — the volume label is what anaconda boots by:
 ```bash
 just build-iso-base              # Or: just build-iso-nvidia-rpmfusion
-sudo dd if=output/bootiso/install.iso of=/dev/sdX bs=4M status=progress
+sudo dd if=/var/tmp/hypervisor-build/output/hypervisor-bootc-<tag>.iso \
+  of=/dev/sdX bs=4M status=progress
 ```
 
 ### Update

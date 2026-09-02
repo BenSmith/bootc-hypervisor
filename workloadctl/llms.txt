@@ -62,7 +62,7 @@ workload-{name}.service → individual containers start via podman run
 - Username: `_wl-{name}` (e.g., `_wl-webserver`)
 - UID range: 10000-52948 (42,949 max workloads)
 - Subuid formula: `600100000 + (uid_offset * 65536)`, count=65536, where `uid_offset = uid - UID_MIN`. The base clears Fedora `useradd`'s own subid window (`SUB_UID_MIN=524288`), which a lower base overlaps at low UIDs. Authoritative in `workload_lib.derived_subid_range()`; the ranges are written by `workload_lib.append_subid_entries()`. `workload-ensure-user` grandfathers an existing entry rather than correcting it (shifting a mapping under a running container corrupts its namespace), so drift off the formula is permanent and silent — `diagnose`/`doctor`'s `subid_derived` and `subid_overlap` checks are the only thing that reports it
-- Home directory: `/var/lib/workloads/{name}`
+- Home directory: `/var/lib/workloads/{name}/state` — the *state* subtree, not the workload root (the root also holds `data/` and `operations.log`, neither of which the workload user owns)
 - Shell: `/usr/sbin/nologin`
 
 Two uid-derived address planes matter and are never configurable: `127.128.0.0 + uid_offset` is the VM management address `exec`/`shell` reach a guest on (port 2222), and `127.129.0.0 + uid_offset` is where that workload's credential broker binds. Neither is routable and neither is advertised to a guest.
@@ -387,7 +387,7 @@ workloadctl incant webproxy -- volume ls
 # by hand:
 sudo -n -u _wl-webproxy \
   -E XDG_RUNTIME_DIR=/run/user/10003 \
-  -E HOME=/var/lib/workloads/webproxy \
+  -E HOME=/var/lib/workloads/webproxy/state \
   -E DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/10003/bus \
   podman volume ls
 ```
