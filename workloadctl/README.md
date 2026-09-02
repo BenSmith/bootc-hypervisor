@@ -222,7 +222,52 @@ directories and SELinux modules)
 `incant` is the deliberate escape hatch: it sends a raw command to a
 workload's control plane as the owning identity — `podman` for a container, QMP
 for a VM — with the fiddly invocation supplied. It bypasses the declarative
-model, which is the point and also the warning.
+model, which is the point and also the warning. It reaches the runtime's
+*manager*, not the workload interior; for the interior use `exec` / `shell`.
+
+For a container it is `podman`, run as `_wl-<name>` with that user's rootless
+environment:
+
+```bash
+workloadctl incant webproxy -- volume ls
+```
+
+```bash
+# the same thing by hand
+sudo -n -u _wl-webproxy \
+  -E XDG_RUNTIME_DIR=/run/user/10003 \
+  -E HOME=/var/lib/workloads/webproxy \
+  -E DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/10003/bus \
+  podman volume ls
+```
+
+The UID is allocated at create time, so it has to be looked up
+(`workloadctl info webproxy`). Dropping the bus address is the interesting
+mistake: read-only calls like `volume ls` still work, so it surfaces much later
+on the first command that migrates a cgroup — `podman exec` failing with
+`Permission denied` writing `cgroup.procs`.
+
+For a VM it is one command on the QEMU monitor. The first token is the QMP
+command; any further `key=value` tokens become its arguments, and the JSON
+reply is printed:
+
+```bash
+workloadctl incant git -- query-status
+workloadctl incant git -- system_powerdown
+```
+
+```bash
+# the same thing by hand
+sudo sh -c 'printf "%s\n%s\n" \
+    "{\"execute\":\"qmp_capabilities\"}" \
+    "{\"execute\":\"query-status\"}" \
+  | socat -t2 - UNIX-CONNECT:/run/workload-vm/git/qmp.sock'
+```
+
+QMP opens with a greeting and refuses every command until it is answered with
+`qmp_capabilities`, so the handshake is not optional; the socket lives in a
+`0750` directory owned by `_wl-git`; and what comes back is a stream of JSON
+objects to match up yourself.
 
 `workloadctl <command> --help` for the full surface; most read commands take
 `--json`.
