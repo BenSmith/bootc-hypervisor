@@ -1,10 +1,7 @@
 # ADR 005: `/var` state records the deployment that provisioned it
 
-**Status:** **Implemented** 2026-07-29 (code review 2026-07-26 follow-up, Q1 Gap 1).
-`lib/deployment.py` plus a `provenance.json` marker written by
-`workload-ensure-user` and read by `cleanup`.
-
-**Date:** 2026-07-29.
+**Status:** Implemented. `lib/deployment.py` plus a `provenance.json` marker
+written by `workload-ensure-user` and read by `cleanup`.
 
 ## Context
 
@@ -24,7 +21,7 @@ identity away while the state stays behind.
 
 `cleanup`'s definition of an orphan — "state whose workload has no config at all"
 — is then satisfied by state that is not orphaned, merely invisible from where you
-happen to have booted. Observed on a GPU hypervisor host 2026-07-28: two workloads present on
+happen to have booted. Seen on a live hypervisor host: two workloads present on
 the booted deployment and absent from the rollback target, their `/var` trees
 owned by UIDs that would not resolve after a rollback. `cleanup --apply` on the
 older deployment would have swept live data, and the operator's mental model —
@@ -90,8 +87,7 @@ rather than left to be rediscovered:
 
 The id is therefore the resolved deployment directory basename,
 `<commit-checksum>.<serial>`: `ostree=/ostree/boot.1/default/<BOOT-csum>/0` →
-`../../../deploy/default/deploy/<DEPLOY-csum>.0`. Verified on a deployed hypervisor host
-2026-07-29.
+`../../../deploy/default/deploy/<DEPLOY-csum>.0`.
 
 Existence is checked by globbing `*/deploy/<id>` rather than hardcoding the
 `default` stateroot. The stateroot is a real variable, and hardcoding it is

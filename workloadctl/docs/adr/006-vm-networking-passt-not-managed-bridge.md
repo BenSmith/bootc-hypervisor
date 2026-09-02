@@ -1,39 +1,36 @@
 # ADR 006: VM networking uses passt, not a shared managed bridge
 
-**Status:** **Implemented.** All five steps of the implementation sequence. Supersedes ADR 002.
+**Status:** Implemented. Supersedes
+[ADR 002](002-vm-bridge-host-level-network-config.md).
 
-- Step 1 (2026-08-09): the passt netdev, the schema, and the SELinux label work.
-- Step 2 (2026-08-10): the nftables skeleton and the `egress`/`allow` schema.
-- Step 3 (2026-08-10): QEMU confined as `svirt_t`, and the virtiofsd domain.
-- Step 4 (2026-08-10): the per-workload proxy, the `hosts` schema key, and its domain. **The proxy was retired on 2026-08-25** and replaced by a transparent, uid-keyed redirect into a per-workload egress inspector — see [ADR 008](008-transparent-egress-inspection.md). `hosts` and everything this ADR says about *why* hostname policy is uid-keyed survive it; the mechanism that reads the name does not.
-- Step 5 (2026-08-11): `workloadctl pcap`, both vantages, and the timestamp correction.
-
-**Date:** 2026-08-09.
+The per-workload tinyproxy this decision originally added for hostname policy has
+since been replaced by a transparent, uid-keyed egress inspector — see
+[ADR 008](008-transparent-egress-inspection.md). The network model below is
+unchanged by that: the inspector rests on exactly the property this ADR chose,
+that the workload uid is an unforgeable selector.
 
 ## Context
 
-VM workloads attach to `_workload-br`, a single host-global NAT bridge
-provisioned by `workload-bridge.service` and shared by every VM that does not
-name its own. ADR 002 resolved a last-write-wins hazard in that unit by lifting
-subnet and DNS to host-level configuration. That fix was correct for the
-topology it was given, but the topology itself is the problem:
+VM workloads attached to `_workload-br`, a single host-global NAT bridge shared by
+every VM that did not name its own. ADR 002 resolved a last-write-wins hazard in
+that unit, but the topology itself was the problem:
 
-- **Every VM shares one L2 segment.** VM-to-VM isolation depends on rules, not
-  structure — there is a segment to spoof onto and an ARP cache to poison.
+- **Every VM shares one L2 segment.** VM-to-VM isolation depends on rules rather
+  than structure — there is a segment to spoof onto and an ARP cache to poison.
 - **There is no per-VM network identity to key policy on.** Guest-chosen
-  addresses are forgeable by definition, so any egress policy would need L2
-  anti-spoofing to mean anything, and would need address allocation to have
-  something to write rules about.
+  addresses are forgeable by definition, so egress policy would need L2
+  anti-spoofing to mean anything, and address allocation to have something to
+  write rules about.
 - **The data path needs host privilege:** a host-global
   `sysctl net.ipv4.ip_forward=1`, a setuid-root `qemu-bridge-helper` reached
-  through `/etc/qemu/bridge.conf`, an `ip workload_nat` table, and a firewalld
-  zone — all of which sit oddly against the rootless-podman posture the rest of
-  the project holds to.
-- **A shared, refcount-persistent resource resists per-VM configuration**, the
-  finding ADR 002 already recorded.
+  through `/etc/qemu/bridge.conf`, an `ip workload_nat` table and a firewalld
+  zone — all of which sit oddly against the rootless posture the rest of the
+  project holds to.
+- **A shared, refcount-persistent resource resists per-VM configuration**, which
+  is ADR 002's finding.
 
-Container workloads have none of these problems, because pasta gives each one
-its own re-originated network identity. The same backend is available to VMs.
+Container workloads have none of these problems, because pasta gives each one its
+own re-originated network identity. The same backend is available to VMs.
 
 ## Decision
 
@@ -42,12 +39,10 @@ removed.**
 
 passt terminates the guest's network stack in userspace and re-originates its
 traffic as ordinary host sockets. Those sockets are owned by the workload's
-existing dedicated system user (`_wl-<name>`, UID 10000+), so **the workload
-uid becomes the network identity** — unforgeable by the guest, unique per
-workload without any allocation step, and directly matchable by nftables.
-
-Per-VM egress policy is therefore a host output chain matching `meta skuid`.
-No address allocation, no L2 anti-spoofing, no shared bridge to secure.
+existing dedicated system user, so **the workload uid becomes the network
+identity** — unforgeable by the guest, unique per workload with no allocation
+step, and directly matchable by nftables. Per-VM egress policy is therefore a
+host output chain matching `meta skuid`.
 
 Three values derive from the uid with no registry:
 
@@ -60,577 +55,280 @@ Three values derive from the uid with no registry:
 `UID_MIN..UID_MAX` is 10000–52948 — 42,949 values, inside both `127.128.0.0/9`
 and the 16-bit nflog group space.
 
-**Both bases exist to miss a convention, and the second was added late.** The
-`127.128.0.0` base avoids `127.0.1.1`, which Debian conventionally places in
-`/etc/hosts`. The nflog group originally had no base, which put the *first*
-workload allocated on any host on group 0 — iptables' `--nflog-group` default
-and what stock ulogd configurations bind. That is not a crash: it silently
-merges two streams in both directions, putting a site's logged packets into
-that workload's capture and the workload's packets into the site's log. Base
-1000 clears the small numbers convention uses and leaves 21,587 groups spare.
+**Both bases exist to miss a convention.** `127.128.0.0` clears `127.0.1.1`,
+which Debian conventionally places in `/etc/hosts`, and everything else customary
+in `127.0.0.0/8` — systemd-resolved's `.53`/`.54`, Istio's `.6`, the DNSBL
+`.2`/`.3` — which clusters at the bottom of the /8 because RFC 6890 registers it
+as one undivided block with nothing reserved inside it. The range spans addresses
+that *look* like network and broadcast addresses (`127.128.0.0`,
+`127.128.0.255`); `lo` carries `127.0.0.1/8`, so they are ordinary hosts, and
+this is asserted by binding and completing a round trip rather than by string
+comparison. The nflog group base was added later and matters as much: with no
+base, the first workload on a host lands on group 0, the netfilter default that
+stock ulogd configurations bind — not a crash but a silent two-way merge, putting
+a site's logged packets into that workload's capture and vice versa.
 
-Everything customary in `127.0.0.0/8` sits below the range — `127.0.0.1`,
-Debian's `127.0.1.1`, systemd-resolved's `127.0.0.53`/`.54`, Istio's
-`127.0.0.6`, the DNSBL `127.0.0.2`/`.3` — because RFC 6890 registers the /8 as
-one undivided Loopback block, so there is nothing *reserved* to hit and the
-conventions cluster at the bottom where the addresses are memorable. The range
-also spans addresses that look like network and broadcast addresses
-(`127.128.0.0` for the first workload, `127.128.0.255` for the 256th), and they
-are ordinary hosts: `lo` carries `127.0.0.1/8`, so the only special addresses of
-that prefix are `127.0.0.0` and `127.255.255.255`, neither of which is in range.
-Verified by binding and completing a TCP round trip on both, since every unit
-test until now asserted only the string.
-
-The per-VM schema gains `[vm.network]` with `ports`, `egress`
-(`"filtered"` default / `"open"`), `allow`, `hosts`, `outbound_if`, and
-`resolver` (`"host"` default / `"none"`). `allow` is address policy; `hosts`
-is hostname policy, served by the per-workload proxy step 4 added — since
-retired for a transparent inspector, ADR 008.
-`[vm.network].bridge` is retained as the unfiltered escape hatch: a VM that
-names an operator-provided bridge attaches directly, takes a real LAN
-identity, and is not filtered — by design.
+The per-VM schema gains `[vm.network]` with `ports`, `egress` (`"filtered"`
+default / `"open"`), `allow`, `hosts`, `outbound_if` and `resolver`. `allow` is
+address policy; `hosts` is hostname policy, owned by the egress inspector.
+`[vm.network].bridge` is retained as the unfiltered escape hatch: a VM naming an
+operator-provided bridge attaches directly, takes a real LAN identity, and is not
+filtered — by design.
 
 ## Rationale
 
-**The uid is the whole argument.** Everything else follows from having a
-network identity the guest cannot influence. This was verified rather than
-assumed: with two concurrent VMs, one `meta skuid` rule blocked one and left
-the other untouched.
+**The uid is the whole argument.** Everything else follows from a network
+identity the guest cannot influence. Verified rather than assumed: with two
+concurrent VMs, one `meta skuid` rule blocked one and left the other untouched.
 
-**Load-bearing precondition, from passt's source:** passt keeps its inherited
-uid *only because it is not started as root*. Started as root it drops to
-`nobody`, collapsing every workload into a single uid and silently defeating
-the scheme — the failure is invisible, since traffic still flows. The generated
-unit's `User=` prevents this, and a test must assert it rather than assume it.
+**Load-bearing precondition, from passt's source:** passt keeps its inherited uid
+*only because it is not started as root*. Started as root it drops to `nobody`,
+collapsing every workload into one uid and silently defeating the scheme — the
+failure is invisible, since traffic still flows. The generated unit's `User=`
+prevents this, and a test asserts it rather than assuming it.
 
-**Throughput is not a constraint.** Measured guest→host with iperf3 on a
-Fedora 44 host: 11.3 Gbit/s TX, 4.9 Gbit/s RX in stream mode — bridge-class.
-`vhost-user=on` measures faster still and is deliberately not adopted, because
-it would reintroduce a shared memory path for a throughput gain nothing here
-needs.
+**Throughput is not a constraint.** Measured guest→host: 11.3 Gbit/s TX,
+4.9 Gbit/s RX in stream mode — bridge-class. `vhost-user=on` measures faster and
+is deliberately not adopted, because it reintroduces a shared memory path for a
+gain nothing here needs.
 
-**No new packaging risk.** QEMU 10.2 exposes a native `passt` netdev, so there
-is no separate process to launch or socket to wire; the image already ships
-`qemu-kvm` 10.2.x. `passt` is now an explicit dependency in
-`hypervisor.Containerfile` rather than arriving transitively via podman, since
-it moves from an incidental container detail to the VM data path.
+**No new packaging risk.** QEMU 10.2 exposes a native `passt` netdev, so there is
+no separate process to launch or socket to wire. `passt` is an explicit
+dependency in `hypervisor.Containerfile` rather than arriving transitively via
+podman, since it moves from an incidental container detail to the VM data path.
 
 **The default posture is stricter than the zone it replaces.** With
-`--map-host-loopback none`, host loopback is unreachable from the guest, and
-the host's default-route address is unreachable *structurally* — the guest is
-assigned that same address, so traffic to it never leaves the guest's own
-stack. Other host addresses (a secondary IP, a second interface) remain
-ordinary routable destinations, which is precisely the residue the egress
-policy exists to handle. Deleting the firewalld zone is therefore not a
-regression.
+`--map-host-loopback none`, host loopback is unreachable from the guest, and the
+host's default-route address is unreachable *structurally* — the guest is
+assigned that same address, so traffic to it never leaves the guest's own stack.
+Other host addresses remain ordinary routable destinations, which is precisely
+the residue egress policy exists to handle.
 
 **passt is self-confining.** Before serving traffic it drops all but a few
-capabilities, `pivot_root`s into an empty filesystem, applies a seccomp filter,
-and enters a user namespace. This holds independently of SELinux.
+capabilities, `pivot_root`s into an empty filesystem, applies a seccomp filter and
+enters a user namespace — independently of SELinux.
 
-**Alternative rejected — keep the bridge and add anti-spoofing.** This buys
-back a forgeable identity at the cost of address allocation, per-VM L2 rules,
-and retaining every privileged component above. It is strictly more machinery
-for a strictly weaker property.
+**Alternative rejected — keep the bridge and add anti-spoofing.** This buys back a
+forgeable identity at the cost of address allocation, per-VM L2 rules, and every
+privileged component above. Strictly more machinery for a strictly weaker
+property.
 
-## Decisions taken during implementation
+## Decisions the design above does not settle
 
-Four things the design above does not settle. All were decided or found while
-building step 2, and are recorded here because a later reader would otherwise
-be entitled to "fix" them.
-
-**`allow` takes addresses and ports only, never hostnames.** The entries
-become elements of an nftables set keyed on `ip daddr` / `ip6 daddr`. A
-hostname has no representation there, so accepting one would mean resolving it
-once at unit start and pinning the result for the life of the VM — silently
-wrong from the moment the record moves, and wrong in the permissive direction
-if the address is later reassigned. Hostname policy is `hosts`, carried by the
-per-workload proxy step 4 added; `allow` is for the non-HTTP exceptions a
-proxy cannot carry, and those are overwhelmingly single hosts (ssh, a
-database, an NTP peer) where an address is the honest way to say it.
-
-> **Reversed 2026-08-25 (ADR 008).** `allow` now accepts a name with a port
-> (`"git.local:2222"`), resolved on the host once at start. The staleness
-> argument above was never wrong — it is simply a cost now paid on purpose,
-> because the guest's resolver is a static map served host-side, so a `allow`
-> destination named by address had no way to be reached by name at all. The
-> conclusion that survives is the second half: hostname *policy* is `hosts`,
-> because that is the path where the name is re-read on every connection
-> rather than pinned once.
+**`allow` carries addresses and ports; hostname *policy* lives elsewhere.** The
+entries become elements of an nftables set keyed on `ip daddr`/`ip6 daddr`, where
+a hostname has no representation — accepting one means resolving once at start
+and pinning the result, which is wrong from the moment the record moves and wrong
+permissively if the address is reassigned. That cost is now paid on purpose in
+one narrow case: ADR 008 makes the guest's resolver a host-side synthesising
+responder, so an `allow` destination named only by address had no way to be
+reached by name at all. An `allow` entry may therefore name a host with a port,
+resolved host-side once at start. The half that stands unchanged is the second:
+hostname policy is `hosts`, because that is the path where the name is re-read on
+every connection instead of pinned once.
 
 **`egress = "filtered"` with nothing reachable is a validation error.** The
-choices were to default to `"open"` and tighten later, to accept `"filtered"`
-and let the VM boot unreachable, or to refuse the combination. Refusing it was
-chosen: the secure default lands now rather than being retrofitted, and nothing
-can boot in a state where the config claims a confinement the VM does not have
-— the failure mode this whole layer exists to prevent. The cost is that every
-VM config must state a posture explicitly, including ones that only ever wanted
-defaults; `egress = "open"` is what the shipped bundles and examples say, with
-the reason given inline.
+alternatives were to default to `"open"` and tighten later, or to let such a VM
+boot unreachable. Refusing the combination puts the secure default in now, and
+means nothing can boot claiming a confinement it does not have. The cost is that
+every VM config states a posture explicitly. Twice a mechanism change was expected
+to retire this refusal and did not — a workload gets a proxy, and later an
+inspector, only when `hosts` is non-empty, since an instance permitting nothing is
+indistinguishable from a broken one. So the refusal is permanent, with its trigger
+widened rather than removed: `"filtered"` is an error when `allow` and `hosts` are
+*both* empty. That it survived two mechanisms is the sign it belongs to the schema.
 
-Step 4 was expected to retire this. The design pairs the `"filtered"` default
-with an implicit allow to the workload's own proxy, which would have made a
-bare `[vm.network]` valid again and meaning `"filtered"`. It did not, because a
-workload gets a proxy instance only when `hosts` is non-empty — the schema
-deliberately cannot express "proxy on, allowlist empty", an instance permitting
-nothing being indistinguishable from a broken one. A bare `[vm.network]`
-therefore still describes a VM that can reach nothing. The refusal is permanent,
-with its trigger widened rather than removed: `"filtered"` is an error when
-`allow` and `hosts` are *both* empty.
+**Loopback is exempt from the filter, and has to be.** Management inbound and
+egress policy are not independent. passt binds the management address
+`127.128.x.y:2222` *as the workload user*, so replies carrying an `exec`/`shell`
+session are output traffic owned by the workload uid and land in the same chain as
+the guest's own traffic; it forwards DNS the same way. A filtered VM without a
+loopback exemption is therefore unreachable *and* unable to resolve — observed as
+a TCP connection accepted and then silently dying while the drop counter climbed.
+The skeleton accepts `oif lo` for filtered uids before the drop. This widens
+nothing a guest can reach: with `--map-host-loopback none` no guest-chosen
+destination translates to host loopback, and a guest packet aimed at `127.0.0.1`
+never leaves its own stack.
 
-The transparent inspector that replaced the proxy (ADR 008) did not retire it
-either, and for the same reason one level down: a workload gets an inspector
-only when `hosts` is non-empty. Twice now the mechanism changed and the argument
-did not, which is the sign it belongs to the schema rather than to the
-mechanism.
+**The drop counter is host-wide, not per-workload.** There is one drop rule,
+guarded on set membership, so every filtered workload's dropped packets accumulate
+on it. Per-workload counts would need a rule or named counter per uid — the
+machinery the shared rule avoids. `diagnose` reports the number and says it is
+shared, because silently attributing a sibling VM's drops to the one being
+diagnosed sends an operator after the wrong workload.
 
-**Loopback is exempt from the filter, and has to be.** The design treats
-management inbound (§3.3) and egress policy (§4) as independent, and they are
-not. passt binds the management address `127.128.x.y:2222` *as the workload
-user*, so the replies carrying an `exec`/`shell` session are output traffic
-owned by the workload uid and land in the same chain as the guest's own
-traffic. It forwards DNS to `dns-host` the same way, which on a
-systemd-resolved host is `127.0.0.53`. A filtered VM without a loopback
-exemption is therefore unreachable *and* unable to resolve — observed on a
-live VM, where the TCP connection to the management port was accepted and then
-silently died while the drop counter climbed.
+**Confinement ships in the RPM, not the image.** workloadctl is a standalone
+package that does not depend on this image, so a policy module delivered by the
+image would leave VM confinement broken on any other host and would version-skew
+against the code that needs it. `security/workload-vm.cil` is installed by `%post`
+instead. Neither vehicle closes the bootc gap the image's Containerfile already
+records — the policy store lives in `/etc`, which ostree 3-way-merges, so an
+upgrade does not deliver a changed module to a host that has ever loaded a local
+one. `diagnose` reports whether it is loaded.
 
-This also corrects §5.2 of the design, which states that under a stub resolver
-guest DNS is "invisible to `meta skuid`". It is not: passt makes that query, so
-it carries the workload uid and is filtered like anything else.
-
-The skeleton therefore accepts `oif lo` for filtered uids, before the drop.
-This does not widen what a guest can reach. `--map-host-loopback none` means no
-guest-chosen destination translates to host loopback, so the only loopback
-traffic passt originates is replies on sockets it already bound and the DNS
-forward; a guest packet aimed at `127.0.0.1` never leaves the guest's own
-stack.
-
-**The drop counter is host-wide, not per-workload.** The design says the
-`counter` on the drop rule "gives `diagnose` per-workload drop counts with no
-extra machinery". It does not: there is one drop rule, guarded on set
-membership, so every filtered workload's dropped packets accumulate on the same
-counter. Per-workload counts would need a rule or a named counter per uid,
-which is the machinery the shared rule was chosen to avoid. `diagnose` reports
-the number and says explicitly that it is shared, because silently attributing
-a sibling VM's dropped traffic to the one being diagnosed would send an
-operator after the wrong workload.
-
-### Step 3: confinement
-
-**The host-global policy ships in the RPM, not in the image.** The design says
-the virtiofsd domain "ships with the image beside `security/pasta_sandbox.cil`
-and is installed by the RPM", which are two different vehicles. It went in the
-RPM (`workloadctl/security/workload-vm.cil` →
-`/usr/share/workloadctl/workload-vm.cil`, loaded by `%post`) because workloadctl
-is a standalone package that does not depend on this image: a module delivered
-by the image would leave VM confinement broken on any other host, and the code
-that needs the module and the module itself would version-skew. Neither vehicle
-closes the bootc gap the image's own Containerfile already records — the policy
-store lives in `/etc`, which ostree 3-way-merges, so an upgrade does not deliver
-a changed module to a host that has ever loaded a local one. `diagnose` reports
-whether it is loaded, which is the same answer the image gives for its booleans.
-
-**The module carries a second, unrelated-looking rule, and should.** It was
-named for virtiofsd and now also grants `svirt_t` what QEMU's native passt
-netdev needs. Both exist for one reason — workloadctl runs QEMU as `svirt_t`
-*outside libvirt*, and the shipped policy is written around libvirt's
-arrangement — so they are one module, `workload-vm`, rather than a virtiofsd
-module plus a passt module that would always be installed together.
+**One module, two rules that look unrelated.** `workload-vm.cil` was named for
+virtiofsd and also grants `svirt_t` what QEMU's native passt netdev needs. Both
+exist for one reason — workloadctl runs QEMU as `svirt_t` *outside libvirt*, and
+the shipped policy is written around libvirt's arrangement — so they are one
+module rather than two that would always be installed together.
 
 **`runcon`, not a `setexeccon()` call.** `lib/` has no third-party dependencies
 and the stdlib has no SELinux binding, so the alternative is a
 `python3-libselinux` requirement for one call. `runcon` also execs the target in
-its own process, which scopes the pending exec context to the child by
-construction; `setexeccon()` in `workload-vm-notify` would leave it armed for
-whatever that process execs next.
+its own process, scoping the pending exec context to the child by construction,
+where `setexeccon()` in `workload-vm-notify` would leave it armed for whatever
+that process execs next.
 
-**Confinement is unconditional for VM workloads, and degrades rather than
-fails.** It is not gated on `[security].selinux_policy`, for the same reason
-disk labelling is not: a VM that omitted the flag would be silently unconfined.
-On a host with SELinux disabled the runcon prefix is dropped and the VM runs as
-it did before this step, because failing the start would turn "this host has no
-SELinux" into "VMs do not run". `diagnose` reports which of the two happened.
+**Confinement is unconditional for VM workloads, and degrades rather than fails.**
+It is not gated on `[security].selinux_policy`, for the same reason disk labelling
+is not: a VM omitting the flag would be silently unconfined. On a host with
+SELinux disabled the `runcon` prefix is dropped and the VM runs as it did before,
+because failing the start would turn "this host has no SELinux" into "VMs do not
+run". `diagnose` reports which of the two happened.
 
-### Corrections from the enforcing run (step 3)
+## What running it corrected
 
-Five things the design did not have right. Every one of them was found by
-running it, and none would have failed a unit test or a review.
+None of these would have failed a unit test or a review.
 
-**Registering the fcontext rule does not label the directory.** §9.4 says
-relabel `/run/workload-vm` to `svirt_var_run_t` and "the same command runs",
-which reads as though the `semanage` rule is the work. It is not: the kernel
-labels a newly created file from its *parent directory*, and `file_contexts` is
-consulted only by userspace tools like `restorecon`. A directory mkdir'd under
-`/run` inherits `var_run_t` however many rules name it, so a confined QEMU could
-not create its QMP socket or read the cloud-init ISO — and `/run` is a tmpfs, so
-it recurs every boot. `setup_vm_socket_dir` now runs `restorecon` before
-anything is written into the directory, since everything created inside
-inherits from it.
+**Registering an fcontext rule does not label a directory.** The kernel labels a
+new file from its *parent*, and `file_contexts` is consulted only by userspace
+tools. A directory mkdir'd under `/run` inherits `var_run_t` however many rules
+name it, so a confined QEMU could not create its QMP socket or read the cloud-init
+ISO — and `/run` is a tmpfs, so it recurs every boot. `setup_vm_socket_dir` runs
+`restorecon` on the directory *before* anything is written into it.
 
-**passt needs a rule that no audit harvest will show you.** QEMU's native netdev
-forks passt with one end of a socketpair already open; libvirt starts passt
-separately and connects by path. So under our topology `passt_t` must read and
-write a `unix_stream_socket` labelled `svirt_t`, which the shipped policy does
-not grant — and *dontaudits*, so the denial produces no AVC at all. What is
-observed is passt failing with `Failed to add fd to epoll: Operation not
-permitted`, QEMU respawning it in a tight loop, an unreachable guest, and an
-empty audit log. 1563 suppressed denials in 30 seconds, visible only under
-`semodule -DB`. Anyone re-deriving this module from a fresh harvest will miss it
-the same way. QEMU also needs `signal` on `passt_t`, or every stop leaks a passt
+**passt needs a grant no audit harvest will show you.** QEMU's native netdev forks
+passt with one end of a socketpair already open, where libvirt starts it
+separately and connects by path — so `passt_t` must read and write a
+`unix_stream_socket` labelled `svirt_t`, which the shipped policy does not grant
+and *dontaudits*. What is observed is passt failing with `Failed to add fd to
+epoll: Operation not permitted`, QEMU respawning it in a tight loop, an
+unreachable guest, and an empty audit log; the denials appear only under
+`semodule -DB`. QEMU also needs `signal` on `passt_t`, or every stop leaks a passt
 process.
 
-**`dac_override` is genuine for virtiofsd.** §9.7 discounts it as a bench
-artifact of running QEMU as root. That is right about QEMU, which production
-runs as `_wl-<name>`, and wrong about the sidecar, which runs as root
-deliberately (an unprivileged virtiofsd squashes every guest-created file to its
-own uid). Without it virtiofsd exits 1 with nothing in the journal and the VM
-fails on the dependency.
+**A permissive harvest is not the whole module.** The FUSE-serving permissions did
+close for free, but they are the entire write surface on `svirt_image_t`, a
+mapping of QEMU's memfd, a `search` on the `container_file_t` parent, and socket
+cleanup on exit — and one permission was denied under enforcing after a permissive
+run that never reached it. For a fail-fast daemon the inversion is stronger still:
+a process that exits on its first unreadable file records the first gate and
+nothing behind it, so enforcing iteration *is* the harvest.
 
-> **Amended 2026-08-14 — the sidecar no longer runs as root, and this finding no
-> longer holds.** The premise above was true when written: an unprivileged
-> virtiofsd squashed every guest-created file to its own uid, so serving a share
-> faithfully required a root daemon that switched credentials per request, and
-> `dac_override`/`setuid`/`setgid`/`fowner`/`fsetid` followed from that.
->
-> The id map introduced later made the premise false. Every guest id now
-> translates to the one host uid, so virtiofsd's credential switch is never
-> attempted — the squash the finding treated as a defect is now the deliberate
-> behaviour, arrived at by translation rather than by EPERM. The sidecar runs as
-> `_wl-<name>` with `CapabilityBoundingSet=` empty, `--sandbox=none` (chroot mode
-> is root-only), and the unit's own mount namespace in place of the chroot.
-> `wlvfsd_t` consequently grants **no capability at all**.
->
-> One constraint came out of it and is easy to trip: the unit must not set
-> `NoNewPrivileges=`, which makes the kernel refuse the `init_t` → `wlvfsd_t`
-> transition (`op=security_bounded_transition`) and fails the exec with a bare
-> 203/EXEC. See the comment in `generate_virtiofs_service`.
-
-**The permissive harvest under load was larger than "a few more lines".** §9.7
-predicted the FUSE-serving permissions would "close for free" — they did close,
-but they are the whole write surface on `svirt_image_t` (file
-create/read/write/unlink, dir add_name/remove_name/rmdir/write), a mapping of
-QEMU's memfd (`svirt_tmpfs_t`), a `search` on the `container_file_t` parent the
-share is reached through, and the socket cleanup on exit. The prediction that
-one enforcing pass would still be required was correct and load-bearing:
-`dac_override` was denied enforcing after a permissive run that never reached
-it.
+**The virtiofsd sidecar is unprivileged, and must not be hardened further.** An
+earlier design ran it as root, because an unprivileged virtiofsd squashes every
+guest-created file to its own uid. The id map made that premise false: every guest
+id now translates to the one host uid, so the credential switch is never
+attempted, and the sidecar runs as `_wl-<name>` with an empty
+`CapabilityBoundingSet=`, `--sandbox=none` (chroot mode is root-only) and the
+unit's own mount namespace. `wlvfsd_t` grants no capability at all. The trap: the
+unit must **not** set `NoNewPrivileges=`, which makes the kernel refuse the
+`init_t` → `wlvfsd_t` transition and fails the exec with a bare 203/EXEC. See the
+comment in `generate_virtiofs_service`.
 
 **A volume outside the workload tree is not covered.** `wlvfsd_t` is granted the
 types workloadctl itself labels. A volume pointing at an operator path carries
-whatever label that path already has (`/srv` is `var_t`) and the sidecar is
-denied it. The module cannot pre-empt this without granting the union of every
-type on the host, so the fix is an fcontext rule on the operator's path.
+whatever label that path has (`/srv` is `var_t`) and the sidecar is denied it. The
+module cannot pre-empt this without granting the union of every type on the host,
+so the fix is an fcontext rule on the operator's path.
 
-**Verified enforcing on Fedora 44 (selinux-policy 44.5):** boot, virtiofs mount,
-32 MiB write/read/delete at 154 MB/s, mkdir/rmdir, DNS, `workloadctl exec`, and
-a clean stop — zero denials, no leaked passt. `diagnose` reports 12/12, and
-fails as intended when the module is removed.
+**`nft -j list map` renders elements as `[key, value]`, not `{"elem": {…}}`,** and
+the document is keyed `"map"` rather than `"set"`. Reading a map with set-shaped
+code returns no elements, which reads as "not armed" — so `diagnose` reported a
+demonstrably working redirect as broken.
 
-### Step 4: the proxy
+**Two nft/iproute2 surprises.** `redirect` is a reserved word, so a nat chain
+cannot be called that, and the parse error points at the chain name without saying
+why. iproute2 answers a duplicate *address* with "Address already assigned", not
+the "File exists" a duplicate *link* produces, so an idempotency check keyed on
+the wrong string fails only on a workload's second start.
 
-> **SUPERSEDED 2026-08-25 by [ADR 008](008-transparent-egress-inspection.md).**
-> The per-workload tinyproxy, its `workload-proxy.cil` domain and the advertised
-> `192.0.2.1:3128` endpoint are deleted. Hostname policy is now a uid-keyed DNAT
-> of ports 80 and 443 into a per-workload egress inspector, which reads the
-> `Host` header or the SNI — the guest is told nothing and cannot opt out. The
-> weakness was never the filtering, it was the *configuring*: a proxy is
-> advisory, so a process free to ignore the variables did, and the default-deny
-> chain could only turn that into a failure rather than into a filtered request.
->
-> This section is kept because most of what it records outlived the mechanism.
-> The uid-sharing finding below, its control-group fix, the pinned slice, the
-> constant advertised address, the `nft -j list map` shape and the enforcing-
-> iteration lesson all transferred to the inspector unchanged — several of them
-> are why the replacement was built the way it was. What did **not** transfer is
-> anything specific to tinyproxy itself: its client ACL, its exit-70 behaviour,
-> and the module that confined it.
+**Two things the design worried about are free.** `route_localnet` is not
+required — DNAT from the output hook to a 127/8 destination works at its default
+0. And a redirected host-local endpoint needs no entry in `wl_allow4`: the nat
+hook (dstnat, −100) runs before the filter chain (0), so the filter sees the
+translated destination and the skeleton's `oif lo` rule already accepts it.
 
-**The open question is closed, and the answer keeps tinyproxy.** The design
-tracked "how large is the SELinux delta for a confined tinyproxy?" as its last
-open question, because the answer could reopen the choice — squid's one
-advantage is that `squid_t` and `squid_exec_t` already exist. Measured: **14
-allow rules, no capabilities at all**, smaller than the virtiofsd domain next
-door. The choice stands, and now on a measurement rather than an estimate.
+### Capture, which writes into a table it does not own
 
-**Harvesting that module is not like harvesting `wlvfsd_t`.** A permissive run
-is close to useless for tinyproxy: it exits 70 the moment it cannot read its own
-config, so the harvest records the first gate and nothing behind it. The
-permissive pass produced 10 rules, of which the module needed 14 — and the
-missing 4 were each revealed by a separate *enforcing* iteration, one gate at a
-time. Step 3's guidance (harvest permissive, confirm enforcing) inverts here:
-for a fail-fast daemon, enforcing iteration *is* the harvest.
+`workloadctl pcap` produced more corrections than anything else here, and all of
+them reduce to one lesson: **a feature that writes into another component's table
+has to write into its own chain**, or it inherits that component's ordering and
+its flushes.
 
-**The advertised address is a constant, not a schema key** — a deliberate
-deviation from §4.4, which says "settable in the schema". The address belongs to
-a host-global dummy interface, so a per-workload key would let two workloads
-disagree about a shared object: the last-write-wins hazard ADR 002 exists to
-describe and this design deleted along with the bridge. A site that genuinely
-uses TEST-NET-1 internally uses `allow` and skips hostname policy.
+- **An appended rule is not a reachable rule.** `nft add rule` appends, and the
+  skeleton's output chain ends with a terminating accept or drop per filtered uid,
+  so the outbound `log` rule landed below the drop and could never match — `pcap
+  -Q out` captured nothing for exactly the workloads egress filtering exists to
+  observe, while reporting a healthy capture.
+- **The skeleton flushes what it owns.** `flush chain … output` is what makes it
+  re-appliable, and it deleted any in-flight capture's rule on every VM start. Set
+  elements survive a flush; appended rules do not.
+- **`nft delete chain` does not refuse a non-empty base chain.** It succeeds and
+  takes the rules with it, so a tolerant teardown silently ended every concurrent
+  capture.
 
-**The proxy's slice is pinned, not inherited from `[resources]`.** The egress
-exemption below is an nftables `socket cgroupv2 level 2` match, so the cgroup
-path must be exactly two components; a nested custom slice would deepen it and
-the match would silently stop firing. The proxy is not the payload — resource
-control belongs on the VM.
+Capture now lives in `pcap_output`/`pcap_input`, created on demand, which the
+skeleton neither declares nor flushes; `pcap_output` sits at `filter - 10` so a
+packet is captured before the drop decides its fate. Relatedly, the skeleton's
+`ct mark set` rule is guarded on the workload uid *range* rather than on
+`@wl_filtered`: the mark is attribution, not policy — inbound capture selects on
+it — so guarding it on the policy set made `-Q in` silently empty for every
+container and every `egress = "open"` VM.
 
-**One module per component, both host-global.** `workload-proxy.cil` is separate
-from `workload-vm.cil` rather than merged: they exist for unrelated reasons (one
-because we run QEMU outside libvirt, one because Fedora has no tinyproxy policy
-at all) and they are removable independently.
+Five more, mostly teardown and ownership:
 
-### Corrections from the live run (step 4)
+- **nft cannot delete a rule by its text.** Deletion is by handle, and a
+  text-shaped delete fails *silently* under a tolerant runner, leaving a `log`
+  rule in a security-critical table with nothing owning it. Removal reads live
+  handles and narrows them to this workload's nflog group, so a concurrent capture
+  keeps its rule.
+- **SIGTERM does not run `finally`.** Python's default disposition terminates
+  without unwinding, so the ordinary `systemctl stop` path was the one path where a
+  guest-side capture was never finalized. The helper turns SIGTERM into
+  `SystemExit`.
+- **A confined QEMU cannot write the operator's `-w` path**, and it fails on plain
+  DAC before SELinux has an opinion, *silently*: `object-add` is accepted, the
+  object exists, and no file appears. Captures are staged in the workload's own
+  runtime directory and moved on finalize, and the file's existence is checked
+  rather than trusted.
+- **`Type=exec` marks a unit active before it can fail**, so `--detach` reported
+  "Capturing in the background" for a unit that was already dead. The settle check
+  is a dwell rather than a poll-until-active: the interesting states arrive
+  quickly, and the wrong answer is the early one.
+- **wireshark-cli is not installed on a default host.** Packet counts, first-packet
+  times and the guest-side timestamp shift went through `capinfos`/`editcap`, which
+  the spec listed as `Suggests:` — and they were called from a teardown block, so
+  the `FileNotFoundError` aborted the rest of it and the guest-side file was never
+  moved. All three are read out of the file in `lib/pcap.py` now; classic pcap is a
+  24-byte header and 16 bytes per record and both writers emit it. That also
+  retires a silent failure of its own: capinfos renamed its first-packet label
+  between releases, and matching one spelling skipped the timestamp correction
+  without saying so.
 
-Four more the design did not have right, all found by running it.
-
-**The proxy shares the guest's uid, so default-deny drops the proxy too.** This
-is the largest of them, and it follows directly from a property §4.4 presents as
-a *feature*: "each instance runs as `_wl-<name>` … so one `meta skuid` rule
-governs both the direct and the via-proxy path". It does — including the drop.
-On a live VM the guest's CONNECT reached the proxy, the proxy resolved the host,
-and its outbound SYN was dropped by the workload's own filter. Hostname policy
-permitted nothing at all while every component looked healthy.
-
-The fix has to separate proxy from guest *within one uid*, and the control group
-is the only discriminator that does: systemd assigns it, a guest can neither
-enter nor forge it, and it widens no destination or port. The obvious
-alternative — "let this uid reach 443 anywhere" — is fatal, because it is
-exactly the bypass the default-deny chain exists to close. `wl_proxy_cg` is a
-set of cgroup paths in the filter skeleton, managed as elements like everything
-else, and re-added on every proxy start because an element resolves to a cgroup
-id and systemd makes a fresh cgroup each time.
-
-**tinyproxy's client ACL must name the advertised address.** The guest's packet
-is routed to `192.0.2.1` *before* it is translated, so the host picks that same
-address as the source and the proxy sees a client connecting from it. Without
-`Allow 192.0.2.1` every request answers 403 while the listener, the redirect,
-the interface and the guest all look correct; the only trace is tinyproxy's
-"Unauthorized connection from" at INFO level.
-
-**`nft -j list map` renders elements as `[key, value]`, not `{"elem": {...}}`.**
-The set shape and the map shape differ, and the map document is keyed `"map"`
-rather than `"set"`. Reading a map with set-shaped code returns no elements at
-all, which reads as "not armed" — so `diagnose` reported a demonstrably working
-redirect as broken, on the same host, in the same minute.
-
-**Two smaller ones.** iproute2 answers a duplicate address with "Address already
-assigned", not the "File exists" a duplicate *link* produces, so the idempotency
-check failed only on the second start of a workload. And `redirect` is a
-reserved word in nft, so a nat chain cannot be called that — the parse error
-points at the chain name without saying why.
-
-Two things the design worried about turned out to be free. `route_localnet` is
-**not** required: DNAT from the output hook to a 127/8 destination works with it
-at its default 0, verified on a live host and not only in a namespace. And the
-proxy endpoint needs **no** entry in `wl_allow4`: the nat hook (dstnat, -100)
-runs before the filter chain (0), so the filter sees the translated destination
-— the workload's own loopback address — which the skeleton's `oif lo` rule
-already accepts.
-
-**Verified enforcing on Fedora 44:** with `egress = "filtered"` and an empty
-`allow`, a guest reached an allowlisted host over HTTPS (200) and over plain
-HTTP (200), reached a wildcard-matched host (200), was refused a non-allowlisted
-host by the proxy, and was **dropped by the kernel when it bypassed the proxy
-entirely** — which is the property that makes hostname policy binding rather
-than advisory. Clean across a full restart cycle, with zero SELinux denials and
-`diagnose` at 13/13.
-
-### Step 5: capture
-
-**Host-side first, as the sequence directs** — it is the default, works on
-every substrate, and needs no QMP. The guest side followed, and the ordering
-paid: every teardown and ownership defect below was found with the simpler
-vantage, before a QMP object was in the picture.
-
-**The plan is one object, not two renderings.** `--dry-run` prints it and the
-helper executes it, and it travels to the helper as JSON rather than being
-re-derived — because a helper that recomputed the plan from the config could
-disagree with what was printed, and the whole contract of §6.6 is that they
-cannot.
-
-**Both files are classic pcap, not pcapng.** The design wanted pcapng so
-per-container annotation stayed possible later. tcpdump cannot write it —
-`--pcap-ng` is not a tcpdump option at all (4.99.6; it belongs to
+**Both files are classic pcap, not pcapng.** The design wanted pcapng to keep
+per-container annotation possible; tcpdump cannot write it (`--pcap-ng` belongs to
 dumpcap/tshark). QEMU's `filter-dump` writes classic pcap too, so both vantages
-agree on the format, which is what actually matters for comparing two files.
+agree on the format, which is what matters for comparing two files. The guest-side
+timestamp needs correcting by two independent terms — the timezone offset plus VM
+uptime — and the timezone term is the *standard*-time offset even on a host
+running DST, because `gmtime_r` leaves `tm_isdst` at 0 and `mktime` then applies
+none.
 
-### Corrections from review (step 5)
+**`[vm.network].ports` may not bind the management range.** Any valid address was
+accepted, including the `127.128.0.0/9` carrying management addresses, so one
+workload could publish a guest port where another's SSH listener belongs, with
+start order deciding the winner. The host-key pin stops that short of a session in
+the wrong guest, but a plane documented as never routable and never configurable
+should not be reachable from a config key. Now rejected; the rest of 127/8 remains
+a normal bind address.
 
-Three, all one mistake: **capture wrote into chains the policy skeleton owns.**
-Each half of it was silent, and the live run missed all three because it
-exercised one workload at a time, and an unfiltered one.
-
-**An appended rule is not a reachable rule.** `nft add rule` appends, and the
-skeleton's `output` chain ends with a terminating `accept`/`drop` for every
-filtered uid — so the outbound `log` rule landed below the drop and could never
-match. `pcap -Q out` captured nothing at all for exactly the workloads egress
-filtering exists to observe, while reporting a healthy capture.
-
-**The skeleton flushes what it owns.** `flush chain ... output` is what makes
-the skeleton re-appliable, and it deleted any in-flight capture's rule — on
-every VM start, and on any other workload starting a capture. Set elements
-survive a flush; appended rules do not.
-
-Both are fixed by the same move: capture now lives in `pcap_output` and
-`pcap_input`, created on demand, which the skeleton neither declares nor
-flushes. `pcap_output` sits at `filter - 10`, ahead of policy, so a packet is
-captured *before* the drop decides its fate — which is the more useful vantage
-anyway.
-
-**`nft delete chain` does not refuse a non-empty base chain.** It succeeds and
-takes the rules with it, so teardown's "delete it and let it fail harmlessly"
-silently ended every concurrent capture. A chain is now deleted only after a
-re-list shows no `log` rule left in it.
-
-A fourth, related: the skeleton's `ct mark set` rule was guarded on
-`@wl_filtered`. The mark is *attribution*, not policy — inbound capture selects
-on it — so guarding it on the policy set made `-Q in` silently empty for every
-container and every `egress = "open"` VM. It is now guarded on the workload uid
-range, which is what the mark always meant.
-
-The common lesson is narrower than "test concurrency": **a feature that writes
-into a table another component owns has to write into its own chain**, or it
-inherits that component's ordering and its flushes.
-
-### Corrections from the live run (step 5)
-
-Six, and five of them were teardown or ownership rather than capture.
-
-**nft cannot delete a rule by its text.** Deletion is by handle. A text-shaped
-delete fails, and fails *silently* under a tolerant runner — so the first
-implementation's teardown removed nothing at all, and left a `log` rule in the
-security-critical table with nothing owning it. Removal now reads the live
-handles and narrows them to this workload's nflog group, so a concurrent
-capture on another workload keeps its rule.
-
-**SIGTERM does not run `finally`.** Python's default disposition terminates the
-process outright without unwinding, so the ordinary `systemctl stop` path — the
-one an operator uses every time — was the single path where a guest-side
-capture never got finalized: the process died, and `ExecStopPost` then found a
-staged file with nobody left to move it. The helper now turns SIGTERM into
-`SystemExit`.
-
-**A confined QEMU cannot write the operator's `-w` path**, which §13 predicted
-and which is worse than predicted: it fails on plain **DAC** before SELinux has
-an opinion (QEMU runs as `_wl-<name>`, the path is root-owned), and it fails
-*silently* — `object-add` is accepted, the object exists, and no file ever
-appears. The capture is staged in the workload's own runtime directory, which
-step 3 already labelled `qemu_var_run_t` so a confined QEMU could create
-sockets there, and moved on finalize. The move rides along free because the
-timestamp correction already required a finalize step. The file's existence is
-now checked rather than trusted.
-
-**`Type=exec` marks a unit active before it can fail.** A capture whose
-`object-add` QEMU refuses, or whose tcpdump exits on a bad option, is
-observably "active" first — so `--detach` reported "Capturing in the
-background" for a unit that was already dead. The settle check is now a dwell
-rather than a poll-until-active: the interesting states arrive quickly, and the
-wrong answer is the early one.
-
-**capinfos says "Earliest packet time", not "First packet time."** Matching one
-label is a silent no-op — the correction is skipped, the file keeps a timestamp
-hours in the future, and nothing says so. Both labels are accepted and a failed
-correction now warns.
-
-**A second capture was refused only after the plan had been narrated**, which
-described something that was not going to happen.
-
-**§6.9 confirmed on hardware, both terms.** The measured offset was
-**−29,407.4 s**: 28,800 s of timezone offset plus ~607 s of VM uptime, exactly
-the two independent errors the design separated. 28,800 s is the *standard*-time
-offset (PST) on a host that was on PDT at the time, because `gmtime_r` leaves
-`tm_isdst` at 0 and `mktime` then applies no DST — so the term is not even the
-offset in force when the capture ran. After correction the file's first
-packet landed on wall clock. The probe is a TCP connect to the workload's own
-management address — passt hands the guest a SYN, which the tap sees, and the
-guest is not asked for anything.
-
-**Verified on Fedora 44:** host vantage alone (rule installed, traffic
-attributed, rule removed, file readable); guest vantage alone (object added,
-staged, corrected, moved); both together, producing files whose first packets
-are 1.0 s apart on the same wall clock — the alignment that is the entire point
-of two vantages, and which does not exist without the correction. The guest
-file held 77 packets to the host file's 18, which is §6.2's claim about what
-never becomes a host socket, measured. A `kill -9` of the capture process left
-**zero** rules, no chain, and no QEMU object — teardown by `ExecStopPost`, not
-by a `finally`. A second concurrent capture was refused by name. Zero SELinux
-denials throughout.
-
-### Corrections from the pre-merge review
-
-Three, found by reading rather than running, and the first would have hit every
-default install.
-
-**capinfos and editcap are not installed, and were called from a `finally`.**
-Packet counts, first-packet times and the guest-side shift went through
-wireshark-cli, which the spec listed as `Suggests:` — and dnf installs
-`Recommends:` but not `Suggests:`, so the default host had tcpdump and neither
-finisher. Every one of those calls sits in the helper's teardown block, so the
-`FileNotFoundError` aborted the rest of it: the guest-side file was never moved
-to the operator's `-w` path, and only the unit's `ExecStopPost` kept a `log`
-rule from being left behind. The tell that it was an oversight rather than a
-choice is that `editcap` *was* guarded and capinfos was not, from the same
-package.
-
-All three are now read out of the file in `lib/pcap.py` — classic pcap is a
-24-byte header and 16 bytes per record, and both our writers emit it — so the
-dependency is gone rather than guarded. That also retires a silent failure of
-its own: capinfos renamed the first-packet label between releases, and matching
-one spelling skipped the correction without saying so.
-
-**`[vm.network].ports` could bind the management range.** Any valid address was
-accepted, including the `127.128.0.0/9` that carries the per-workload
-management addresses, so one workload could publish a guest port where
-another's SSH listener belongs — with start order deciding the winner. The
-host-key pin stops that short of a session in the wrong guest, since `exec`
-fails verification rather than connecting, but a plane the design calls "never
-routable and never configurable" should not be reachable from a config key.
-Now rejected; the rest of 127/8 is still a normal bind address.
-
-**The nflog group had no base, so the first workload took group 0.** The
-address derivation got a base specifically to dodge `127.0.1.1`; the group
-derivation got none, and landed on the netfilter default — see the Decision
-above for what that merges. Fixed by the same move the addresses already used.
-The addresses themselves check out, including the `.0` and `.255` ones, which
-is now asserted by binding rather than by spelling.
-
-**`hosts` with `egress = "open"` is refused.** It was accepted, and it built a
-proxy that bound only the guests choosing to be bound — the drop is what makes
-the allowlist mandatory. The first review draft called this a misreport and it
-is not: `open` means unfiltered, `diagnose` says so plainly, and the
-no-silent-default rule means nobody reaches `open` without typing it. The
-reason to refuse it is narrower and better: a proxy is a daemon parsing
-guest-controlled input, with its own SELinux domain and an egress exemption the
-guest's uid does not get, and that is the wrong thing to stand up for a control
-that stops only cooperative guests. Refused rather than silently skipped,
-because a `hosts` list accepted and then ignored *would* be the misreport. It
-joins the two refusals already there — `hosts` with `bridge`, and
-`hosts = ["*"]`.
-
-### The advertised endpoint got a second consumer
-
-`[vm.network].broker` reaches a host-side credential broker over the same
-mechanism as the proxy: one advertised endpoint, rewritten per uid by a nat
-output rule. Added after this ADR was accepted, and it is recorded here because
-it is evidence about the design rather than a new decision — the uid-keyed
-redirect turned out to be reusable, and the second consumer needed no new
-address, no new interface, and no change to the first.
-
-Three things about it are deliberately unlike the proxy. Its element lifecycle
-rides the VM unit rather than a unit of its own, because the broker is a single
-host service and there is no per-workload process for it to follow. It is a
-separate table, since a workload may have a broker and no proxy and would
-otherwise depend on a skeleton applied by a unit that does not exist for it. And
-it does not require `egress = "filtered"`: the reason `hosts` does is that an
-unenforceable allowlist misreports, whereas a broker holds the credential
-regardless of what else the guest can reach.
-
-One thing worth recording for anyone else building on the redirect: a translated
-connection is still recorded by the *client* under the address it dialled, not
-the one the receiver is bound to. A host service that identifies callers by
-matching socket tables therefore has to look for the advertised endpoint —
-measured, after the naive form matched nothing and would have refused every
-guest while passing a loopback test.
+**`hosts` with `egress = "open"` is refused.** Not because it misreports —
+`open` means unfiltered and `diagnose` says so — but because hostname policy
+stands up a daemon parsing guest-controlled input, with its own SELinux domain and
+an egress exemption the guest's uid does not get. That is the wrong thing to build
+for a control that binds only cooperative guests. Refused rather than silently
+skipped, because a `hosts` list accepted and then ignored *would* be a misreport.
 
 ## Consequences
 
@@ -647,83 +345,47 @@ guest while passing a loopback test.
 | `VM_BRIDGE_NAME`, `managed_bridge_params()`, `VM_DHCP_LEASE_FILE` | dead with the bridge |
 | the bridge refcount in VM teardown | nothing shared to refcount |
 
-`managed_bridge_params()` is the mechanism ADR 002 introduced; removing it is
-what makes this a supersession rather than an amendment.
+`managed_bridge_params()` is the mechanism ADR 002 introduced; removing it is what
+makes this a supersession rather than an amendment.
 
-**Added:** netdev construction in the generator (step 1); the nftables
-skeleton, its element management, and the schema keys above (step 2); the
-`runcon` prefix in `workload-vm-notify` and the `workload-vm` policy module
-(step 3); the per-workload tinyproxy, its uid-keyed redirect, and the
-`workload-proxy` policy module (step 4); `workloadctl pcap` and its two
-vantages (step 5).
+**Added:** passt netdev construction in the generator; the nftables filter
+skeleton, its element management and the `[vm.network]` schema keys; the `runcon`
+prefix in `workload-vm-notify` and the `workload-vm` policy module; hostname
+policy, since rebuilt as the transparent inspector of ADR 008; and
+`workloadctl pcap` with its two vantages.
 
-**New capability, not a migration.** Managed-bridge VMs have no port publishing
-today, so `[vm.network].ports` adds a facility rather than replacing one.
+**New capability, not a migration.** Managed-bridge VMs had no port publishing, so
+`[vm.network].ports` adds a facility rather than replacing one.
 
-**Not addressed by this ADR:**
+**Not addressed:**
 
 - **Exfiltration through an allowed destination.** Permitting a host means
   anything the guest can read can leave through it. Structural.
-- **DNS tunnelling** when the guest is given a forwarding resolver.
+- **DNS tunnelling** where the guest is given a forwarding resolver. Narrowed
+  since by ADR 008's synthesising responder, not closed.
 - **VMs on an operator-provided bridge**, which are unfiltered by design.
-- **Capture of a workload that is not running.** Both vantages need a live
-  process — a socket to attribute or a netdev to tap.
-- ~~**SELinux confinement of VM workloads.**~~ **Closed by step 3**, which the
-  original text listed here as a separate decision with unresolved cost. QEMU
-  now enters `svirt_t` via a `runcon` prefix in `workload-vm-notify`, and passt
-  and swtpm transition for free on the shipped policy's own rules. What was not
-  anticipated is that the QEMU-native passt netdev needs two grants libvirt's
-  arrangement never does — see the corrections above.
-
+- **Capture of a workload that is not running** — both vantages need a live
+  process, a socket to attribute or a netdev to tap.
 - **Confinement of the guest's own workloads.** `svirt_t` bounds what the
-  hypervisor process may touch on the host. It says nothing about what runs
-  inside the guest, which is the guest's own problem.
+  hypervisor process may touch on the host and says nothing about what runs inside
+  the guest.
+- **A host-side reader of guest TLS.** This design put nothing on the host that
+  could read a guest's plaintext. ADR 008's `tls = "inspect"` default changed that
+  deliberately: a filtered VM's HTTPS is terminated on the host, with a leaf from
+  that workload's own CA. It is the price of the allowlist meaning per request what
+  it previously meant only per connection, and `tls = "splice"` keeps the original
+  property for a workload that needs it. Unchanged by all of it: the guest still
+  has no LAN identity of its own, the management address is still uid-derived and
+  unroutable, and `[vm.network].ports` is still the only inbound path.
 
-**Testing debt: closed.** The runtime harness now boots two VMs.
-`tests/cli_surface/test_runtime_vm_egress_isolation.py` runs a filtered
-workload and an open one concurrently, from TOMLs that differ in exactly two
-lines, and asserts the difference: the open VM reaches a destination the
-filtered one cannot, and the filtered one still reaches the single entry in its
-own `allow` list. A second test purges the open VM and shows the survivor stays
-armed — the disarming direction being the silent one, since a VM that quietly
-stops being filtered keeps passing every other check.
-
-The shape of that test is the point. A single filtered VM failing to reach a
-host proves only that something is broken; the property lives in the
-*difference* between two guests that are identical apart from a posture. Both
-tests guard their own preconditions first — the postures are read back out of
-`wl_filtered` before any probe, and the run skips rather than passes if the
-harness host cannot reach the destination itself — because every one of those
-would otherwise turn into a green that means nothing.
-
-### Amendment 2026-08-26: the proxy this ADR added is gone, and the plane it left holds plaintext
-
-A decision record is not rewritten, so what follows amends the Consequences
-above rather than editing them. Two of its statements have been overtaken by
-`008-transparent-egress-inspection.md`.
-
-**The per-workload tinyproxy listed under *Added* (step 4) no longer exists.**
-It was replaced by a transparent inspector on a uid-keyed redirect. The
-mechanism this ADR chose is what made that possible and is unchanged: passt
-re-originates the guest's traffic as host sockets owned by `_wl-<name>`, so the
-workload uid is an unforgeable selector, and the redirect keys on it. What
-changed is that a guest no longer has to be *configured* to use a proxy for the
-policy to apply — the reason the proxy was always a weaker construction than
-the uid selector underneath it.
-
-**The `Not addressed` list gains an entry, and it is a real cost.** As of
-`tls = "inspect"` — the default — a filtered VM's HTTPS is terminated on the
-host: the inspector completes the guest's handshake with a leaf from that
-workload's own CA and holds the plaintext for the length of the connection.
-This ADR's design put nothing on the host that could read a guest's TLS. That
-is no longer true, and it is not a side effect: it is the price of the
-allowlist meaning per request what it previously meant only per connection. The
-CA is per workload, lives under that workload's uid, and can impersonate sites
-only to the single guest that trusts it — but a filtered VM is no longer a
-place where "the host cannot read this traffic" holds. `tls = "splice"` keeps
-the original property for a workload that needs it.
-
-**Unchanged by all of it:** the guest still has no LAN identity of its own, the
-management address is still uid-derived and unroutable, and `[vm.network].ports`
-is still the only inbound path. Nothing in the termination touches the network
-model this ADR decided.
+**Testing.** `tests/cli_surface/test_runtime_vm_egress_isolation.py` runs a
+filtered workload and an open one concurrently, from TOMLs differing in two lines,
+and asserts the *difference*: the open VM reaches a destination the filtered one
+cannot, and the filtered one still reaches the single entry in its own `allow`
+list. A second test purges the open VM and shows the survivor stays armed — the
+disarming direction being the silent one, since a VM that quietly stops being
+filtered keeps passing every other check. A single filtered VM failing to reach a
+host proves only that something is broken; the property lives in the difference
+between two guests identical apart from a posture. Both tests read the postures
+back out of `wl_filtered` before probing and skip rather than pass if the harness
+host cannot reach the destination itself.
