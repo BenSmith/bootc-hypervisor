@@ -254,20 +254,27 @@ reply is printed:
 ```bash
 workloadctl incant buildhost -- query-status
 workloadctl incant buildhost -- system_powerdown
+workloadctl incant buildhost -- screendump filename=/tmp/vm.ppm
 ```
 
 ```bash
-# the same thing by hand
+# the first of those by hand
 sudo sh -c 'printf "%s\n%s\n" \
     "{\"execute\":\"qmp_capabilities\"}" \
     "{\"execute\":\"query-status\"}" \
   | socat -t2 - UNIX-CONNECT:/run/workload-vm/buildhost/qmp.sock'
+
+# and the other two -- only the second object changes
+    "{\"execute\":\"system_powerdown\"}"
+    "{\"execute\":\"screendump\",\"arguments\":{\"filename\":\"/tmp/vm.ppm\"}}"
 ```
 
-QMP opens with a greeting and refuses every command until it is answered with
-`qmp_capabilities`, so the handshake is not optional; the socket lives in a
-`0750` directory owned by `_wl-buildhost`; and what comes back is a stream of
-JSON objects to match up yourself.
+Every QMP command is that same shape, which is the point: the handshake is not
+optional (QMP opens with a greeting and refuses commands until it is answered
+with `qmp_capabilities`), the socket lives in a `0750` directory owned by
+`_wl-buildhost`, and the reply is a stream of JSON objects to correlate
+yourself. `incant` supplies all of it and turns the `key=value` tokens into the
+`arguments` object.
 
 `workloadctl <command> --help` for the full surface; most read commands take
 `--json`.
