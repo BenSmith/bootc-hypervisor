@@ -442,7 +442,7 @@ class TestDriftSeesAHandEditedInstance(unittest.TestCase):
         from unittest import mock
         from tests import script_env
         from tests.test_generator_snapshot import (
-            FIXTURES, run_generator, write_config)
+            FIXTURES, GENERATOR, run_generator, write_config)
 
         cfg_dir = tempfile.mkdtemp(prefix="drift-cfg-")
         sysusers_dir = tempfile.mkdtemp(prefix="drift-sysusers-")
@@ -469,6 +469,22 @@ class TestDriftSeesAHandEditedInstance(unittest.TestCase):
         # an orphan rather than as a failure.
         self.enterContext(mock.patch.dict(
             os.environ, {"PYTHONPATH": script_env()["PYTHONPATH"]}))
+
+        # Pin the generator to THIS CHECKOUT. cmd_drift._find_generator prefers
+        # /usr/libexec/workloadctl/workload-generate and only falls back to the
+        # checkout when that is absent, which is right for the product and
+        # wrong for a test: setUp renders the live tree with the checkout's
+        # generator, so on a host that has the RPM installed collect_drift
+        # would re-render with a DIFFERENT generator and every unit here would
+        # be compared against another build's output. An installed copy that
+        # predates this branch does not know `[[vm.network.credential]]` at
+        # all, refuses the fixture, and emits nothing -- so every live unit
+        # reads as an orphan and the drift list is the whole workload rather
+        # than the one hand-edited file. Only test_vm_broker ran the real
+        # collect_drift unpinned; test_cmd_drift patches this same hook and
+        # test_substrate patches subprocess.run.
+        self.enterContext(mock.patch.object(
+            cmd_drift, "_find_generator", lambda: Path(GENERATOR)))
 
         self.policy_root = Path(tempfile.mkdtemp(prefix="drift-policy-"))
         self.addCleanup(shutil.rmtree, self.policy_root, ignore_errors=True)
