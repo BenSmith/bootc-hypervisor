@@ -252,8 +252,8 @@ command; any further `key=value` tokens become its arguments, and the JSON
 reply is printed:
 
 ```bash
-workloadctl incant git -- query-status
-workloadctl incant git -- system_powerdown
+workloadctl incant buildhost -- query-status
+workloadctl incant buildhost -- system_powerdown
 ```
 
 ```bash
@@ -261,13 +261,13 @@ workloadctl incant git -- system_powerdown
 sudo sh -c 'printf "%s\n%s\n" \
     "{\"execute\":\"qmp_capabilities\"}" \
     "{\"execute\":\"query-status\"}" \
-  | socat -t2 - UNIX-CONNECT:/run/workload-vm/git/qmp.sock'
+  | socat -t2 - UNIX-CONNECT:/run/workload-vm/buildhost/qmp.sock'
 ```
 
 QMP opens with a greeting and refuses every command until it is answered with
 `qmp_capabilities`, so the handshake is not optional; the socket lives in a
-`0750` directory owned by `_wl-git`; and what comes back is a stream of JSON
-objects to match up yourself.
+`0750` directory owned by `_wl-buildhost`; and what comes back is a stream of
+JSON objects to match up yourself.
 
 `workloadctl <command> --help` for the full surface; most read commands take
 `--json`.
