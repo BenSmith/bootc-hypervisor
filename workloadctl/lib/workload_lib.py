@@ -656,12 +656,17 @@ def _reserved_uids_in_pending_sysusers() -> set[int]:
     Between allocation and `systemd-sysusers` creating the user, a workload's
     UID lives only in its sysusers .conf: the boot generator writes it into
     /run/systemd/system and defers user creation to the workload's setup
-    service (potentially much later), while enable stages a copy in
-    /run/sysusers.d. During that gap the UID is invisible to `pwd.getpwall()`,
-    so a concurrent allocator would re-hand-out the slot. get_next_uid() unions
-    these in — provided every allocator writes its .conf while still holding
-    SUBID_LOCK — to close that window. /run is tmpfs (no cross-boot staleness)
-    and disable removes the conf, so this set tracks live allocations.
+    service, potentially much later. During that gap the UID is invisible to
+    `pwd.getpwall()`, so a concurrent allocator would re-hand-out the slot.
+    get_next_uid() unions these in — provided every allocator writes its .conf
+    while still holding SUBID_LOCK — to close that window. /run is tmpfs (no
+    cross-boot staleness) and disable removes the conf, so this set tracks
+    live allocations.
+
+    /run/sysusers.d is scanned too even though nothing of ours writes there:
+    it is the standard drop-in directory, so a conf placed by hand or by a
+    future caller pins its UID the same way. Today that half always reads
+    empty.
     """
     reserved: set[int] = set()
     for d in (RUN_SYSTEMD_SYSTEM, RUN_SYSUSERS_D):
