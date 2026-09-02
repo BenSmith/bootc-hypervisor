@@ -1,14 +1,22 @@
 # workloadctl
 
-> Declarative rootless workload manager for Linux. Define workloads as TOML files, and workloadctl handles user creation, systemd service generation, volume management, secrets, and lifecycle across two **substrates** — isolated rootless-podman containers and KVM/QEMU virtual machines.
+> Declarative workload manager for Linux. Drop a TOML file into `/etc/workloads.d/<name>/` and workloadctl provisions everything underneath it — a dedicated unprivileged system user, systemd units, storage, secrets, networking and lifecycle — across two **substrates**: rootless-podman containers and KVM/QEMU virtual machines.
 
-workloadctl is a Python CLI tool and systemd integration that turns TOML config files into fully isolated workloads. A workload is either a **container** (rootless podman, the common case) or a **VM** (raw QEMU/KVM, declared with a `[vm]` section). Each container workload gets a dedicated locked-down system user (`_wl-<name>`), its own UID/subuid namespace, a systemd service generated at boot, automatic volume directories, and optional TPM2-encrypted secrets via systemd credentials; VM workloads get a per-instance disk set, passt networking, and a cloud-init seed. The two substrates share one TOML model and one day-2 verb surface, dispatched through a **Substrate port** (see "Substrate dispatch").
+workloadctl is a stdlib-Python CLI plus a systemd integration. A workload is either a **container** (rootless podman) or a **VM** (raw QEMU/KVM, declared with a `[vm]` section). Both share one TOML model, one command surface, and one isolation rule — **one workload, one unprivileged system user** — so `status`, `logs`, `update`, `rollback` and `backup` mean the same thing whichever substrate a workload runs on. Substrate-variant verbs dispatch through a **Substrate port** (see "Substrate dispatch"); the container/VM difference lives only there.
+
+The uid is not just hygiene. It is the **selector everything else keys on**: egress policy matches it as `meta skuid`, storage is owned by it, the credential broker identifies callers by it, and because the host assigns it, software inside the workload cannot forge it. Read the VM sections with that in mind — passt networking, transparent egress inspection and the per-workload broker are all consequences of it.
+
+No package manager, no virtualenv, no daemon of its own.
 
 ## Requirements
 
-- Fedora 41+ (or any systemd + Podman 5.3+ Linux)
-- Python 3.11+
-- Works on standard Fedora or bootc/immutable OS images
+- systemd, and Fedora 43+ or an equivalent
+- Python 3.14+, podman 5.3+
+- `passt`, `nftables`, `openssl`, `shadow-utils`
+- SELinux tooling: `policycoreutils`, `policycoreutils-python-utils`, `container-selinux` (`udica` recommended for authoring per-workload policy)
+- VM workloads additionally want `qemu-kvm` and `virtiofsd`; `pcap` wants `tcpdump`
+
+No bootc or immutable OS required — workloadctl is a standalone RPM and runs on ordinary Fedora. It is *bootc-ready*, which is a different claim: TOMLs and encrypted secrets can be baked into an image, and everything self-provisions on first boot.
 
 ## Architecture
 
@@ -16,16 +24,21 @@ The system has four main components:
 
 1. **Generator + early-boot oneshot**: A tiny shell systemd generator (`generators/workload-generator`) emits a single oneshot service unit, `workload-generate.service`. That service runs the Python script `generators/workload-generate` during early boot (ordered `After=sysinit.target Before=basic.target`), which reads `/etc/workloads.d/*/workload.toml` and produces systemd-sysusers configs and per-workload service unit files in `/run/systemd/system/`. The Python work is *not* run as a systemd generator because generators are expected to be fast and minimal (see `systemd.generator(7)`); Python import overhead alone can exceed the generator execution budget systemd 258+ enforces. Both the shell generator and the Python script always exit 0 so a failure never blocks boot. The Python script is still read-only with respect to `/var` — all `/var` work is deferred to `workload-ensure-user` at service start.
 
-   **Boot cost, measured (2026-07-28, on a deliberately slow dev host — Fedora 44 / systemd 259).** `workload-generate.service` is ordered `Before=basic.target`, so its whole runtime is boot delay. It is **~0.65s, near-flat in workload count**: 615ms at 1 workload, 715ms at 40. The breakdown, from phase-instrumented boots: ~180ms Python startup + `lib/` imports, ~400ms `systemctl daemon-reload`, ~30ms for the batched start enqueue, and only **~2ms per workload** for everything the generator actually does (TOML parse, validation, unit emission, UID allocation combined — 77ms for all 40). The shell generator that emits the oneshot is O(1) at 3–8ms, well inside the `systemd.generator(7)` budget the split exists to respect. So the cost is two fixed constants, not a scaling problem; if this ever needs to come down further, `daemon-reload` is the target, and micro-optimising the config loop is not worth doing. Do not re-derive this by reading the code — the code path that dominates is invisible in a non-live run (it is gated on `SERVICES_DIR == /run/systemd/system`), which is why the number went unmeasured for so long. Reproduce with a bench-bundle sweep + reboot, reading `systemctl show workload-generate.service -p ExecMainStartTimestampMonotonic -p ExecMainExitTimestampMonotonic`.
-
    The CLI re-runs `workload-generate` post-boot to apply config edits (`enable`, `edit`, `recreate`), and those runs pass **`--workload <name>`**, which narrows the emit to one workload, plus **`--no-start`**, which suppresses the generator's own daemon-reload + `systemctl start` enqueue. Boot passes neither and emits the whole enabled set. Both flags matter: an unfiltered run rewrites *every* enabled workload's unit files and enqueues a `systemctl start` for each, so acting on one workload would (a) silently update a bystander's unit file in `/run` while its service keeps running the old one — and `drift` compares against the files, so the staleness becomes invisible — and (b) start a workload the operator had deliberately stopped. And a generator-enqueued start fires *during* the CLI verb's generate step, racing ahead of the verb's later provisioning — most critically `enable`'s image transfer to the user store, where the premature cold start pins a fresh container to the stale image (the verbs own their start/restart after those steps instead). The `--workload` filter is applied after the all-names pre-scan, so a narrowed run still validates `[workload].requires`/`.after` against the full fleet.
+
 2. **User Setup** (`libexec/workload-ensure-user`): Runs as `ExecStartPre` in each workload service. Configures subordinate UID/GID ranges, creates home and volume directories, writes the EnvironmentFile, and enables linger.
-3. **Workload Services**: Per-workload systemd services that run `podman run` as dedicated `_wl-<name>` users with rootless podman. Default service type is `Type=exec` (activates when podman execs the container process). `Type=notify` is available via `[resources] service_type = "notify"` but is **structurally incompatible** with this architecture, so `Type=exec` stays the default — this is settled, not a pending question. The root cause: systemd attributes an incoming `sd_notify` datagram to the unit owning the *sender's* cgroup, and under rootless + linger the process that emits `READY=1` always lives in `user@<uid>.service`'s cgroup, never in `workload-<name>.service`'s. So the notification is credited to the user manager (the wrong unit) and `workload-<name>.service` never sees it; no `NotifyAccess` tweak on the workload unit can fix this, because the sender is not in that unit's cgroup at all. Both sdnotify policies fail identically for this reason (verified on Fedora 44 / systemd 259, 2026-06-21): with `--sdnotify=conmon` the sender is conmon; with `--sdnotify=healthy` (which additionally requires a healthcheck) podman *does* send `READY=1` once the container is healthy, but the emitter is the re-exec'd libpod podman (`waitForHealthy`), which has migrated into `…/user@<uid>.service/…/podman-<pid>.scope` — same cgroup as conmon, same misattribution (systemd logs `user@<uid>.service: Got notification message from PID …, but reception only permitted for main PID …`). The earlier `--cgroups=split` explanation named the symptom; ADR 001 option 1b does not change the outcome because the notifier is user-manager-resident either way. Use podman-native `--health-cmd` + `workloadctl health`/`update`'s health-verified flow for readiness instead (those work under 1b). The VM substrate's `Type=notify` is unaffected — `workload-vm-notify` sends `READY=1` from a process inside the system unit's own cgroup. Cgroup placement uses **ADR 001 option 1b**: the generator emits a `user@<uid>.service.d/50-workload.conf` drop-in that redirects each workload's user manager into `workloads.slice` (`Slice=workloads.slice`). The container payload follows the user manager and lands at `workloads.slice/user@<uid>.service/…/libpod-<id>.scope` — inside the aggregate slice. Per-workload resource caps (`MemoryHigh`, `CPUWeight`, etc.) go on the same drop-in as `[Service]` directives; per-container caps (`--memory`, `--cpus`, `--pids-limit`, `--device-read-bps/write-bps`) are passed as podman flags and bind natively via the user manager's delegated subtree. There is no `cgroup_exec.py` placement shim — plain `sudo -u` exec works because the container is user-manager-resident. Podman's native `--health-cmd` healthcheck timer fires in the user manager and `--health-on-failure` works without any system-manager replacement. `ExecStopPost=-podman rm -f -t0` is emitted on each container unit because `KillMode=control-group` can't reach the payload (it lives in the user manager's cgroup subtree, not the system unit's). See `docs/adr/001-container-cgroup-placement.md`. Each workload's *head* unit runs two cleanup `ExecStartPre` steps before any other podman call: `ExecStartPre=-/usr/bin/podman system migrate` then `ExecStartPre=-/usr/bin/rm -f /run/user/<uid>/libpod/tmp/pause.pid /run/user/<uid>/libpod/tmp/ns_handles`. The problem: a libpod pause process left over from a previous service invocation gets migrated into `podman-pause-*.scope` under `user@<uid>.service` by any host-side podman call and survives restarts, but its mount namespace pins the old invocation's already-deleted `PrivateTmp` `/tmp`; the next `podman run` takes the rootless join shortcut (`can_use_shortcut` → `join_namespace_or_die`, which ignores `--userns` — so this is independent of keep-id vs host userns) into that stale pause, and pasta then fails its sandbox mount of `/tmp` with ENOENT and the unit restart-loops. `migrate` alone does not fully close this (`runtime_migrate.go` returns before `stopPauseProcess()` if any container stop errors), so the tolerant `rm` of `pause.pid`+`ns_handles` is the belt-and-suspenders: it makes the join shortcut fall through so podman builds a *fresh* pause in the live mount ns. Host-verified 2026-06-28 (both `--userns=keep-id` and `--userns=host` fail identically against an armed stale pause; the `rm` makes both start clean). Member services must *not* run either step (they would kill the pause out from under live pod infra / sibling containers).
-4. **CLI** (`bin/workloadctl` + `lib/cmd_*.py` + `lib/substrate.py`): Docker/kubectl-like argparse CLI for creating, enabling, disabling, updating, and inspecting workloads. `bin/workloadctl` is a thin (~330-line) argument-parser/dispatcher; each verb's body lives in its own `lib/cmd_<verb>.py` module — `cmd_enable`, `cmd_disable`, `cmd_cleanup`, `cmd_create`, `cmd_validate`, `cmd_diagnose`, `cmd_edit`, `cmd_info`, `cmd_images`, `cmd_stats`, `cmd_health`, `cmd_doctor`, `cmd_drift`, `cmd_secret`, `cmd_catalog`, `cmd_backup`, `cmd_update`, plus the few that keep a small family together (`cmd_lifecycle` = start/stop/restart/recreate/reboot/build, `cmd_inspect` = list/status, `cmd_interact` = logs/exec/shell/cp/incant). The provisioning machinery those verbs share (preflight, user creation, image transfer, unit generation, host-setup hooks, SELinux policy) lives in `lib/provisioning.py`, deliberately outside the `cmd_*` namespace: it is library code with several command-layer callers, and `tests/test_layering.py` binds the "raise, never exit" rule to exactly the non-`cmd_*` modules. Substrate-variant verbs (status, health, stats, logs, exec/shell, start/stop/restart/reboot, update/recreate, rollback, backup, incant) route through the **Substrate port** (`lib/substrate.py`); container interactions use `lib/podman.py` (typed Podman wrapper returning structured data from `podman inspect --format=json` rather than go-template strings).
+
+3. **Workload Services**: Per-workload systemd services that run `podman run` as dedicated `_wl-<name>` users with rootless podman. Default service type is `Type=exec` (activates when podman execs the container process). `Type=notify` is available via `[resources] service_type = "notify"` but is **structurally incompatible** with this architecture, so `Type=exec` stays the default — this is settled, not a pending question. The root cause: systemd attributes an incoming `sd_notify` datagram to the unit owning the *sender's* cgroup, and under rootless + linger the process that emits `READY=1` always lives in `user@<uid>.service`'s cgroup, never in `workload-<name>.service`'s. So the notification is credited to the user manager (the wrong unit) and `workload-<name>.service` never sees it; no `NotifyAccess` tweak on the workload unit can fix this, because the sender is not in that unit's cgroup at all. Both sdnotify policies fail this way — under `--sdnotify=conmon` the sender is conmon, under `--sdnotify=healthy` it is the re-exec'd libpod podman, and both live in the user manager's subtree. Use podman-native `--health-cmd` + `workloadctl health`/`update`'s health-verified flow for readiness instead (those work under 1b). The VM substrate's `Type=notify` is unaffected — `workload-vm-notify` sends `READY=1` from a process inside the system unit's own cgroup.
+
+   Cgroup placement uses **ADR 001 option 1b**: the generator emits a `user@<uid>.service.d/50-workload.conf` drop-in that redirects each workload's user manager into `workloads.slice` (`Slice=workloads.slice`). The container payload follows the user manager and lands at `workloads.slice/user@<uid>.service/…/libpod-<id>.scope` — inside the aggregate slice. Per-workload resource caps (`MemoryHigh`, `CPUWeight`, etc.) go on the same drop-in as `[Service]` directives; per-container caps (`--memory`, `--cpus`, `--pids-limit`, `--device-read-bps/write-bps`) are passed as podman flags and bind natively via the user manager's delegated subtree. There is no `cgroup_exec.py` placement shim — plain `sudo -u` exec works because the container is user-manager-resident. Podman's native `--health-cmd` healthcheck timer fires in the user manager and `--health-on-failure` works without any system-manager replacement. `ExecStopPost=-podman rm -f -t0` is emitted on each container unit because `KillMode=control-group` can't reach the payload (it lives in the user manager's cgroup subtree, not the system unit's). See `docs/adr/001-container-cgroup-placement.md`.
+
+   Each workload's *head* unit runs two cleanup `ExecStartPre` steps before any other podman call: `ExecStartPre=-/usr/bin/podman system migrate` then `ExecStartPre=-/usr/bin/rm -f /run/user/<uid>/libpod/tmp/pause.pid /run/user/<uid>/libpod/tmp/ns_handles`. The problem: a libpod pause process left over from a previous service invocation gets migrated into `podman-pause-*.scope` under `user@<uid>.service` by any host-side podman call and survives restarts, but its mount namespace pins the old invocation's already-deleted `PrivateTmp` `/tmp`; the next `podman run` takes the rootless join shortcut (`can_use_shortcut` → `join_namespace_or_die`, which ignores `--userns` — so this is independent of keep-id vs host userns) into that stale pause, and pasta then fails its sandbox mount of `/tmp` with ENOENT and the unit restart-loops. `migrate` alone does not fully close this (`runtime_migrate.go` returns before `stopPauseProcess()` if any container stop errors), so the tolerant `rm` of `pause.pid`+`ns_handles` is the belt-and-suspenders: it makes the join shortcut fall through so podman builds a *fresh* pause in the live mount ns. Both `--userns=keep-id` and `--userns=host` fail identically against an armed stale pause; the `rm` makes both start clean. Member services must *not* run either step (they would kill the pause out from under live pod infra / sibling containers).
+
+4. **CLI** (`bin/workloadctl` + `lib/cmd_*.py` + `lib/substrate.py`): Docker/kubectl-like argparse CLI. `bin/workloadctl` is a thin argument-parser/dispatcher; each verb's body lives in its own `lib/cmd_<verb>.py` module — `cmd_enable`, `cmd_disable`, `cmd_cleanup`, `cmd_create`, `cmd_validate`, `cmd_diagnose`, `cmd_edit`, `cmd_info`, `cmd_images`, `cmd_stats`, `cmd_health`, `cmd_doctor`, `cmd_drift`, `cmd_secret`, `cmd_catalog`, `cmd_backup`, `cmd_update`, `cmd_egress`, `cmd_rules`, `cmd_pcap`, plus the few that keep a small family together (`cmd_lifecycle` = start/stop/restart/recreate/reboot/build, `cmd_inspect` = list/status, `cmd_interact` = logs/exec/shell/cp/incant). The provisioning machinery those verbs share (preflight, user creation, image transfer, unit generation, host-setup hooks, SELinux policy) lives in `lib/provisioning.py`, deliberately outside the `cmd_*` namespace: it is library code with several command-layer callers, and `tests/test_layering.py` binds the "raise, never exit" rule to exactly the non-`cmd_*` modules. Container interactions use `lib/podman.py` (typed Podman wrapper returning structured data from `podman inspect --format=json` rather than go-template strings).
 
    **Exit-code boundary (enforced): the library core raises, only the CLI leaf exits.** `sys.exit()` is allowed in `bin/workloadctl` and `lib/cmd_*.py`, and nowhere else in `lib/`. Everything else — `workload_lib`, `workloadctl_core`, `substrate`, `substrate_container`, `substrate_vm`, `backup`, `podman`, `qmp`, `unit_file`, `validation`, `vm`, `secrets_template`, `service_runtime`, `imagebuild` — raises a typed exception, and `_run_cli()` in `bin/workloadctl` maps it to a code: `UsageError` → 2, `LifecycleError` → the returncode of the systemctl/podman call that failed, `NotRoot`/`ProvisionFailed`/`WorkloadMasked`/`WorkloadUserNotFound`/`FileNotFoundError` → 1, anything else → traceback + "this looks like a workloadctl bug". `ProvisionFailed`, `BackupError` and `NotApplicable` are also caught at call sites that must keep going (`update --all` tallies per-workload failures rather than dying on the first). The reason is that `SystemExit` inherits `BaseException` so it passes straight through `except Exception:` — harmless at a leaf, a trapdoor in a helper, which takes the process down past a caller that meant to recover. `tests/test_layering.py` walks the AST of every non-`cmd_` module in `lib/` and fails the suite if a `sys.exit`/`os._exit` call appears, so this is a checked invariant, not a convention.
 
-   **`--dry-run` exists only where a truthful plan can be computed** — `disable` (`_disable_plan`) and `update` (`_update_plan`), plus `cleanup`, which defaults to it. Both plans are built read-only *before* any mutation and returned as lines, rather than by walking the real teardown with the writes switched off: a plan that shares the mutating path is only as trustworthy as the last guard someone remembered to add. They enumerate from the same sources the real path acts on (`workload_run_files`, the passwd db, `/etc/subuid`, the data dir) and report only what is actually present, so what a plan doesn't list, the command won't touch. The other mutating verbs deliberately have no `--dry-run`: for most of them "would restart the service" is a restatement of the verb, not a plan, and a dry-run that cannot be wrong teaches operators to trust it. Applying a config edit is `recreate`, and previewing that edit is `drift` (which already generates into a temp dir and diffs) — not a third flag.
+   **`--dry-run` exists only where a truthful plan can be computed** — `disable` (`_disable_plan`) and `update` (`_update_plan`), plus `cleanup`, which defaults to it, and `pcap`, which prints the exact nft rule it would install. Both plans are built read-only *before* any mutation and returned as lines, rather than by walking the real teardown with the writes switched off: a plan that shares the mutating path is only as trustworthy as the last guard someone remembered to add. They enumerate from the same sources the real path acts on (`workload_run_files`, the passwd db, `/etc/subuid`, the data dir) and report only what is actually present, so what a plan doesn't list, the command won't touch. The other mutating verbs deliberately have no `--dry-run`: for most of them "would restart the service" is a restatement of the verb, not a plan, and a dry-run that cannot be wrong teaches operators to trust it. Applying a config edit is `recreate`, and previewing that edit is `drift` (which already generates into a temp dir and diffs) — not a third flag.
 
 ### Boot Flow
 
@@ -37,38 +50,64 @@ workload-generate.service → runs Python workload-generate script, which writes
 workload-{name}-setup.service → systemd-sysusers creates user; workload-ensure-user
                                 configures subuid/subgid, home dir, EnvironmentFile, linger
 workload-{name}.service → individual containers start via podman run
+                          (VM: workload-{name}-build.service then the QEMU unit)
 ```
 
-**Every emitted file is stamped with the build that wrote it** —
-`# Generated by workload-generate (<version-release>)`, from `WORKLOADCTL_VERSION`
-(`workload_lib`), which the RPM's `%install` injects as `_version.py` and which
-`--version` also reports. Units live in `/run` and are rewritten only at boot or
-by `enable`, so `dnf upgrade workloadctl` on a package host leaves running
-workloads on the *previous* generator's output with nothing else to say so:
-neither the TOML's nor the unit's mtime moved, which is exactly what
-`units_outdated()` compares. `units_from_other_build()` reads the stamp back and
-`doctor`/`diagnose`/`status` report the skew; the remedy is `workloadctl enable
-<name>` (or a reboot). `drift` deliberately **normalizes the stamp away** before
-comparing — it answers "do the running units match what this TOML would
-produce", and letting a build bump mark every workload as drifted is how a
-signal stops being read. On a bootc host the skew cannot arise: new code is live
-only after a reboot, and that boot regenerates.
+**The TOML is the source of truth and the units are derived.** Edit the file, re-enable, and the units follow; `workloadctl drift` reports any live unit that no longer matches what its TOML would produce.
+
+**Every emitted file is stamped with the build that wrote it** — `# Generated by workload-generate (<version-release>)`, from `WORKLOADCTL_VERSION` (`workload_lib`), which the RPM's `%install` injects as `_version.py` and which `--version` also reports. Units live in `/run` and are rewritten only at boot or by `enable`, so `dnf upgrade workloadctl` on a package host leaves running workloads on the *previous* generator's output with nothing else to say so: neither the TOML's nor the unit's mtime moved, which is exactly what `units_outdated()` compares. `units_from_other_build()` reads the stamp back and `doctor`/`diagnose`/`status` report the skew; the remedy is `workloadctl enable <name>` (or a reboot). `drift` deliberately **normalizes the stamp away** before comparing — it answers "do the running units match what this TOML would produce", and letting a build bump mark every workload as drifted is how a signal stops being read. On a bootc host the skew cannot arise: new code is live only after a reboot, and that boot regenerates.
 
 ### User Management
 
 - Username: `_wl-{name}` (e.g., `_wl-webserver`)
 - UID range: 10000-52948 (42,949 max workloads)
-- Subuid formula: `600100000 + (uid_offset * 65536)`, count=65536, where
-  `uid_offset = uid - UID_MIN`. The base clears Fedora `useradd`'s own subid
-  window (`SUB_UID_MIN=524288`), which a lower base overlaps at low UIDs.
-  Authoritative in `workload_lib.derived_subid_range()`; the ranges are written
-  by `workload_lib.append_subid_entries()`. `workload-ensure-user` grandfathers
-  an existing entry rather than correcting it (shifting a mapping under a
-  running container corrupts its namespace), so drift off the formula is
-  permanent and silent — `diagnose`/`doctor`'s `subid_derived` and
-  `subid_overlap` checks are the only thing that reports it
+- Subuid formula: `600100000 + (uid_offset * 65536)`, count=65536, where `uid_offset = uid - UID_MIN`. The base clears Fedora `useradd`'s own subid window (`SUB_UID_MIN=524288`), which a lower base overlaps at low UIDs. Authoritative in `workload_lib.derived_subid_range()`; the ranges are written by `workload_lib.append_subid_entries()`. `workload-ensure-user` grandfathers an existing entry rather than correcting it (shifting a mapping under a running container corrupts its namespace), so drift off the formula is permanent and silent — `diagnose`/`doctor`'s `subid_derived` and `subid_overlap` checks are the only thing that reports it
 - Home directory: `/var/lib/workloads/{name}`
 - Shell: `/usr/sbin/nologin`
+
+Two uid-derived address planes matter and are never configurable: `127.128.0.0 + uid_offset` is the VM management address `exec`/`shell` reach a guest on (port 2222), and `127.129.0.0 + uid_offset` is where that workload's credential broker binds. Neither is routable and neither is advertised to a guest.
+
+### Logging
+
+Container stdout/stderr go to the host journal via `--log-driver=passthrough` (podman hands the unit's journal stream fds to the container), with `SyslogIdentifier=` set to the container name so lines read `workload-<name>[pid]: ...` (`workload-<wl>-<ctr>` for pod/bridge members). Passthrough stores each line exactly once — the journald driver kept a second, untagged copy via the unit's stdout relay. Filter container output with `journalctl -t workload-<name>`; `workloadctl logs` wraps journalctl, OR-ing the unit with `SYSLOG_IDENTIFIER=` so passthrough app output is included (a unit-only filter misses it — journald attributes it to the user manager's cgroup). `podman logs` does not work with passthrough (podman keeps no copy).
+
+### CLI output: prose vs. output
+
+`lib/cli_log.py` owns the CLI's **prose** — what a command says *about* what it is doing (progress, status, diagnostics). `info()` goes to stdout, `warn()`/`error()` to stderr, so severity survives a redirect. Everything a command was *asked* to produce — reports, `--dry-run` plans, JSON documents, `incant`/`logs`/`stats` passthrough — stays on plain `print()`.
+
+That split is the whole reason `--quiet` is safe: it raises the level to WARNING, so it can silence narration but never a failure, and never the answer. `--json` suppresses prose the same way *and* reserves stdout for the result object the mutating verbs emit via `emit_result()` (shape in `docs/cli.md`), so `update --all --json | jq` can't choke on a progress line. `bin/workloadctl` calls `cli_log.configure()` once from the parsed args, and the exit-code ladder in `_run_cli()` calls `emit_failure()` so a command that dies still leaves a result document behind. Handlers resolve `sys.stdout`/`sys.stderr` per record rather than binding at import, so a redirected caller (the test suite) still captures what we write.
+
+`--quiet`/`--json` are offered only on the verbs that mutate a workload (enable, disable, start, stop, restart, reboot, recreate, build, update, rollback) — the ones whose narration goes through cli_log. Offering the flag where it wasn't honored would be a lie.
+
+### Operations log
+
+`lib/oplog.py` appends one JSON object per mutated workload to `/var/lib/workloads/<name>/operations.log` — the `--json` result row plus `ts`, `command`, `ok`, `user` and `user_source`. It hangs off `cli_log.emit_result()`, the one call each verb already makes, so the log and `--json` are the same dict and can't drift; a verb that learns to report something new records it with no second call site. The administrative verbs (`create`/`init`/`duplicate`/`install`/`edit`/`backup`/`restore`/`cp`) call `emit_result()` too even though they own no `--json` document: with `json_mode` off it feeds the log and nothing else. `secret` (host-global credstore) and `cleanup` (reaps orphans that have no workload left to own a record) stay out.
+
+`oplog.RECORDED_RESULTS` / `IGNORED_RESULTS` classify every `result` string a verb can emit — **a new verb must add its result string to one of them.** It's an allowlist because `update --all` reports `"unchanged"` for a fleet that didn't move, and a denylist that hadn't heard of that string appended a no-op line per workload on every scheduled run, forever (nothing rotates this file). An unclassified string is recorded *and* warned about: losing an operation is worse than keeping a doubtful one, and the warning is what sends you here.
+
+The config-authoring verbs run before `enable` ever creates `/var/lib/workloads/<name>/`, so `record()` makes that root on demand for any workload that has a config. A name with no config gets a warning and no directory — otherwise a typo would leave something `cleanup` reads as an orphan.
+
+It is a **record, not an audit trail** — only root can run these verbs and root can equally delete the file, so it is worthless as a tamper-evident control and isn't offered as one. Its value is the half `sudo`'s own journal entry misses: not *that* someone ran `update web`, but that the update moved nginx from 1f2e3d4c to 9a8b7c6d and rolled back on a failed health check.
+
+`user` comes from the kernel's audit **loginuid** first (`/proc/self/loginuid`), falling back to `SUDO_USER` and then the real uid — recorded as `user_source` `login` / `sudo` / `system`. loginuid is the only unforgeable source and the only one that survives `su -`; and its absence positively identifies automation, so a timer-driven `update --all` reads as `system` rather than as an indistinguishable bare `root`.
+
+Placement is load-bearing: at the workload *root*, beside `state/` and `data/` rather than inside either — so backup (which captures only `data/`) doesn't import one host's history into a restored workload, and the rootless `_wl-<name>` user (who owns `state/`) can't touch its own record. `--purge` rmtree's the root and takes the log with it, which is coherent: the workload is gone. Dry-runs and reports record nothing. Writes are best-effort — a missing directory warns once on stderr and the command carries on. No rotation (a few KB a year).
+
+The workload root's other bookkeeping file, `provenance.json`, sits there for the same reasons and answers a different question: **which ostree deployment this `/var` state belongs to.** `/etc` is per-deployment and `/var` is shared, so every piece of workload *identity* (the TOML, the `_wl-*` passwd line, the `subuid` range) is per-deployment while its *state* is not — and `bootc rollback`, which deletes nothing, therefore manufactures orphans: state whose workload has no config here, which is precisely `cleanup`'s definition. `workload-ensure-user` stamps the root with the booted deployment's `<csum>.<serial>` on every run (last *provisioned* under, not created under — create-only stamping would make cleanup skip the ordinary "operator deleted a TOML" sweep), and `cleanup` spares state whose stamp names a deployment that still exists but isn't booted, reporting it under "State from another deployment — not swept". Every uncertainty — no `/ostree`, no stamp, a corrupt stamp, a pruned deployment — falls back to the pre-stamp behavior, because nothing in this mechanism may ever *cause* a deletion. The deployment id comes from resolving the cmdline's `ostree=` symlink (its own csum is the **boot** checksum, not the deployment's) and existence is a `glob('/ostree/deploy/*/deploy/<id>')` — the stateroot is a variable, and `/var` may be a separate filesystem shared by all of them. `lib/deployment.py` carries the full table. The UID and subid range are deliberately **not** stamped: the owning UID of `<root>/data` is one `stat` away, and a copy could only go stale and compete with `/etc/subuid`.
+
+### Substrate dispatch
+
+The substrate (container vs VM) is a first-class dimension, orthogonal to the verb. `lib/substrate.py` defines a `Substrate` abstract port with a small set of **primitives** — `liveness`, `resource_usage`, `logs`, `exec`/`open_shell`, `lifecycle(action)`, `reprovision`, `rollback_targets`/`rollback_to`, `capture(consistency)`, `endpoints`, `addresses`, `teardown`/`teardown_plan`, `control`, `gating_units` — plus the exception vocabulary (`NotApplicable`, `ProvisionFailed`, `BackupError`, `LifecycleError`) and the `get_substrate(config, manager)` router. The two implementations live beside it, one module each: `lib/substrate_container.py` (`ContainerSubstrate`) and `lib/substrate_vm.py` (`VMSubstrate`). Both import the port for the ABC and the exceptions, so `get_substrate()` imports them inside its body rather than at module scope — the router is the only place that has to know both, and only at call time. `get_substrate()` resolves the implementation from the **declaration** (presence of `[vm]`, i.e. `config.is_vm`), never from runtime state. Each substrate-variant verb is written once and composes primitives; the substrate-specific delta lives only in the port.
+
+The one primitive with a shared body is `capture`: `lib/backup.py` stages the TOML, the credential blobs and the precious `data/` tree into a temp dir and tars it, and the substrates differ only in how they quiesce the workload first (systemd stop vs QMP vCPU pause), so that difference stays in the callers.
+
+Required primitives are `@abstractmethod`s, so a substrate cannot exist without them. Optional ones (`resource_usage`, `logs`, `endpoints`, `addresses`, `reprovision`, `teardown`, `teardown_plan`) have a base-class default — `NotApplicable` with a self-documenting reason for most, `[]` for the teardown pair, since a substrate with no state of its own to remove is coherent rather than incapable — and a substrate opts in by overriding. The `(verb, substrate)` capability matrix is therefore **declared by what each class defines**, not maintained as a list: a verb a substrate can't serve reports "not applicable" rather than running a nonsensical command against it. `ContainerSubstrate` overrides `resource_usage`/`endpoints`/`reprovision` plus the teardown pair (subuid/subgid ranges, the `user@<uid>.service.d` drop-in); `VMSubstrate` overrides `resource_usage` (sourced from QMP, see below), `reprovision`, `addresses` (the guest's IP) and the teardown pair (socket dir, and this workload's elements in the shared nftables sets), and leaves `logs`/`endpoints` at the default. Two questions travel on two channels: a *capability* answer is `NotApplicable`, while "supported, nothing right now" is the type's empty value in band — `endpoints` returns `[]` with no ports published, `addresses` returns `[]` before the guest has a lease, `reprovision` returns `None` when already up to date. A new primitive should prefer an empty container to a `None` sentinel, so the nothing case has the same shape as the something case.
+
+`resource_usage(json_out=True)` returns normalized rows keyed by `STAT_ROW_KEYS`, uniform across substrates so `stats --json` has one schema. A substrate with no source for a key reports `None`, not `0` — a VM has no block-I/O figure because nothing asks QEMU for `query-blockstats`, and a zero there would read as an idle disk rather than as a gap. The VM row is read from `qmp-metrics.sock` (the dedicated read-only monitor the Prometheus exporter also scrapes) via `lib/vm_metrics.py`, never from the control socket `qmp.sock`: a QMP monitor serves one client at a time, so a competing reader there could block `ExecStop`'s `system_powerdown` and force an unclean SIGKILL.
+
+`gating_units()` is a diagnostics primitive: it names the systemd units that must succeed *before* the main service starts. Containers return `[]` (setup is an `ExecStartPre` on the main unit, so a failure surfaces there directly); a VM returns its `workload-<name>-setup.service` + `workload-<name>-build.service`, which run as separate `RemainAfterExit=yes` units. `status`/`_effective_state` walk these so a failed setup/build is reported as `failed` and the culprit unit is named, instead of the main service showing a bland `inactive`/`dependency failed` with the real cause buried.
+
+## Container workloads
 
 ### Network Modes
 
@@ -77,112 +116,7 @@ only after a reboot, and that boot regenerates.
 - `none`: No networking
 - Custom named networks for container-to-container communication
 
-### Logging
-
-Container stdout/stderr go to the host journal via `--log-driver=passthrough`
-(podman hands the unit's journal stream fds to the container), with
-`SyslogIdentifier=` set to the container name so lines read
-`workload-<name>[pid]: ...` (`workload-<wl>-<ctr>` for pod/bridge members).
-Passthrough stores each line exactly once — the journald driver kept a second,
-untagged copy via the unit's stdout relay. Filter container output with
-`journalctl -t workload-<name>`; `workloadctl logs` wraps journalctl, OR-ing the
-unit with `SYSLOG_IDENTIFIER=` so passthrough app output is included (a unit-only
-filter misses it — journald attributes it to the user manager's cgroup).
-`podman logs` does not work with passthrough (podman keeps no copy).
-
-### CLI output: prose vs. output
-
-`lib/cli_log.py` owns the CLI's **prose** — what a command says *about* what it
-is doing (progress, status, diagnostics). `info()` goes to stdout,
-`warn()`/`error()` to stderr, so severity survives a redirect. Everything a
-command was *asked* to produce — reports, `--dry-run` plans, JSON documents,
-`incant`/`logs`/`stats` passthrough — stays on plain `print()`.
-
-That split is the whole reason `--quiet` is safe: it raises the level to
-WARNING, so it can silence narration but never a failure, and never the answer.
-`--json` suppresses prose the same way *and* reserves stdout for the result
-object the mutating verbs emit via `emit_result()` (shape in `docs/cli.md`), so
-`update --all --json | jq` can't choke on a progress line. `bin/workloadctl`
-calls `cli_log.configure()` once from the parsed args, and the exit-code ladder
-in `_run_cli()` calls `emit_failure()` so a command that dies still leaves a
-result document behind. Handlers resolve `sys.stdout`/`sys.stderr` per record
-rather than binding at import, so a redirected caller (the test suite) still
-captures what we write.
-
-`--quiet`/`--json` are offered only on the verbs that mutate a workload (enable,
-disable, start, stop, restart, reboot, recreate, build, update, rollback) — the
-ones whose narration goes through cli_log. Offering the flag where it wasn't
-honored would be a lie.
-
-### Operations log
-
-`lib/oplog.py` appends one JSON object per mutated workload to
-`/var/lib/workloads/<name>/operations.log` — the `--json` result row plus `ts`,
-`command`, `ok`, `user` and `user_source`. It hangs off `cli_log.emit_result()`,
-the one call each verb already makes, so the log and `--json` are the same dict
-and can't drift; a verb that learns to report something new records it with no
-second call site. The administrative verbs (`create`/`init`/`duplicate`/
-`install`/`edit`/`backup`/`restore`/`cp`) call `emit_result()` too even though
-they own no `--json` document: with `json_mode` off it feeds the log and nothing
-else. `secret` (host-global credstore) and `cleanup` (reaps orphans that have no
-workload left to own a record) stay out.
-
-`oplog.RECORDED_RESULTS` / `IGNORED_RESULTS` classify every `result` string a verb
-can emit — **a new verb must add its result string to one of them.** It's an
-allowlist because `update --all` reports `"unchanged"` for a fleet that didn't
-move, and a denylist that hadn't heard of that string appended a no-op line per
-workload on every scheduled run, forever (nothing rotates this file). An
-unclassified string is recorded *and* warned about: losing an operation is worse
-than keeping a doubtful one, and the warning is what sends you here.
-
-The config-authoring verbs run before `enable` ever creates `/var/lib/workloads/
-<name>/`, so `record()` makes that root on demand for any workload that has a
-config. A name with no config gets a warning and no directory — otherwise a typo
-would leave something `cleanup` reads as an orphan.
-
-It is a **record, not an audit trail** — only root can run these verbs and root
-can equally delete the file, so it is worthless as a tamper-evident control and
-isn't offered as one. Its value is the half `sudo`'s own journal entry misses:
-not *that* someone ran `update web`, but that the update moved nginx from
-1f2e3d4c to 9a8b7c6d and rolled back on a failed health check.
-
-`user` comes from the kernel's audit **loginuid** first (`/proc/self/loginuid`),
-falling back to `SUDO_USER` and then the real uid — recorded as `user_source`
-`login` / `sudo` / `system`. loginuid is the only unforgeable source and the only
-one that survives `su -`; and its absence positively identifies automation, so a
-timer-driven `update --all` reads as `system` rather than as an indistinguishable
-bare `root`.
-
-Placement is load-bearing: at the workload *root*, beside `state/` and `data/`
-rather than inside either — so backup (which captures only `data/`) doesn't
-import one host's history into a restored workload, and the rootless
-`_wl-<name>` user (who owns `state/`) can't touch its own record. `--purge`
-rmtree's the root and takes the log with it, which is coherent: the workload is
-gone. Dry-runs and reports record nothing. Writes are best-effort — a missing
-directory warns once on stderr and the command carries on. No rotation (a few KB
-a year).
-
-The workload root's other bookkeeping file, `provenance.json`, sits there for the
-same reasons and answers a different question: **which ostree deployment this
-`/var` state belongs to.** `/etc` is per-deployment and `/var` is shared, so
-every piece of workload *identity* (the TOML, the `_wl-*` passwd line, the
-`subuid` range) is per-deployment while its *state* is not — and `bootc rollback`,
-which deletes nothing, therefore manufactures orphans: state whose workload has
-no config here, which is precisely `cleanup`'s definition. `workload-ensure-user`
-stamps the root with the booted deployment's `<csum>.<serial>` on every run (last
-*provisioned* under, not created under — create-only stamping would make cleanup
-skip the ordinary "operator deleted a TOML" sweep), and `cleanup` spares state
-whose stamp names a deployment that still exists but isn't booted, reporting it
-under "State from another deployment — not swept". Every uncertainty — no
-`/ostree`, no stamp, a corrupt stamp, a pruned deployment — falls back to the
-pre-stamp behavior, because nothing in this mechanism may ever *cause* a
-deletion. The deployment id comes from resolving the cmdline's `ostree=` symlink
-(its own csum is the **boot** checksum, not the deployment's) and existence is a
-`glob('/ostree/deploy/*/deploy/<id>')` — the stateroot is a variable, and `/var`
-may be a separate filesystem shared by all of them. `lib/deployment.py` carries
-the full table. The UID and subid range are deliberately **not** stamped: the
-owning UID of `<root>/data` is one `stat` away, and a copy could only go stale
-and compete with `/etc/subuid`.
+Note that pasta-published ports answer on the host's LAN address, not on the host's own loopback — a `curl localhost:<port>` from the host itself gets connection refused while everything is healthy.
 
 ### Multi-Container Workloads
 
@@ -204,440 +138,281 @@ workload-<name>-<container>.service  # one per [[containers]] entry
 
 Stopping the umbrella tears everything down (`PartOf=`). The CLI accepts `<workload>/<container>` for container-targeted commands (`exec`, `shell`, `logs`, `health`); lifecycle and most introspection commands take a bare `<workload>`. The generator normalizes single- and multi-container shapes through `normalize_containers()` so single-container TOMLs produce byte-identical units to before. See `docs/workloads.md` and `docs/schema-reference.toml` for the full schema; `workloads/webproxy-demo/workload.toml` is the smallest working bridge-mode example.
 
-### Substrate dispatch
+### Device convenience flags
 
-The substrate (container vs VM) is a first-class dimension, orthogonal to the verb. `lib/substrate.py` defines a `Substrate` abstract port with a small set of **primitives** — `liveness`, `resource_usage`, `logs`, `exec`/`open_shell`, `lifecycle(action)`, `reprovision`, `rollback_targets`/`rollback_to`, `capture(consistency)`, `endpoints`, `addresses`, `teardown`/`teardown_plan`, `control`, `gating_units` — plus the exception vocabulary (`NotApplicable`, `ProvisionFailed`, `BackupError`, `LifecycleError`) and the `get_substrate(config, manager)` router. The two implementations live beside it, one module each: `lib/substrate_container.py` (`ContainerSubstrate`) and `lib/substrate_vm.py` (`VMSubstrate`). Both import the port for the ABC and the exceptions, so `get_substrate()` imports them inside its body rather than at module scope — the router is the only place that has to know both, and only at call time. `get_substrate()` resolves the implementation from the **declaration** (presence of `[vm]`, i.e. `config.is_vm`), never from runtime state. Each substrate-variant verb is written once and composes primitives; the substrate-specific delta lives only in the port.
-
-The one primitive with a shared body is `capture`: `lib/backup.py` stages the TOML, the credential blobs and the precious `data/` tree into a temp dir and tars it, and the substrates differ only in how they quiesce the workload first (systemd stop vs QMP vCPU pause), so that difference stays in the callers.
-
-Required primitives are `@abstractmethod`s, so a substrate cannot exist without them. Optional ones (`resource_usage`, `logs`, `endpoints`, `addresses`, `reprovision`, `teardown`, `teardown_plan`) have a base-class default — `NotApplicable` with a self-documenting reason for most, `[]` for the teardown pair, since a substrate with no state of its own to remove is coherent rather than incapable — and a substrate opts in by overriding. The `(verb, substrate)` capability matrix is therefore **declared by what each class defines**, not maintained as a list: a verb a substrate can't serve reports "not applicable" rather than running a nonsensical command against it. `ContainerSubstrate` overrides `resource_usage`/`endpoints`/`reprovision` plus the teardown pair (subuid/subgid ranges, the `user@<uid>.service.d` drop-in); `VMSubstrate` overrides `resource_usage` (sourced from QMP, see below), `reprovision`, `addresses` (the guest's IP) and the teardown pair (socket dir, and this workload's elements in the shared nftables sets), and leaves `logs`/`endpoints` at the default. Two questions travel on two channels: a *capability* answer is `NotApplicable`, while "supported, nothing right now" is the type's empty value in band — `endpoints` returns `[]` with no ports published, `addresses` returns `[]` before the guest has a lease, `reprovision` returns `None` when already up to date. A new primitive should prefer an empty container to a `None` sentinel, so the nothing case has the same shape as the something case.
-
-`resource_usage(json_out=True)` returns normalized rows keyed by `STAT_ROW_KEYS`, uniform across substrates so `stats --json` has one schema. A substrate with no source for a key reports `None`, not `0` — a VM has no block-I/O figure because nothing asks QEMU for `query-blockstats`, and a zero there would read as an idle disk rather than as a gap. The VM row is read from `qmp-metrics.sock` (the dedicated read-only monitor the Prometheus exporter also scrapes) via `lib/vm_metrics.py`, never from the control socket `qmp.sock`: a QMP monitor serves one client at a time, so a competing reader there could block `ExecStop`'s `system_powerdown` and force an unclean SIGKILL.
-
-`gating_units()` is a diagnostics primitive: it names the systemd units that must succeed *before* the main service starts. Containers return `[]` (setup is an `ExecStartPre` on the main unit, so a failure surfaces there directly); a VM returns its `workload-<name>-setup.service` + `workload-<name>-build.service`, which run as separate `RemainAfterExit=yes` units. `status`/`_effective_state` walk these so a failed setup/build is reported as `failed` and the culprit unit is named, instead of the main service showing a bland `inactive`/`dependency failed` with the real cause buried.
-
-### VM workloads
-
-A TOML with a top-level `[vm]` section (mutually exclusive with `[container]`/`[[containers]]`) runs as a raw QEMU/KVM virtual machine under a systemd unit, via `VMSubstrate` and the `libexec/workload-vm-*` helpers (`workload-vm-build-disk`, `workload-vm-qmp`, `workload-vm-shutdown`, `workload-vm-notify`, `workload-vm-netdev`):
-
-- **Disks** — a writable `system.qcow2` built once from the image source (rebuildable, with generational `system.qcow2.gen-N` rollback, `rollback_keep + 1` retained) plus an optional durable `data.qcow2`. `update`/`reprovision` rebuilds `system.qcow2`; `rollback` restores the previous generation.
-- **Networking** — **passt** (ADR 006), not a bridge: it terminates the guest's stack in userspace and re-originates traffic as host sockets owned by `_wl-<name>`, so **the workload uid is the network identity** (unforgeable, unique, matchable as `meta skuid`). The guest is assigned the *host's* address, so it has no LAN identity; `exec`/`shell` reach it on a uid-derived management address (`127.128.0.0 + uid offset`, port 2222). `[vm.network].bridge` is the escape hatch for a VM that needs a real LAN identity — supported, and **unfiltered by design**. Egress policy is one nftables table (`inet workload_filter`, skeleton at `%{_datadir}/workloadctl/workload-filter.nft`) whose *elements* the units manage — never its rules; the file is applied on every VM start and is idempotent because it flushes the chain before re-adding rules, while set elements survive on the table. `egress` defaults to `"filtered"`, and a filtered VM needs somewhere for its traffic to go — either `hosts` (HTTP/HTTPS, through its own egress inspector) or `allow` (everything else). **`filtered` with neither is a validation error**, not a VM that boots and reaches nothing: every VM config must state a posture. `allow` entries are `"<addr>:<port>"` **or a name with a port** (`"git.local:2222"`), resolved on the host once at start — the staleness that buys is real and accepted, which is why hostname policy proper goes through `hosts` instead. Ports 80 and 443 are *refused* in `allow`: they are redirected into the inspector before the filter chain is consulted, so the element would be armed and never matched while the config read as if the destination were exempt. Break-glass: `nft delete table inet workload_filter`.
-- **Boot/seed** — UEFI/OVMF firmware; cloud-init seed ISO from `[vm.cloud_init]` (user-data template + `template_vars`); a per-instance SSH key for CLI access. CLI verbs reach a VM over SSH (`exec`/`shell`) or QMP (`incant`, lifecycle, `capture`), not podman.
-- **The guest's clock** — a paused vCPU (`backup --consistency crash`, a host suspend, `incant stop`) is lost by the guest exactly and permanently, and NTP cannot repair it: it is unreachable in a filtered guest, and a stock chrony steps only during its first three updates and slews forever after. That matters because the egress inspector mints leaves backdated one hour, so a guest rewound further rejects every *new* leaf while its cached ones keep validating — it reaches its usual hosts, fails on new names, and every host-side figure reads healthy. Two remedies, covering each other's gaps: **in the guest**, the built-in seed wires `ptp_kvm` (the module, a udev rule naming the device by the driver's `clock_name`, a chrony refclock, and `makestep 1 -1` — the line that actually fixes it) so the guest reads the host's clock over a KVM hypercall, needing no network and *nothing on the host*; **on the host**, `lib/vm_clock.py` compares clocks over the guest agent on every mint cache miss and resyncs past five minutes. A custom `[vm.cloud_init].user_data_file` replaces the built-in seed, so it carries no `ptp_kvm` wiring unless its author copied it — which is why the host-side half exists.
-
-`workloads/virtual-forgejo/workload.toml` is the live example; `docs/schema-reference.toml` documents `[vm]`, `[vm.cloud_init]`, and `[vm.network]`.
+`--gpu amd|nvidia|intel|auto` (or `nvidia:<index|UUID>` to pin one card), `--audio`, `--input` and `--virtualization` expand to the right devices, groups and mounts rather than making the author spell them out. `[devices]` carries the same thing declaratively.
 
 ### Lifecycle: pet vs cattle
 
 `[workload] lifecycle` (default `"cattle"`) declares lifecycle intent, honored per-substrate. **Cattle** containers are ephemeral — the generator appends `--rm`, so the writable overlay is destroyed on every stop/start (including a plain reboot) and rebuilt from the image. **Pet** containers reuse the overlay (`podman create` once + `start`/`stop`, no `--rm`; the graphroot lives under `/var` and survives reboots and bootc updates) and snapshot the overlay to a timestamped local image before any destructive verb (`recreate`/`update`). A **pet VM** skips `system.qcow2` rotation on `reprovision`/`update`, keeping the durable disk. Pet reclassifies a workload's `home/`/system disk from rebuildable-and-backup-skipped to precious-and-backup-included.
 
-### Secrets
+## VM workloads
 
-Uses systemd credentials (`systemd-creds`) for secret management:
-- Encryption at rest via AES256-GCM with TPM2 or host keys
-- Runtime decryption into RAM-only tmpfs
-- Per-workload isolation
-- `${SECRET:name}` syntax in environment variables for auto-detection
-- Portable export/import between machines
+A TOML with a top-level `[vm]` section (mutually exclusive with `[container]`/`[[containers]]`) runs as a raw QEMU/KVM virtual machine under a systemd unit, via `VMSubstrate` and the `libexec/workload-vm-*` helpers (`workload-vm-build-disk`, `workload-vm-qmp`, `workload-vm-shutdown`, `workload-vm-notify`, `workload-vm-netdev`, `workload-vm-filter`, `workload-vm-inspect`, `workload-vm-inspect-listener`, `workload-vm-resolve`, `workload-vm-broker`). It gets the same dedicated user, the same generated units and the same verbs a container workload does.
 
-### SELinux confinement
+- **Disks** — a writable `system.qcow2` built once from the image source (rebuildable, with generational `system.qcow2.gen-N` rollback, `rollback_keep + 1` retained) plus an optional durable `data.qcow2`. `update`/`reprovision` rebuilds `system.qcow2`; `rollback` restores the previous generation. The image source is a cloud image by URL + checksum, a `local_image`, or a bootc `image` reference.
+- **Boot/seed** — UEFI/OVMF firmware; cloud-init seed ISO from `[vm.cloud_init]` (user-data template + `template_vars`); a per-instance SSH key for CLI access. CLI verbs reach a VM over SSH (`exec`/`shell`/`cp`) or QMP (`incant`, lifecycle, `capture`), not podman.
+- **Shares** — virtiofs `volumes`, every guest id squashed to the workload user on the host (`docs/vm-virtiofs.md`).
+- **Size** — `vcpus`, `memory`, a virtio-balloon so the host can reclaim idle guest memory, and a `restart` policy.
 
-A workload that needs rights beyond the stock container domain sets
-`[security].selinux_policy = true` and ships a policy file. Each such workload
-gets its **own** SELinux type (`wl_<name>.process`) rather than adding rules to
-the shared `container_t`. This matters because a `semodule` load is global: a
-rule written against `container_t` widens *every* container on the host, so the
-desktop/telemetry workloads' device and journal grants would otherwise leak
-host-wide. Per-workload types keep each workload's extra rights scoped to
-itself, and — because the type is keyed on the workload name — a duplicated
-workload gets an independently loadable/removable module.
+`workloads/virtual-forgejo/` is the live example and `workloads/vm-base/` the minimal one; `docs/schema-reference.toml` documents `[vm]`, `[vm.cloud_init]` and `[vm.network]` and is written in valid file order.
 
-The policy is written in **CIL** (Common Intermediate Language, the IR the
-SELinux userspace compiles `.te`/`.pp` down to), not `.te`, for two reasons:
+### Three network stances, and they are peers
 
-- **Inheritance.** `(block wl_<name> (blockinherit container) ...)` stamps out a
-  full copy of the base `container` domain and adds the workload's extra rules
-  on top. A flat `.te` rule on `container_t` can't be "copied per workload";
-  a bare `typeattribute container_domain` is not a complete container domain
-  (the container won't even start). Inheriting udica's base block is what
-  supplies the full domain.
-- **Namespacing + direct load.** CIL blocks namespace their types
-  (`wl_<name>.process`), so two workloads never collide on a shared type, and
-  `semodule -i` loads `.cil` directly — no `checkmodule`/`semodule_package`
-  compile step (and no `checkpolicy` dependency).
+Not a default and two ways of falling short of it. Which one a VM is in decides what every section below applies to.
 
-Authoring is done with **udica** against a running container; it emits the CIL
-block and the base templates (`/usr/share/udica/templates/*.cil`) that
-workloadctl loads alongside the workload module on `enable`. The enable-time
-loader lives in `lib/provisioning.py` (`apply_selinux_policy`); the
-`[security].selinux_policy` flag is documented in `docs/schema-reference.toml`.
+- **`egress = "filtered"`** (the default) — passt networking, and the workload uid joins the nftables set `wl_filtered`. Everything the VM originates is dropped but what policy names: HTTP/HTTPS through its own egress inspector (`.hosts` / `[[vm.network.policy]]`), everything else through `[[vm.network.allow]]`. **`filtered` with neither is a validation error**, not a VM that boots and reaches nothing — a config reading "filtered" while the VM is in fact wide open is the exact misreport this layer exists to prevent.
+- **`egress = "open"`** — passt networking, no filtering. The uid never joins the set, and the drop rule (which is set-guarded) never sees this VM. It is *not* a filtered VM with the rules taken out: it keeps its own user, its own management address, its published `ports`, its `outbound_if` pin and every disk and lifecycle guarantee. It is isolated from the host and from every other workload exactly as much as before; it simply is not egress-policed. Its DNS is forwarded to the host's resolver rather than answered by a synthesising responder.
+- **`[vm.network].bridge = "<iface>"`** — a real LAN identity: its own address, reachable by other hosts. The supported answer for a VM that has to be addressable (one serving TLS on its own name cannot do that under passt). Such a VM is **unfiltered by construction**, since its traffic never becomes a host socket for `meta skuid` to match — `egress`, `ports`, `outbound_if` and the inspector keys are *refused* beside it rather than silently ignored — and `exec` reaches it at its own address on port 22 rather than at a management address. You provision the bridge (NetworkManager / systemd-networkd, plus `/etc/qemu/bridge.conf`); workloadctl does not. No shipped bundle sets it, because a bridge name is site-specific.
 
-**All of the above is the container path. VM workloads confine differently**
-(ADR 006 step 3), and the difference is easy to get wrong:
+A filtered VM is disposable in a way a bridged one is not: "this only affects filtered VMs" is a safety argument, and "this only affects VMs" is not.
 
-- **QEMU runs as `svirt_t`, unconditionally and without the flag.** Not a
-  per-workload type: `svirt_t` is the distro's own domain for a hypervisor
-  process hosting an untrusted guest, and re-deriving it would be the mistake
-  the per-workload argument above is *not* making — there is fifteen years of
-  encoded knowledge to inherit, where a container workload has none. The
-  transition is a `runcon` prefix in `libexec/workload-vm-notify`, because
-  systemd execs from `init_t` and the policy has no `init_t → svirt_t`
-  transition; `unconfined_service_t → virt_domain` is what makes it work.
-- **MCS categories are deliberately unused.** libvirt needs them because all its
-  VMs share one uid; ours each run as their own `_wl-<name>`, so DAC already
-  separates them.
-- **So `[security].selinux_policy` means something different on a VM.** The
-  `wl_<name>.process` type it declares has exactly one consumer — the generator
-  passing it to podman — and a VM makes no podman call. A VM's `policy.cil` is a
-  *delta against `svirt_t`*.
-- **Two host-global pieces ship outside that flag:** the `svirt_image_t`
-  fcontext rule per VM workload (semanage at enable, gated on `is_vm`, because
-  labelling is a precondition for booting rather than optional hardening), and
-  `security/workload-vm.cil` — a virtiofsd domain plus the two grants QEMU's
-  native passt netdev needs — which the RPM loads once.
+### passt, not a bridge
 
-Three traps worth carrying forward if you touch this. A `filecon` in a bundle's
-`policy.cil` under a path workloadctl registers with `semanage` is **silently
-ignored**, because `file_contexts.local` outranks the base `file_contexts`
-wholesale (`validate` warns). The shipped policy **dontaudits** the rule passt
-needs under a QEMU-native netdev, so an ordinary AVC harvest will not show it —
-run `semodule -DB` before concluding a harvest is complete. And **no unit that
-transitions into one of our domains may set `NoNewPrivileges=`** (nor
-`DynamicUser=`, which implies it): NNP makes the kernel refuse any transition
-not *bounded* by the calling domain, and none of ours are bounded by `init_t`.
-The symptom is a bare `203/EXEC` "Permission denied" on a mode-0755 binary, with
-`op=security_bounded_transition` in the audit log and nothing else pointing at
-the cause. The seccomp-implying options (`PrivateDevices=`, `ProtectKernel*=`,
-`SystemCallFilter=`, ...) are fine despite the documentation's phrasing —
-systemd only forces NNP for those when the *manager* lacks `CAP_SYS_ADMIN`,
-which never holds for a system service.
+**By default a VM has no bridge at all** (ADR 006). passt terminates the guest's network stack in userspace and re-originates its traffic as ordinary host sockets owned by `_wl-<name>` — which is what makes **the workload uid the network identity**: unforgeable, unique per workload with no allocation step, and matchable as `meta skuid`. There is no `_workload-br`, no `workload-bridge.service`, no dnsmasq of ours, no host-global `ip_forward` and no setuid `qemu-bridge-helper`.
 
-A harvest is only ever as good as the workout behind it, and the virtiofsd
-domain is where that bites: the module is a list of the classes someone
-exercised, so a share can pass every test and still deny `ln -s`.
-`security/workload-vm.cil` records the workout its list comes from — extend that
-and rebuild, rather than appending the one permission a denial names. `docs/vm-virtiofs.md` is the
-connected version: the share's ownership model, why the sidecar holds no
-capabilities, what confines it instead, and the symptom table.
+Consequences that catch people out:
+
+- The guest is assigned the **host's** address and has **no LAN identity of its own**. Inbound needs an explicit `[vm.network].ports` (same convention as a container's `[network].ports`).
+- `exec`/`shell` reach it on the uid-derived management address `127.128.x.y:2222` — never routable, never configurable. `diagnose` prints the derived value.
+- `ports` refuses a bind address in a plane this design owns: `127.128.0.0/9` (management addresses), and `198.18.0.0/16` / `2001:2::/48` (the egress inspector's listener planes). A collision there is decided by start order and reported by neither side.
+
+Egress policy is one nftables table (`inet workload_filter`, skeleton at `%{_datadir}/workloadctl/workload-filter.nft`) whose *elements* the units manage — never its rules. The file is applied on every VM start and is idempotent because it flushes the chain before re-adding rules, while set elements survive on the table. Break-glass: `nft delete table inet workload_filter`.
+
+`%{_datadir}/workloadctl/workload-proxy.nft` and the `workload-proxy` dummy link keep a name that is now a **fossil**: the forward proxy they were named for is gone, and what they carry today is the inspector's redirect rules and its listener addresses.
+
+### `[[vm.network.allow]]` — the non-HTTP destinations
+
+Each entry is a table with `address` and a **required** `reason`, not a bare string: the entry is a hole opened on purpose, and the operator who later has to decide whether it is still needed is not the one who opened it. `address` is `"<addr>:<port>"` (`"[<v6addr>]:<port>"` for IPv6) or a **name with a port** (`"git.local:2222"`), resolved on the host once at start — the staleness that buys is real and accepted, which is why hostname policy proper goes through the inspector instead. Each family has its own nftables set, so v4 and v6 entries never match each other and a name answering in both arms both.
+
+- **Refused: ports 80 and 443.** They are redirected into the inspector before the filter chain consults `.allow` at all, so the element would be armed and never matched while the config read as if the destination were exempt from inspection. The redirect keys on the uid and the port alone, never on the destination, so this holds for the name form exactly as for the address form.
+- **Refused: an address inside `198.18.0.0/16` or `2001:2::/48`**, including a name that resolves into one. Those planes carry every filtered VM's own inspector, and `.allow` is matched *ahead* of the rule that stops one workload reaching another's — so such an entry does not bypass that guard so much as replace it.
+- **Warned: port 53.** It gives the guest a resolver of its own, past the synthesising responder — which returns both the ECHConfig that hides a name from the inspector and the DNS exfiltration channel synthesis exists to remove.
+
+`.allow` is also the escape hatch for the internal-destination guard (the inspector is barred from *opening* a connection into RFC 1918, loopback or link-local space) on ports the redirect does not touch. For a name reached over HTTP/HTTPS, that exemption is `[[vm.network.internal]]` instead.
+
+**File-order footgun.** Every `[vm.network]` scalar — `egress`, `hosts`, `resolver`, `ports`, `bridge`, `tls`, `tls_reason` — must be written **above** the first array-of-tables, because that table ends the `[vm.network]` section. A scalar written after it is read by TOML as part of that *entry*: not a typo, not a missing key, just a key that quietly belongs to the wrong table in a file that looks fine. Re-declaring `[vm.network]` further down does not fix it (TOML rejects a table declared twice). `docs/schema-reference.toml` is itself written in valid file order.
+
+### The guest's clock
+
+A paused vCPU (`backup --consistency crash`, a host suspend, `incant stop`) is lost by the guest exactly and permanently, and NTP cannot repair it: it is unreachable in a filtered guest, and a stock chrony steps only during its first three updates and slews forever after. That matters because the egress inspector mints leaves backdated one hour, so a guest rewound further rejects every *new* leaf while its cached ones keep validating — it reaches its usual hosts, fails on new names, and every host-side figure reads healthy.
+
+Two remedies, covering each other's gaps. **In the guest**, the built-in seed wires `ptp_kvm` (the module, a udev rule naming the device by the driver's `clock_name`, a chrony refclock, and `makestep 1 -1` — the line that actually fixes it), so the guest reads the host's clock over a KVM hypercall, needing no network and nothing on the host. **On the host**, `lib/vm_clock.py` compares clocks over the guest agent on every mint cache miss and resyncs past five minutes. A custom `[vm.cloud_init].user_data_file` replaces the built-in seed and so carries no `ptp_kvm` wiring unless its author copied it — which is why the host-side half exists.
+
+`ptp_kvm` requires a **TSC host clocksource**; on an HPET host the module fails in every guest and that whole arm is unavailable, which is a finding rather than a flake.
+
+Measured against a real guest by `tests/manual/clock_rig.py`. Free-running drift is ~10 ppm and irrelevant against a 30-day leaf; a vCPU pause is not — a 120 s pause steps the guest back 119.98 s and nothing puts it back unassisted. `ptp_kvm` in the guest repairs that in ~24 s on its own. On the host side, **`guest-set-time` must be called with an explicit nanosecond argument**: with no argument it reads the guest RTC and fails (`hwclock: select() to /dev/rtc0 ... timed out`).
+
+The property the whole arrangement exists to guarantee: a guest rewound 7200 s — well past the backdate — still validates a freshly minted leaf, because the mint path repairs the clock before it signs.
 
 ### Hostname policy: transparent egress inspection
 
-`[vm.network].hosts` gives one VM its own **egress inspector** — a
-socket-activated listener (`libexec/workload-vm-inspect-listener`) running as
-`_wl-<name>`, confined by `security/workload-inspect.cil` — plus a **synthesising
-DNS responder** (`libexec/workload-vm-resolve`, `security/workload-resolve.cil`).
-**The guest is told nothing.** It dials 80 and 443 normally and a DNAT keyed on
-the workload uid lands it on its own inspector, which reads the `Host` header
-(forward, or 403) or the ClientHello's SNI.
+`[vm.network].hosts` gives one VM its own **egress inspector** — a socket-activated listener (`libexec/workload-vm-inspect-listener`) running as `_wl-<name>`, confined by `security/workload-inspect.cil` — plus a **synthesising DNS responder** (`libexec/workload-vm-resolve`, `security/workload-resolve.cil`). **The guest is told nothing.** It dials 80 and 443 the way it would on any network and a DNAT keyed on the workload uid lands it on its own inspector, which reads the `Host` header (forward, or 403) or the ClientHello's SNI. Enforcement is at the **name** and never at an address — resolving the list to addresses at rule-install time races DNS, breaks on CDN churn, and opens everything sharing an address. A connection carrying no readable name is dropped, not guessed at.
 
-`[vm.network].tls` decides what happens to 443, and the default is
-**`inspect`**: the inspector completes the guest's handshake with a leaf minted
-by *this workload's own CA*, verifies the origin against the **host's** anchors
-on a separate session, and authorises every request inside by its `Host` header
-— so the allowlist means the same thing on 443 as on 80, and a refused name gets
-a readable 403 through a chain the guest trusts rather than a closed socket.
-Consequences that catch people out: the guest must trust that CA, which the seed
-installs **once per instance-id** (an existing VM gets certificate errors until
-re-seeded); this host holds the plaintext; a host requiring a client certificate
-or not speaking HTTP over 443 is refused. `tls = "splice"` is the older, weaker
-property and stays fully supported — the same bytes replayed upstream, nothing
-decrypted, no CA, and the name checked once per connection. It requires a
-`tls_reason`: it is the widest bypass in the section and was the last to be
-made say why, and `validate` refuses the reason without the mode as well,
-because a recorded splice that is not happening misdescribes the workload in
-the safe direction, which is the one nobody re-checks.
+Patterns are **fnmatch, not a DNS suffix match**, with an apex trap: `*.example.com` requires something before the dot and does not cover `example.com`. A wildcard whose parent is a registration domain anyone can create records under (`*.github.io`, `*.pages.dev`) is **warned** and never an error — the list of such parents cannot be exhaustive, and a stale copy shipped in an RPM that hard-failed a valid config would be worse than a line of output.
 
-Three per-host keys sit under that default, and **two of the three are holes**
-— which is the thing to carry away from them, because each reads like a
-protocol setting:
+`[vm.network].tls` decides what happens to 443, and the default is **`inspect`**: the inspector completes the guest's handshake with a leaf minted by *this workload's own CA*, verifies the origin against the **host's** anchors on a separate session, and authorises every request inside by its `Host` header — so the allowlist means the same thing on 443 as on 80, and a refused name gets a readable 403 through a chain the guest trusts rather than a closed socket. Consequences that catch people out: the guest must trust that CA, which the seed installs **once per instance-id** (an existing VM gets certificate errors until re-seeded); this host holds the plaintext; a host requiring a client certificate is refused with a 502 naming it, and so is a host the *host* cannot verify (a private root belongs in the host's anchors, not the guest's). The quiet one is a host that merely **offers** client authentication: the session completes unauthenticated, so the symptom is that host starting to answer its own 401/403 under termination while it worked under splice, with nothing failing and no counter to see it.
 
-- **`[[vm.network.splice]]`** exempts one host from termination: its name is
-  read from the ClientHello, matched against `.hosts`, and its own bytes are
-  relayed with no key of ours in the session. Reach for it first when a client
-  cannot be made to trust the CA (it pins, or it verifies a signed transparency
-  log), or when the thing on 443 is not HTTP.
-- **`[[vm.network.http2]]`** exempts one host from the `http/1.1`-only ALPN
-  offer. That downgrade is what lets everything else work without an HPACK
-  decoder — an HTTP/1.1 head is plain text, so the `Host` binding and the
-  method/path rules apply to *every* inspected host rather than to a subset.
-  A listed host is relayed at the frame level and enforced by name alone.
-  **Prefer `.splice` wherever it works**: both stop at the server name, and
-  splice additionally gives the host its end-to-end TLS back and needs no CA in
-  the guest. The key exists so an HPACK decoder has somewhere to land later.
-- **`[[vm.network.policy]]`** is the only one that *tightens*: `.hosts` says
-  which hosts, this says what may be asked of them. `methods` and `paths`
-  inside one entry are a cross product; to vary methods by path, repeat the
-  host. Two composition rules do the damage. **A host any entry matches is
-  governed by policy alone** — `.hosts` allowlists it and contributes no rules,
-  deliberately, so that a wildcard written for an unrelated reason cannot
-  contribute "any method, any path" to a host someone restricted. And
-  **entries union**, by pattern rather than by identical strings, so ordering
-  is irrelevant and there is **no way to subtract**: a narrow entry cannot
-  carve an exception out of a wide one, and the file does not show what a name
-  may do without collecting every entry whose pattern matches it. The trap
-  that follows: an omitted `methods` or `paths` means *any*, which is safe for
-  a lone entry and defeats every narrowed sibling under union — so where more
-  than one entry can match a host, all of them must state both keys.
+`tls = "splice"` is the older, weaker property and stays fully supported — the same bytes replayed upstream, nothing decrypted, no CA, and the name checked once per connection. It requires a `tls_reason`, and `validate` refuses the reason without the mode as well, because a recorded splice that is not happening misdescribes the workload in the safe direction, which is the one nobody re-checks.
 
-`splice` and `http2` each carry a required `reason`, because a hole should say
-who opened it and why. All three are fnmatch patterns with the same **apex
-trap** as `.hosts`: `*.example.com` does not cover `example.com`. Under
-`.policy` that trap is worse and is caught as an error: an allowlisted apex
-whose only entry is the wildcard beneath it would stay allowlisted and
-inspected *with no rules applied*, which is a hole rather than an outage.
+Three per-host keys sit under that default, and **two of the three are holes** — which is the thing to carry away from them, because each reads like a protocol setting:
 
-An entry matching no allowlisted name is an **error, not a no-op** — it means someone
-believes a host is exempt that is not, and that failure would otherwise arrive
-as a TLS error rather than as a policy message. `http2` and `policy` on one
-host is likewise an error (the rules could never run), as is `http2` with
-`splice` (a spliced connection is never terminated, so no ALPN of ours is
-offered on it).
+- **`[[vm.network.splice]]`** exempts one host from termination: its name is read from the ClientHello, matched against `.hosts`, and its own bytes are relayed with no key of ours in the session. Reach for it first when a client cannot be made to trust the CA (it pins, or it verifies a signed transparency log), or when the thing on 443 is not HTTP. It applies on a plain restart — the CA is seeded into every filtered VM whatever `tls` says, so turning inspection back on later needs nothing from the guest either.
+- **`[[vm.network.http2]]`** exempts one host from the `http/1.1`-only ALPN offer. That downgrade is what lets everything else work without an HPACK decoder — an HTTP/1.1 head is plain text, so the `Host` binding and the method/path rules apply to *every* inspected host rather than to a subset. A listed host is relayed at the frame level and enforced by name alone. **Prefer `.splice` wherever it works**: both stop at the server name, and splice additionally gives the host its end-to-end TLS back and needs no CA in the guest. The key exists so an HPACK decoder has somewhere to land later.
+- **`[[vm.network.policy]]`** is the only one that *tightens*: `.hosts` says which hosts, this says what may be asked of them. `methods` and `paths` inside one entry are a cross product; to vary methods by path, repeat the host. A method that is not a registered HTTP method is an error rather than a rule that never matches, and `CONNECT`/`PRI` are refused by name.
 
-The **h2 exemption is checked on both legs**, and neither half is optional.
-Without the guest half the key would mean "exempt from policy" rather than
-"speaks h2", reachable by writing different first bytes. Without the origin
-half a host listed by mistake would have the guest's preface relayed into an
-HTTP/1.1 server and fail as garbage no figure names — an ALPN offer binds
-nobody, and a server that speaks only HTTP/1.1 completes the handshake
-selecting nothing, with no alert of any kind.
+`splice` and `http2` each carry a required `reason`, because a hole should say who opened it and why. `[[vm.network.internal]]` carries one for the same reason: it names an allowlisted host that is *supposed* to resolve into private space (a homelab forge), exempting it from the drop that otherwise stops an allowlisted public name from being pointed at your LAN. That name is resolved at VM start as the inspect socket's `ExecStartPre`, and **a failure there stops the guest** rather than arming nothing silently; `validate` resolves the same names and warns, since DNS at validate time is not DNS at boot time.
 
-**The drop reasons split where a merged figure would mislead**, and the splits
-are the reason `diagnose` can tell one operator error from another: `not HTTP`
-against `not HTTP (policy entry)` separates "this host is not speaking HTTP"
-from "you wrote a policy entry for a host that is not", and `host does not
-match the server name` against `… (allowlisted)` separates an ordinary
-misdirect from one where the *name is on the allowlist* — a configuration
-error rather than a guest one. `not permitted by policy` and `not HTTP/2` are
-the two new refusals. The keys are pinned against the listener's own constants
-in `tests/test_vm_inspect_diagnose.py`; what no static test can say is whether
-anything ever *increments* them, since a counter that is declared, exported,
-pinned and never written reads 0 and 0 passes every assertion.
-**Reading a filter, from the host.** Three verbs, and they answer different
-questions on purpose. `workloadctl rules <wl> [HOST]` reports the *effective*
-rules — not the file's entries, because host patterns union among themselves
-and a host any `[[vm.network.policy]]` entry matches is governed by **those
-entries alone**, with `hosts` not consulted for it; it calls the shipped matcher
-(`vm_policy_governs`/`vm_hostname_match`) rather than reimplementing one, so the
-report cannot disagree with the listener, and it names which document it read
-(`/run/workload-vm/<n>/inspect.json` vs a render from the TOML). `workloadctl
-egress <wl>` reads the private per-request record — allows as much as drops,
-since "what did this agent send" is not answerable from denials alone.
-`workloadctl doctor <wl>` prints the counters as an **Egress (inspected)**
-section that adds nothing to its problem count: a guest being denied is the
-filter working, and the inspector's real faults come through
-`vm_inspect_check`'s verdicts instead. `lib/vm_inspect_figures.py` is the single
-producer behind `doctor` and `libexec/workload-exporter` — a `FIGURES` table
-carrying each figure's source path, metric name, type, help and human label
-together, walked by both, so a Prometheus label cannot become a second
-definition. Its two sums (`connections_total`, `drops_total`) are deliberately
-*not* published: `sum by (workload)` computes them from series already on the
-wire without a total that can disagree with its own parts.
-`tests/manual/rung5_rig.py` is the seam those three cannot test themselves —
-whether the document they read is the one a live listener wrote.
+Two composition rules do the damage, and they are the thing to get right:
 
-Through rung 1 this was a per-workload tinyproxy the guest was *configured* to
-use via `https_proxy` at an advertised literal. That is gone. Its weakness was
-never the filtering, it was the configuring: a proxy is advisory, so a process
-free to ignore the variables simply did not use it, and the default-deny chain
-could only turn that into a failure — never into a filtered request.
+- **A host any `[[vm.network.policy]]` entry matches is governed by policy alone.** `.hosts` allowlists it and contributes no rules, deliberately, so that a wildcard written for an unrelated reason cannot contribute "any method, any path" to a host someone restricted — and the diff that added the wildcard would have looked like it added access rather than removing a restriction. A policy entry allowlists on its own, so a host named there need not also be in `.hosts`.
+- **Entries union**, by pattern rather than by identical strings, so ordering is irrelevant and there is **no way to subtract**: a narrow entry cannot carve an exception out of a wide one, and the file does not show what a name may do without collecting every entry whose pattern matches it. The trap that follows: an omitted `methods` or `paths` means *any*, which is safe for a lone entry and defeats every narrowed sibling under union — so where more than one entry can match a host, all of them must state both keys.
+
+The apex trap is worse under `.policy` and is caught as an error: an allowlisted apex whose only entry is the wildcard beneath it would stay allowlisted and inspected *with no rules applied*, which is a hole rather than an outage. Note `.hosts` need not mention the wildcard for this to bite — `hosts = ["example.com"]` beside a lone `"*.example.com"` entry is the ordinary way to write it and is exactly that shape.
+
+An entry matching no allowlisted name is an **error, not a no-op** — it means someone believes a host is exempt that is not, and that failure would otherwise arrive as a TLS error rather than as a policy message. `http2` and `policy` on one host is likewise an error (the rules could never run), as is `http2` with `splice` (a spliced connection is never terminated, so no ALPN of ours is offered on it). `paths` matches the path alone, so the query string is not part of it.
+
+The **h2 exemption is checked on both legs**, and neither half is optional. Without the guest half the key would mean "exempt from policy" rather than "speaks h2", reachable by writing different first bytes. Without the origin half a host listed by mistake would have the guest's preface relayed into an HTTP/1.1 server and fail as garbage no figure names — an ALPN offer binds nobody, and a server that speaks only HTTP/1.1 completes the handshake selecting nothing, with no alert of any kind.
+
+**The drop reasons split where a merged figure would mislead**, and the splits are the reason `diagnose` can tell one operator error from another: `not HTTP` against `not HTTP (policy entry)` separates "this host is not speaking HTTP" from "you wrote a policy entry for a host that is not", and `host does not match the server name` against `… (allowlisted)` separates an ordinary misdirect from one where the *name is on the allowlist* — a configuration error rather than a guest one. `not permitted by policy` and `not HTTP/2` are the other two refusals. The keys are pinned against the listener's own constants in `tests/test_vm_inspect_diagnose.py`; what no static test can say is whether anything ever *increments* them, since a counter that is declared, exported, pinned and never written reads 0 and 0 passes every assertion.
+
+**Reading a filter, from the host.** Three verbs, and they answer different questions on purpose. `workloadctl rules <wl> [HOST]` reports the *effective* rules — not the file's entries, because host patterns union among themselves and a host any `[[vm.network.policy]]` entry matches is governed by those entries alone; it calls the shipped matcher (`vm_policy_governs`/`vm_hostname_match`) rather than reimplementing one, so the report cannot disagree with the listener, and it names which document it read (`/run/workload-vm/<n>/inspect.json` vs a render from the TOML). `workloadctl egress <wl>` reads the private per-request record — allows as much as drops, since "what did this agent send" is not answerable from denials alone. `workloadctl doctor <wl>` prints the counters as an **Egress (inspected)** section that adds nothing to its problem count: a guest being denied is the filter working, and the inspector's real faults come through `vm_inspect_check`'s verdicts instead. `lib/vm_inspect_figures.py` is the single producer behind `doctor` and `libexec/workload-exporter` — a `FIGURES` table carrying each figure's source path, metric name, type, help and human label together, walked by both, so a Prometheus label cannot become a second definition. Its two sums (`connections_total`, `drops_total`) are deliberately *not* published: `sum by (workload)` computes them from series already on the wire without a total that can disagree with its own parts.
+
+This replaced a per-workload tinyproxy the guest was *configured* to use via `https_proxy`. A proxy is advisory: a process free to ignore the variables simply did not use it, and the default-deny chain could only turn that into a failure, never into a filtered request. Nothing is asked of a custom seed any more; if you are copying an older one forward, **delete its proxy exports**, which name an endpoint where nothing listens.
 
 Non-obvious things that hold the replacement together:
 
-- **The inspector runs as the workload's own user, so `meta skuid` cannot tell
-  it from the guest** — under default-deny the drop would catch it too, and
-  under the redirect it would be DNAT'd into the listener it *is*. The
-  discriminator is the **control group**, which systemd assigns and a guest can
-  neither enter nor forge, and it takes **two** elements: `wl_egress_cg` (filter
-  table) exempts it from the drop, `wl_inspect_cg` (nat table) from the
-  redirect. One without the other is an inspector that reaches nothing, or one
-  that dials into itself — and each looks like the other from the guest. Both
-  are armed by the *service*'s `ExecStartPre` and withdrawn by its
-  `ExecStopPost`, never by the socket's: an element resolves to a cgroup id at
-  add time, and a bound-but-unstarted service has no cgroup to resolve to. The
-  unit's `Slice=` is pinned (`workloads.slice`) because the match is `level 2`,
-  so the path must stay two components deep.
-- **The guest's resolver is the responder and there is no upstream socket in the
-  program at all.** Every A/AAAA, for any name, answers with this workload's
-  inspector address; everything else is NODATA. Nothing is forwarded, so DNS
-  exfiltration is *absent* rather than filtered — check that property first if
-  anyone ever "adds a fallback". Consequence: `resolver = "none"` kept its
-  meaning and lost its coherence, because a guest that cannot resolve can only
-  dial literals, and a literal arrives with no name to match and is dropped.
-- **The advertised literal `192.0.2.1` is gone**, and rung 6 was what finally
-  took it. It outlived the proxy by carrying the credential broker on 8081; with
-  the broker moved to a uid-derived loopback address the guest is never told,
-  nothing puts it on the dummy link any more. The consequence runs the other
-  way: `192.0.2.0/24` was excluded from `wl_internal4` *because* that address
-  lived in it, so TEST-NET-1 is now inside the drop like every other
-  documentation range, and a site genuinely routing it needs a
-  `[[vm.network.internal]]` exemption.
-- **A permissive AVC harvest is nearly useless here**, for the same reason it
-  was under the proxy: an early denial changes which branch runs, so the harvest
-  measures one sample. Both domains were finished by iterating under
-  *enforcing*, one gate per round — the opposite of how `wlvfsd_t` was derived.
-  `tests/manual/inspect_rig.py` is the seam a unit test cannot reach for the
-  redirect, the domains and the cgroup elements (two throwaway guests, 37
-  assertions, last green 2026-08-25 under enforcing);
-  `tests/manual/policy_rig.py` is the seam for the per-host keys and the split
-  counters, which it drives against one real listener with real origins (42
-  assertions, last green 2026-08-27). Both were break-verified — the rung-4
-  lists emptied one at a time on a throwaway copy — because a rig that asserts
-  nothing passes just as loudly as one that works.
+- **The inspector runs as the workload's own user, so `meta skuid` cannot tell it from the guest** — under default-deny the drop would catch it too, and under the redirect it would be DNAT'd into the listener it *is*. The discriminator is the **control group**, which systemd assigns and a guest can neither enter nor forge, and it takes **two** elements: `wl_egress_cg` (filter table) exempts it from the drop, `wl_inspect_cg` (nat table) from the redirect. One without the other is an inspector that reaches nothing, or one that dials into itself — and each looks like the other from the guest. Both are armed by the *service*'s `ExecStartPre` and withdrawn by its `ExecStopPost`, never by the socket's: an element resolves to a cgroup id at add time, and a bound-but-unstarted service has no cgroup to resolve to. The unit's `Slice=` is pinned (`workloads.slice`) because the match is `level 2`, so the path must stay two components deep.
+- **The guest's resolver is the responder and there is no upstream socket in the program at all.** Every A/AAAA, for any name, answers with this workload's inspector address; everything else is NODATA. Nothing is forwarded, so DNS exfiltration is *absent* rather than filtered — check that property first if anyone ever "adds a fallback". Consequence: `resolver = "none"` kept its meaning and lost its coherence, because a guest that cannot resolve can only dial literals, and a literal arrives with no name to match and is dropped. `validate` errors if `.hosts`, `.internal` or a name-form `.allow` entry is set beside it, and warns even in the coherent case.
+- **Nothing of ours is advertised to the guest at a literal address.** The old `192.0.2.1` endpoint is gone and nothing sits on the dummy link, so `192.0.2.0/24` is no longer excluded from `wl_internal4` — TEST-NET-1 is inside the drop like every other documentation range, and a site genuinely routing it needs a `[[vm.network.internal]]` exemption.
+- **A permissive AVC harvest is nearly useless here.** An early denial changes which branch runs, so the harvest measures one sample; both domains were derived by iterating under *enforcing*, one gate per round. `tests/manual/inspect_rig.py` is the seam a unit test cannot reach for the redirect, the domains and the cgroup elements; `tests/manual/policy_rig.py` is the seam for the per-host keys and the split counters, driven against a real listener with real origins. Both are break-verified, because a rig that asserts nothing passes just as loudly as one that works.
 
 ### The credential broker
 
-`libexec/agent-broker` is a standalone program this package ships, and since
-rung 6 there is one instance per workload rather than one per host. A workload
-declaring `[[vm.network.credential]]` material gets
-`workload-<name>-broker.service` — written by the generator, `DynamicUser=yes`,
-bound to `vm_broker_listen_address(uid)`, config regenerated into `/run` at
-every start.
+`libexec/agent-broker` is a standalone program this package ships (stdlib only, ~600 lines): it holds a provider API key that a sandboxed guest is never given, and attaches it to outbound requests the guest makes through it. **One instance per workload, and the guest is never told where it is.** A workload declaring `[[vm.network.credential]]` material gets `workload-<name>-broker.service` — written by the generator, `DynamicUser=yes`, bound to `vm_broker_listen_address(uid)` (`127.129.0.0` + the uid offset), with a `broker.toml` regenerated into `/run` at every start. ADR 007 is the decision record; `docs/agent-broker.md` the threat model and operation.
 
-**The guest is told nothing and dials nothing.** It asks for the provider's real
-hostname with a `placeholder` in the variable the credential block's `env`
-names; its own egress inspector finds the matched `[[vm.network.policy]]` entry
-carries `credential = "<name>"` and relays that request to the broker instead of
-to the origin. So a guest cannot choose to use the broker, cannot decline, and
-has no name for another workload's. `[vm.network].broker = true` is now a
-validation error naming `credential` as its replacement.
+**The guest is told nothing and dials nothing.** It holds `placeholder` in the variable the credential block's `env` names, calls the provider's real hostname, and its own egress inspector finds that the matched `[[vm.network.policy]]` entry carries `credential = "<name>"` and relays that request to the broker instead of to the origin. The broker discards the placeholder and sets the real header. So a guest cannot name the broker, cannot decline to use it, and cannot be pointed at another workload's. `[vm.network].broker = true` is now a **validation error** naming `credential` as its replacement.
 
-- **Identity is the uid owning the far end of the connection**, read out of
-  `/proc/net/tcp`. The host assigns it and a guest cannot forge it, which is why
-  two guests dialling one literal can hold different keys. It fails *silently*
-  when it fails: from a user namespace that cannot map a workload's uid, every
-  caller reads as the overflow uid and they all merge into one identity. The
-  unit therefore must not set `PrivateUsers=`, and the program refuses to start
-  when it can prove that is happening.
-- **The upstream set is fixed by config and never taken from a request.** That
-  is the whole security property — a broker that forwarded to a guest-chosen
-  destination would be an SSRF pivot with a credential welded to it. Qualified
-  at rung 6, not abandoned: dispatch is keyed by `(uid, Host)`, so a value that
-  began in the guest now *selects a row*, but only among rows the host wrote,
-  and a `Host` matching none is a 403 rather than a fetch. Absolute-form request
-  targets are still a 400.
-- **`libexec/workload-vm-broker` is a different thing**: a one-verb helper,
-  `workload-vm-broker config <name>`, run as the broker unit's `ExecStartPre` to
-  write that instance's `broker.toml` into `/run`. It does not start, stop or
-  check the broker. The address it renders must match what the inspector dials
-  and what the program defaults to, asserted by `tests/test_vm_broker.py` — a
-  drift there is indistinguishable from the broker being down. It no longer runs
-  for every VM: the nftables map it used to sweep is deleted, so bridged and
-  unfiltered VMs have nothing to install or remove.
-- **The broker's address needs an nftables exemption it does not ask for.**
-  `127.129.x.y` is inside `wl_internal4`, and that drop sits above the rule
-  accepting a workload's own loopback traffic, so `libexec/workload-vm-inspect`
-  arms the broker address in `wl_internal_ok4` for any workload that has one.
-  Omit it and the dial dies in silence, reading exactly like a dead broker.
-- **Admission is bounded per caller, not just in total.** 32 connections
-  overall, 8 for any one caller, and 60 seconds of no progress ends a
-  connection. A single global bound is a denial-of-service lever rather than a
-  protection: one sandbox opening 32 sockets and sending nothing denied the
-  broker to every other sandbox, which is measured in
-  `tests/test_broker_request.py`.
-- **Proven end to end only by hand, and the five defects that proved it
-  matter.** The rig that proved the host-wide broker was deleted with the
-  mechanism it dialled; its replacement — two workloads, four claims, three
-  controls on the refusal — was 35/35 on a KVM host under enforcing on
-  2026-09-02, against the installed RPM. It found defects the whole unit suite
-  passed over, two of which on their own made the brokered path inert for a real
-  guest: a terminated
-  session seeds the upstream pool with the ORIGIN connection keyed by host, so
-  a brokered request got that socket and `_dial_broker` never ran (the record
-  still said a credential was attached); and 127.129.x.y is inside
-  `wl_internal4`, whose cgroup-keyed drop sits above the skeleton's `oif lo
-  accept`, so the dial to the broker was dropped and presented as a broker that
-  was down. Three more followed from reading what those implied: the render
-  emitted no `auth_header`/`auth_format`, so every instance ran `x-api-key` and
-  a bearer-token provider 401'd a fully authorised request; two policy entries
-  for one host emitted that host's table twice, which TOML refuses, so the
-  broker exited at start; and a brokered host was still dialled at the ORIGIN
-  before the request was read, verified, pooled and never written to. All five
-  are fixed and gated. See `workloadctl/tests/manual/README.md`.
+The material is sealed under the workload that may spend it, using a scoped `secret` **name form** rather than a broker-specific flag — so `secret list`, `rotate`, `export` and the rest take it too:
+
+```bash
+echo -n "sk-ant-..." | sudo workloadctl secret create broker/agent-vm/anthropic
+```
+
+It lands at `/etc/credstore.encrypted/broker/agent-vm/anthropic`, sealed under the name `broker-agent-vm-anthropic`; because the seal name is bound into the blob and checked on decrypt, a unit pointed at another workload's file fails to start rather than reading that workload's key. It is decrypted only into the broker instance's own tmpfs, under a dynamic user disjoint from the workload's.
+
+```toml
+[[vm.network.policy]]
+host       = "api.anthropic.com"
+methods    = ["POST"]
+paths      = ["/v1/messages"]
+credential = "anthropic"
+
+[[vm.network.credential]]
+name        = "anthropic"          # the sealed material, broker/agent-vm/anthropic
+placeholder = "sk-ant-placeholder-not-a-real-key"
+env         = "ANTHROPIC_API_KEY"  # what the guest gets instead
+```
+
+- **The credential does not widen anything.** `methods` and `paths` are applied first, on the same terms as an unbrokered host; it only changes *who* attaches the authorisation. It is per **exact** host — a wildcard `host` with a credential is an error, because the broker's table has no patterns in it and every request matching the pattern would be authorised here and refused there. It requires `tls = "inspect"`: a spliced or h2 host is never decrypted into a request the broker could dispatch on, and both are refused rather than ignored.
+- **`placeholder` is required and is not decoration.** With nothing in the variable, an SDK that refuses to send a request without a key fails *inside* the guest, before a packet, which looks nothing like a policy failure. It must not be a real key — the broker refuses to start if it equals the decrypted material, because that means one was pasted into a world-readable `workload.toml`.
+- **`auth_header`/`auth_format` are the provider's HTTP convention**, defaulting to `x-api-key` and `{secret}` (Anthropic's). A bearer-token provider needs `auth_header = "Authorization"`, `auth_format = "Bearer {secret}"`; Gemini wants `x-goog-api-key` with the default format. `auth_format` must name `{secret}` exactly once, and a header that frames the message or is hop-by-hop is refused.
+- **A block nothing selects is an error, and so is a `credential` naming no block.** Both are the same mistake in opposite directions: material sealed and loaded into a broker for a host it is never attached to reads, in the file and in `diagnose`, exactly like a credential that is in use.
+- **Identity is the uid owning the far end of the connection**, read out of `/proc/net/tcp`. The host assigns it and a guest cannot forge it, which is why two guests dialling one literal can hold different keys. It fails *silently* when it fails: from a user namespace that cannot map a workload's uid, every caller reads as the overflow uid and they all merge into one identity. The unit therefore must not set `PrivateUsers=`, and the program refuses to start when it can prove that is happening.
+- **The upstream set is fixed by config and never taken from a request.** That is the whole security property — a broker that forwarded to a guest-chosen destination would be an SSRF pivot with a credential welded to it. Dispatch is keyed by `(uid, Host)`, so a value that began in the guest *selects a row*, but only among rows the host wrote, and a `Host` matching none is a 403 rather than a fetch. Absolute-form request targets are a 400.
+- **`libexec/workload-vm-broker` is a different thing**: a one-verb helper, `workload-vm-broker config <name>`, run as the broker unit's `ExecStartPre` to write that instance's `broker.toml` into `/run`. It does not start, stop or check the broker. The address it renders must match what the inspector dials and what the program defaults to, asserted by `tests/test_vm_broker.py` — a drift there is indistinguishable from the broker being down. It no longer runs for every VM: the nftables map it used to sweep is deleted, so bridged and unfiltered VMs have nothing to install or remove.
+- **The broker's address needs an nftables exemption it does not ask for.** `127.129.x.y` is inside `wl_internal4`, and that drop sits above the rule accepting a workload's own loopback traffic, so `libexec/workload-vm-inspect` arms the broker address in `wl_internal_ok4` for any workload that has one. Omit it and the dial dies in silence, reading exactly like a dead broker.
+- **Admission is bounded per caller, not just in total.** 32 connections overall, 8 for any one caller, and 60 seconds of no progress ends a connection. A single global bound is a denial-of-service lever rather than a protection: one sandbox opening 32 sockets and sending nothing denied the broker to every other sandbox, which is measured in `tests/test_broker_request.py`.
+
+**The brokered path is only observable with a real packet**, and the five defects `tests/manual/broker_rig.py` found had each passed the whole unit suite. Two made the path inert on a real guest: a terminated session seeded the upstream pool with the **origin** connection keyed by host, so a brokered request was handed that socket and `_dial_broker` never ran while the record still said a credential was attached; and the broker's `127.129.x.y` address is inside `wl_internal4`, whose cgroup-keyed drop sits above the skeleton's `oif lo accept`, so once it *was* dialled the packet was dropped and presented as a broker that was down. The other three: the render emitted no `auth_header`/`auth_format`, so a bearer-token provider 401'd a fully authorised request; two policy entries for one host emitted that host's table twice, which TOML refuses, so the broker exited at start; and a brokered host was still dialled at the origin, making the origin's reachability a prerequisite for a request that goes to loopback. All five are fixed and gated. See `tests/manual/README.md`.
 
 ### Packet capture
 
-`workloadctl pcap` writes a non-terminating `log` rule into the
-security-critical `inet workload_filter` table and reads it back through
-`tcpdump -i nflog:<uid - UID_MIN>`. Things that bite here:
+`workloadctl pcap` writes a non-terminating `log` rule into the security-critical `inet workload_filter` table and reads it back through `tcpdump -i nflog:<uid - UID_MIN>`. Things that bite here:
 
-- **Capture gets its own chains — `pcap_output` (at `filter - 10`) and
-  `pcap_input` — and never writes into the skeleton's `output` chain.** Two
-  reasons, and both were silent failures before: `nft add rule` appends, so a
-  log rule in `output` lands *below* the terminating drop and never matches for
-  a filtered workload; and the skeleton carries `flush chain ... output`, so
-  every VM start deleted any running capture's rule. Being ahead of policy also
-  means dropped packets are captured, which is usually the point.
-- **Deleting a capture chain is guarded on it being empty.** `nft delete chain`
-  does *not* refuse a non-empty base chain — it succeeds and takes the rules
-  with it, so an unguarded delete ended every concurrent capture.
-- **The skeleton's `ct mark set` is guarded on the uid RANGE, not
-  `@wl_filtered`.** The mark is attribution, not policy; `-Q in` selects on it,
-  so guarding it on the policy set made inbound capture silently empty for
-  containers and `egress = "open"` VMs.
-- **nft deletes rules by handle, never by text.** A text-shaped delete fails
-  silently under a tolerant runner, leaving a log rule nobody owns. Teardown
-  reads live handles and narrows them to the workload's nflog group so a
-  concurrent capture keeps its own rule.
-- **SIGTERM skips `finally`.** Python's default disposition terminates without
-  unwinding, so `systemctl stop` — the normal path — was the one that never
-  finalized a guest-side file. `libexec/workload-pcap` turns SIGTERM into
-  `SystemExit`; the unit's `ExecStopPost` covers `kill -9`.
-- **A confined QEMU cannot write an operator's `-w` path**, and fails on DAC
-  before SELinux is consulted — silently, with `object-add` accepted and no
-  file created. Guest-side captures are staged in `/run/workload-vm/<name>/`
-  (labelled `qemu_var_run_t` by step 3) and moved on finalize.
-- **Guest-side timestamps are wrong by VM uptime + the host's UTC offset.**
-  Measured at −29,407 s on a PDT host. The offset is measured with a probe
-  packet, never derived from guest uptime — deriving it leaves the timezone
-  term in place, silently, on every non-UTC host.
+- **Capture gets its own chains — `pcap_output` (at `filter - 10`) and `pcap_input` — and never writes into the skeleton's `output` chain.** Two reasons, and both were silent failures before: `nft add rule` appends, so a log rule in `output` lands *below* the terminating drop and never matches for a filtered workload; and the skeleton carries `flush chain ... output`, so every VM start deleted any running capture's rule. Being ahead of policy also means dropped packets are captured, which is usually the point.
+- **Deleting a capture chain is guarded on it being empty.** `nft delete chain` does *not* refuse a non-empty base chain — it succeeds and takes the rules with it, so an unguarded delete ended every concurrent capture.
+- **The skeleton's `ct mark set` is guarded on the uid RANGE, not `@wl_filtered`.** The mark is attribution, not policy; `-Q in` selects on it, so guarding it on the policy set made inbound capture silently empty for containers and `egress = "open"` VMs.
+- **nft deletes rules by handle, never by text.** A text-shaped delete fails silently under a tolerant runner, leaving a log rule nobody owns. Teardown reads live handles and narrows them to the workload's nflog group so a concurrent capture keeps its own rule.
+- **SIGTERM skips `finally`.** Python's default disposition terminates without unwinding, so `systemctl stop` — the normal path — was the one that never finalized a guest-side file. `libexec/workload-pcap` turns SIGTERM into `SystemExit`; the unit's `ExecStopPost` covers `kill -9`.
+- **A confined QEMU cannot write an operator's `-w` path**, and fails on DAC before SELinux is consulted — silently, with `object-add` accepted and no file created. Guest-side captures are staged in `/run/workload-vm/<name>/` (labelled `qemu_var_run_t`) and moved on finalize.
+- **Guest-side timestamps are wrong by VM uptime + the host's UTC offset.** Measured at −29,407 s on a PDT host. The offset is measured with a probe packet, never derived from guest uptime — deriving it leaves the timezone term in place, silently, on every non-UTC host.
 
-The plan travels from CLI to helper as JSON so `--dry-run` and the run cannot
-disagree. `diagnose` reports a live capture, so the extra rule is explained
-rather than discovered.
+The plan travels from CLI to helper as JSON so `--dry-run` and the run cannot disagree. `diagnose` reports a live capture, so the extra rule is explained rather than discovered.
+
+## Secrets
+
+Uses systemd credentials (`systemd-creds`) for secret management:
+
+- Encryption at rest via AES256-GCM with TPM2 or host keys — so encrypted blobs are safe to commit into an image
+- Runtime decryption into RAM-only tmpfs, at unit start
+- Per-workload isolation; the seal name is bound into the blob and checked on decrypt
+- `${SECRET:name}` syntax in environment variables for auto-detection
+- Scoped name forms, e.g. `broker/<workload>/<name>` for credential-broker material
+- Portable, passphrase-protected export/import between machines (`docs/adr/004-secret-export-versioned-crypto.md`)
+
+## SELinux confinement
+
+A container workload that needs rights beyond the stock container domain sets `[security].selinux_policy = true` and ships a policy file. Each such workload gets its **own** SELinux type (`wl_<name>.process`) rather than adding rules to the shared `container_t`. This matters because a `semodule` load is global: a rule written against `container_t` widens *every* container on the host, so the desktop/telemetry workloads' device and journal grants would otherwise leak host-wide. Per-workload types keep each workload's extra rights scoped to itself, and — because the type is keyed on the workload name — a duplicated workload gets an independently loadable/removable module.
+
+The policy is written in **CIL** (Common Intermediate Language, the IR the SELinux userspace compiles `.te`/`.pp` down to), not `.te`, for two reasons:
+
+- **Inheritance.** `(block wl_<name> (blockinherit container) ...)` stamps out a full copy of the base `container` domain and adds the workload's extra rules on top. A flat `.te` rule on `container_t` can't be "copied per workload"; a bare `typeattribute container_domain` is not a complete container domain (the container won't even start). Inheriting udica's base block is what supplies the full domain.
+- **Namespacing + direct load.** CIL blocks namespace their types (`wl_<name>.process`), so two workloads never collide on a shared type, and `semodule -i` loads `.cil` directly — no `checkmodule`/`semodule_package` compile step (and no `checkpolicy` dependency).
+
+Authoring is done with **udica** against a running container; it emits the CIL block and the base templates (`/usr/share/udica/templates/*.cil`) that workloadctl loads alongside the workload module on `enable`. The enable-time loader lives in `lib/provisioning.py` (`apply_selinux_policy`).
+
+**All of the above is the container path. VM workloads confine differently** (ADR 006 step 3), and the difference is easy to get wrong:
+
+- **QEMU runs as `svirt_t`, unconditionally and without the flag.** Not a per-workload type: `svirt_t` is the distro's own domain for a hypervisor process hosting an untrusted guest, and re-deriving it would be the mistake the per-workload argument above is *not* making — there is fifteen years of encoded knowledge to inherit, where a container workload has none. The transition is a `runcon` prefix in `libexec/workload-vm-notify`, because systemd execs from `init_t` and the policy has no `init_t → svirt_t` transition; `unconfined_service_t → virt_domain` is what makes it work.
+- **MCS categories are deliberately unused.** libvirt needs them because all its VMs share one uid; ours each run as their own `_wl-<name>`, so DAC already separates them.
+- **So `[security].selinux_policy` means something different on a VM.** The `wl_<name>.process` type it declares has exactly one consumer — the generator passing it to podman — and a VM makes no podman call. A VM's `policy.cil` is a *delta against `svirt_t`*.
+- **Host-global pieces ship outside that flag:** the `svirt_image_t` fcontext rule per VM workload (semanage at enable, gated on `is_vm`, because labelling is a precondition for booting rather than optional hardening), and `security/workload-vm.cil` (a virtiofsd domain plus the two grants QEMU's native passt netdev needs), `security/workload-inspect.cil` and `security/workload-resolve.cil` — all loaded once by the RPM.
+
+Traps worth carrying forward if you touch this:
+
+- A `filecon` in a bundle's `policy.cil` under a path workloadctl registers with `semanage` is **silently ignored**, because `file_contexts.local` outranks the base `file_contexts` wholesale (`validate` warns).
+- The shipped policy **dontaudits** the rule passt needs under a QEMU-native netdev, so an ordinary AVC harvest will not show it — run `semodule -DB` before concluding a harvest is complete.
+- **No unit that transitions into one of our domains may set `NoNewPrivileges=`** (nor `DynamicUser=`, which implies it): NNP makes the kernel refuse any transition not *bounded* by the calling domain, and none of ours are bounded by `init_t`. The symptom is a bare `203/EXEC` "Permission denied" on a mode-0755 binary, with `op=security_bounded_transition` in the audit log and nothing else pointing at the cause. The seccomp-implying options (`PrivateDevices=`, `ProtectKernel*=`, `SystemCallFilter=`, ...) are fine despite the documentation's phrasing — systemd only forces NNP for those when the *manager* lacks `CAP_SYS_ADMIN`, which never holds for a system service.
+- An RPM reinstall silently drops the `semanage` fcontext rules, and a VM then fails with "QMP socket not ready"; a restart alone cannot fix it.
+
+A harvest is only ever as good as the workout behind it, and the virtiofsd domain is where that bites: the module is a list of the classes someone exercised, so a share can pass every test and still deny `ln -s`. `security/workload-vm.cil` records the workout its list comes from — extend that and rebuild, rather than appending the one permission a denial names. `docs/vm-virtiofs.md` is the connected version: the share's ownership model, why the sidecar holds no capabilities, what confines it instead, and the symptom table.
 
 ## Key Commands
 
 | Command | Description |
 |---|---|
-| `workloadctl pcap <name> [FILTER]` | Capture traffic; `-D` lists vantages, `--dry-run` prints the exact nft rule first |
 | `workloadctl catalog` | List shippable bundles under `/usr/share/workloadctl/workloads/` |
 | `workloadctl init <bundle> [--as <name>]` | Stamp a catalog bundle into `/etc/workloads.d/<name>/workload.toml` (sets `bundle` when name diverges) |
-| `workloadctl duplicate <src> <new>` | Copy a live workload (alias `clone`); resolves `bundle` to the source's, lints host-global settings |
 | `workloadctl create` | Scaffold a from-scratch workload TOML from flags (`--image …`) |
+| `workloadctl duplicate <src> <new>` | Copy a live workload (alias `clone`); resolves `bundle` to the source's, lints host-global settings |
+| `workloadctl install` | Install a workload definition from a path or archive |
+| `workloadctl build` | Build a workload's self-built image from its `Containerfile` |
 | `workloadctl enable` | Create user, transfer image, start service |
 | `workloadctl disable` | Stop service, optionally purge user/data (`--dry-run` prints the teardown plan) |
-| `workloadctl start` | Start workload service |
-| `workloadctl stop` | Stop workload service |
-| `workloadctl restart` | Bounce the workload service (keeps the container overlay / VM disks + seed; does **not** apply TOML edits — that's `recreate`) |
+| `workloadctl start` / `stop` | Start / stop the workload service |
+| `workloadctl restart` | Bounce the service (keeps the container overlay / VM disks + seed; does **not** apply TOML edits — that's `recreate`) |
 | `workloadctl reboot` | Restart the workload (container: keeps the overlay; VM: guest reboot) |
 | `workloadctl update` | Pull new image / rebuild VM disk and recreate (automatic rollback on failure; `--dry-run` prints what it would pull and restart) |
 | `workloadctl recreate` | Recreate from current config (destroys a cattle overlay; rotates VM `system.qcow2`) |
 | `workloadctl rollback` | Roll back to the previous image (VM: restore previous disk generation); `--list` shows targets |
-| `workloadctl status` | Show workload status |
+| `workloadctl list` / `status` / `info` | Inventory, service state, detailed facts (ports/uid-map/ps facets) |
 | `workloadctl logs` | View workload logs (container output / VM service journal) |
-| `workloadctl list` | List all configured workloads |
-| `workloadctl info` | Show detailed workload information (incl. ports/uid-map/ps facets) |
-| `workloadctl shell` | Open interactive shell (container exec / VM SSH) |
-| `workloadctl exec` | Execute command inside the workload (container exec / VM SSH) |
-| `workloadctl incant` | Run a command against the runtime control plane as the owning identity (container: `podman …` as `_wl-<name>`; VM: QMP) |
-| `workloadctl edit` | Edit config in $EDITOR with validation |
-| `workloadctl validate` | Validate TOML config (static, declaration-level) |
-| `workloadctl diagnose` | Diagnose workload runtime setup (user, subuid, linger, SELinux), emits fixes |
-| `workloadctl drift` | Show drift between generated and deployed systemd unit files (exits 1 if out of sync) |
-| `workloadctl stats` | Show live resource usage (containers via podman; VMs via QMP, no `--follow`) |
+| `workloadctl stats` | Live resource usage (containers via podman; VMs via QMP, no `--follow`) |
 | `workloadctl health` | Check health status (scriptable exit code) |
-| `workloadctl secret` | Manage TPM2-encrypted credentials |
+| `workloadctl images` | Show images or prune unused |
+| `workloadctl exec` / `shell` / `cp` | Reach inside (container exec / VM SSH) |
+| `workloadctl incant` | Run one command against the runtime control plane as the owning identity (container: `podman …` as `_wl-<name>`; VM: QMP) |
+| `workloadctl rules <wl> [HOST]` | What a filtered VM is *permitted* to do — effective rules, not the file's entries |
+| `workloadctl egress <wl>` | What it *did* — the per-request record, allows as well as drops |
+| `workloadctl pcap <name> [FILTER]` | Capture traffic; `-D` lists vantages, `--dry-run` prints the exact nft rule first |
+| `workloadctl edit` | Edit config, or a named control file (copy-on-write override), with validation |
+| `workloadctl validate` | Validate TOML config (static, declaration-level) — run before enabling |
+| `workloadctl doctor` | Aggregate diagnosis: generator log, unit states, setup checks, drift, health |
+| `workloadctl diagnose` | Diagnose workload runtime setup (user, subids, linger, SELinux), emits fixes |
+| `workloadctl drift` | Drift between generated and deployed unit files (exits 1 if out of sync) |
+| `workloadctl secret` | Manage TPM2-encrypted credentials (`create`/`list`/`show`/`delete`/`rotate`/`export`/`import`) |
 | `workloadctl backup` | Backup config, overrides, and durable data; `--consistency {cold,crash}` for VMs |
 | `workloadctl restore` | Restore workload from backup archive |
-| `workloadctl cleanup` | Find/remove orphaned workload users |
+| `workloadctl cleanup` | Find/remove orphaned users, directories and SELinux modules (defaults to `--dry-run`) |
 
-Most mutating commands require `sudo`. Read-only commands work as any user.
+Most mutating commands require `sudo`. Read-only commands work as any user. Most read commands take `--json`.
+
+**`incant` is the deliberate escape hatch.** It sends a raw command to a workload's control plane as the owning identity, with the fiddly invocation supplied. It bypasses the declarative model, which is the point and also the warning. It reaches the runtime's *manager*, not the workload interior — for the interior use `exec`/`shell`.
+
+For a container it is `podman`, run as `_wl-<name>` with that user's rootless environment:
+
+```bash
+workloadctl incant webproxy -- volume ls
+# by hand:
+sudo -n -u _wl-webproxy \
+  -E XDG_RUNTIME_DIR=/run/user/10003 \
+  -E HOME=/var/lib/workloads/webproxy \
+  -E DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/10003/bus \
+  podman volume ls
+```
+
+The UID is allocated at create time, so it has to be looked up (`workloadctl info`). Dropping the bus address is the interesting mistake: read-only calls like `volume ls` still work, so it surfaces much later on the first command that migrates a cgroup — `podman exec` failing with `Permission denied` writing `cgroup.procs`.
+
+For a VM it is one command on the QEMU monitor: the first token is the QMP command, any further `key=value` tokens become its `arguments` object, and the JSON reply is printed.
+
+```bash
+workloadctl incant buildhost -- query-status
+workloadctl incant buildhost -- screendump filename=/tmp/vm.ppm
+# by hand:
+sudo sh -c 'printf "%s\n%s\n" \
+    "{\"execute\":\"qmp_capabilities\"}" \
+    "{\"execute\":\"query-status\"}" \
+  | socat -t2 - UNIX-CONNECT:/run/workload-vm/buildhost/qmp.sock'
+```
+
+The handshake is not optional (QMP opens with a greeting and refuses commands until answered with `qmp_capabilities`), the socket lives in a `0750` directory owned by `_wl-buildhost`, and the reply is a stream of JSON objects to correlate yourself. `incant` supplies all of it.
 
 ## Configuration (TOML)
 
 Workloads are defined in `/etc/workloads.d/<name>/workload.toml`. Key sections:
 
-- `[workload]` — name, enabled flag, `mode` (single/pod/bridge), `lifecycle` (pet/cattle, default cattle)
+- `[workload]` — name, enabled flag, `mode` (single/pod/bridge), `lifecycle` (pet/cattle, default cattle), `requires`/`after`
 - `[container]` — image, command, pull policy, systemd mode, user, environment, health checks
 - `[container.health]` — health check cmd, interval, timeout, retries, on_failure action
 - `[container.environment]` — env vars, supports `${SECRET:name}` syntax
@@ -648,77 +423,113 @@ Workloads are defined in `/etc/workloads.d/<name>/workload.toml`. Key sections:
 - `[network]` — mode (pasta/host/none/custom), ports, DNS
 - `[resources]` — cpu-quota, cpu-weight, memory-max, memory-high, io-weight, tasks-max, shm-size, service_type (default: `exec`)
 - `[volumes]` — host:container path mappings
+- `[host]` — setup hooks run as root at enable time
 
 VM workloads use a separate, mutually-exclusive set of sections:
 
-- `[vm]` — image source (`image` or `cloud_image_url` + `cloud_image_checksum`), memory, vcpus, rollback_keep, data-disk size
-- `[vm.cloud_init]` — user-data template + `template_vars` for per-instance seeding
-- `[vm.network]` — `ports` (published, container convention), `egress` (`"filtered"` default / `"open"`), `allow` (`"<addr>:<port>"`, addresses only), `outbound_if` (pin egress to one host interface), `resolver` (`"host"` / `"none"`), and `bridge` (absent = passt; present = attach directly and be unfiltered). Presence of `bridge` IS the topology selector — there is no `mode` key. `egress`/`allow` alongside `bridge` is an error, not a no-op: a bridged guest sends from its own LAN address, so no host socket carries the uid.
+- `[vm]` — image source (`image`, or `cloud_image_url` + `cloud_image_checksum`, or `local_image`), memory, vcpus, balloon, rollback_keep, data-disk size, volumes, restart policy
+- `[vm.cloud_init]` — user-data template (`user_data_file`) + `template_vars` for per-instance seeding
+- `[vm.network]` — scalars first: `bridge` (absent = passt; present = a real LAN identity and unfiltered), `ports`, `outbound_if`, `resolver` (`"host"`/`"none"`), `egress` (`"filtered"` default / `"open"`), `hosts`, `tls` (`"inspect"` default / `"splice"`), `tls_reason`
+- `[[vm.network.allow]]` — `address` + `reason`; the non-HTTP destinations
+- `[[vm.network.internal]]` — `host` + `reason`; an allowlisted name that is supposed to resolve into private space
+- `[[vm.network.splice]]` — `host` + `reason`; one host exempt from TLS termination
+- `[[vm.network.http2]]` — `host` + `reason`; one host exempt from the http/1.1 ALPN offer
+- `[[vm.network.policy]]` — `host`, optional `methods`/`paths`, optional `credential`
+- `[[vm.network.credential]]` — `name`, `placeholder`, `env`, optional `auth_header`/`auth_format`
+
+Presence of `bridge` **is** the topology selector — there is no `mode` key. `egress`/`hosts`/`ports`/`outbound_if` alongside `bridge` is an error, not a no-op: a bridged guest sends from its own LAN address, so no host socket carries the uid.
 
 ## File Structure
 
 ```
 bin/workloadctl                    # CLI dispatcher (argparse → lib/cmd_*.py)
-lib/cmd_*.py                       # One module per verb (enable, disable, info, health, …)
-lib/provisioning.py                # The provisioning steps enable/disable/recreate share (preflight, user creation, image transfer, unit generation, host-setup hook, SELinux policy)
+lib/cmd_*.py                       # One module per verb (enable, disable, info, health, egress, rules, pcap, …)
+lib/provisioning.py                # Steps enable/disable/recreate share (preflight, user creation, image transfer, unit generation, host-setup hook, SELinux policy)
 lib/cli_log.py                     # CLI prose channel (info/warn/error, --quiet) + the mutating verbs' --json result object
 lib/oplog.py                       # Per-workload operations log (/var/lib/workloads/<name>/operations.log, JSON Lines)
+lib/deployment.py                  # ostree deployment identity for /var provenance
 lib/substrate.py                   # Substrate port (ABC + exceptions + get_substrate router, computed capability matrix)
 lib/substrate_container.py         # ContainerSubstrate (rootless podman)
 lib/substrate_vm.py                # VMSubstrate (QEMU/KVM, SSH + QMP)
 lib/backup.py                      # capture() implementation shared by both substrates
+lib/podman.py                      # Typed Podman wrapper (JSON output, PodmanError, root/user modes)
+lib/qmp.py                         # QMP client
+lib/workloadctl_core.py            # WorkloadConfig / WorkloadManager (TOML loading, paths, lifecycle field)
+lib/workload_lib.py                # Shared library (config parsing, UID allocation, paths, subid math)
+lib/vm.py                          # VM constants and derivations (addresses, planes, unit names)
+lib/vm_provision.py                # VM disk/seed provisioning
+lib/vm_status.py                   # VM state derivation
+lib/vm_metrics.py                  # VM metric collectors (QMP balloon/vCPU, qemu cgroup) shared by the exporter and `stats`
+lib/vm_mint.py                     # Per-workload egress CA and leaf minting
+lib/vm_clock.py                    # Host-side guest clock resync on mint cache miss
+lib/vm_inspect_figures.py          # FIGURES table: the single producer behind doctor and the exporter
+lib/pcap.py                        # Capture planning (JSON plan shared with the helper)
 generators/workload-generator      # Tiny shell systemd generator (emits workload-generate.service)
 generators/workload-generate       # Python script run by workload-generate.service at early boot
 libexec/workload-ensure-user       # Per-workload user setup (ExecStartPre)
-libexec/workload-vm-*              # VM helpers (build-disk, qmp, shutdown, notify, netdev)
-libexec/agent-broker               # The credential broker: a standalone program, not a helper (shipped disabled)
+libexec/workload-write-env         # EnvironmentFile rendering (incl. ${SECRET:name})
+libexec/workload-vm-*              # VM helpers: build-disk, qmp, shutdown, notify, netdev, filter,
+                                   #   inspect, inspect-listener, resolve, broker
+libexec/agent-broker               # The credential broker: a whole standalone program, not a helper
+libexec/workload-pcap              # Capture runner (SIGTERM → SystemExit)
 libexec/workload-exporter          # Prometheus metrics exporter (textfile drop)
-lib/workloadctl_core.py            # WorkloadConfig / WorkloadManager (TOML loading, paths, lifecycle field)
-lib/workload_lib.py                # Shared library (config parsing, UID allocation, paths)
-lib/podman.py                      # Typed Podman wrapper (JSON output, PodmanError, root/user modes)
-lib/vm_metrics.py                  # VM metric collectors (QMP balloon/vCPU, qemu cgroup) shared by the exporter and `stats`
-workloads/<bundle>/                # Shipped bundles: workload.toml (template declaration)
-                                   #   co-located with control files (Containerfile, build.sh,
-                                   #   setup.sh, policy.cil, cloud-init user-data — any subset)
-docs/workloads.md                  # Full configuration guide
-docs/workload-run-files.md         # Authoritative per-workload run-file topology (what disable/drift/inspect enumerate)
-docs/cli.md                        # Complete CLI reference
-docs/secrets.md                    # Secrets management guide
-docs/agent-broker.md               # Credential broker: threat model, identity, operation
-docs/agent-broker.toml.example     # Annotated broker config (installed to /usr/share/doc/workloadctl/)
-docs/schema-reference.toml         # Annotated TOML schema with all options
-docs/testing.md                    # Test-value rubric: rung model, oracle/contract/snapshot, deletion heuristic
-systemd/                           # systemd units (workloads.slice, metrics timers)
-nftables/                          # nft skeletons: workload-filter, workload-proxy
+workloads/<bundle>/                # Shipped bundles: workload.toml co-located with control files
+                                   #   (Containerfile, build.sh, setup.sh, policy.cil, cloud-init — any subset)
+security/                          # Host-global CIL: workload-vm, workload-inspect, workload-resolve
+nftables/                          # nft skeletons: workload-filter (policy), workload-proxy (redirect; name is a fossil)
+systemd/                           # workloads.slice, exporter units + timers, tmpfiles, preset
 completions/                       # Bash completions
 seccomp-workload-baseline.json     # Default seccomp profile
-tests/                             # Test suite
+docs/                              # See Documentation below
+tests/                             # Unit suite + tests/manual/ rigs + tests/runtime/
 ```
 
-## Included Container Images
+## Shipped bundles
 
-Pre-built container definitions ship in their bundle dir (`workloads/<bundle>/`):
+33 bundles under `workloads/`, each a directory with `workload.toml` at minimum. `workloadctl catalog` lists them; `workloadctl init <bundle>` stamps one into `/etc/workloads.d/`. By shape:
 
-- `smb-server` — Samba file sharing (guest shares, host networking)
-- `wireguard-vpn` — WireGuard VPN client
-- `socks5-vpn` — SOCKS5 proxy over WireGuard
-- `dns-vpn` — DNS resolver over WireGuard
-- `pihole-vpn` — Pi-hole DNS + WireGuard VPN
-- `proxy-stack` — Squid cache + Pi-hole + WireGuard (all-in-one)
-- `squid` — Squid caching proxy
-- `grafana` — Grafana dashboards for workload monitoring
-- `desktop-vnc` — VNC-accessible Wayland desktop
+- **VM** — `virtual-forgejo` (the live filtered-VM example), `vm-base` (the minimal one)
+- **Multi-container** — `proxy-stack`, `pihole-vpn`, `webproxy-demo` (smallest bridge-mode example), `example-multi-container`
+- **Network / VPN** — `wireguard-vpn`, `socks5-vpn`, `dns-vpn`, `vpn-torrent`, `squid`, `caddy`, `avahi`, `pihole`
+- **Registry / forge** — `registry`, `zot-registry`, `forgejo`
+- **Observability** — `alloy`, `otel-lgtm`, `nvidia-gpu-exporter`
+- **GPU / AI** — `llama-swap`, `llamacpp`, `comfyui`, `swarmui`, `oobabooga`
+- **Desktop / streaming** — `vncdesktop-sway`, `vncdesktop-labwc`, `vncdesktop-wayfire`, `gamedev-sway`, `sunshine-streaming`, `wolf-game-streaming`, `jellyfin`
+- **Files** — `smb-server`
+
+Shipped bundles use `pull = "missing"` or `"never"` only — enforced by `tests/test_workloads.py`; see Image trust.
 
 ## Documentation
 
-- [Workload guide](docs/workloads.md) — full configuration reference with examples
-- [Workload run-files](docs/workload-run-files.md) — authoritative per-workload run-file topology (units + secrets env + wants symlink; what disable/drift/inspect must agree on)
-- [CLI reference](docs/cli.md) — complete command documentation
-- [Secrets management](docs/secrets.md) — TPM2-encrypted credentials
-- [Credential broker](docs/agent-broker.md) — threat model, peer-uid identity, and how to configure and run `agent-broker.service`
-- [Schema reference](docs/schema-reference.toml) — annotated TOML schema with all options
-- [Testing](docs/testing.md) — test-value rubric: rung model, oracle/contract/snapshot, deletion heuristic
-- [Example configs](workloads/) — each workloads/<bundle>/workload.toml — real-world workload definitions
+- [Workload guide](docs/workloads.md) — full configuration reference with worked examples
+- [CLI reference](docs/cli.md) — every command and flag, and the `--json` result shapes
+- [Schema reference](docs/schema-reference.toml) — the annotated full TOML schema, in valid file order
+- [Secrets](docs/secrets.md) — TPM2-encrypted credentials end to end
+- [Filtered VM walkthrough](docs/vm-egress-walkthrough.md) — one request, TOML to packet
+- [Credential broker](docs/agent-broker.md) — design, threat model, peer-uid identity, operation
+- [Broker config example](docs/agent-broker.toml.example) — annotated, installed to `/usr/share/doc/workloadctl/`
+- [VM virtiofs](docs/vm-virtiofs.md) — how guest volumes are shared and confined, and the symptom table
+- [Run files](docs/workload-run-files.md) — authoritative per-workload run-file topology (what `disable`/`drift`/`inspect` must agree on)
+- [Testing](docs/testing.md) — the test-value rubric: rung model, oracle/contract/snapshot, deletion heuristic
+- [Design decisions](docs/adr/) — 001 container cgroup placement, 002 VM bridge host-level config, 003 non-destructive VM rollback, 004 versioned secret-export crypto, 005 /var state deployment provenance, 006 passt not a managed bridge, 007 per-workload credential broker, 008 transparent egress inspection
+- [Example bundles](workloads/) — 33 shipped workload definitions, one per directory
+
+**Docs policy: tracked files may not cite untracked docs.** A citation has to be followable from a clean checkout. `docs/wip/` is gitignored, so nothing tracked may point into it — and don't cite a doc you intend to write later; write it, or state the fact inline. `tests/test_doc_citations.py` enforces this repo-wide and runs in the normal `just test`.
+
+## Testing
+
+```bash
+just test              # full unit suite (unittest discover -t .)
+just test-unit         # fast subset (lib, generator, write-env, metrics)
+just test-integration  # tests.test_integration only
+just lint              # py_compile syntax check
+just rpm-build         # build the RPM from this checkout
+just test-runtime      # boots a harness-owned VM and runs runtime checks; skips cleanly without /dev/kvm
+```
+
+There is no virtualenv: scripts run against the system `python3`, and `lib/` has no third-party dependencies. `lib/` is a flat set of top-level modules, not a package — on a host the RPM installs every entrypoint *into* `/usr/libexec/workloadctl` alongside the modules so each finds them via its own `sys.path[0]`, and the `%{_bindir}/workloadctl` wrapper execs into that private dir. In the suite, `tests/__init__.py` puts `lib/` on `sys.path` and provides `load_script()` for the extension-less entrypoints and `script_env()` for subprocess launches; no test module does its own `sys.path` surgery.
+
+**Unit gates do not see the seam.** The recurring lesson across ADRs 006–008 is that every unit test can be green while the feature is inert on a real guest — the wiring between units is what no brief owns. `tests/manual/` holds the rigs that run against real packets on a KVM host under enforcing SELinux (`inspect_rig`, `policy_rig`, `broker_rig`, `clock_rig`, `rung5_rig`, `splice_rig`, `self_dial_rig`, `input_chain_rig`), each break-verified — a rig that asserts nothing passes just as loudly as one that works. `tests/manual/README.md` records what each has run and when.
 
 ## Deliberate non-adoptions
 
@@ -730,22 +541,22 @@ These patterns were considered and explicitly rejected:
 
 - **`podman auto-update` for image updates.** Rejected: auto-update is keyed on the container having an `io.containers.autoupdate` label and uses `sd_notify` to signal readiness. workloadctl's update flow does a health-verified rollback (pull → recreate → health check → rollback on failure), which auto-update can't replicate. The `workloadctl update` verb is the correct path.
 
-- **Quadlet (systemd `.container` units).** Rejected in favour of the current generator approach; see `docs/adr/001-container-cgroup-placement.md` option 3. Quadlet generates units at daemon-reload time, not boot-generator time, which means the units don't exist when `workload-generate.service` runs (`Before=basic.target`). Cgroup placement under Quadlet also hardcodes the system unit cgroup tree, blocking the option-1b `workloads.slice` redirect. Keeping an explicit generator preserves full control of the unit content and ordering.
+- **Quadlet (systemd `.container` units).** Rejected in favour of the current generator approach; see `docs/adr/001-container-cgroup-placement.md` option 3. Quadlet generates units at daemon-reload time, not boot-generator time, which means the units don't exist when `workload-generate.service` runs (`Before=basic.target`). Cgroup placement under Quadlet also hardcodes the system unit cgroup tree, blocking the option-1b `workloads.slice` redirect. Keeping an explicit generator preserves full control of the unit content and ordering. More broadly: Quadlet answers "what unit should this container get?"; workloadctl starts a layer earlier and finishes a layer later — it owns the OS user, the subuid ranges, the storage, the secrets and the update path, and treats a VM as the same kind of object as a container. If you want a unit file from a container spec, Quadlets are simpler and you should use them.
 
 - **Rootful `--userns=auto` (per-container UID remapping).** Rejected; see `docs/adr/001-container-cgroup-placement.md` option 4. Rootful podman with `--userns=auto` remaps container UIDs to an unprivileged range but still runs the container manager as root — any container escape exposes the full root privilege of the host. workloadctl's dedicated `_wl-<name>` users run the podman *process* itself unprivileged. The blast radius of a container escape is bounded to the workload user, not root.
+
+- **A managed bridge for VM networking.** Rejected in ADR 006 in favour of passt: a shared bridge gives every guest a LAN identity of its own and leaves the host with no unforgeable per-VM selector, which is exactly what uid-keyed egress policy needs. `[vm.network].bridge` remains as the operator-provisioned escape hatch.
+
+- **A forward proxy the guest is configured to use.** Rejected in ADR 008 after shipping it: a proxy is advisory, so a process free to ignore `https_proxy` simply did not use it, and the default-deny chain could only turn that into a failure — never into a filtered request.
 
 ## Deliberate non-features
 
 These capabilities are out of scope for a single-host homelab workload manager and there are no intentions to add them:
 
 - **Multi-node scheduling and cluster orchestration.** Workloads bind to one host; there is no distributed scheduling, workload migration, or peer discovery.
-
 - **Service mesh.** No sidecar injection, no transparent network policies, no distributed tracing substrate.
-
 - **HA/failover.** No active-active clustering or automatic restart on a different node. If the host is down, workloads are down.
-
 - **Secret rotation policy engine.** Secrets are operator-managed at deployment time; there is no automatic key rotation or credential freshening.
-
 - **Cross-host orchestration.** Each host is managed independently. There is no global policy engine, topology discovery, or fleet-wide coordination.
 
 ## Trust model
@@ -757,6 +568,8 @@ While workloads run as individual user accounts, workload configs under `/etc/wo
 - The generator and provisioning scripts execute all TOML directives without validation.
 
 **Untrusted or third-party configs are out of scope for this tool.** A config with access to `/etc/workloads.d/` can request arbitrary capabilities, mount any path, and run setup commands as root. Never enable a workload from an untrusted TOML source.
+
+The guest inside a filtered VM is the one thing in this design that is *not* trusted, which is why every mechanism aimed at it — the redirect, the synthesising resolver, the broker's peer-uid identity — is enforced by the host and never by anything the guest is told, configured with, or can decline.
 
 ### Image trust
 
