@@ -82,10 +82,19 @@ EXTRA_DOCS = (ROOT / "README.md", ROOT / "llms.txt", ROOT.parent / "README.md")
 
 
 def _tracked_docs() -> list[pathlib.Path]:
-    out = subprocess.run(
-        ["git", "ls-files", "docs"], cwd=ROOT, capture_output=True, text=True,
-    )
+    # The RPM build runs the suite inside a container that has no git and no
+    # .git, so this has to skip rather than error there -- same treatment
+    # test_doc_citations gives its own ls-files.
+    try:
+        out = subprocess.run(
+            ["git", "ls-files", "docs"], cwd=ROOT,
+            capture_output=True, text=True, check=True,
+        )
+    except (OSError, subprocess.CalledProcessError) as e:
+        raise unittest.SkipTest(f"git unavailable: {e}")
     docs = [ROOT / p for p in out.stdout.split() if p.endswith(".md")]
+    if not docs:
+        raise unittest.SkipTest("no tracked docs")
     return docs + [p for p in EXTRA_DOCS if p.exists()]
 
 
