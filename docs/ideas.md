@@ -2,7 +2,7 @@
 
 > Idea capture and planning. No commitment.
 
-**Last Updated:** 2026-07-08
+**Last Updated:** 2026-09-02
 
 ---
 
@@ -149,12 +149,23 @@ real "online backup."
 **Mechanism:** in `VMSubstrate.capture(consistency="app")` —
 `guest-fsfreeze-freeze` → QMP snapshot/copy of `data.qcow2` → `guest-fsfreeze-thaw`.
 
-**Blocked on two prerequisites (the reason it's parked):**
-1. **Host:** add an `org.qemu.guest_agent.0` virtio-serial channel to the QEMU
-   argv in the VM launch helper (`libexec/workload-vm-*`).
-2. **Guest:** `qemu-guest-agent` installed + enabled in the VM image — trivial
-   once the guest is a bootc image we control,
-   another bootstrap step on the current Fedora-Cloud+cloud-init guest.
+**The host prerequisite has since shipped; the guest one is now per-bundle
+rather than blocking:**
+1. **Host — done.** The `org.qemu.guest_agent.0` virtio-serial channel is in the
+   QEMU argv (`VM_GUEST_AGENT_PORT` in `lib/vm.py`), with a per-VM host-side
+   socket, and `lib/vm_clock.py` already drives the agent in anger
+   (`guest-set-time` on a mint cache miss).
+2. **Guest — per bundle.** The built-in cloud-init seed does *not* install
+   `qemu-guest-agent`; a bundle that wants it installs and enables it in its own
+   `user_data_file` (`workloads/virtual-forgejo/cloud-init/user-data` does). So
+   the agent is available where a workload asks for it, and absent otherwise —
+   which the `app` branch has to degrade on, exactly as noted below.
+
+**Caveat for whoever picks it up:** the agent is confined in the guest, and not
+every command it advertises is permitted there — the file-read and `guest-exec`
+families are denied by the guest's own SELinux policy. Whether
+`guest-fsfreeze-freeze`/`-thaw` are is unverified; check on a real guest before
+designing around them.
 
 **When picked up:** add `app` as a third level to the existing
 `backup --consistency {cold,crash}` flag — the selection seam already exists, so

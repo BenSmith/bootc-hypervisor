@@ -52,9 +52,7 @@ sudo workloadctl diagnose <workload>
 sudo /usr/libexec/workloadctl/workload-ensure-user <name>
 
 # For pull=never images, pull manually
-sudo -u _wl-<name> \
-  -E XDG_RUNTIME_DIR=/run/user/$(id -u _wl-<name>) \
-  podman pull registry.local:5000/<image>:latest
+sudo workloadctl incant <name> -- pull registry.local:5000/<image>:latest
 
 # Then restart workload
 sudo workloadctl recreate <workload>
@@ -76,16 +74,18 @@ sudo workloadctl recreate <workload>
 # Check volume paths exist
 sudo workloadctl diagnose <workload>
 
-# Create missing directories
-sudo mkdir -p /var/lib/workloads/<name>/<subdir>
+# Create missing directories. A './' volume anchor resolves under data/,
+# not under the workload root — state/ is the workload user's $HOME and
+# podman's graphroot, and chowning into it will break the workload.
+sudo mkdir -p /var/lib/workloads/<name>/data/<subdir>
 
-# For userns=host: Check UID mapping
-sudo workloadctl uid-map <workload>
+# For userns=host: the mapped UID is what `diagnose` reports as uid_mapping
+sudo workloadctl diagnose <workload>
 
-# Fix ownership using the mapped UID shown by uid-map command
+# Fix ownership using the mapped UID diagnose printed
 # Example: Container UID 1000 → Host UID (subuid_start + 999)
 # If subuid_start=100000, then: 100000 + 999 = 100999
-sudo chown -R <mapped-uid>:<mapped-gid> /var/lib/workloads/<name>/
+sudo chown -R <mapped-uid>:<mapped-gid> /var/lib/workloads/<name>/data
 ```
 
 ### 3. Service not starting
@@ -154,7 +154,7 @@ sudo workloadctl enable <workload>
 **Fix:**
 ```bash
 # Check what ports are configured
-sudo workloadctl ports <workload>
+sudo workloadctl info <workload>
 
 # Check if port is already in use
 sudo ss -tlnp | grep :<port>
@@ -166,6 +166,12 @@ podman --version
 sudo firewall-cmd --list-all
 ```
 
+**A published port that answers from another machine but not from the host is
+not a fault.** Under the default `pasta` network the port is bound on the host's
+LAN address only — `curl localhost:<port>` on the host itself gets connection
+refused while the workload is perfectly healthy. Test against the host's LAN
+address, not loopback.
+
 ### 6. UID mapping confusion (userns=host)
 
 **Symptoms:**
@@ -173,17 +179,18 @@ sudo firewall-cmd --list-all
 - Permission denied even with correct container UID
 
 **Explanation:**
-With `userns=host`, container UIDs are shifted by the workload's subuid range:
+With `userns = "host"` (which requires `unsafe_host_userns = true`), container
+UIDs are shifted by the workload's subuid range:
 - Container UID N → Host UID (subuid_start + N - 1)
 - Example: Container UID 1000 → Host UID 100999 (if subuid_start=100000)
 
 **Fix:**
 ```bash
-# Check UID mapping
-sudo workloadctl uid-map <workload>
+# diagnose reports this as uid_mapping, with the range it read from /etc/subuid
+sudo workloadctl diagnose <workload>
 
-# This will show the formula and example mappings
-# Follow the chown command shown in the output
+# Or read the range directly and apply the formula above
+grep _wl-<name> /etc/subuid /etc/subgid
 ```
 
 ### 7. SSH auth failures (for SSH-based workloads)
@@ -199,14 +206,13 @@ sudo workloadctl uid-map <workload>
 **Fix:**
 ```bash
 # For userns=host workloads with SSH:
-# 1. Calculate the mapped UID
-sudo workloadctl uid-map <workload>
+# 1. Get the mapped UID (diagnose reports it as uid_mapping)
+sudo workloadctl diagnose <workload>
 
-# 2. Fix ownership of .ssh directory
-# Example: borgbackup with container UID 1000 → host UID shown by uid-map
-sudo chown -R <mapped-uid>:<mapped-gid> /var/lib/workloads/borgbackup/.ssh
-sudo chmod 700 /var/lib/workloads/borgbackup/.ssh
-sudo chmod 600 /var/lib/workloads/borgbackup/.ssh/authorized_keys
+# 2. Fix ownership of the .ssh directory inside the workload's data subtree
+sudo chown -R <mapped-uid>:<mapped-gid> /var/lib/workloads/<name>/data/.ssh
+sudo chmod 700 /var/lib/workloads/<name>/data/.ssh
+sudo chmod 600 /var/lib/workloads/<name>/data/.ssh/authorized_keys
 ```
 
 ### 8. Systemd service inside container fails
@@ -217,13 +223,17 @@ sudo chmod 600 /var/lib/workloads/borgbackup/.ssh/authorized_keys
 
 **Causes:**
 - Missing capabilities (SYS_ADMIN, SYS_RESOURCE, etc.)
-- Wrong userns mode for systemd (need userns=host)
+- Container is not root in its own user namespace
 
 **Fix:**
 ```toml
 # In workload TOML config:
 [security]
-userns = "host"
+# Container root in a PRIVATE userns. This is what systemd inside a container
+# needs — not userns = "host", which shares the *host's* namespace and is
+# refused unless unsafe_host_userns = true. Reach for "host" only when the
+# container must observe host-side UIDs through a host mount.
+userns = "keep-id:uid=0,gid=0"
 
 capabilities = [
     "SYS_ADMIN",     # For systemd namespace setup
@@ -257,9 +267,8 @@ The blocked syscalls are: `ptrace`, `bpf`, `perf_event_open`, `process_vm_readv`
 **Confirm seccomp is the cause:**
 ```bash
 # Test with seccomp disabled - if it starts, seccomp is blocking something
-sudo -u _wl-<name> \
-  -E XDG_RUNTIME_DIR=/run/user/$(id -u _wl-<name>) \
-  podman run --rm --security-opt seccomp=unconfined <image>
+sudo workloadctl incant <name> -- \
+  run --rm --security-opt seccomp=unconfined <image>
 ```
 
 **Fix — use the system default (less strict):**
@@ -304,9 +313,7 @@ sudo workloadctl recreate <workload>
 sudo journalctl -u workload-<name>.service -n 100
 
 # Try running container manually to see full error
-sudo -u _wl-<name> \
-  -E XDG_RUNTIME_DIR=/run/user/$(id -u _wl-<name>) \
-  podman run --rm <image> <command>
+sudo workloadctl incant <name> -- run --rm <image> <command>
 
 # Common fixes:
 # - Pull image if missing
@@ -348,7 +355,7 @@ sudo systemctl restart user@<uid>.service
 sudo loginctl enable-linger <uid>
 
 # If podman still complains about stale subid mappings after the above
-sudo -u _wl-<name> -E XDG_RUNTIME_DIR=/run/user/<uid> podman system migrate
+sudo workloadctl incant <name> -- system migrate
 ```
 
 > **Do NOT run `loginctl terminate-user`** on a workload user. It removes
@@ -510,7 +517,7 @@ sudo journalctl -u workload-<name>.service --since "2024-01-01 10:00:00"
 
 ```bash
 # Container output for one member of a multi-container workload
-sudo journalctl -t workload-stack-db
+sudo journalctl -t workload-example-multi-container-db
 
 # Search for specific text
 sudo journalctl -t workload-squid | grep "ERROR"
@@ -527,17 +534,17 @@ sudo journalctl -u workload-squid.service > /tmp/workload.log
 
 ### For systemd containers
 
-Containers running systemd inside (like borgbackup) forward console output to the host journal under the same identifier:
+Containers running systemd inside forward console output to the host journal under the same identifier:
 
 ```bash
-# View sshd logs from inside borgbackup container
-sudo journalctl -t workload-borgbackup | grep sshd
+# View sshd logs from inside the container
+sudo journalctl -t workload-<name> | grep sshd
 
 # View all systemd messages from inside container
-sudo journalctl -t workload-borgbackup | grep systemd
+sudo journalctl -t workload-<name> | grep systemd
 
 # Combine with time filters
-sudo journalctl -t workload-borgbackup --since "10 minutes ago" | grep sshd
+sudo journalctl -t workload-<name> --since "10 minutes ago" | grep sshd
 ```
 
 ### Why `podman logs` does not work
@@ -547,29 +554,40 @@ sudo journalctl -t workload-borgbackup --since "10 minutes ago" | grep sshd
 ## Debugging Techniques
 
 ### 1. Run container manually
+`workloadctl incant <name> -- <podman args>` is the supported way to reach a
+workload's own rootless podman; it assembles the identity environment for you.
+
 ```bash
-# Get workload user and UID
+# Run container interactively
+sudo workloadctl incant <name> -- run --rm -it <image> /bin/sh
+```
+
+By hand — three variables, not one. `HOME` is the *state* subtree (podman's
+graphroot lives there, so with the workload root instead podman reads an empty
+store and reports nothing), and dropping the D-Bus address surfaces much later
+as `podman exec` failing on `cgroup.procs: Permission denied`:
+
+```bash
 WORKLOAD_USER="_wl-<name>"
 WORKLOAD_UID=$(id -u $WORKLOAD_USER)
 
-# Run container interactively
-sudo -u $WORKLOAD_USER \
+sudo -n -u $WORKLOAD_USER \
   -E XDG_RUNTIME_DIR=/run/user/$WORKLOAD_UID \
+  -E HOME=/var/lib/workloads/<name>/state \
+  -E DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$WORKLOAD_UID/bus \
   podman run --rm -it <image> /bin/sh
 ```
 
 ### 2. Check UID mapping
 ```bash
 # Inside container (with podman unshare)
-sudo -u $WORKLOAD_USER \
-  -E XDG_RUNTIME_DIR=/run/user/$WORKLOAD_UID \
-  podman unshare cat /proc/self/uid_map
+sudo workloadctl incant <name> -- unshare cat /proc/self/uid_map
 ```
 
 ### 3. Examine generated service file
 ```bash
 # View the generated systemd service
-cat /run/systemd/generator/workload-<name>.service
+cat /run/systemd/system/workload-<name>.service
 
 # Check what podman command is actually run
 systemctl cat workload-<name>.service
@@ -610,8 +628,14 @@ If it fails:
 
 | Mode | Container root | Isolation | Use case |
 |------|----------------|-----------|----------|
-| `keep-id` | Maps to workload user | Maximum | Default, most secure |
-| `host` | Maps to subuid range | Reduced | Systemd containers, complex UID requirements |
+| `keep-id` | Maps to subuid range | Maximum | Default, most secure |
+| `keep-id:uid=N,gid=N` | Maps to subuid range | Maximum | Image runs as a fixed non-root UID and needs writable volumes |
+| `keep-id:uid=0,gid=0` | Container root, private userns | Maximum | Systemd-in-container, and anything that merely needs to *be* root |
+| `host` | Shares the host user namespace | Reduced | Only when the container must observe host-side UIDs through a host mount |
+
+`host` is **gated**: a workload that sets it without `unsafe_host_userns = true`
+fails validation and is skipped by the boot generator, so it never starts.
+Full semantics in `workloadctl/docs/schema-reference.toml`.
 
 ### Exit codes
 
@@ -629,10 +653,12 @@ If it fails:
 
 | Path                                                   | Purpose |
 |--------------------------------------------------------|---------|
-| `/etc/workloads.d/*.toml`                              | Workload configs |
-| `/run/systemd/generator/workload-*.service`            | Generated service files (temporary) |
+| `/etc/workloads.d/<name>/workload.toml`                | Workload config (a directory per workload; a flat `<name>.toml` is not read) |
+| `/run/systemd/system/workload-*.service`               | Generated service files (temporary — `/run` is tmpfs) |
 | `/run/systemd/system/workload-*.conf`                  | Generated sysusers configs |
-| `/var/lib/workloads/<name>/`                           | Default home directory |
+| `/var/lib/workloads/<name>/`                           | Workload root — holds `state/`, `data/` and `operations.log` |
+| `/var/lib/workloads/<name>/state/`                     | Workload user's `$HOME` and podman graphroot (reconstructible, backup-skipped) |
+| `/var/lib/workloads/<name>/data/`                      | Precious data; `./` volume anchors resolve here (backup-captured) |
 | `/run/workload-env/workload-*.env`                     | EnvironmentFiles with XDG_RUNTIME_DIR |
 | `/run/user/<uid>/`                                     | Runtime directory (requires linger) |
 | `/etc/subuid` `/etc/subgid`                            | UID/GID mapping ranges |
@@ -654,12 +680,17 @@ systemctl restart workload-<name>      # Restart service
 systemctl daemon-reload                      # Reload after config changes
 
 # Podman operations (as workload user)
-sudo -u _wl-<name> -E XDG_RUNTIME_DIR=/run/user/<uid> podman ps
-sudo -u _wl-<name> -E XDG_RUNTIME_DIR=/run/user/<uid> podman images
-sudo -u _wl-<name> -E XDG_RUNTIME_DIR=/run/user/<uid> podman system migrate
+sudo workloadctl incant <name> -- ps
+sudo workloadctl incant <name> -- images
+sudo workloadctl incant <name> -- system migrate
 
 # Debugging
 journalctl -u workload-<name> -n 100   # View recent logs
 systemctl cat workload-<name>          # View service file
-dmesg | grep workload-generator              # Check generator logs
+sudo workloadctl doctor <name>         # Includes this boot's generate-step log
+journalctl -b -k -g workload-generate  # The generate step's own early lines
 ```
+
+The journal tag is `workload-generate`, the Python step that writes the units —
+not `workload-generator`, the shell systemd generator that only emits the
+oneshot which runs it. Grepping for the latter matches nothing.

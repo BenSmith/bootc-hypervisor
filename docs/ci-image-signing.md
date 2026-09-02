@@ -4,9 +4,9 @@ Both forges publish signed images, but they get the signing key in different
 ways, and only one of them can use a forge secret at build time. This is the
 reference for the Forgejo path, which is the unusual one.
 
-Cited from `.forgejo/workflows/seal-signing-key.yml`,
-`.forgejo/workflows/build-hypervisor.yml`,
-`.forgejo/workflows/build-minimal-bootc.yml`, and `CLAUDE.md`.
+Cited from `.forgejo/workflows/seal-signing-key.yml`, the four Forgejo build
+workflows that sign (`build-hypervisor.yml`, `build-hypervisor-f44-quick.yml`,
+`build-minimal-bootc.yml`, `build-workload-images.yml`), and `CLAUDE.md`.
 
 ## The two schemes
 
