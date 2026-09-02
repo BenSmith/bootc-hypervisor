@@ -98,10 +98,8 @@ raw QEMU/KVM: UEFI/OVMF, a split `system.qcow2`/`data.qcow2`, a cloud-init seed
 and a per-workload SSH key. It gets the same dedicated user, the same generated
 units and the same commands as a container workload does.
 
-A VM is a first-class workload, and none of what it gets depends on how it is
-networked:
 
-| | |
+|||
 |---|---|
 | **image** | a cloud image by URL and checksum, a `local_image`, or a bootc `image` reference |
 | **disks** | `update` rebuilds `system.qcow2` and leaves the data disk alone, keeping `rollback_keep` older generations; `lifecycle = "pet"` never rotates the system disk at all |
