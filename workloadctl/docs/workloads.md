@@ -1282,6 +1282,36 @@ refclock it cannot open as fatal and an unconditional edit would leave that
 guest with no time service at all. Those guests are covered by the host-side
 check alone, which is one of the reasons it exists.
 
+#### What was measured
+
+Every claim above is measured rather than reasoned, by
+`tests/manual/clock_rig.py` on a real KVM host under enforcing SELinux. Two
+full runs, on hosts whose clocksource is the TSC: **19/19 on 2026-08-27**, and
+**19/19 again on 2026-09-02** against a later build. An earlier partial run on
+a host with no TSC available reached 8/9 — the `ptp_kvm` arm cannot execute
+there at all, which is itself the finding.
+
+| | measured |
+|---|---|
+| drift, unassisted | ~10 ppm — 3.7 s over 4 days 10 hours, four orders of magnitude inside a 30-day leaf |
+| a 120 s vCPU pause | the guest steps back **119.98 s** — the step equals the pause to 25 ms |
+| after resume, unassisted | still 119.3 s behind; nothing puts it back |
+| `ptp_kvm` in the guest | repairs that pause **by itself in 24 s**; chrony selects `PHC0` at ~874 ns |
+| `guest-set-time`, explicit ns | works — 119.3 s behind → +0.7 s |
+| `guest-set-time`, no argument | **fails**: `hwclock: select() to /dev/rtc0 to wait for clock tick timed out` |
+| a guest 7200 s behind | still validates a freshly minted leaf; the mint path resyncs it before signing |
+
+Three of those are worth stating as conclusions rather than rows. The pause is
+**exactly** as bad as the model predicts and is permanent without a remedy. The
+guest-side remedy genuinely works unaided, on a host that can offer it. And a
+guest rewound two hours — well past the one-hour backdate — still gets working
+egress, because the mint path repairs the clock before it signs, which is the
+property the whole arrangement exists to guarantee.
+
+The no-argument form of `guest-set-time` is a known-bad, stable across both
+runs. It reads the guest's RTC, which is what fails; the explicit-nanoseconds
+form is the one workloadctl uses.
+
 ### virtiofs Volumes
 
 Share host directories into the VM:

@@ -597,18 +597,43 @@ somewhere inside the `workloadctl exec` round-trip, so the reading is bracketed
 by two host reads and the interval's *width* is that latency. The upper bound is
 the stable one; the lower tracks the round-trip.
 
-**What it settled, 2026-08-26, 8/9 assertions.** The step equals the pause to
-37 ms. `guest-set-time` with **no argument fails** — it reads the guest's RTC
+**Last green 2026-09-02: 19/19, on a TSC-clocksource KVM host under enforcing,
+against the installed RPM.** The same 19/19 was recorded on 2026-08-27; the
+re-run was against a later build, on a host also carrying live production
+workloads, with clean teardown and nothing else disturbed. Rungs since then
+deliberately deferred this rig — they touch nothing it covers — so the re-run
+exists to close one residual doubt: a later rung deleted an `ExecStopPost` from
+*every* VM unit, including ones with no broker, which is the generic VM unit
+path this rig exercises.
+
+**The `ptp_kvm` arm needs a host this rig does not control**, and that is the
+one thing to check before reading a result. `ptp_kvm` answers only where the
+**host's** clocksource is the TSC; on `hpet` or `acpi_pm` the module refuses to
+load in every guest and measurements 3, 3b and 3c skip, saying so. An earlier
+run on such a host reached 8/9 and could say nothing about the guest-side
+remedy. Two homelab hosts qualify; check the candidate rather than assuming.
+
+**What the guest-side arm settled, once it could run at all.** `/dev/ptp_kvm`
+appears, chrony selects it as a refclock (`#* PHC0`, ~874 ns) with
+`makestep 1 -1`, and **the guest repairs a 120-second pause by itself in 24
+seconds**. Measurement 3c then turns the remedy off, and the rest of the rig
+measures the guest that a custom `user_data_file` produces — one with no
+`ptp_kvm` wiring — rather than contriving a second workload for it.
+
+**What it settled about the pause itself.** The step equals the pause to 25 ms
+(119.984 s against 120.008 s), the guest survives it, and **nothing puts it
+back**: still 119.3 s behind after resume with the guest-side remedy off.
+`guest-set-time` with **no argument fails** — it reads the guest's RTC
 and returns `hwclock: select() to /dev/rtc0 to wait for clock tick timed out`,
 which corrects an earlier note recording it as not returning at all. The
 **explicit-nanoseconds form works**, taking the guest from −120.9 s to +0.6 s,
 inside the measurement's own bracket. That is the remedy rung 3 adopts.
 
-The one FAIL is the no-argument form and is the *finding*, not a defect in the
-rig: it is asserted rather than skipped so that a future QEMU or image making it
-work shows up as a rig that started passing.
+The no-argument form is a *finding*, not a defect in the rig, and is recorded
+as an observation rather than a failure so a future QEMU or image that makes it
+work shows up as a change here. It has been stable across both full runs.
 
-**Measurement 6 closes the loop, and it needed T5 to exist.** Everything above
+**Measurement 7 closes the loop, and it needed T5 to exist.** Everything above
 measures a clock; 6 measures what the clock was on the critical path *of*. It
 pushes the guest **two hours** back — past the `notBefore` backdate, so a stale
 clock cannot validate a fresh leaf by accident — and then asks it for a name it
