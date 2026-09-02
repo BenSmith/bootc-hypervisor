@@ -597,10 +597,23 @@ class ScopedCredentialNameTest(SecretTestBase):
     def test_delete_show_and_rotate_all_find_the_scoped_file(self):
         """The four verbs a per-verb change would have missed."""
         self._seed_scoped("agentvm", "tok")
-        out, err, code = _run(_ns(subcommand="show", name="broker/agentvm/tok"))
+        # Stub the decrypt: an unstubbed `show` execs the real systemd-creds,
+        # which is absent from the RPM build container and raises
+        # FileNotFoundError before any assertion runs.
+        captured = {}
+
+        def fake_run(cmd, **kw):
+            captured["cmd"] = cmd
+            return types.SimpleNamespace(returncode=0, stdout="secret\n", stderr="")
+
+        with mock.patch.object(cmd_secret.subprocess, "run", fake_run):
+            out, err, code = _run(_ns(subcommand="show",
+                                      name="broker/agentvm/tok"))
         # It gets as far as decrypting, which is all this asserts: "not found"
         # would mean the path was resolved against the credstore root.
         self.assertNotIn("not found", err)
+        self.assertEqual(captured["cmd"][2],
+                         str(self.cred_dir / "broker" / "agentvm" / "tok"))
 
         self._seed_scoped("agentvm", "tok")
         out, err, code = _run(_ns(subcommand="delete", name="broker/agentvm/tok",
