@@ -112,15 +112,20 @@ networked:
 
 ### Networking
 
-**passt, not a bridge.** passt terminates the guest's stack in userspace and
-re-originates its traffic as host sockets owned by `_wl-<name>` — which is what
-makes the workload uid an unforgeable selector for egress policy. Two
-consequences catch people out:
+**By default a VM has no bridge at all.** It uses passt, which terminates the
+guest's stack in userspace and re-originates its traffic as ordinary host
+sockets owned by `_wl-<name>` — which is what makes the workload uid an
+unforgeable selector for egress policy. workloadctl creates no bridge, runs no
+dnsmasq, sets no host-global `ip_forward` and needs no setuid
+`qemu-bridge-helper` (ADR 006). Two consequences catch people out:
 
 - The guest has **no LAN identity of its own**; it is assigned the host's
   address. Inbound needs an explicit `[vm.network].ports`.
 - `exec` and `shell` reach it on a uid-derived management address that is never
   routable and never configurable.
+
+A VM can still be put on a bridge — but one *you* own, not one workloadctl
+manages. That is the third stance below.
 
 ### Filtered, open, and bridged
 
@@ -142,9 +147,10 @@ of it:
   reachable by other hosts. This is the supported answer for a VM that has to
   be addressable — one serving TLS on its own name cannot do that under passt.
   Such a VM is unfiltered by construction, since its traffic never becomes a
-  host socket for `meta skuid` to match, and `exec` reaches it at its own
-  address on port 22 rather than at a management address. You provision the
-  bridge; workloadctl does not.
+  host socket for `meta skuid` to match — `egress`, `ports` and `outbound_if`
+  are refused beside it rather than silently ignored — and `exec` reaches it at
+  its own address on port 22 rather than at a management address. You provision
+  the bridge; workloadctl does not.
 
 ### Egress filtering
 
