@@ -139,8 +139,24 @@ whole view of the filter.
 ### The credential broker
 
 A sandboxed workload that must call an authenticated API never receives the
-key. Declare the material, name it from the policy entry it applies to, and a
-host-side broker attaches it on the way out:
+key. Seal it on the host, declare the material, and name it from the policy
+entry it applies to; a host-side broker attaches it on the way out.
+
+Seal the real key under the workload that may spend it — here a VM workload
+named `agent-vm`:
+
+```bash
+echo -n "sk-ant-..." | sudo workloadctl secret create broker/agent-vm/anthropic
+```
+
+The scoped name is a `secret` name form, not a broker-specific flag, so
+`secret list`, `rotate`, `export` and the rest take it too. It lands at
+`/etc/credstore.encrypted/broker/agent-vm/anthropic`, sealed under the name
+`broker-agent-vm-anthropic` — and because the seal name is bound into the blob
+and checked on decrypt, a unit pointed at another workload's file fails to
+start rather than reading that workload's key.
+
+Then, in `/etc/workloads.d/agent-vm/workload.toml`:
 
 ```toml
 [[vm.network.policy]]
@@ -150,17 +166,24 @@ paths      = ["/v1/messages"]
 credential = "anthropic"
 
 [[vm.network.credential]]
-name        = "anthropic"
+name        = "anthropic"          # the sealed material, broker/agent-vm/anthropic
 placeholder = "sk-ant-placeholder-not-a-real-key"
-env         = "ANTHROPIC_API_KEY"
+env         = "ANTHROPIC_API_KEY"  # what the guest gets instead
 ```
 
-The guest holds `placeholder`, calls the provider's real hostname, and its own
-inspector relays the request to that workload's broker instead of to the
-origin. The guest is told nothing: no endpoint, no variable, no name — so it
-cannot decline to use the broker and cannot be pointed at another workload's.
-Seal the real key with
-`workloadctl secret create broker/<workload>/<name>`.
+```bash
+workloadctl validate agent-vm && sudo workloadctl restart agent-vm
+```
+
+The guest holds `placeholder` in `ANTHROPIC_API_KEY`, calls the provider's real
+hostname, and its own inspector relays the request to that workload's broker
+instead of to the origin. The broker discards the placeholder and sets the real
+header. The key is decrypted only into the broker instance's own tmpfs, under a
+dynamic user disjoint from the workload's, so it is never in the guest, never in
+`workload.toml`, and never in the workload user's filesystem.
+
+The guest is told nothing: no endpoint, no variable, no name — so it cannot
+decline to use the broker and cannot be pointed at another workload's.
 
 ## Secrets
 
