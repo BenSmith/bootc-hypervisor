@@ -1,10 +1,15 @@
 # ADR 007: Credentials live in a per-workload broker, substituted per host
 
-**Status:** **Accepted, not implemented.** Depends on the transparent egress
-inspector, which is designed but unbuilt; this ADR records the credential
-architecture that design assumes, and the decision not to fold the two together.
+**Status:** **Accepted, implemented, verified on hardware.** Built at rung 6 and
+proven end to end on 2026-09-02 — a real guest received a provider response
+carrying a key it never held, on a KVM host under enforcing SELinux, 35/35.
 
-**Date:** 2026-08-16.
+The dependency this ADR was blocked on — the transparent egress inspector — was
+built at rungs 1–5 and is what dials the broker now. The record of the run, and
+of the five defects it found that the whole unit suite had passed, is in
+`../../tests/manual/README.md`.
+
+**Date:** 2026-08-16. **Implemented:** 2026-09-02.
 
 ## Context
 
@@ -340,3 +345,59 @@ broker sees a packet.
 authenticated upstream; the inspector does not exist. Nothing here is built
 until the inspector is, and the broker keeps its current host-wide shape in the
 meantime. This ADR is a decision about direction, not a change already made.
+
+---
+
+## Amendments
+
+Recorded rather than edited in, so the decision as taken stays readable.
+
+**A1 — `placeholder` moved off the policy entry (2026-09-01, supersedes part of
+decision 3 and §3).** §3 put `placeholder` on the `[[vm.network.policy]]` entry
+and then spent a paragraph on the validation rule that repaired the resulting
+mismatch: entries naming the same `credential` had to agree on `placeholder`,
+because it is a property of the credential and not of the entry. Adding a second
+credential-scoped fact — the guest variable that holds the placeholder — would
+have doubled that rule. Both now live on a `[[vm.network.credential]]` table
+that declares the material once, and the policy entry carries only the selector:
+
+```toml
+[[vm.network.credential]]
+name        = "github-token"
+placeholder = "ghp_000000000000PLACEHOLDER000000000000"
+env         = "GITHUB_TOKEN"
+
+[[vm.network.policy]]
+host       = "api.github.com"
+methods    = ["GET", "POST"]
+paths      = ["/repos/myorg/*"]
+credential = "github-token"          # the selector, which IS per entry
+```
+
+The agreement rule is gone rather than reimplemented — there is one declaration,
+so there is nothing to disagree. Two new errors replace it, in opposite
+directions: a `credential` naming no block, and a block no entry selects.
+
+**A2 — the credential block carries the provider's auth convention
+(2026-09-02).** The ADR is silent on how the credential is attached, because the
+host-wide broker's hand-written config could always name an `auth_header` and
+`auth_format` and the question never arose. Generating that config from
+`workload.toml` made the generated form able to express *less* than the file it
+replaced: with no way to say `Authorization: Bearer`, every provider not using
+Anthropic's `x-api-key` received a 401 on a request every layer here had
+authorised. Both keys are now optional on `[[vm.network.credential]]`,
+defaulting in the broker alone to `x-api-key` and `{secret}`.
+
+`validate` refuses a header name that is not an RFC 9110 field name, one that
+frames the message or is hop-by-hop (the credential would be overwritten or
+stripped downstream, and the provider's 401 would name nothing), and a format
+string the broker would fail to render — which it does at startup, so the
+alternative to refusing here is a unit that will not start.
+
+**A3 — one table per host in the rendered config (2026-09-02).** A consequence
+of decision 3's `(workload, Host)` key that only appears once a config is
+generated: two policy entries for one host — the documented way to vary
+`methods` by path — rendered that host's broker table twice, which TOML refuses.
+The render collapses on the host. Found on hardware; `validate` had called the
+config clean and the broker then exited at start, so every brokered request
+answered 502.

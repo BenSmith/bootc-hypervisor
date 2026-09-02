@@ -83,6 +83,11 @@ root:
    the armed state is a function of the current config alone. Arming one table
    and not the other leaves a workload that looks configured and reaches nothing.
 6. Resolves each `[[vm.network.internal]]` host and arms `wl_internal_ok4/6`.
+   A workload declaring `[[vm.network.credential]]` material gets one more
+   element here that its config never names: its own broker's listen address.
+   That address is inside 127/8 and therefore inside `wl_internal4`, so without
+   the exemption the inspector's dial to its own broker is dropped by rule 14 —
+   which presents as a dead broker rather than as a policy refusal.
 
 **The two cgroup exemptions are not armed here.** They are armed by each
 listener *service*'s own `ExecStartPre` and withdrawn by its `ExecStopPost`,
@@ -354,9 +359,12 @@ Rules 14 and 15 are the check. Four things about them are load-bearing:
   responder synthesises, every inspected connection's reply is addressed back
   into a host-local range; without the qualifier every one of them hangs with the
   SYN already accepted. Measured: the qualified form works, the unqualified one
-  does not. `192.0.2.0/24` is likewise absent from `wl_internal4` — that is the
-  advertised address, which still carries the credential broker, and listing it
-  would drop the broker's replies to its own client.
+  does not. `192.0.2.0/24` is now *present* in `wl_internal4`. It was excluded while
+  the advertised address `192.0.2.1` lived in it — first for the retired proxy,
+  then for the host-wide credential broker — and rung 6 deleted the last
+  consumer. With nothing carrying it, TEST-NET-1 is exactly what this drop
+  exists to catch. A site that really routes it internally writes a
+  `[[vm.network.internal]]` exemption.
 - **Rule 11, the DNS carve-out, comes first.** The inspector resolves through the
   host's configured resolver, and that address is inside these ranges whichever
   form it takes — `127.0.0.53` under a stub resolver, or a box on the LAN.

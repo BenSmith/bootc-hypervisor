@@ -3,11 +3,19 @@
 `libexec/agent-broker` — why this program exists, what it refuses to do, how it
 knows which sandbox is calling, and how to run it.
 
-A sandboxed coding agent never receives a provider API key. It points its client
-at the broker with a base-URL override; the broker attaches the real credential
-on the way out. Guest → broker is plain HTTP over an isolated path; broker →
-provider is ordinary verified TLS from the host, and the agent never holds the
-credential. The broker's own path involves no TLS interception and breaks no
+A sandboxed coding agent never receives a provider API key. It calls the
+provider's real hostname, exactly as it would with a key; its workload's egress
+inspector recognises a policy entry naming a credential and sends that request
+to the broker instead of to the origin, and the broker attaches the real
+credential on the way out. Inspector → broker is plain HTTP on a loopback
+address the guest cannot reach; broker → provider is ordinary verified TLS from
+the host, and the agent never holds the credential.
+
+**The guest is told nothing.** It has no endpoint, no variable and no name for
+the broker — so it cannot choose to use one, cannot decline to, and cannot be
+pointed at another workload's. Earlier revisions of this design did hand the
+guest a base URL; §2 and §4 record why that was sound and §7 records why it is
+gone. The broker's own path involves no TLS interception and breaks no
 certificate pinning. (Since 2026-08-26 a *filtered* VM does carry a CA for a
 different reason — its egress inspector terminates TLS by default; see
 `adr/008-transparent-egress-inspection.md`. That is egress policy, not
@@ -88,6 +96,18 @@ No interception on this path. No pinning breakage. The agent never holds a
 credential — the single property that matters most, and the only one of the four
 that depends on nothing else being configured.
 
+*Amended at rung 6:* **cooperation is no longer assumed, and that is strictly
+stronger.** The step above that needed it — the guest pointing its client
+somewhere — was the one thing an injected agent could undo, by pointing the
+client back at the origin with a key it had found elsewhere, or simply by
+running software that reads a base URL from somewhere the image does not set.
+The redirect does not ask. The guest dials the provider's real name and the
+inspector decides, so an agent that ignores every variable in its environment
+reaches the broker anyway. What the finding bought is unchanged and still the
+reason this is ~600 lines rather than 15,000: the broker parses nothing of the
+guest's request beyond its line and headers, and it is the inspector — which
+holds no credential — that does the reading.
+
 **This does not replace network policy.** The broker covers exactly one
 destination. Everything else the agent reaches — git, package registries,
 whatever it decides to curl — still needs default-deny egress, or you have
@@ -102,14 +122,24 @@ and the redirect does not ask.
 
 ## 3. What the broker is, and is not
 
-A reverse proxy that holds one credential and speaks to one upstream.
+A reverse proxy that holds a workload's credentials and speaks only to the
+upstreams its own config names.
 
-**Deliberately not a general proxy.** The upstream is fixed by config and is
-*never* taken from the request. Absolute-form request targets
+**Deliberately not a general proxy.** The set of upstreams is fixed by config
+and is *never* taken from the request. Absolute-form request targets
 (`GET https://elsewhere/...`, which is how a client asks a proxy to choose a
 destination) are rejected with 400. A broker that forwarded to a guest-chosen
 destination would be an SSRF pivot with a credential welded to it — precisely
 the failure this design exists to avoid, and a failure found in the field.
+
+**This claim is qualified since rung 6, not abandoned.** The broker no longer
+holds one credential for one upstream: it holds a table keyed by `Host`, and
+the inspector supplies the `Host` of the request it is relaying. So a value
+that originated in the guest now selects a row. What is preserved is the part
+that carries the security property — **the guest can only select among rows the
+host wrote**, and every row's `upstream` is configuration. A `Host` naming no
+row is a 403, not a fetch. The guest gained the ability to pick a losing ticket
+out of a hat the operator filled; it did not gain the ability to write one.
 
 Decisions worth not re-litigating:
 
@@ -141,14 +171,18 @@ Decisions worth not re-litigating:
 
 ## 4. Client cooperation
 
-Two client behaviours have to hold. Both were checked against the source of
-three real coding agents.
+Two client behaviours had to hold for the base-URL shape, and both were checked
+against the source of three real coding agents. **Neither is load-bearing any
+more** — §2 records why — but they are kept because the trust-store trap below
+is not about the broker at all, and a filtered guest walks into it regardless.
 
-**Base-URL override: universal.** All three expose it per-provider. This is the
-mechanism the whole design rests on and it is not in doubt.
+**Base-URL override: universal.** All three expose it per-provider. This was the
+mechanism the design rested on through rung 5. The guest sets nothing now.
 
 **Certificate pinning: absent.** No pinning checks in any of the three. The wall
-that would have killed the HTTPS variant is not there.
+that would have killed the HTTPS variant is not there — and since rung 3 a
+filtered guest's inspector terminates TLS by default, so this finding turned out
+to matter for the inspector rather than for the broker.
 
 **The operational trap is the trust store, and it is per-runtime, not
 per-product.** None of these runtimes use the system trust store, so installing
@@ -163,15 +197,12 @@ The asymmetry costs an hour if hit blind: point a Python client's
 `SSL_CERT_FILE` at your CA alone and every *other* TLS connection it makes
 breaks. It must be certifi's `cacert.pem` concatenated with your CA.
 
-**Practical order: try plain HTTP first.** All three take a base URL and you may
-never need a CA at all. Only if a client refuses to send credentials over
-plaintext do you reach for `tls_cert`/`tls_key`, and that is the easy sub-case —
-one hostname, one certificate.
-
-Two things static reading could not answer: whether any provider SDK *refuses*
-plain `http://` (that check lives in the vendored client libraries), and whether
-pointing a client at a broker disturbs any provider-attribution logic that
-matches on the base-URL hostname.
+**Neither open question survived the shape change.** They were whether a
+provider SDK refuses plain `http://`, and whether pointing a client at a broker
+disturbs provider-attribution logic keyed on the base-URL hostname. The guest's
+client now sees the provider's own `https://` origin and nothing else — the
+substitution happens two hops away, after the inspector has already terminated
+the connection — so both questions are moot rather than unanswered.
 
 ---
 
@@ -191,15 +222,22 @@ it. Match the mirror tuple — the row whose local address is our peer and whose
 remote address is our local — and read the uid column. `pwd.getpwuid()` turns it
 into the workload name, so config stays keyed on something readable.
 
-**"Our local" is not simply the address we are bound to.** Under the host
-redirect the guest dials an advertised literal and the kernel rewrites the
-destination in flight; the client's socket still records the address it
-*dialled*. Matching only `getsockname()` finds no row at all on precisely the
-path this exists for — while every loopback test passes, because loopback is the
-one route with nothing to translate. So the match takes a *set* of candidate
+**"Our local" is not simply the address we are bound to.** Under the retired
+host redirect the guest dialled an advertised literal and the kernel rewrote the
+destination in flight; the client's socket still recorded the address it
+*dialled*. Matching only `getsockname()` found no row at all on precisely the
+path that existed for — while every loopback test passed, because loopback is
+the one route with nothing to translate. So the match takes a *set* of candidate
 local endpoints: the bound address, and `SO_ORIGINAL_DST`, which recovers the
 pre-translation destination. This asymmetry was measured before the map that
-depends on it was written; see §9.
+depended on it was written; see §9.
+
+*Since rung 6 there is no translation left on this path* — the inspector dials
+the broker's own bound address, so `getsockname()` matches and `SO_ORIGINAL_DST`
+returns the same endpoint. The candidate set is kept rather than simplified
+away: it costs one `getsockopt` per connection, and it is the difference between
+this program tolerating a redirect in front of it and failing closed on every
+request if one is ever put there.
 
 This is the same primitive the rest of the sandbox rests on: workloadctl's
 egress policy matches `meta skuid`, and the uid is assigned by the host and
@@ -219,18 +257,26 @@ succeeded" passes through either one:
 
 **Alternatives considered.** `SO_PEERCRED` is AF_UNIX only. `SO_ORIGINAL_DST`
 answers *what was dialled*, not *who dialled it* — the same literal for every
-guest — so it is useless as identity, even though the match above now depends on
-it for something else. Giving each sandbox its own broker instance on its own
-listen address would work, but it reverts to address-as-identity, and it
-collides with the existing per-workload proxy map (one value per uid, one
-advertised endpoint) rather than composing with it.
+guest — so it is useless as identity, even though the match above depends on it
+for something else.
+
+**One of them was subsequently adopted, and the objection to it dissolved rather
+than being overruled.** Giving each sandbox its own broker instance on its own
+listen address was rejected here for two reasons: it reverts to
+address-as-identity, and it collides with the per-workload proxy map. The second
+reason expired when the proxy was retired (ADR 008), and the first was a
+misreading — a per-instance broker does not *replace* uid identity with address
+identity, it adds an address the uid check then has to agree with. §6's last
+paragraph had already named that as the quiet advantage. So rung 6 split the
+instances (ADR 007) and kept the uid check, which is why a broker that somehow
+received a connection from the wrong workload would still refuse it.
 
 **Identity and reachability are separate questions.** The uid answers *who is
 calling*. Whether a given workload can reach the broker at all is answered by
-whether it has an element in the host's redirect map — no element, no
-translation, nothing listening at the advertised address. Cross-sandbox access
-is then structurally unavailable rather than denied by a rule that could be
-misconfigured. Keep both; they fail independently.
+address: each instance binds a loopback address derived from its own workload's
+uid, inside 127/8, which no guest's packets reach and no other workload is told.
+Cross-sandbox access is structurally unavailable rather than denied by a rule
+that could be misconfigured. Keep both; they fail independently.
 
 ---
 
@@ -258,55 +304,80 @@ shared broker the uid routes; in per-instance brokers it becomes an assertion �
 check the address-based design could not make at all. Start shared, split later,
 without redoing the mechanism.
 
+**Split at rung 6, and the mechanism was indeed not redone.** Every workload
+declaring credential material gets its own instance holding only its own keys,
+and the dispatch key became `(uid, Host)` rather than `uid` alone — the second
+half being what lets one workload hold credentials for several providers. The
+uid half is now the assertion described above: the config names exactly one
+sandbox, so a resolved caller that is not it is a 403 on a connection that
+should have been impossible to open.
+
 ---
 
 ## 7. Host integration
 
 What the host must provide, and what a request actually traverses.
 
-The guest is handed a fixed advertised endpoint — an address literal on a
-host-side interface no guest can otherwise reach. A nat output rule rewrites
-that one destination per uid, using a map from uid to the real listener. The
-guest cannot influence the translation: it only ever dials the literal.
+**Nothing is advertised.** A workload declaring `[[vm.network.credential]]`
+material gets a `workload-<name>-broker.service` written by the boot generator:
+`DynamicUser=yes`, bound to `vm_broker_listen_address(uid)` — `127.129.0.0` plus
+the workload's offset from `UID_MIN`, port 8081 — with a `broker.toml`
+regenerated into `/run` at every start by `workload-vm-broker config <name>`.
+Its only caller is that workload's own egress inspector.
 
 A request therefore goes: guest → passt (re-originates as the workload uid) →
-nat output rewrites the destination → filter output, which sees the translated
-destination on loopback and accepts it under the rule that exempts a workload's
-own control plane → broker.
+the nat redirect that sends every filtered guest's 80/443 to its inspector →
+inspector, which terminates TLS, applies `methods`/`paths`/host policy, and
+finds the matched policy entry names a `credential` → inspector dials the broker
+on that loopback address → broker attaches the real key → provider.
 
-**The host half is built** as a `workload_broker` nftables table holding a
-`wl_broker_dest` map from uid to address and port. A workload opts in with
-`broker = true` in its VM network section; the VM unit adds and removes that
-workload's element around the guest's lifetime (`libexec/workload-vm-broker`),
-and the guest is told the endpoint through a `WORKLOAD_BROKER_URL` environment
-variable. It is deliberately a separate table from the per-workload proxy's: a
-workload may want a broker and no proxy, and would otherwise depend on a
-skeleton applied by a unit it does not run.
+The guest's leg is unchanged from any other inspected host. It asked for
+`api.anthropic.com` and it gets the provider's answer; the branch happens
+entirely on the host side of a connection the guest had already given up
+control of.
 
 **Two constants must agree**: this program's `listen_address`/`listen_port`
-defaults against the address and port the map's elements carry
-(`VM_BROKER_LISTEN_ADDR`/`VM_BROKER_LISTEN_PORT` in `lib/vm.py`). A mismatch
-presents exactly as the broker being down — connection refused, no log line on
-either side, nothing pointing at the cause. They were a cross-repo constant
-checked by neither side until the broker moved into this package;
-`tests/test_vm_broker.py` now asserts they agree, which is most of the reason it
-moved.
+against what the generator renders and what the inspector dials
+(`vm_broker_listen_address` / `VM_BROKER_INSTANCE_PORT` in `lib/vm.py`). A
+mismatch presents exactly as the broker being down — connection refused, no log
+line on either side, nothing pointing at the cause. `tests/test_vm_broker.py`
+asserts they agree, which is most of the reason the broker moved into this
+package.
 
 Consequences worth knowing:
 
-- **No allowlist entry is needed** for the broker endpoint. The loopback
-  exemption already covers it, for the same reason it covers the existing
-  per-workload proxy.
+- **The broker's address needs an explicit nftables exemption**, and this is not
+  obvious. `127.129.x.y` is inside 127/8, which is inside `wl_internal4`, and
+  the cgroup-keyed drop that stops the inspector reaching host-internal ranges
+  sits *above* the rule accepting its loopback traffic. So `workload-vm-inspect`
+  arms the broker's address in `wl_internal_ok4` for any workload that has one.
+  Without it the dial is dropped in silence and presents as a dead broker. This
+  was found on hardware, not in review.
+- **No `[[vm.network.allow]]` entry is needed** for the provider host on the
+  brokered path, beyond the `[[vm.network.policy]]` entry that names the
+  credential. The inspector never dials the origin for a brokered host at all.
 - **The upstream leg is not attributable to the sandbox.** The broker egresses
-  as its own service identity, outside the workload uid range, so the host's
+  as its own dynamic user, outside the workload uid range, so the host's
   connection-marking rule does not tag it and per-workload packet capture will
   not show that half.
 - **The broker's own egress is unfiltered** by the workload policy, for the same
   reason. That is correct — it is host infrastructure, not a workload — but it
   means the broker is the one component that can reach the provider directly,
   and it should be treated as such.
+- **The workload uid cannot read its own broker's config.** The instance runs as
+  a dynamic user disjoint from `_wl-<name>`, and `broker.toml` names the
+  credential the instance loads. A workload that could read it would learn the
+  seal name, which is the one thing standing between it and asking systemd for
+  the material.
 
----
+> **Retired at rung 6:** the `workload_broker` nftables table and its
+> `wl_broker_dest` uid→address map, the advertised `192.0.2.1:8081` endpoint,
+> the host-wide `agent-broker.service`, `/etc/agent-broker/`, and the
+> `WORKLOAD_BROKER_URL` variable. `[vm.network].broker = true` is refused by
+> `validate` by name, naming `credential` as the replacement. The address that
+> carried all of it, `192.0.2.1`, is no longer put on the dummy link, and
+> TEST-NET-1 consequently moved *into* `wl_internal4` — it had been excluded
+> only because that address lived in it.
 
 ## 8. TLS to the guest, and the private-CA trap
 
@@ -383,59 +454,82 @@ check.
 ## 10. Running it
 
 The broker ships in the workloadctl RPM and therefore in the hypervisor image:
-the program at `/usr/libexec/workloadctl/agent-broker`, the unit as
-`agent-broker.service`, this file and an annotated `agent-broker.toml.example`
-under `/usr/share/doc/workloadctl/`, and an empty root-only `/etc/agent-broker/`
-for the config and credentials.
+the program at `/usr/libexec/workloadctl/agent-broker`, this file and an
+annotated `agent-broker.toml.example` under `/usr/share/doc/workloadctl/`.
 
-It is **not enabled**. No preset line names it and it cannot start without a
-config, so a host that installs workloadctl gets an inert unit. Three steps turn
-it on:
+**There is no unit to enable and no config to edit.** Since rung 6 there is no
+host-wide `agent-broker.service` and no `/etc/agent-broker/`: an instance is
+generated per workload from that workload's own TOML, and starts and stops with
+it. Turning it on is two steps in the workload, not three on the host:
 
 ```bash
-cp /usr/share/doc/workloadctl/agent-broker.toml.example /etc/agent-broker/broker.toml
-$EDITOR /etc/agent-broker/broker.toml          # upstream, and one entry per sandbox
-systemd-creds encrypt --name=anthropic-api-key - \
-    /etc/agent-broker/anthropic-api-key.cred
-systemctl enable --now agent-broker
+# 1. seal the material under the workload's own scope
+workloadctl secret create broker/agent-vm/anthropic
+
+# 2. declare it, and name it from the policy entries it applies to
+$EDITOR /etc/workloads.d/agent-vm/workload.toml
+workloadctl validate agent-vm && workloadctl enable agent-vm
 ```
 
-One name is spelled three times and all three must agree: `--name=` above, the
-name in the unit's `LoadCredentialEncrypted=`, and `credential =` in
-broker.toml. `--name=` is sealed into the blob and verified on decrypt, so every
-mismatch fails at start rather than at request time. The blobs live in
-`/etc/agent-broker/` rather than `/etc/credstore.encrypted/`, which is a flat
-namespace shared with every unit on the host — including workloadctl's own
-workload credentials.
+```toml
+[[vm.network.policy]]
+host       = "api.anthropic.com"
+methods    = ["POST"]
+paths      = ["/v1/messages"]
+credential = "anthropic"
+
+[[vm.network.credential]]
+name        = "anthropic"
+placeholder = "sk-ant-placeholder-not-a-real-key"
+env         = "ANTHROPIC_API_KEY"
+```
+
+One name is spelled twice and both must agree: the last segment of the
+`secret create` path, and `name` in the credential block. workloadctl derives
+the seal name (`broker-<workload>-<name>`) and the unit's
+`LoadCredentialEncrypted=` from those, so there is no third place to get wrong —
+and because systemd-creds binds the seal name into the blob and verifies it on
+decrypt, a unit handed another workload's file fails at start rather than
+loading that workload's key.
 
 Configuration that matters, beyond the comments in the example:
 
-- **`upstream` is fixed and never taken from a request.** That is the security
-  property; absolute-form request targets are rejected with 400.
+- **The set of upstreams is fixed and never taken from a request**, and the
+  qualification in §3 applies: a `Host` selects among rows the host wrote, and
+  one naming no row is a 403. Absolute-form request targets are rejected with
+  400.
 - **`[sandboxes.<workload-name>]` is keyed by workload name**, resolved from the
-  uid owning the far end of the connection (§5). Anything unlisted gets 403.
-  Each sandbox inherits the top-level settings and may override any of them, so
-  sandboxes can hold different keys or target different providers.
+  uid owning the far end of the connection (§5). A generated config has exactly
+  one, and anything else gets 403.
 - **The unit must not set `PrivateUsers=`.** From a user namespace that cannot
   map a workload's uid, every caller reads as the overflow uid and they all
   merge into one identity, with no error anywhere. The broker refuses to start
-  when it can prove this is happening and warns when it cannot.
+  when it can prove this is happening and warns when it cannot. The generated
+  unit does not set it; this matters if you write one by hand.
 - **Credentials are read at start and not re-read**, so rotating one means
-  restarting the unit. The unit is also restarted by any workloadctl upgrade
-  that finds it running, so the process never outlives the code that was
-  installed.
+  restarting that workload's broker instance. Editing the workload's TOML
+  regenerates `broker.toml` at the next start, so a changed `auth_header` or
+  `upstream` needs the same restart.
 - **`relax_x509_strict`** exists for private CAs missing `keyUsage`, which
   Python 3.13+ rejects (§8). Do not set it without a reason.
 - **A key the broker does not read is a startup error**, at the top level and
   inside `[sandboxes.<name>]` alike, with the nearest real key suggested. Every
   option here decides who receives a credential or how the guest is served, so
   a typo that silently falls back to the default gives an operator a broker
-  that starts, looks healthy, and applies a policy they did not pick.
+  that starts, looks healthy, and applies a policy they did not pick. `validate`
+  catches these before the generator writes a unit; the broker's own check is
+  what covers a hand-written config.
 - **`allow_unknown_callers` is for local testing and logs a warning at
-  startup.** With it off, a caller needs to be both routed here (a map element,
-  added by its own VM unit) and named in `[sandboxes]`, so neither list alone
-  grants a credential. With it on, the map is the only thing left — and map
-  elements are keyed by uid, which workloadctl reuses.
+  startup.** The generator never emits it.
+
+**Broker material is not carried by `backup`.** `workloadctl backup` copies a
+workload's `data/` subtree and the credentials its own config references; the
+sealed provider keys under `broker/<workload>/` are outside that set, by
+decision rather than by oversight. They are sealed to the host — TPM2, or
+`/var/lib/systemd/credential.secret` — so the ciphertext would not decrypt on
+another machine even if it were copied, and an archive that appeared to contain
+a provider key would be a worse artefact to hand around than one that plainly
+does not. Re-seal them on the restore host with `secret create`.
 
 ### What the broker refuses, and why a client might see it
 
@@ -476,18 +570,34 @@ with `streamed=` telling them apart.
 
 ### What the guest does with it
 
-Every guest is handed the same advertised literal in `WORKLOAD_BROKER_URL`
-(§7); the host rewrites it per uid to that sandbox's broker. The guest image
-maps it to whatever its agent actually reads — one line of cloud-init, and it
-belongs with the software that has an opinion about the spelling:
+**Nothing, and that is the point.** The guest is handed no endpoint and no
+variable naming the broker. Its client is configured for the provider exactly as
+it would be without one — real hostname, real port — and the only unusual thing
+in its environment is that the API-key variable holds `placeholder` instead of a
+key.
 
-```bash
-ANTHROPIC_BASE_URL=$WORKLOAD_BROKER_URL            # Node/Bun agents
-# Python agents: base_url in the provider config
+That variable is required, and it is the one piece of guest-side configuration
+the design still needs: an SDK that refuses to send a request without a key
+fails inside the guest, before a packet, which looks nothing like a policy
+failure. `env` in the credential block names it, and workloadctl seeds it into
+the guest env:
+
+```toml
+[[vm.network.credential]]
+name        = "anthropic"
+placeholder = "sk-ant-placeholder-not-a-real-key"
+env         = "ANTHROPIC_API_KEY"
 ```
 
-Add a trust-store variable only if you serve HTTPS to the guest, and read §4
-before you do: `NODE_EXTRA_CA_CERTS` appends, `SSL_CERT_FILE` replaces.
+The broker discards whatever arrives in the auth header and sets the real
+value, so the placeholder never reaches the provider. It must not be a real
+key — the broker refuses to start if it equals the decrypted material, which is
+the check for one having been pasted into a world-readable `workload.toml`.
+
+A filtered guest does need the inspector's CA, which is a separate matter
+handled by workloadctl's own guest env; read §4 before touching a trust-store
+variable by hand, because `NODE_EXTRA_CA_CERTS` appends and `SSL_CERT_FILE`
+replaces.
 
 For local development the program takes its config path as its only argument and
 falls back to `AGENT_BROKER_SECRET` for the credential, logging a warning:
@@ -503,12 +613,16 @@ is not a workload user and matches no sandbox.
 
 ## 11. What is not built
 
-- **No consumer.** No workload sets `broker = true`, and there is no sandbox VM
-  and no guest image. The feature has zero users.
+- **No consumer.** No deployed workload declares credential material, and there
+  is no sandbox VM and no guest image. The feature still has zero users — which
+  is what made rung 6 free to delete the host-wide shape outright rather than
+  migrate it. The two workloads the rig stands up are throwaways it creates and
+  destroys.
 - **Nothing runs the end-to-end check but a person.** The seam is proven (see
-  below) by a rig needing root and four VMs of its own, so it is neither a PR
+  below) by a rig needing root and two VMs of its own, so it is neither a PR
   gate nor part of the runtime rung. A regression in it surfaces when someone
-  next runs it by hand, not when it is introduced.
+  next runs it by hand, not when it is introduced. This gap is why five defects
+  reached hardware at rung 6 having passed the whole unit suite.
 
 Built 2026-08-12: peer-uid identification, per-sandbox credential and upstream
 profiles, the startup guard for the namespace failure, a test suite that asserts

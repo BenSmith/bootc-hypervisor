@@ -98,31 +98,39 @@ placeholder = "sk-ant-api00-000000000000000000PLACEHOLDER0000000000"
 
 # --- host wiring, for reference -------------------------------------------
 #
-# Guests reach this broker through a per-uid destination rewrite, the same
-# mechanism that steers each workload to its own filtering proxy: every guest is
-# handed one fixed advertised endpoint, and the host translates it per uid to
-# the real listener. A workload with no map entry gets no translation and
-# nothing is listening where it dialled, so cross-sandbox access is
-# structurally unavailable rather than denied by a rule. That map is
-# workloadctl's to maintain: a `workload_broker` table, keyed on uid, with an
-# element added per workload that sets `broker = true`. See docs/agent-broker.md §7.
+# NOTHING IN THE GUEST DIALS THIS BROKER. The guest asks for the provider's real
+# hostname; its workload's egress inspector terminates that connection, finds
+# the matching [[vm.network.policy]] entry names a `credential`, and relays the
+# request here instead of to the origin. So there is no endpoint to advertise,
+# no variable to seed, and no way for a guest to name another workload's broker
+# or to opt out of its own.
 #
-# The address and port above must match what those elements carry. That is
+# Reachability is the address. Each instance binds a loopback address derived
+# from its own workload's uid (127.129.0.0 + the offset from UID_MIN), inside
+# 127/8, which no guest's packets reach. Cross-sandbox access is structurally
+# unavailable rather than denied by a rule that could be misconfigured. The uid
+# check in the broker is then an assertion rather than a router: this config
+# names one sandbox, so a caller resolving to anything else is a 403 on a
+# connection that should not have opened.
+#
+# The address and port above must match what the inspector dials. That is
 # asserted by tests/test_vm_broker.py against lib/vm.py, but only for the
-# defaults -- override them here and you are on your own, and a mismatch looks
-# exactly like the broker being down.
+# generated form -- override them by hand and you are on your own, and a
+# mismatch looks exactly like the broker being down.
 #
-# Guest environment (Node/Bun agents), from $WORKLOAD_BROKER_URL:
+# One consequence that is not obvious: 127.129.x.y is inside wl_internal4, and
+# the drop that keeps a workload's inspector out of host-internal ranges runs
+# ahead of the rule accepting its loopback traffic. workload-vm-inspect
+# therefore arms the broker's address in wl_internal_ok4. Without that the dial
+# is discarded in silence and reads as a broker that is not running.
 #
-#   ANTHROPIC_BASE_URL=http://192.0.2.1:8081
-#   NODE_EXTRA_CA_CERTS=/etc/ssl/certs/broker-ca.pem   # only if serving HTTPS
+# Guest environment: only the placeholder. `env` in the [[vm.network.credential]]
+# table names the variable, workloadctl seeds it, and the broker discards
+# whatever arrives under auth_header and substitutes the real value.
 #
-# Guest environment (Python agents):
+#   ANTHROPIC_API_KEY=sk-ant-api00-000000000000000000PLACEHOLDER0000000000
 #
-#   base_url in the provider config
-#   SSL_CERT_FILE=/etc/ssl/certs/broker-bundle.pem     # only if serving HTTPS
-#
-# NOTE: NODE_EXTRA_CA_CERTS *appends* to the runtime's bundled roots.
-# SSL_CERT_FILE *replaces* the bundle, so broker-bundle.pem must be certifi's
-# cacert.pem concatenated with the broker CA, or every other TLS call the agent
-# makes will fail. docs/agent-broker.md §4.
+# A filtered guest also carries the INSPECTOR's CA, which is a separate matter
+# and seeded separately. NODE_EXTRA_CA_CERTS *appends* to the runtime's bundled
+# roots; SSL_CERT_FILE *replaces* the bundle, so a Python client pointed at a
+# bare CA file loses every other anchor it had. docs/agent-broker.md §4.

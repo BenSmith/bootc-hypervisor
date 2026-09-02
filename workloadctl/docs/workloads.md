@@ -1689,47 +1689,98 @@ inspector's own exempted egress, alongside the paths that are refused.
 ### Reaching a Credential Broker
 
 Software inside a guest sometimes needs to call an API that requires a key —
-and a guest that holds the key is a guest that can leak it. `[vm.network].broker`
-opens a path to a host-side broker that holds the credential instead and
-attaches it on the way out, so nothing inside the VM ever sees one:
+and a guest that holds the key is a guest that can leak it. Declare the
+material in a `[[vm.network.credential]]` table and name it from the policy
+entries it applies to, and a host-side broker holds the key and attaches it on
+the way out, so nothing inside the VM ever sees one:
 
 ```toml
 [vm.network]
 egress = "filtered"
-broker = true
+tls    = "inspect"
+
+[[vm.network.policy]]
+host       = "api.anthropic.com"
+methods    = ["POST"]
+paths      = ["/v1/messages"]
+credential = "anthropic"
+
+[[vm.network.credential]]
+name        = "anthropic"
+placeholder = "sk-ant-placeholder-not-a-real-key"
+env         = "ANTHROPIC_API_KEY"
 ```
 
-The guest is handed `WORKLOAD_BROKER_URL`, an IP literal, and its own software
-maps that to whatever base-URL variable it reads. The variable is deliberately
-neutral: clients disagree about the spelling, so naming one here would be wrong
-for every other.
+**The guest is told nothing.** There is no endpoint variable and no address to
+dial: the guest asks for `api.anthropic.com`, exactly as it would without a
+broker, and the *inspector* recognises a policy entry naming a credential and
+sends that request to the broker instead of to the origin. So a guest cannot
+choose to use the broker, cannot decline to, and has no name for it to leak.
 
-The same uid-keyed rewrite hostname policy uses, at a different port on the same
-advertised address: every guest dials one endpoint and the kernel rewrites the
-destination per uid. A workload can have both, and they no longer interact.
-Through rung 1 they did, awkwardly: the guest was configured with proxy
-variables, so the advertised address had to be listed in its `NO_PROXY` or a
-client honouring them would ask the proxy to fetch the broker — and the proxy's
-allowlist held internet hostnames, not this address. That whole hazard is gone
-with the proxy. The broker's port is not one of the two the redirect touches,
-and there is nothing in the guest telling it to route requests anywhere.
-**A workload without the key gets no translation, and
-nothing is listening where it would dial** — so one VM cannot reach another's
-broker, and that is a property of the topology rather than a rule that could be
-misconfigured.
+The key it does hold is `placeholder`, in the variable named by `env`, and that
+is not decoration: an SDK that refuses to send a request without a key fails
+inside the guest, before a packet, which looks nothing like a policy failure.
+The broker discards whatever arrives in that header and sets the real one, so
+the placeholder never reaches the provider. It must not be a real key — the
+broker refuses to start if it equals the decrypted material, because that means
+one was pasted into a world-readable `workload.toml`.
 
-Two things this deliberately does not do. It does not run the broker — that is a
-separate host service with its own unit and its own credentials, and if it is
-down a guest sees a connection refused. It does fix where that service must
-listen: the rewrite targets `127.0.0.1:8081`, so a broker bound anywhere else is
-indistinguishable from one that is not running. And it does not require
-`egress = "filtered"`, unlike `hosts`: the broker holds the credential either
-way, so an unfiltered guest still cannot obtain one. Filtering is what stops the
-guest reaching *other* destinations, which is a separate question with a
-separate answer.
+`auth_header` and `auth_format` on the credential block are the provider's HTTP
+convention, defaulting to `x-api-key` and `{secret}`. A provider wanting a
+bearer token needs `auth_header = "Authorization"` with
+`auth_format = "Bearer {secret}"`; get this wrong and the provider answers 401
+on a request every layer here considered fully authorised.
 
-Rejected with `bridge` set — the redirect is keyed on the uid of a host socket,
-and a bridged VM does not create one.
+Seal the material under the workload's own scope:
+
+```bash
+workloadctl secret create broker/<workload>/anthropic
+```
+
+**One broker instance per workload, and no workload can reach another's.** Each
+gets its own `workload-<name>-broker.service`, `DynamicUser=yes`, bound to a
+loopback address derived from the workload's uid, with its config regenerated
+into `/run` at every start. The material is decrypted only into that instance's
+tmpfs, under a dynamic user disjoint from the workload's own — so the workload
+uid cannot read the config that names its own key. Isolation is the address
+family rather than a rule: the addresses are inside 127/8, which a guest's
+packets cannot reach at all.
+
+**It requires `egress = "filtered"` and `tls = "inspect"`.** The inspector is
+the only thing that dials the broker, so those are not stylistic
+prerequisites — without them there is no code path to the broker and an
+instance would hold decrypted provider keys for a leg that does not exist.
+`validate` refuses the combination rather than rendering a unit that cannot be
+reached. For the same reason a credential-backed host cannot be spliced or kept
+on HTTP/2: neither is decrypted into a request the broker could dispatch on.
+
+The credential widens nothing. `methods` and `paths` are applied first, on the
+same terms as any other allowlisted host, so naming a credential only changes
+*who* attaches the authorisation. It is per exact host — a wildcard `host` with
+a credential is an error, because the broker's table has no patterns in it and
+every request matching the pattern would be authorised here and refused there.
+
+A credential block nothing selects is an error, and so is a `credential` naming
+no block. Both are the same mistake in opposite directions: material sealed and
+loaded into a broker for a host it is never attached to reads, in the file and
+in `diagnose`, exactly like a credential that is in use.
+
+Broker material is **not carried by `backup`**, deliberately. `backup` copies a
+workload's own referenced credentials; the sealed provider keys under
+`broker/<workload>/` are outside that set and must be re-sealed on a restore.
+They are sealed to the host in any case (TPM2, or the host key), so copying the
+ciphertext to another machine would not yield a usable key.
+
+Rejected with `bridge` set — a bridged VM is outside the inspector, and the
+inspector is what dials the broker.
+
+> **Retired:** `[vm.network].broker = true`, and with it a host-wide broker
+> service, an advertised endpoint every guest was handed as
+> `WORKLOAD_BROKER_URL`, and a uid-keyed rewrite that mapped it per workload.
+> `validate` refuses the key by name rather than ignoring it, naming
+> `credential` as the replacement. The design rationale is
+> [ADR 007](adr/007-per-workload-credential-broker.md); the threat model and
+> operating instructions are in [agent-broker.md](agent-broker.md).
 
 ### Packet Capture
 

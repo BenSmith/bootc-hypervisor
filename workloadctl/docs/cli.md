@@ -1137,6 +1137,14 @@ sudo workloadctl restore [--force] [--enable] <archive>
 > (host-key case), or re-encrypt the affected secrets on the target with
 > `workloadctl secret`.
 
+> **Broker credentials are not archived at all.** `backup` copies the
+> credentials a workload's config references; the material a VM's credential
+> broker holds, sealed under `broker/<workload>/`, is deliberately outside that
+> set. It would not decrypt on another host in any case (see above), and an
+> archive that appeared to carry a provider key would be a worse thing to hand
+> around than one that plainly does not. Re-seal them on the target with
+> `workloadctl secret create broker/<workload>/<name>`.
+
 [↑ top](#workloadctl-command-reference)
 
 ---
@@ -1174,6 +1182,24 @@ Reads from stdin if `--file` is not given.
 ```bash
 echo -n "my-api-key" | sudo workloadctl secret create --key-type tpm2 myapp-api-key
 ```
+
+**Scoped names.** `<name>` takes a second form, `broker/<workload>/<name>`, for
+material a VM workload's credential broker holds
+([agent-broker.md](agent-broker.md)). It is a name form rather than a flag, so
+it works on every `secret` subcommand:
+
+```bash
+echo -n "sk-ant-..." | sudo workloadctl secret create broker/agent-vm/anthropic
+```
+
+The file lands at `/etc/credstore.encrypted/broker/agent-vm/anthropic` and is
+sealed under the name `broker-agent-vm-anthropic`. Both halves matter. The
+subtree keeps one workload's provider keys out of the flat namespace every other
+unit on the host shares, and the seal name is bound into the blob and verified
+on decrypt — so a generated unit pointed at another workload's file, whose path
+is guessable, gets a decryption failure at start rather than that workload's
+key. Each segment is one path component (`[a-zA-Z0-9_-]+`), so a name can
+neither traverse out of the subtree nor collide with an unscoped credential.
 
 [↑ top](#workloadctl-command-reference)
 
