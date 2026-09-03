@@ -1,0 +1,64 @@
+#!/bin/sh
+# Fail the build if the SELinux policy store is not what the packages we
+# installed say it should be.
+#
+# This exists because the failure it catches is silent. dnf does not propagate
+# a failed %post, so when semodule fails inside a scriptlet — as it does when
+# libsemanage takes the overlayfs EXDEV path that selinux-store-copyup exists
+# to avoid — the package still installs, the transaction still succeeds, the
+# build still goes green, and the module is simply absent from the shipped
+# image. Four of them (pcp-import, fail2ban, smartmon, swtpm) were lost exactly
+# that way, and nothing noticed until an unrelated semodule call failed loudly.
+#
+# The expected set is derived, not listed. A package shipping a policy module
+# drops <module>.pp[.bz2] into /usr/share/selinux/packages/ or its targeted/
+# subdirectory, and the basename is the module name — verified against
+# fail2ban-selinux, pcp-selinux-import and smartmontools-selinux, and against a
+# live host where all eight shipped .pp files mapped to installed modules. So
+# this check grows by itself when a new selinux subpackage is pulled in, which
+# a hand-maintained list would not.
+#
+# A false positive means some package ships a .pp it deliberately does not
+# install. Name it here with the reason when that happens; don't widen the
+# check into uselessness.
+set -eu
+
+fail=0
+
+for debris in /etc/selinux/targeted/tmp /etc/selinux/targeted/previous; do
+    if [ -e "$debris" ]; then
+        echo "selinux-store-verify: $debris exists — a semodule transaction did not complete" >&2
+        fail=1
+    fi
+done
+
+modules=$(semodule -l)
+
+check() {
+    if printf '%s\n' "$modules" | grep -qx "$1"; then
+        return 0
+    fi
+    echo "selinux-store-verify: module '$1' is missing from the policy store ($2)" >&2
+    fail=1
+}
+
+for pp in /usr/share/selinux/packages/*.pp        \
+          /usr/share/selinux/packages/*.pp.bz2    \
+          /usr/share/selinux/packages/targeted/*.pp \
+          /usr/share/selinux/packages/targeted/*.pp.bz2; do
+    [ -e "$pp" ] || continue   # unmatched glob
+    name=${pp##*/}
+    check "${name%%.pp*}" "shipped as $pp"
+done
+
+# Ours. Installed from .cil source, so there is no .pp to derive them from.
+for own in seatd_container container_input_devices pasta_sandbox; do
+    check "$own" "installed from security/$own.cil"
+done
+
+if [ "$fail" -ne 0 ]; then
+    echo "selinux-store-verify: /usr/libexec/hypervisor-build/selinux-store-copyup explains how modules go missing without failing a build" >&2
+    exit 1
+fi
+
+echo "selinux-store-verify: policy store OK ($(printf '%s\n' "$modules" | wc -l) modules)"

@@ -123,6 +123,15 @@ RUN if ls /tmp/ca-trust-inject/*.crt >/dev/null 2>&1; then \
 # lost. Detection keeps /etc tracking the image, which is what makes later
 # anchor rotations apply by themselves.
 
+# Build-time helper, not a shipped feature: every RUN below that reaches
+# semodule/semanage/setsebool has to re-materialise the SELinux policy store in
+# its own layer first, or libsemanage's overlayfs EXDEV fallback corrupts it.
+# The script explains the mechanism in full and refuses to run outside a build.
+# It lives in the image because the -nvidia/-amd variants build FROM it and
+# need it too.
+COPY security/selinux-store-copyup /usr/libexec/hypervisor-build/selinux-store-copyup
+COPY security/selinux-store-verify /usr/libexec/hypervisor-build/selinux-store-verify
+
 # Break ostree hardlinks on rpmdb: fuse-overlayfs preserves hardlinks during
 # copy-up, so modifying rpmdb.sqlite also propagates to the ostree object and
 # rpm-ostree base-db (which share the same lower inode). This corrupts the
@@ -132,7 +141,8 @@ RUN cp /usr/share/rpm/rpmdb.sqlite /usr/share/rpm/rpmdb.sqlite.tmp && \
 
 # the pcp and gssproxy bootc lint warnings are because these packages (upon which others depend)
 # store data in /var/lib, and bootc would prefer they're in /usr/lib
-RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
+RUN /usr/libexec/hypervisor-build/selinux-store-copyup && \
+    dnf install --setopt=install_weak_deps=False --nodocs -y \
     acl \
     alsa-sof-firmware \
     amd-ucode-firmware \
@@ -301,7 +311,8 @@ RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
 # Ensure device access groups exist, propagate to /etc/group, set privileged port sysctl.
 # /usr/lib/group is immutable on bootc; /etc/group is mutable and needed for usermod.
 # Groups: audio, dialout, disk, input, kvm, render, seat, tpm, video
-RUN printf 'g seat - -\n' >> /usr/lib/sysusers.d/hypervisor-groups.conf && \
+RUN /usr/libexec/hypervisor-build/selinux-store-copyup && \
+    printf 'g seat - -\n' >> /usr/lib/sysusers.d/hypervisor-groups.conf && \
     printf 'g tpm - -\n' >> /usr/lib/sysusers.d/hypervisor-groups.conf && \
     grep -E "^(video|render|input|audio|dialout|disk|kvm|seat|tpm):" /usr/lib/group >> /etc/group || true && \
     echo 'net.ipv4.ip_unprivileged_port_start = 0' > /usr/lib/sysctl.d/50-privileged-ports.conf && \
@@ -354,7 +365,7 @@ RUN printf 'add_dracutmodules+=" lvm dm "\n' \
 #   sudo setsebool -P container_input_devices on
 COPY security/seatd_container.cil security/container_input_devices.cil \
      security/pasta_sandbox.cil /tmp/
-RUN rm -rf /etc/selinux/targeted/tmp /etc/selinux/targeted/previous 2>/dev/null; \
+RUN /usr/libexec/hypervisor-build/selinux-store-copyup && \
     semodule -i /tmp/seatd_container.cil /tmp/container_input_devices.cil \
                 /tmp/pasta_sandbox.cil && \
     rm -f /tmp/seatd_container.cil /tmp/container_input_devices.cil \
@@ -377,7 +388,8 @@ COPY --from=rpm-builder /workloadctl/rpmbuild/RPMS/noarch/ /tmp/wl-rpms/
 # caching the wrong one at /usr/share/workloadctl. A glob matching none expands
 # to itself. Both are build-stopping, so say which happened: the failure lands
 # hundreds of layers deep and reads as unexplained if it doesn't.
-RUN set -- /tmp/wl-rpms/workloadctl-*.rpm && \
+RUN /usr/libexec/hypervisor-build/selinux-store-copyup && \
+    set -- /tmp/wl-rpms/workloadctl-*.rpm && \
     if [ "$#" -ne 1 ] || [ ! -f "$1" ]; then \
         echo "expected exactly one workloadctl RPM in /tmp/wl-rpms, got $#:" >&2; \
         ls -l /tmp/wl-rpms >&2; \
@@ -421,6 +433,13 @@ RUN chmod 0755 /usr/bin/cosy && \
     chmod 0644 /usr/lib/systemd/system/emergency.target.d/emergency-access.conf && \
     /usr/bin/cosy completion bash > /usr/share/bash-completion/completions/cosy && \
     chmod 0644 /usr/share/bash-completion/completions/cosy
+
+# Assert the policy store actually holds every module the installed packages
+# ship. A failed semodule inside a %post does not fail the transaction, so
+# without this a build can go green having silently dropped policy — which is
+# how four modules went missing unnoticed. Runs before the lint: a store defect
+# should report itself, not surface later as something else.
+RUN /usr/libexec/hypervisor-build/selinux-store-verify
 
 # Lint again, after everything.
 #

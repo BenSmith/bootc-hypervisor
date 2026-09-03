@@ -1,0 +1,41 @@
+#!/bin/sh
+# Build-time only: re-materialise /etc/selinux/targeted inside the current
+# container layer.
+#
+# overlayfs cannot rename() a directory that still lives in a lower layer —
+# without redirect_dir the kernel returns EXDEV. libsemanage 3.11 (Fedora 44)
+# answers that EXDEV with a non-atomic copy fallback:
+#
+#   libsemanage.semanage_rename: WARNING: rename(.../active, .../previous)
+#   failed: Invalid cross-device link, fall back to non-atomic
+#   semanage_copy_dir_flags()
+#
+# When the fallback does not fully retire `active`, the following commit fails
+#
+#   semanage_commit_sandbox: Error while renaming .../tmp to .../active.
+#   (Directory not empty)
+#
+# and leaves `active`, `tmp` and `previous` all populated. Every later semodule
+# in the build then fails the same way — including the ones run from package
+# %post scriptlets, whose failure dnf does not propagate, so the module is lost
+# silently. Fedora 43 (libsemanage 3.10) does not take this path, which is why
+# only the 44 matrix leg fails.
+#
+# Copying the store and moving the copy over the original makes it a pure
+# upper-layer directory, so the rename stays within one layer and the fallback
+# never runs. This has to be repeated in EVERY RUN that reaches semodule,
+# semanage or setsebool: committing a layer puts the store back in a lower one.
+set -eu
+
+# Refuse to run on a real host: this replaces the policy store non-atomically,
+# which is only safe when nothing else can be using it.
+[ -f /run/.containerenv ] || [ -f /.dockerenv ] || {
+    echo "selinux-store-copyup: build-time only, refusing to run on a host" >&2
+    exit 1
+}
+
+cp -a /etc/selinux/targeted /etc/selinux/.targeted.copyup
+rm -rf /etc/selinux/targeted
+mv /etc/selinux/.targeted.copyup /etc/selinux/targeted
+# Debris from an earlier layer that failed the way described above.
+rm -rf /etc/selinux/targeted/tmp /etc/selinux/targeted/previous

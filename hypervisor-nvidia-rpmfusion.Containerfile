@@ -34,8 +34,16 @@ RUN curl -s -L https://nvidia.github.io/libnvidia-container/stable/rpm/nvidia-co
     sed '/^sslcacert=/d' | \
     tee /etc/yum.repos.d/nvidia-container-toolkit.repo
 
+# Copied into every image that needs it rather than inherited from the base:
+# the variant `FROM` is a published registry tag, so a variant-only
+# workflow_dispatch can build against a base predating this file. A COPY from
+# the repo (all four builds share this build context) cannot go stale that way.
+COPY security/selinux-store-copyup /usr/libexec/hypervisor-build/selinux-store-copyup
+COPY security/selinux-store-verify /usr/libexec/hypervisor-build/selinux-store-verify
+
 # Install NVIDIA drivers and tools, headless
-RUN dnf install --setopt=install_weak_deps=False -y \
+RUN /usr/libexec/hypervisor-build/selinux-store-copyup && \
+    dnf install --setopt=install_weak_deps=False -y \
     nvidia-container-toolkit \
     nvidia-gpu-firmware \
     nvidia-modprobe \
@@ -70,7 +78,14 @@ RUN echo -e "blacklist nouveau\noptions nouveau modeset=0" \
 # not reach udica-derived wl_<name>.process types; workloads with their own
 # policy.cil state the grant themselves (vncdesktop-sway, vncdesktop-wayfire,
 # sunshine-streaming do).
-RUN setsebool -P container_use_xserver_devices on
+RUN /usr/libexec/hypervisor-build/selinux-store-copyup && \
+    setsebool -P container_use_xserver_devices on
+
+# Assert the policy store holds every module the installed packages ship. A
+# failed semodule inside a %post does not fail the transaction, so without this
+# a build can go green having silently dropped policy. Runs before the lint: a
+# store defect should report itself, not surface later as something else.
+RUN /usr/libexec/hypervisor-build/selinux-store-verify
 
 # Generate CDI specification for nvidia-container-toolkit (modern approach for podman/crun)
 # Install service to generate CDI spec on first boot

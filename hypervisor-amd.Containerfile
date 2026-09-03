@@ -12,8 +12,16 @@ RUN dnf install -y \
     python3 && \
     dnf clean all
 
+# Copied into every image that needs it rather than inherited from the base:
+# the variant `FROM` is a published registry tag, so a variant-only
+# workflow_dispatch can build against a base predating this file. A COPY from
+# the repo (all four builds share this build context) cannot go stale that way.
+COPY security/selinux-store-copyup /usr/libexec/hypervisor-build/selinux-store-copyup
+COPY security/selinux-store-verify /usr/libexec/hypervisor-build/selinux-store-verify
+
 # Install AMD GPU support (ROCm for compute, Mesa for graphics)
-RUN dnf install -y \
+RUN /usr/libexec/hypervisor-build/selinux-store-copyup && \
+    dnf install -y \
     linux-firmware \
     linux-firmware-whence \
     amd-gpu-firmware \
@@ -26,6 +34,12 @@ RUN dnf install -y \
 # ROCm KFD device for AI workloads - render group access
 RUN printf '# AMD ROCm KFD device - render group access for AI workloads\n' > /usr/lib/udev/rules.d/71-hypervisor-device-access.rules && \
     printf 'SUBSYSTEM=="kfd", KERNEL=="kfd", GROUP="render", MODE="0660"\n' >> /usr/lib/udev/rules.d/71-hypervisor-device-access.rules
+
+# Assert the policy store holds every module the installed packages ship. A
+# failed semodule inside a %post does not fail the transaction, so without this
+# a build can go green having silently dropped policy. Runs before the lint: a
+# store defect should report itself, not surface later as something else.
+RUN /usr/libexec/hypervisor-build/selinux-store-verify
 
 # AMD GPUs work with podman automatically via CDI
 RUN mkdir -p /etc/cdi && \
