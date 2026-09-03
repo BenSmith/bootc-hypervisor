@@ -28,9 +28,9 @@ the otel-lgtm backend uses. With its own namespace those never collide, so
 alloy and otel-lgtm can run on the same host. The receiver binds `0.0.0.0`
 *inside the container* (a pasta-forwarded port can't reach a loopback bind);
 host-facing exposure is governed solely by the `[network] ports` list in
-`alloy.toml`, which publishes only on `127.0.0.1`.
+`workload.toml`, which publishes only on `127.0.0.1`.
 
-Two per-host variants, both in `alloy.toml`:
+Two per-host variants, both in `/etc/workloads.d/alloy/workload.toml`:
 
 - **Normal host (alloy only):** publish the receiver so local apps can reach it
   — `ports = ["127.0.0.1:4317:4317", "127.0.0.1:4318:4318"]`. This is the
@@ -52,8 +52,9 @@ sudo workloadctl enable alloy
 
 This pulls `docker.io/grafana/alloy:latest` and copies the sample
 `alloy-config.alloy` from `/usr/share/workloadctl/workloads/alloy/` into
-`/var/lib/workloads/alloy/`. Edit that file on the host to customize
-collection, then `sudo workloadctl recreate alloy`.
+`/var/lib/workloads/alloy/data/` (the `./` volume anchor resolves under
+`data/`). Edit that file on the host to customize collection, then
+`sudo workloadctl recreate alloy`.
 
 ## Notes
 
@@ -61,10 +62,10 @@ collection, then `sudo workloadctl recreate alloy`.
   denied to the stock container domain under SELinux enforcing, so without help
   `loki.source.journal` silently collects nothing. Instead of `label=disable`,
   `[security].selinux_policy = true` makes `enable` load a per-workload type
-  from `alloy.cil` (a udica CIL block inheriting the base container domain), so
+  from `policy.cil` (a udica CIL block inheriting the base container domain), so
   alloy runs confined as its own `wl_alloy.process` with just journal read
   access — no other container is widened — and `disable` removes it. If the
-  host-metrics collectors hit AVC denials, regenerate/extend `alloy.cil` with
+  host-metrics collectors hit AVC denials, regenerate/extend `policy.cil` with
   `udica` / `audit2allow -a` rather than disabling confinement.
 - **Journal path:** `alloy-config.alloy` sets `loki.source.journal` `path` to
   `/var/log/journal` explicitly. sd_journal's default location keys off

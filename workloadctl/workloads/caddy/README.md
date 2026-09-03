@@ -21,15 +21,19 @@ publishes those names via mDNS.
    > sudo dnf install policycoreutils-python-utils checkpolicy
    > ```
 
-2. **Drop a Caddyfile in place** (the sample fronts zot and grafana):
+2. **Enable it.** `enable` creates the volume directories and seeds the sample
+   Caddyfile (which fronts zot and grafana) from the shipped template — it is a
+   `[setup].required_files` entry with an absolute hint, so there is nothing to
+   copy by hand:
    ```bash
-   sudo workloadctl enable caddy             # creates /var/lib/workloads/caddy/
-   sudo cp /usr/share/workloadctl/workloads/caddy/Caddyfile /var/lib/workloads/caddy/Caddyfile
+   sudo workloadctl enable caddy
    ```
 
-3. **Edit routes** and recreate the container:
+3. **Edit routes** and recreate the container. The `./Caddyfile` volume anchor
+   resolves under `data/`, so the live copy is the one below — not an
+   `/etc/workloads.d/caddy/` override, which this file would never reach:
    ```bash
-   sudo nano /var/lib/workloads/caddy/Caddyfile
+   sudo nano /var/lib/workloads/caddy/data/Caddyfile
    sudo workloadctl recreate caddy
    ```
 
@@ -65,6 +69,14 @@ Each backend address is the host-side port that the corresponding workload's
 so Caddy talks to `127.0.0.1:5050`. Caddy itself runs in host networking, so
 `127.0.0.1` is the actual host loopback.
 
+**`127.0.0.1` only reaches the backend if the backend is on the host's
+loopback.** A `mode = "host"` workload (like `zot-registry`) is. A `pasta`
+workload is only if its port is published with an explicit loopback bind
+(`"127.0.0.1:3000:3000"`); a bare `"3000:3000"` answers on the host's LAN
+address and *not* on `127.0.0.1`, and a Caddy site pointed at loopback gets a
+502 while the workload is perfectly healthy. Either publish the backend on
+`127.0.0.1` or name the host's LAN address in the `reverse_proxy` line.
+
 The catchall site block is optional but recommended. Without it, hitting the
 host by IP or with a Host header that doesn't match anything yields Caddy's
 default empty-200 response, which looks identical to a working site whose
@@ -92,8 +104,10 @@ it 308s, image signing will break.
 
 Caddy received the request but couldn't reach the backend.
 
-- **Wrong port?** Compare the Caddyfile address to the workload's
-  `[network] ports` mapping. The host-side number is what Caddy needs.
+- **Wrong port — or right port, wrong address?** Compare the Caddyfile
+  address to the workload's `[network] ports` mapping. The host-side number is
+  what Caddy needs, and under `pasta` a port published without an explicit
+  bind address is not on `127.0.0.1` at all (see "Caddyfile pattern").
   ```bash
   ss -tlnp | grep <port>                  # confirm something is actually listening
   ```
@@ -166,7 +180,7 @@ The sample Caddyfile uses `local_certs`, which has Caddy's internal CA sign
 the certs. Browsers will warn until you install Caddy's root CA on each
 client, or until you switch to plain HTTP. To extract the root:
 ```bash
-sudo cat /var/lib/workloads/caddy/data/caddy/pki/authorities/local/root.crt
+sudo cat /var/lib/workloads/caddy/data/caddy/caddy/pki/authorities/local/root.crt
 ```
 Install that on your clients' trust stores. For HTTP-only operation, replace
 the global block in the Caddyfile with `{ auto_https off }`.
@@ -185,8 +199,8 @@ every later request gets pinned to http and loops on the 308 until cosign
 fails with "stopped after 10 redirects". The `:80` block hard-404s `/v2*`
 instead, so the http probe always loses. The rule is path-based on purpose —
 it protects any current or future registry behind this proxy without
-maintaining a hostname list. See `docs/cosign-local-redirect-loop.md` for the
-full failure analysis.
+maintaining a hostname list. See the repo root's `docs/cosign-local-redirect-loop.md`
+for the full failure analysis.
 
 To serve plain HTTP *without* any redirect, drop the `@dotlocal` redirect
 from the `:80` block; to drop HTTPS entirely, replace the global block with
@@ -230,10 +244,10 @@ suspect firewall or DNS, not the proxy.
 
 Two reasons:
 - Caddy needs to bind 80/443 on the host's actual interfaces.
-- Pasta-networked backends are reachable on the host's loopback at their
-  forwarded port. From inside a pasta container, that loopback is not
-  shared, so a pasta-mode Caddy would not reach them without extra
-  port-forwarding plumbing. Host networking sidesteps the whole issue.
+- Backends are reached over the host's own network stack. From inside a
+  pasta container that stack is not shared, so a pasta-mode Caddy would not
+  reach a host-published port without extra plumbing. Host networking
+  sidesteps the whole issue.
 
 ## Why the Containerfile pins `XDG_DATA_HOME`
 
@@ -249,7 +263,8 @@ restart, breaking clients that previously trusted it.
 Setting `XDG_DATA_HOME=/var/lib/caddy` (and `XDG_CONFIG_HOME=/etc/caddy/config`)
 forces the storage into the bind-mounted volumes so certs and state
 persist across restarts. The CA root referenced in the TLS section above
-lives at `/var/lib/workloads/caddy/data/caddy/pki/authorities/local/root.crt`
+lives at `/var/lib/workloads/caddy/data/caddy/caddy/pki/authorities/local/root.crt`
+(the doubled `caddy/` is Caddy's own subdir under `XDG_DATA_HOME`)
 (self-signed CA only; with the shared CA below, only `intermediate.crt`/`.key`
 live there and the root is the mounted file).
 
@@ -261,7 +276,7 @@ trust a different root per host — and they are all confusingly named
 `SEC_ERROR_BAD_SIGNATURE` rather than a clear "untrusted" error. To trust ONE
 root for every host's `*.local` services, point every Caddy at a shared homelab
 root via the `pki` block (already wired into the sample `Caddyfile` and
-`caddy.toml`).
+`workload.toml`).
 
 The shared-root `pki` block is **generated host-side** by `setup.sh` (the
 `[host] setup` hook) into `/etc/caddy/pki/homelab-ca.caddyfile`, which the

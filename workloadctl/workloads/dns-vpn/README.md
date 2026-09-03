@@ -13,7 +13,7 @@ tunnel. LAN clients can use this host as their DNS resolver.
 
 2. **Copy your WireGuard config and enable:**
    ```bash
-   sudo cp ~/Downloads/vpn.conf /var/lib/workloads/dns-vpn/wg0.conf
+   sudo cp ~/Downloads/vpn.conf /var/lib/workloads/dns-vpn/data/wg0.conf
    sudo workloadctl enable dns-vpn
    ```
 
@@ -34,7 +34,7 @@ The upstream DNS server is read automatically from the `DNS =` line in
 `wg0.conf`. To override it:
 
 ```toml
-# In workloads.d/dns-vpn.toml
+# In /etc/workloads.d/dns-vpn/workload.toml
 [container.environment]
 UPSTREAM_DNS = "10.5.0.1"
 ```

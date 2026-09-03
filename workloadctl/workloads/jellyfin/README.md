@@ -23,7 +23,7 @@ The workload passes `/dev/dri/renderD128` into the container and adds the
 Works with AMD (`amdgpu`) and Intel (`i915`) GPUs. AMD Navi 10 / RX 5000-series
 supports H.264 and HEVC encode/decode but not AV1 encode.
 
-For NVIDIA, switch `[devices]` in `jellyfin.toml` to `gpu = "nvidia"` and pick
+For NVIDIA, switch `[devices]` in `workload.toml` to `gpu = "nvidia"` and pick
 NVENC in the UI instead.
 
 ## Media

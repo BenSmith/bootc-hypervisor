@@ -166,7 +166,7 @@ Units run `--log-driver=passthrough`, so `podman logs` will not work. Use:
 
 ```bash
 workloadctl logs comfyui             # add -f to tail
-journalctl -t workload-comfyui-comfyui
+journalctl -t workload-comfyui
 ```
 
 The healthcheck probes `/api/object_info`, which returns 200 with no models

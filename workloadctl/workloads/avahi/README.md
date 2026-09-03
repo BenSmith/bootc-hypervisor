@@ -99,7 +99,7 @@ What you *can* check:
 
 ```bash
 sudo ss -ulnpH 'sport = :5353'                          # only avahi-daemon should appear
-sudo -u _wl-avahi podman logs workload-avahi --tail 50  # look for: "Established under name <X>"
+workloadctl logs avahi | tail -50                       # look for: "Established under name <X>"
 ```
 
 A clean log has no `Local name collision` and no "Detected another mDNS
@@ -117,7 +117,7 @@ avahi-browse -art | grep zot                            # if avahi installed
 
 ### Only one alias publishes, the rest fail with `Local name collision`
 
-Symptom in `podman logs workload-avahi`:
+Symptom in `workloadctl logs avahi`:
 
 ```
 Static host name zoop.local: avahi_server_add_address failure: Local name collision
@@ -184,14 +184,14 @@ ALIASES = "zot registry"
 ```
 
 The entrypoint logs the parsed alias list and the chosen IP at startup —
-check the first few lines of `podman logs workload-avahi`.
+check the first few lines of `workloadctl logs avahi`.
 
 ### Container restarts in a loop
 
 The entrypoint shuts the whole process tree down if *any* subprocess
 (`dbus-daemon`, `avahi-daemon`, or any of the `avahi-publish` instances)
 exits. Systemd then restarts the unit. To find which subprocess is dying,
-look at the very end of `podman logs workload-avahi` from the last run —
+look at the very end of `workloadctl logs avahi` from the last run —
 the failing component prints its error before the entrypoint's
 `a subprocess exited unexpectedly` line.
 

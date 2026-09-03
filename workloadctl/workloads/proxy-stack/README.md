@@ -21,9 +21,9 @@ LAN clients and the proxy services themselves.
 
 2. **Copy your WireGuard config and squid.conf template:**
    ```bash
-   sudo cp ~/Downloads/vpn.conf /var/lib/workloads/proxy-stack/wg0.conf
+   sudo cp ~/Downloads/vpn.conf /var/lib/workloads/proxy-stack/data/wg0.conf
    podman run --rm localhost/proxy-stack:latest cat /usr/share/proxy-stack/squid.conf \
-     | sudo tee /var/lib/workloads/proxy-stack/squid.conf
+     | sudo tee /var/lib/workloads/proxy-stack/data/squid.conf
    ```
 
 3. **Edit squid.conf** — at minimum adjust `acl localnet` to match your subnet.

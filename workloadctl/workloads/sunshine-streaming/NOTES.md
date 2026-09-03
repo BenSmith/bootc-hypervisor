@@ -28,7 +28,7 @@ its socket is.
 The host hypervisor system manages the container as a workload:
 - Dedicated `_wl-sunshine-streaming` system user (UID 10000+)
 - Rootless podman with `userns=keep-id`
-- Persistent home volume at `/var/lib/workloads/sunshine-streaming/home`
+- Persistent home volume at `/var/lib/workloads/sunshine-streaming/data/home`
 - Host `setup.sh` loads the uinput module, installs the udev relay, mints the
   web UI's TLS cert, and advertises the host over mDNS. SELinux policy is loaded
   by `workloadctl enable` from `[security].selinux_policy`, not by the script.

@@ -12,7 +12,7 @@ Host traffic is unaffected — only this container's traffic exits via VPN.
 
 2. **Copy your WireGuard config:**
    ```bash
-   sudo cp ~/Downloads/vpn.conf /var/lib/workloads/wireguard-vpn/wg0.conf
+   sudo cp ~/Downloads/vpn.conf /var/lib/workloads/wireguard-vpn/data/wg0.conf
    ```
 
 3. **Enable:**
@@ -26,7 +26,7 @@ Host traffic is unaffected — only this container's traffic exits via VPN.
    workloadctl logs wireguard-vpn
 
    # Check public IP (should show VPN server IP)
-   sudo -u _wl-wireguard-vpn podman exec workload-wireguard-vpn curl https://ipinfo.io/ip
+   sudo workloadctl exec wireguard-vpn curl https://ipinfo.io/ip
    ```
 
 ## WireGuard Config Format
@@ -56,5 +56,5 @@ automatically excluded from the VPN so the container can still reach the LAN.
 workloadctl logs wireguard-vpn
 
 # Verify WireGuard is up inside the container
-sudo -u _wl-wireguard-vpn podman exec workload-wireguard-vpn wg show
+sudo workloadctl exec wireguard-vpn wg show
 ```

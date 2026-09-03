@@ -12,7 +12,7 @@ exits via the VPN. Binds to `127.0.0.1:1080` by default — local use only.
 
 2. **Copy your WireGuard config and enable:**
    ```bash
-   sudo cp ~/Downloads/vpn.conf /var/lib/workloads/socks5-vpn/wg0.conf
+   sudo cp ~/Downloads/vpn.conf /var/lib/workloads/socks5-vpn/data/wg0.conf
    sudo workloadctl enable socks5-vpn
    ```
 
@@ -35,7 +35,7 @@ resolution rather than resolving locally — preferred for privacy.
 ## Exposing to the Network
 
 To allow other LAN devices to use the proxy, change the port binding in
-`workloads.d/socks5-vpn.toml`:
+`/etc/workloads.d/socks5-vpn/workload.toml`:
 
 ```toml
 [network]

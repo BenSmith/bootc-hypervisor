@@ -33,7 +33,10 @@ Docker Hub sidesteps that, so a normal `pull = "newer"` works.
 
 ```bash
 sudo workloadctl enable nvidia-gpu-exporter
-curl -s localhost:9835/metrics | grep nvidia_smi_utilization   # sanity check
+# Under pasta the published port answers on the host's LAN address, not on the
+# host's own loopback — a localhost probe gets connection refused while the
+# exporter is healthy.
+curl -s "$(hostname -I | awk '{print $1}'):9835/metrics" | grep nvidia_smi_utilization
 ```
 
 Then wire alloy to scrape it — uncomment the `nvidia_gpu_exporter`

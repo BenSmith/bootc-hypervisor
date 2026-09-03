@@ -24,18 +24,17 @@ podman build -t localhost/squid:latest .
 
 1. **Build the container** (see above)
 
-2. **Create directories and copy config:**
+2. **Enable the workload.** `enable` creates the volume directories and seeds
+   `squid.conf` from the shipped template — it is a `[setup].required_files`
+   entry with an absolute hint, so there is nothing to copy by hand:
    ```bash
-   sudo mkdir -p /var/lib/workloads/squid/{cache,logs}
-   sudo cp squid.conf /var/lib/workloads/squid/
-   sudo chown -R _wl-squid:_wl-squid /var/lib/workloads/squid
+   sudo workloadctl enable squid
    ```
 
-   Note: Using workload username ensures correct ownership regardless of UID
-
-3. **Customize configuration** (optional):
+3. **Customize configuration** (optional), then apply it:
    ```bash
-   sudo vi /var/lib/workloads/squid/squid.conf
+   sudo vi /var/lib/workloads/squid/data/squid.conf
+   sudo workloadctl recreate squid
    ```
 
    Adjust:
@@ -44,14 +43,18 @@ podman build -t localhost/squid:latest .
    - `cache_mem` (default: 256MB)
    - Add more repository ACLs as needed
 
-4. **Enable the workload:**
-   ```bash
-   sudo workloadctl enable squid
-   ```
+   Edit that copy, not an `/etc/workloads.d/squid/` override: `squid.conf`
+   reaches the container through the `./squid.conf` volume, which resolves
+   under `data/`. Never `chown -R` the workload root — `state/` is the
+   workload user's `$HOME` and podman's graphroot, and walking into it breaks
+   the workload. `workload-ensure-user` owns the ownership of `data/`.
 
-5. **Verify it's running:**
+4. **Verify it's running.** Under the default `pasta` network the published
+   port is bound on the host's LAN address, not on the host's own loopback —
+   `localhost:3128` gets connection refused while the proxy is perfectly
+   healthy:
    ```bash
-   curl -x http://localhost:3128 http://example.com
+   curl -x http://$(hostname -I | awk '{print $1}'):3128 http://example.com
    ```
 
 ## Usage
@@ -83,20 +86,21 @@ podman build -t myimage .
 
 ### Check Cache Status
 
-**View logs:**
+**View logs:** `squid.conf` sends the access log to stdout and the cache log
+to stderr, so both land in the journal — there is no host-side `logs/`
+directory. Units run `--log-driver=passthrough`, so `podman logs` fails:
 ```bash
-sudo tail -f /var/lib/workloads/squid/logs/access.log
-sudo tail -f /var/lib/workloads/squid/logs/cache.log
+workloadctl logs squid          # add -f to tail
 ```
 
 **Cache statistics:**
 ```bash
-sudo -u _wl-squid podman exec squid squidclient mgr:info
+sudo workloadctl exec squid squidclient mgr:info
 ```
 
 **Cache size:**
 ```bash
-sudo du -sh /var/lib/workloads/squid/cache
+sudo du -sh /var/lib/workloads/squid/data/cache
 ```
 
 ## Firewall Configuration
@@ -142,24 +146,24 @@ http_access allow CONNECT custom_repos
 
 Then restart:
 ```bash
-sudo systemctl restart workload-squid.service
+sudo workloadctl recreate squid
 ```
 
 ## Monitoring
 
 **Service status:**
 ```bash
-systemctl status workload-squid.service
+workloadctl status squid
 ```
 
 **Watch access log:**
 ```bash
-sudo tail -f /var/lib/workloads/squid/logs/access.log
+workloadctl logs squid -f
 ```
 
 **Cache hits vs misses:**
 ```bash
-sudo grep -E "TCP_(HIT|MISS)" /var/lib/workloads/squid/logs/access.log | \
+workloadctl logs squid | grep -E "TCP_(HIT|MISS)" | \
   awk '{print $4}' | sort | uniq -c
 ```
 
@@ -171,13 +175,13 @@ sudo grep -E "TCP_(HIT|MISS)" /var/lib/workloads/squid/logs/access.log | \
 - Add corresponding `http_access allow CONNECT` rule
 
 **Cache not working:**
-- Check disk space: `df -h /var/lib/workloads/squid/cache`
-- Verify permissions: `ls -la /var/lib/workloads/squid/cache` (should be owned by _wl-squid)
-- Check cache log: `sudo tail /var/lib/workloads/squid/logs/cache.log`
+- Check disk space: `df -h /var/lib/workloads/squid/data/cache`
+- Verify permissions: `ls -la /var/lib/workloads/squid/data/cache` (should be owned by _wl-squid)
+- Check the cache log: `workloadctl logs squid` (squid writes it to stderr)
 
 **Service won't start:**
-- Check configuration syntax: `sudo -u _wl-squid podman exec squid squid -k parse`
-- Review logs: `sudo journalctl -u workload-squid.service`
+- Check configuration syntax: `sudo workloadctl exec squid squid -k parse`
+- Review logs: `workloadctl logs squid`
 
 ## Performance Tuning
 

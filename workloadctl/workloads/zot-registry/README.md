@@ -22,8 +22,13 @@ the upstream `zot-linux-amd64` release binary on a Fedora base.
 
 ## Customizing upstreams
 
-Edit `/var/lib/workloads/zot-registry/config.json` after enabling and restart
-the workload. Each entry under `extensions.sync.registries` maps an upstream
+`enable` seeds `config.json` into the workload's `data/` dir from the shipped
+template (a `[setup].required_files` entry with an absolute hint). Edit
+`/var/lib/workloads/zot-registry/data/config.json` there — not an
+`/etc/workloads.d/zot-registry/` override, which the `./config.json` volume
+would never read — and `sudo workloadctl recreate zot-registry`.
+
+Each entry under `extensions.sync.registries` maps an upstream
 URL; with `prefix: "**"` they all match every repo and Zot tries them in
 order. Remove entries you don't need to speed up cache misses.
 

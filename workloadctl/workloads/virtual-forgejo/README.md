@@ -25,8 +25,12 @@ empty, do the web installer, mint a token, then enable the runner; or
 (b) point this VM's runner at a pre-existing Forgejo by overriding the
 template vars.
 
-1. **(Optional) override defaults** in `virtual-forgejo.toml`:
+1. **(Optional) override defaults** in `/etc/workloads.d/virtual-forgejo/workload.toml`:
 
+   - `[vm.network].egress` — set to `"open"` in this bundle rather than left
+     to the `"filtered"` default: a CI host builds arbitrary code against
+     arbitrary registries and mirrors, so no allowlist both works and means
+     anything. Narrow it only if you know every destination your jobs need.
    - `[vm.network].bridge` — unset by default, meaning passt: **no bridge, and
      the guest is assigned the host's address**, so nothing on the LAN can
      reach it directly. Set it to your own LAN bridge (e.g. `br0`) to give the
@@ -35,7 +39,10 @@ template vars.
      one. You provision that bridge yourself, and a bridged VM is unfiltered:
      host egress policy cannot reach it.
    - `[vm.cloud_init.template_vars]`:
-     - `HYPERVISOR_REPO_URL`, `RUNNER_VERSION` — usually leave alone.
+     - `RUNNER_VERSION` — usually leave alone.
+     - `FORGEJO_HOSTNAME` — the name the VM announces over mDNS and Caddy
+       serves. Used in the fqdn, `/etc/hosts`, the Caddyfile and `app.ini`;
+       change it to rename the forge. Defaults to `virtual-forgejo.local`.
      - `FORGEJO_URL` — runner registers against this URL. Defaults to the
        in-VM `https://virtual-forgejo.local`. Point elsewhere if registering
        against an existing Forgejo.
@@ -47,6 +54,9 @@ template vars.
        ship VM metrics + journal + OTLP traces to that backend.
      - `ALLOY_HOST_LABEL` / `ALLOY_ROLE_LABEL` — `host.name` / `host.role`
        labels stamped on outbound signals. Defaults `virtual-forgejo` / `ci`.
+     - `REGISTRY_CA_URL` — plain-HTTP URL serving the registry host's Caddy
+       internal CA cert, needed by CI jobs that push/pull from a Caddy-fronted
+       `registry.local`. Empty (the default) skips installing that trust.
 
 2. **(If `REGISTER_RUNNER = "true"`)** drop the runner registration
    token into the systemd credstore so it survives reboots and never
@@ -96,25 +106,25 @@ template vars.
 
    Once `workloadctl` is installed via the RPM, the support tree at
    `/usr/share/workloadctl/workloads/virtual-forgejo/` is already on disk —
-   only the TOML needs to land in `/etc/workloads.d/`:
+   `init` stamps the bundle's declaration into
+   `/etc/workloads.d/virtual-forgejo/workload.toml` and the `user_data_file`
+   path in it already points at that tree:
 
    ```sh
-   sudo cp /usr/share/doc/workloadctl/examples/virtual-forgejo.toml \
-       /etc/workloads.d/
+   sudo workloadctl init virtual-forgejo     # `workloadctl catalog` lists bundles
    sudo workloadctl enable virtual-forgejo
    ```
 
-   For a dev checkout without the RPM installed, the TOML's
-   `user_data_file` path needs to point at the repo copy instead of
-   `/usr/share/workloadctl/workloads/...`. Easiest: copy the TOML and the
-   support tree to matching paths, e.g.:
+   For a dev checkout without the RPM installed, promote the bundle directory
+   itself — `install` copies the whole thing (cloud-init tree included) into
+   `/etc/workloads.d/<name>/`. Then point `user_data_file` at the copy that
+   landed beside it: a relative path is resolved against the instance
+   directory, so no `/usr/share` tree is needed at all.
 
    ```sh
-   sudo install -d /etc/workloads.d/virtual-forgejo
-   sudo install -m 0644 workloads.d/virtual-forgejo.toml \
+   sudo workloadctl install workloads/virtual-forgejo
+   sudo sed -i 's|^user_data_file = .*|user_data_file = "cloud-init/user-data"|' \
        /etc/workloads.d/virtual-forgejo/workload.toml
-   sudo install -d /usr/share/workloadctl/workloads
-   sudo cp -a workloads/virtual-forgejo /usr/share/workloadctl/workloads/
    sudo workloadctl enable virtual-forgejo
    ```
 
@@ -129,9 +139,9 @@ template vars.
 
 4. **First-time Forgejo setup**: hit `https://virtual-forgejo.local/` from a
    machine on the same LAN, accept the Caddy local-CA cert (or trust it
-   in the OS), and complete the install wizard. The seeded
-   The seeded `app.ini` (generated from `cloud-init/user-data` at ISO build
-   time) already points Forgejo at `${FORGEJO_HOSTNAME}` with SQLite for storage.
+   in the OS), and complete the install wizard. The seeded `app.ini`
+   (generated from `cloud-init/user-data` at ISO build time) already points
+   Forgejo at `${FORGEJO_HOSTNAME}` with SQLite for storage.
 
 5. **(If first boot skipped registration)** mint a runner token through
    Site Administration → Actions → Runners → "Create new Runner", then

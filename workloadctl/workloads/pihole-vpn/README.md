@@ -13,7 +13,7 @@ the VPN provider's DNS server over the encrypted tunnel.
 
 2. **Copy your WireGuard config and enable:**
    ```bash
-   sudo cp ~/Downloads/vpn.conf /var/lib/workloads/pihole-vpn/wg0.conf
+   sudo cp ~/Downloads/vpn.conf /var/lib/workloads/pihole-vpn/data/wg0.conf
    sudo workloadctl enable pihole-vpn
    ```
 
@@ -39,7 +39,7 @@ The VPN upstream DNS is read from the `DNS =` line in `wg0.conf` automatically.
 To override it:
 
 ```toml
-# In workloads.d/pihole-vpn.toml
+# In /etc/workloads.d/pihole-vpn/workload.toml
 [container.environment]
 UPSTREAM_DNS = "10.5.0.1"
 ```

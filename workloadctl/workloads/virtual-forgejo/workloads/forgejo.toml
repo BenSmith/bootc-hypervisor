@@ -27,10 +27,14 @@ volumes = [
 userns = "keep-id:uid=1000,gid=1000"
 
 [network]
-# Use the VM's network namespace directly instead of pasta. The VM is
-# already on the LAN bridge with its own IP, so Forgejo listens directly
-# on :3000 (HTTP) and :2222 (SSH) of the VM. Caddy (also network=host on
-# this VM) reverse-proxies HTTPS:443 to localhost:3000.
+# Use the VM's network namespace directly instead of pasta, so Forgejo
+# listens on :3000 (HTTP) and :2222 (SSH) of the VM itself and Caddy (also
+# network=host on this VM) reverse-proxies HTTPS:443 to localhost:3000.
+# Whether those ports are reachable from the LAN is the *host* workload's
+# question, not this one's: under the default passt the VM has no LAN
+# identity of its own and the host must publish [vm.network].ports; with
+# [vm.network].bridge set it has a real address. See the parent bundle's
+# workload.toml.
 mode = "host"
 
 [resources]
