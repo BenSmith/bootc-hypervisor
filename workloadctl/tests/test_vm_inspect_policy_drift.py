@@ -45,6 +45,22 @@ egress = "filtered"
 hosts = ["api.example.com"]
 '''
 
+# The container shapes. A container writes its policy document to the same
+# path, so these are what distinguishes "no renderer for this substrate" from
+# "this workload should have no document".
+_CONTAINER_INSPECTED = '''\
+[container]
+image = "example.test/img"
+
+[network]
+hosts = ["api.example.com"]
+'''
+
+_CONTAINER_PLAIN = '''\
+[container]
+image = "example.test/img"
+'''
+
 
 class TestThereIsOneRenderer(unittest.TestCase):
     """A formatting difference between writer and comparator would report every
@@ -145,6 +161,39 @@ class TestWhatCountsAsDrift(_PolicyDriftCase):
         it would mark every stopped workload as drifted forever."""
         self._config("demo")
         self.assertEqual(cmd_drift.collect_policy_drift(), [])
+
+    def test_an_inspected_container_is_skipped_not_reported_as_an_orphan(self):
+        """FOUND ON HARDWARE 2026-09-05.
+
+        A container writes the SAME policy document to the SAME path as a VM,
+        but G8 left the renderer VM-only pending the container document
+        renderer -- so `_rendered_policy` returned "", the orphan answer, and
+        every inspected container was reported as a whole file REMOVED. It read
+        as permanent drift on a workload that had nothing wrong with it, with a
+        remedy (restart) that could not clear it, and `doctor` carried the same
+        diff.
+
+        The two answers are different and collapsing them is what broke: "" is
+        "nothing should be rendered here", which is exactly what makes a
+        document left by a workload that STOPPED being inspected show up. None
+        is "this substrate has no renderer yet", and there is no comparison to
+        make. The row below pins that an UNinspected container still reports as
+        an orphan, so this is a skip and not a blanket exemption for
+        containers.
+        """
+        self._config("cwl", _CONTAINER_INSPECTED)
+        self._document("cwl", '{"hosts": ["example.com"]}\n')
+        self.assertEqual(cmd_drift.collect_policy_drift(), [])
+
+    def test_an_uninspected_containers_leftover_document_is_still_an_orphan(self):
+        """The other side of the skip above. A container that has no [network]
+        trigger should have no document, so one on disk is the same stale-file
+        condition a de-filtered VM leaves and must still be reported."""
+        self._config("cwl", _CONTAINER_PLAIN)
+        self._document("cwl", '{"hosts": ["example.com"]}\n')
+        diffs = cmd_drift.collect_policy_drift()
+        self.assertEqual([f for f, _, _ in diffs], ["cwl/inspect.json"])
+        self.assertEqual(diffs[0][2], "")
 
     def test_a_document_whose_workload_is_gone_is_an_orphan(self):
         self._config("demo")

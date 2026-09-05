@@ -23,6 +23,7 @@ from vm import (
 )
 from workload_lib import (
     GENERATED_BY_RE,
+    container_uses_inspect,
     RUN_TREE_SCANS,
     workload_config_dir,
     workload_config_path,
@@ -195,6 +196,19 @@ def _rendered_policy(name: str) -> str:
     # policy => "splice", not "inspect" -- §3), same reason cmd_rules.py's
     # G5 stays VM-only. Revisit once the container document renderer exists
     # (Phase 3).
+    #
+    # AN INSPECTED CONTAINER RETURNS None, NOT "". The two are different
+    # answers and collapsing them is a live misreport: "" means "nothing should
+    # be rendered here", which is what makes a leftover document from a
+    # workload that STOPPED being inspected show up as drift -- and an
+    # inspected container writes exactly the same document to exactly the same
+    # path, so it was being compared against "" and reported as a whole file
+    # removed. Every inspected container read as permanently drifted, with a
+    # remedy (restart) that could not fix it, and `doctor` carried the same
+    # diff. None means "this substrate has no renderer yet, so no comparison is
+    # possible" and the caller skips. Measured on hardware 2026-09-05.
+    if container_uses_inspect(config):
+        return None
     if not vm_uses_inspect(config):
         return ""
     return vm_inspect_policy_text(config.get("vm", {}).get("network", {}) or {})
@@ -235,6 +249,14 @@ def collect_policy_drift(workload_name=None) -> list:
         except OSError as e:
             raise RuntimeError(f"could not read {policy_file}: {e}") from None
         gen_text = _rendered_policy(name)
+        if gen_text is None:
+            # No renderer for this substrate yet -- see _rendered_policy. Not
+            # "no drift": nothing was compared, and saying otherwise would be
+            # the false all-clear this module refuses elsewhere. It is silent
+            # here because `drift` reports differences, and a surface that
+            # cannot form an expectation has no difference to report; the row
+            # belongs to whatever builds the renderer.
+            continue
         if live_text != gen_text:
             diffs.append((f"{name}/{VM_INSPECT_POLICY_FILE}", live_text, gen_text))
     return diffs

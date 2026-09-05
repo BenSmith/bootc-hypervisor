@@ -238,16 +238,32 @@ def inside(name, script, timeout=60):
 
 
 def fetch(name, url, timeout=60):
-    """One request from inside the container, as (seconds, output).
+    """One request from inside the container, as (seconds, ok, detail).
 
-    busybox wget writes the status line to stderr and the body to stdout, and
-    `-O -` is what keeps it from creating files in a read-only-ish image. The
-    elapsed time is returned because S1's failure mode is a hang, not an error.
+    `ok` IS WGET'S OWN EXIT STATUS, and getting that right took a rewrite.
+    The obvious spelling -- `wget ... | head -c 200; echo "[rc=$?]"` -- reports
+    the exit status of HEAD, which is 0 whatever wget did, so a 403 and a 200
+    were indistinguishable and every "must be refused" row passed for the wrong
+    reason while reading as a failure. The body and the error text go to
+    separate files so the status is not inferred from prose that varies by
+    wget build.
+
+    The elapsed time is returned because S1's failure mode is a hang rather
+    than an error, and a timeout arrives here as ok=False with the marker
+    `run()` substitutes rather than as an exception.
     """
     started = time.monotonic()
-    p = inside(name, f"wget -q -O - -T 15 {url!r} 2>&1 | head -c 200; "
-                     f"echo \"[rc=$?]\"", timeout=timeout)
-    return time.monotonic() - started, (p.stdout + p.stderr).strip()
+    script = (
+        f"if wget -q -O /tmp/ceg-body -T 15 {url!r} 2>/tmp/ceg-err; "
+        f"then echo '[OK]'; else echo '[NO]'; fi; "
+        f"head -c 110 /tmp/ceg-body 2>/dev/null; echo; "
+        f"head -c 110 /tmp/ceg-err 2>/dev/null"
+    )
+    p = inside(name, script, timeout=timeout)
+    out = (p.stdout + p.stderr).strip()
+    ok = "[OK]" in out
+    detail = " ".join(out.replace("[OK]", "").replace("[NO]", "").split())[:90]
+    return time.monotonic() - started, ok, detail
 
 
 # --- config generation -------------------------------------------------------
@@ -438,9 +454,9 @@ def check_rung_ladder():
     p = cli("validate", FILTERED)
     record("rung 2: it validates with no CA route stated",
            p.returncode == 0, (p.stdout + p.stderr).strip()[:90])
-    elapsed, out = fetch(FILTERED, f"https://{ALLOWED}/")
+    elapsed, ok, out = fetch(FILTERED, f"https://{ALLOWED}/")
     record("rung 2: HTTPS to an allowlisted host round-trips",
-           "[rc=0]" in out, f"{elapsed:.1f}s  {out[:60]}")
+           ok, f"{elapsed:.1f}s  {out}")
     rec = latest_for(FILTERED, ALLOWED)
     record("rung 2: the record says the connection was SPLICED",
            bool(rec) and rec.get("mode") == "splice",
@@ -469,9 +485,9 @@ def check_rung_ladder():
     record("rung 3: recreate applies it", p.returncode == 0,
            (p.stdout + p.stderr).strip()[-90:])
     time.sleep(5)
-    elapsed, out = fetch(FILTERED, f"https://{ALLOWED}/")
+    elapsed, ok, out = fetch(FILTERED, f"https://{ALLOWED}/")
     record("rung 3: HTTPS still round-trips after the transition",
-           "[rc=0]" in out, f"{elapsed:.1f}s  {out[:60]}")
+           ok, f"{elapsed:.1f}s  {out}")
     rec = latest_for(FILTERED, ALLOWED)
     # The mode name on the wire is the terminating one; `splice` here would
     # mean the transition changed the file and not the running inspector.
@@ -494,9 +510,9 @@ def check_both_planes():
     read the NAME, which on 80 means the Host header and not merely the dial.
     """
     say("\n== both redirected planes ==")
-    elapsed, out = fetch(FILTERED, f"http://{ALLOWED}/")
+    elapsed, ok, out = fetch(FILTERED, f"http://{ALLOWED}/")
     record("cleartext: HTTP to an allowlisted host round-trips",
-           "[rc=0]" in out, f"{elapsed:.1f}s  {out[:60]}")
+           ok, f"{elapsed:.1f}s  {out}")
     rec = latest_for(FILTERED, ALLOWED)
     record("cleartext: the record is on the cleartext plane",
            bool(rec) and rec.get("plane") == "cleartext",
@@ -506,9 +522,9 @@ def check_both_planes():
            json.dumps({k: rec.get(k) for k in ("method", "path", "status")})
            if rec else "no record")
 
-    elapsed, out = fetch(FILTERED, f"https://{ALLOWED}/")
+    elapsed, ok, out = fetch(FILTERED, f"https://{ALLOWED}/")
     record("tls: HTTPS to an allowlisted host round-trips",
-           "[rc=0]" in out, f"{elapsed:.1f}s  {out[:60]}")
+           ok, f"{elapsed:.1f}s  {out}")
     rec = latest_for(FILTERED, ALLOWED)
     record("tls: the record is on the tls plane and names the SNI",
            bool(rec) and rec.get("plane") == "tls" and rec.get("host") == ALLOWED,
@@ -533,10 +549,10 @@ def check_redial_exemption():
            unit in proxy, "wl_inspect_cg")
     record("the inspector's cgroup is exempt in workload_filter",
            unit in filt, "wl_egress_cg")
-    elapsed, out = fetch(FILTERED, f"https://{ALLOWED}/")
+    elapsed, ok, out = fetch(FILTERED, f"https://{ALLOWED}/")
     record("a forwarded request completes well inside the hang budget",
-           "[rc=0]" in out and elapsed < REDIAL_BUDGET,
-           f"{elapsed:.1f}s of {REDIAL_BUDGET:.0f}s")
+           ok and elapsed < REDIAL_BUDGET,
+           f"{elapsed:.1f}s of {REDIAL_BUDGET:.0f}s  {out}")
 
 
 def check_denial():
@@ -549,9 +565,9 @@ def check_denial():
     the workload that made the request.
     """
     say("\n== a denied host ==")
-    elapsed, out = fetch(FILTERED, f"https://{DENIED}/")
+    elapsed, ok, out = fetch(FILTERED, f"https://{DENIED}/")
     record("a non-allowlisted host does not round-trip",
-           "[rc=0]" not in out, f"{elapsed:.1f}s  {out[:60]}")
+           not ok, f"{elapsed:.1f}s  {out}")
     rec = latest_for(FILTERED, DENIED)
     record("the denial is in this workload's record",
            bool(rec), "no record" if not rec else rec.get("decision", ""))
@@ -597,9 +613,9 @@ def check_internal():
         record("recreate for the not-excepted arm", False, "recreate failed")
         return
     time.sleep(5)
-    elapsed, out = fetch(FILTERED, f"http://{LAN_HOST}/")
+    elapsed, ok, out = fetch(FILTERED, f"http://{LAN_HOST}/")
     record("allowlisted but not excepted: the LAN host is NOT reached",
-           "[rc=0]" not in out, f"{elapsed:.1f}s  {out[:60]}")
+           not ok, f"{elapsed:.1f}s  {out}")
     rec = latest_for(FILTERED, LAN_HOST)
     record("and the record names the internal destination as the reason",
            bool(rec) and rec.get("decision") == "drop"
@@ -613,9 +629,9 @@ def check_internal():
         record("recreate for the excepted arm", False, "recreate failed")
         return
     time.sleep(5)
-    elapsed, out = fetch(FILTERED, f"http://{LAN_HOST}/")
+    elapsed, ok, out = fetch(FILTERED, f"http://{LAN_HOST}/")
     record("with [[network.internal]]: the same host IS reached",
-           "[rc=0]" in out, f"{elapsed:.1f}s  {out[:60]}")
+           ok, f"{elapsed:.1f}s  {out}")
     rec = latest_for(FILTERED, LAN_HOST)
     record("and the record says it was forwarded",
            bool(rec) and rec.get("decision") == "forward",
@@ -656,10 +672,28 @@ def check_reporting():
            f'workload="{FILTERED}"' in text and "inspect" in text,
            "no drop file" if not text else f"{len(text.splitlines())} lines")
 
-    for verb in ("rules", "diagnose", "drift", "pcap"):
+    # `rules` is the one that refuses outright, and its message names the
+    # trigger rather than saying "not supported". That is the shape a VM-only
+    # surface is supposed to have.
+    p = cli("rules", FILTERED)
+    record("`rules` refuses a container and names the trigger",
+           p.returncode != 0 and "no inspected egress" in (p.stdout + p.stderr),
+           (p.stdout + p.stderr).strip()[:70])
+
+    # THE OTHER THREE ARE MEASURED, NOT ASSERTED, because the row this rig was
+    # written from had a stale premise: it called `diagnose`, `drift` and
+    # `pcap` "VM-only" as though each refuses. They do not. `diagnose` is a
+    # general workload check that runs fine for a container and simply says
+    # nothing about its egress; `drift` and `pcap` were left unrouted, which is
+    # not the same thing as declining. Whatever they do, an operator meets it,
+    # so it is recorded rather than guessed at -- and a rig that asserted a
+    # refusal here would have failed rows for a decision made on purpose while
+    # missing the one below.
+    for verb in ("diagnose", "drift", "pcap"):
         p = cli(verb, FILTERED)
-        record(f"`{verb}` is VM-only and says so rather than half-working",
-               p.returncode != 0, (p.stdout + p.stderr).strip()[:70])
+        text = " ".join((p.stdout + p.stderr).split())
+        record_gap(f"`{verb}` on an inspected container",
+                   f"rc={p.returncode}: {text[:100]}")
 
 
 def check_cross_workload_gap():
@@ -694,8 +728,13 @@ def check_cross_workload_gap():
     # a redirect, which is what a co-resident uid with no element would have to
     # do. 8080 is the cleartext listener, 8443 the TLS one.
     for port, label in ((8080, "cleartext"), (8443, "tls")):
-        _, out = fetch(OPEN, f"http://{addr}:{port}/", timeout=30)
-        reached = "[rc=0]" in out or "400" in out or "HTTP/" in out
+        _, ok, out = fetch(OPEN, f"http://{addr}:{port}/", timeout=30)
+        # "Reached" is NOT the same as "the request succeeded". A 400 from the
+        # listener's own parser and a TLS reset are both proof that bytes
+        # arrived at it, which is the whole question; a connection refused or
+        # a timeout would be the answer we want. So this reads the error text,
+        # not wget's exit status.
+        reached = ok or "400" in out or "reset" in out or "HTTP/" in out
         record_gap(
             f"{OPEN} -> {FILTERED}'s inspector on {addr}:{port} ({label})",
             f"{'REACHED' if reached else 'not reached'}: {out[:70]}")
