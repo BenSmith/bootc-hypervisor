@@ -485,6 +485,71 @@ class TestDisableRemovesRunFiles(unittest.TestCase):
                             "a triggered container emits its own inspector")
 
 
+class PurgeRemovesTheEgressRecordTest(unittest.TestCase):
+    """`--purge` must remove /var/log/workloadctl/egress/<name>.
+
+    FOUND ON HARDWARE 2026-09-05, and it is not a tidiness bug. That directory
+    is a systemd LogsDirectory= owned by the workload uid, and purge is the step
+    that frees the uid for reallocation. Left behind, the next workload given
+    that uid -- which need not be a re-enable of this one -- inherits a
+    directory owned by a user that no longer exists, systemd refuses to set it
+    up, and the inspect service fails 240/LOGS_DIRECTORY.
+
+    THE PRESENTATION IS WHY THIS IS WORTH A TEST. The workload service starts
+    fine and the DNAT is armed, so every redirected connection goes to a
+    listener that is not running: the workload hangs on 80 and 443 and on
+    nothing else, the error text belongs to whatever it was dialling, and the
+    unit that explains it is a different unit's journal. On the host that found
+    it, a filtered workload could not pull its own image and the symptom read
+    as "TLS handshake timeout" against a registry.
+
+    The record survived every earlier purge, so a host that had run the VM rigs
+    carried a directory per throwaway workload, several owned by whoever now
+    holds the uid rather than by the name on the directory.
+    """
+
+    def _purge(self, record_root):
+        run = Path(tempfile.mkdtemp())
+        with _Env(FILTERED_TOML, 'rr') as (config, _env_dir):
+            record_dir = record_root / 'rr'
+            record_dir.mkdir(parents=True)
+            (record_dir / 'requests.log').write_text("{}\n")
+            sibling = record_root / 'rr-other'      # a different workload
+            sibling.mkdir()
+            (sibling / 'requests.log').write_text("{}\n")
+
+            args = SimpleNamespace(workload='rr', purge=True)
+            with patch.object(cmd_disable, 'require_root', lambda: None), \
+                 patch.object(substrate_container, 'RUN_SYSTEMD_SYSTEM', run), \
+                 patch.object(workload_lib, 'RUN_SYSTEMD_SYSTEM', run), \
+                 patch.object(cmd_disable.subprocess, 'run', MagicMock()), \
+                 patch.object(cmd_disable, 'run_host_setup', MagicMock()), \
+                 patch.object(cmd_disable, 'apply_selinux_policy', MagicMock()), \
+                 patch.object(cmd_disable, '_stop_user_manager',
+                              MagicMock(return_value=False)), \
+                 patch.object(cmd_disable, 'vm_inspect_record_dir',
+                              lambda name: record_root / name), \
+                 patch.object(VMSubstrate, 'teardown', MagicMock(return_value=[])), \
+                 patch.object(cmd_disable, 'workload_enabled_marker',
+                              MagicMock(return_value=MagicMock())), \
+                 patch.object(cmd_disable.pwd, 'getpwnam',
+                              MagicMock(side_effect=KeyError)):
+                try:
+                    cmd_disable.cmd_disable(args, MagicMock())
+                except SystemExit:
+                    pass
+            return record_dir, sibling
+
+    def test_purge_removes_it(self):
+        root = Path(tempfile.mkdtemp())
+        record_dir, sibling = self._purge(root)
+        self.assertFalse(record_dir.exists(),
+                         "the egress record outlives the uid that owns it")
+        self.assertTrue(sibling.exists(),
+                        "exact-name removal must not touch another workload's "
+                        "record -- 'rr' and 'rr-other' share a prefix")
+
+
 class TestDisableStopsWholeTopology(unittest.TestCase):
     """cmd_disable must stop BOTH the -pod and -net helpers regardless of the
     workload's CURRENT mode.

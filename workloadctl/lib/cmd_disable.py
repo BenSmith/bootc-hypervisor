@@ -22,6 +22,7 @@ from workload_lib import (
     workload_run_files,
 )
 from substrate import get_substrate
+from vm import vm_inspect_record_dir
 from workloadctl_core import (
     WorkloadConfig,
     WorkloadManager,
@@ -333,6 +334,34 @@ def cmd_disable(args, manager: WorkloadManager):
             except OSError as e:
                 failures.append(f"remove {workload_dir}: {e} "
                                 "(data may still be present — remove manually before re-enabling)")
+
+        # The per-request egress record, which lives under /var/log and not
+        # under the workload root above, so the rmtree does not reach it.
+        #
+        # THIS IS NOT TIDINESS. The directory is a systemd LogsDirectory=, owned
+        # by the workload uid, and purge is the step that frees that uid for
+        # reallocation. Left behind, the NEXT workload to be given the uid --
+        # which need not be a re-enable of this one -- gets a directory owned by
+        # a user that no longer exists, systemd refuses to set it up, and the
+        # inspect service fails 240/LOGS_DIRECTORY.
+        #
+        # What makes that worth a comment is how it presents. The workload
+        # service starts fine and the DNAT is armed, so every redirected
+        # connection is sent to a listener that is not running: the workload
+        # hangs on 80 and 443 and on nothing else, the failure text belongs to
+        # whatever it was dialling ("TLS handshake timeout" against a registry),
+        # and the one unit that says what happened is a different unit's
+        # journal. Measured on hardware 2026-09-05, where it stopped a filtered
+        # workload from pulling its own image and read as a network fault.
+        record_dir = vm_inspect_record_dir(config.name)
+        if record_dir.exists():
+            try:
+                info(f"  Removing egress record {record_dir}...")
+                shutil.rmtree(record_dir)
+            except OSError as e:
+                failures.append(
+                    f"remove {record_dir}: {e} (a later workload given uid "
+                    f"{uid} will fail to start its inspector — remove manually)")
 
         if uid is None:
             success_msg = (f"✓ Workload '{args.workload}' disabled and purged "

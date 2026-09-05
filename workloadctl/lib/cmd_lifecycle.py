@@ -17,7 +17,7 @@ from cli_log import emit_result, error, info
 from workload_lib import workload_config_path
 from workloadctl_core import WorkloadConfig, WorkloadManager, require_root
 from substrate import get_substrate, service_active
-from provisioning import transfer_image
+from provisioning import apply_vm_fcontext, transfer_image
 
 
 # ---------------------------------------------------------------------------
@@ -126,6 +126,55 @@ def cmd_recreate(args, manager: WorkloadManager):
     # state. reset-failed is idempotent and harmless on a clean unit.
     subprocess.run(
         ["systemctl", "reset-failed", config.service_name],
+        check=False, capture_output=True,
+    )
+    # RE-REGISTER THE FCONTEXT RULES FIRST, because the setup unit restarted
+    # below ends with a `restorecon` and a restorecon can only relabel a file
+    # to a type some rule names. apply_vm_fcontext is gated on `is_vm` or
+    # `container_uses_inspect()`, so a workload that GAINED an egress trigger
+    # had no PKI patterns registered at its enable and gets none from a
+    # regeneration -- `recreate` never called this at all.
+    #
+    # The consequence is the same silent one P1-10 shipped and fixed at enable:
+    # /var/lib/workloads/<name>/state/ca stays on the blanket container_file_t,
+    # wlinspect_t has read on wlinspect_ca_t/wlinspect_leaf_t and never on that
+    # type, and the listener's own existence check on its CA reads back False
+    # because EACCES is indistinguishable from ENOENT. It then exits with
+    # "tls = 'inspect' terminates, which needs this workload's egress CA, and
+    # <path> is not there" about a file that is right there, mode 0644, owned
+    # by the very user it runs as. Measured on hardware 2026-09-05: rung 3 was
+    # unreachable by `recreate` on a container under enforcing.
+    apply_vm_fcontext(config, "enable")
+
+    # RE-RUN THE SETUP UNIT, or a workload that GAINED something /var-side is
+    # regenerated into units whose prerequisites do not exist.
+    #
+    # workload-<name>-setup.service is a oneshot with RemainAfterExit=yes, so
+    # after the first enable it stays `active` forever and neither the
+    # daemon-reload above nor the restart below re-runs it. Everything
+    # workload-ensure-user provisions is therefore frozen at whatever the
+    # config said the FIRST time the workload was enabled -- and the config is
+    # exactly what `recreate` exists to change.
+    #
+    # Measured on hardware 2026-09-05, on the transition this project tells
+    # operators to use: a container enabled with no [network] egress key and
+    # then given `hosts` came back with its redirect armed (the workload unit's
+    # own ExecStartPre does that) and its egress CA and PKI directories never
+    # created (setup's job). The inspect service then failed 226/NAMESPACE on a
+    # ReadWritePaths= that did not exist, and since the redirect was live and
+    # nothing was listening, EVERY connection the container made to 80 or 443
+    # hung -- with no error on the workload's own unit and no message anywhere
+    # naming the cause. `restart` is not the fix and never was: it regenerates
+    # nothing at all.
+    #
+    # Restart rather than start: `start` on a unit systemd already considers
+    # active is a no-op, which is the whole bug. workload-ensure-user is
+    # idempotent by construction (it runs as every workload's ExecStartPre),
+    # so re-running it costs a few hundred milliseconds and fixes the drift.
+    # check=False: a workload whose setup unit is not loaded yet (a recreate
+    # racing a first enable) must not turn that into a failed recreate.
+    subprocess.run(
+        ["systemctl", "restart", f"workload-{config.name}-setup.service"],
         check=False, capture_output=True,
     )
     if not config.is_vm:

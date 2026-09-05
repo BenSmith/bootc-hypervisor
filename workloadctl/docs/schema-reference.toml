@@ -1883,6 +1883,25 @@ ports = ["8080:80", "8443:443"]
 #      unreachability with nothing logged saying why. Re-arm (see APPLYING A
 #      CHANGE, below) after a destination moves.
 #
+# THE IMAGE PULL IS THE WORKLOAD'S OWN TRAFFIC, and this catches people out on
+# the very first start. `podman run --pull=missing` runs in the workload
+# service's ExecStart, as the workload user, AFTER the redirect has been armed
+# -- so on a filtered workload whose image is not already in its store, the
+# pull is dialled at 443, lands on this workload's own inspector, and is
+# REFUSED, because a registry is not something you would think to put in
+# .hosts. It presents as a pull that times out or 403s, which reads as a
+# registry outage rather than as a policy decision.
+#
+# Three ways out, in the order worth trying:
+#   - pull the image before the workload is filtered (enable it with no
+#     [network] egress key, then add the keys and `workloadctl recreate`);
+#   - build the image from a Containerfile in the bundle, which is pulled and
+#     transferred by root at enable and never fetched by the workload at all;
+#   - allowlist the registry in .hosts, which works and is the widest of the
+#     three -- it grants the workload's RUNTIME traffic that destination too,
+#     and a registry is usually several names (auth, the blob CDN) rather than
+#     one.
+#
 # APPLYING A CHANGE: USE `workloadctl recreate <name>`, NOT `restart`.
 # `restart` restarts the workload's service and nothing else -- it does not
 # regenerate unit files and does not reload systemd, so a change that adds,

@@ -2238,6 +2238,104 @@ class TestCmdRecreate(unittest.TestCase):
                 transfer.assert_called_once()
                 self.assertEqual(transfer.call_args.args[1], manager)
 
+    def test_recreate_reregisters_the_fcontext_rules(self):
+        """A workload that GAINED an egress trigger has no PKI fcontext rule.
+
+        FOUND ON HARDWARE 2026-09-05. `apply_vm_fcontext` is gated on `is_vm`
+        or `container_uses_inspect()`, and `recreate` never called it — so a
+        container enabled without an egress key and then given one had nothing
+        registered for `restorecon` to relabel its CA subtree TO. It stayed on
+        the blanket container_file_t, which `wlinspect_t` has no read on, and
+        the listener's existence check on its own CA read back False because
+        EACCES is indistinguishable from ENOENT. It then exited saying the CA
+        "is not there" about a file that was there, mode 0644, owned by the
+        user it runs as.
+
+        This is the same defect P1-10 fixed at `enable`, surviving at
+        `recreate` because the call was only ever added to one of the two.
+        """
+        with _cfg(_CONTAINER_TOML, 'test-wl'):
+            with _RootBypass():
+                sub = MagicMock()
+                with patch.object(cmd_lifecycle.subprocess, 'run',
+                                  return_value=MagicMock(returncode=0)):
+                    with patch.object(cmd_lifecycle, 'get_substrate', return_value=sub):
+                        with patch.object(cmd_lifecycle, 'transfer_image'):
+                            with patch.object(cmd_lifecycle,
+                                              'apply_vm_fcontext') as fcontext:
+                                with redirect_stdout(io.StringIO()):
+                                    cmd_lifecycle.cmd_recreate(
+                                        _ns(workload="test-wl"), MagicMock())
+                fcontext.assert_called_once()
+                self.assertEqual(fcontext.call_args.args[1], "enable")
+
+    def test_recreate_reruns_the_setup_unit(self):
+        """A workload that GAINS something /var-side must have it provisioned.
+
+        FOUND ON HARDWARE 2026-09-05, on the transition the schema reference
+        tells operators to use. workload-<name>-setup.service is a oneshot with
+        RemainAfterExit=yes, so after the first enable it stays `active` and
+        neither daemon-reload nor the workload restart re-runs it: everything
+        workload-ensure-user provisions was frozen at whatever the config said
+        the FIRST time the workload was enabled, which is precisely what
+        `recreate` exists to change.
+
+        A container enabled with no [network] egress key and then given `hosts`
+        came back with its redirect armed (the workload unit's own ExecStartPre
+        does that) and its egress CA and PKI directories never created. The
+        inspect service failed 226/NAMESPACE on a ReadWritePaths= that did not
+        exist, the redirect stayed live with nothing listening, and every
+        connection the container made to 80 or 443 HUNG -- no error on the
+        workload's own unit, and nothing anywhere naming the cause.
+
+        Asserted as `restart` and not `start` on purpose: `start` on a unit
+        systemd already considers active is a no-op, which is the bug itself.
+        """
+        with _cfg(_CONTAINER_TOML, 'test-wl'):
+            with _RootBypass():
+                manager = MagicMock()
+                sub = MagicMock()
+                with patch.object(cmd_lifecycle.subprocess, 'run',
+                                  return_value=MagicMock(returncode=0)) as run_mock:
+                    with patch.object(cmd_lifecycle, 'get_substrate', return_value=sub):
+                        with patch.object(cmd_lifecycle, 'transfer_image'):
+                            with redirect_stdout(io.StringIO()):
+                                cmd_lifecycle.cmd_recreate(_ns(workload="test-wl"), manager)
+                cmds = [c.args[0] for c in run_mock.call_args_list]
+                self.assertIn(
+                    ["systemctl", "restart", "workload-test-wl-setup.service"],
+                    cmds)
+                # After the regeneration and the reload, because the setup unit
+                # it restarts is the freshly written one; and before
+                # reprovision (which is a substrate call, not a subprocess, so
+                # what is asserted here is that nothing else has run since).
+                setup = cmds.index(["systemctl", "restart",
+                                    "workload-test-wl-setup.service"])
+                reload_ = cmds.index(["systemctl", "daemon-reload"])
+                self.assertGreater(setup, reload_)
+                self.assertEqual(setup, len(cmds) - 1,
+                                 "the setup restart is the last subprocess "
+                                 "before the substrate reprovisions")
+
+    def test_recreate_reruns_the_setup_unit_for_a_vm_too(self):
+        """Same unit, same oneshot, same freeze. A VM that gains a
+        [[vm.network.credential]] block needs its broker material and its PKI
+        directories provisioned by the same step, and nothing about the failure
+        above is container-specific."""
+        with _cfg(_VM_TOML, 'test-vm'):
+            with _RootBypass():
+                with patch.object(cmd_lifecycle.subprocess, 'run',
+                                  return_value=MagicMock(returncode=0)) as run_mock:
+                    with patch.object(cmd_lifecycle, 'get_substrate',
+                                      return_value=MagicMock()):
+                        with redirect_stdout(io.StringIO()):
+                            cmd_lifecycle.cmd_recreate(_ns(workload="test-vm"),
+                                                       MagicMock())
+                cmds = [c.args[0] for c in run_mock.call_args_list]
+                self.assertIn(
+                    ["systemctl", "restart", "workload-test-vm-setup.service"],
+                    cmds)
+
     def test_recreate_skips_image_transfer_for_vm(self):
         with _cfg(_VM_TOML, 'test-vm'):
             with _RootBypass():

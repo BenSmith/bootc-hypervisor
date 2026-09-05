@@ -119,6 +119,7 @@ LAN_HOST = os.environ.get("CEG_LAN_HOST")
 LAN_HOST_IN_CONFIG = LAN_HOST or "10.99.99.1"
 
 WORKLOAD_DIR = Path("/etc/workloads.d")
+RECORD_ROOT = Path("/var/log/workloadctl/egress")
 AUDIT_LOG = Path("/var/log/audit/audit.log")
 
 # The one already-documented, deliberately-ungranted denial (see
@@ -162,6 +163,7 @@ class Arm:
 # It is built by `_toml_missing_ca_delivery` below, whose name keeps it out of
 # the gate's `def toml_for(` selector.
 ARMS = (
+    Arm(FILTERED, 1),
     Arm(FILTERED, 2),
     Arm(FILTERED, 3),
     Arm(FILTERED, 3, internal=True),
@@ -199,8 +201,27 @@ def say(msg):
 
 
 def run(argv, check=True, timeout=120, **kw):
-    p = subprocess.run(argv, capture_output=True, text=True, timeout=timeout,
-                       **kw)
+    """A timeout is a RESULT here, not an exception.
+
+    Half of what this rig measures fails by HANGING -- a missing cgroup
+    exemption, a redirect armed in front of an inspector that did not start --
+    so a TimeoutExpired propagating out of a probe aborts the run at the exact
+    moment the interesting thing happened, and the traceback replaces the
+    finding. It happened on the first hardware run of this file. A timeout now
+    comes back as rc=124 with a marker in stdout, so the assertion that was
+    being made still gets made, and it fails.
+    """
+    try:
+        p = subprocess.run(argv, capture_output=True, text=True,
+                           timeout=timeout, **kw)
+    except subprocess.TimeoutExpired as exc:
+        out = (exc.stdout or b"").decode("utf-8", "replace") \
+            if isinstance(exc.stdout, bytes) else (exc.stdout or "")
+        p = subprocess.CompletedProcess(
+            argv, 124, out + f"\n[TIMED OUT after {timeout}s]", "")
+        if check:
+            raise RuntimeError(f"{argv!r} timed out after {timeout}s")
+        return p
     if check and p.returncode != 0:
         raise RuntimeError(f"{argv!r} rc={p.returncode}\n{p.stdout}\n{p.stderr}")
     return p
@@ -741,12 +762,44 @@ def preflight():
             sys.exit(f"{WORKLOAD_DIR / name} already exists -- purge it first "
                      f"(`workloadctl disable {name} --purge`) so this rig is "
                      f"not measuring a previous run's state")
+        # The egress record outlived `disable --purge` until 2026-09-05, and a
+        # leftover one is worse than untidy in BOTH directions: `latest_for()`
+        # would match a record from a previous run, and the directory is a
+        # LogsDirectory= owned by whoever held the uid last, so systemd refuses
+        # to set it up and the inspect service fails 240/LOGS_DIRECTORY --
+        # which presents as every redirected connection hanging. Refused rather
+        # than swept, because on a host with the fix this cannot happen and its
+        # presence means something else left it.
+        stale = RECORD_ROOT / name
+        if stale.exists():
+            sys.exit(f"{stale} is left over from an earlier run. Remove it "
+                     f"(`sudo rm -rf {stale}`) -- a stale record makes this "
+                     f"rig read another run's decisions, and its ownership "
+                     f"stops the inspector from starting at all")
 
 
 def deploy():
+    """Enable BOTH workloads at rung 1, then move the filtered one to rung 2.
+
+    Not the obvious order, and the reason is a constraint worth knowing before
+    you write a filtered container workload of your own: THE IMAGE PULL IS THE
+    WORKLOAD'S OWN TRAFFIC. `podman run --pull=missing` runs in the workload
+    service's ExecStart, as the workload uid, AFTER
+    `workload-container-filter up` has armed the redirect -- so on a filtered
+    workload whose image is not already in its store, the pull is dialled at
+    443, lands on this workload's inspector, and is refused because a registry
+    is not in `hosts`. `transfer_image` does not cover it: root's store is the
+    override channel for images the bundle BUILDS, and a third-party image is
+    deliberately left to its own pull policy.
+
+    So a rig that enabled the filtered arm directly would measure image supply
+    and report it as an egress failure. Enabling at rung 1 lets the pull happen
+    unfiltered, and the recreate to rung 2 then exercises the rung-1-to-rung-2
+    transition as a bonus -- which the ladder section otherwise skips.
+    """
     say("== deploying ==")
     write_config(OPEN, toml_for(Arm(OPEN, 1)))
-    write_config(FILTERED, toml_for(Arm(FILTERED, 2)))
+    write_config(FILTERED, toml_for(Arm(FILTERED, 1)))
     for name in (OPEN, FILTERED):
         say(f"  enabling {name} ...")
         p = cli("enable", name, timeout=900)
@@ -773,6 +826,26 @@ def deploy():
             subprocess.run(["journalctl", "-u", f"workload-{name}.service",
                             "-n", "30", "--no-pager"])
         sys.exit(f"never became reachable: {', '.join(pending)}")
+
+    # Both images are now in their own stores, so the filtered arm can be
+    # filtered without needing the registry. See this function's docstring.
+    say(f"  moving {FILTERED} to rung 2 ...")
+    write_config(FILTERED, toml_for(Arm(FILTERED, 2)))
+    p = cli("recreate", FILTERED, timeout=600)
+    if p.returncode != 0:
+        sys.exit(f"recreate {FILTERED} to rung 2 failed:\n{p.stdout}\n{p.stderr}")
+    deadline = time.time() + 180
+    while time.time() < deadline:
+        r = inside(FILTERED, "echo UP", timeout=30)
+        if r.returncode == 0 and "UP" in r.stdout:
+            say(f"  {FILTERED} back up, filtered")
+            return
+        time.sleep(5)
+    subprocess.run(["journalctl", "-u", f"workload-{FILTERED}.service",
+                    "-n", "30", "--no-pager"])
+    subprocess.run(["journalctl", "-u", f"workload-{FILTERED}-inspect.service",
+                    "-n", "20", "--no-pager"])
+    sys.exit(f"{FILTERED} did not come back after moving to rung 2")
 
 
 def cleanup():
