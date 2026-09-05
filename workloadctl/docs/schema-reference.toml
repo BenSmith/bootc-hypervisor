@@ -746,6 +746,13 @@ name = "schema-reference"
 # `paths` matches the path ALONE; the query string is not part of it, so
 # paths = ["/v1/messages"] still permits "/v1/messages?stream=true".
 #
+# CASE IS NOT UNIFORM ACROSS THE THREE FIELDS. `host` is case-insensitive (both
+# sides lowercased, a trailing root dot stripped) and `methods` is compared
+# uppercase, but `paths` is case-SENSITIVE: "/V1/messages" does not match
+# paths = ["/v1/*"]. RFC-correct, since a URI path is case-sensitive, but it is
+# the odd one out — and a server that accepts both spellings will accept one
+# this policy refuses.
+#
 # A method that is not a registered HTTP method is an ERROR, not a rule that
 # never matches — "FETCH" and "GET " are both far likelier to be typos that
 # silently deny than intents. CONNECT and PRI are refused by name: the
@@ -2047,7 +2054,10 @@ ports = ["8080:80", "8443:443"]
 #
 # Write `host` (a name, resolved on the HOST once at arm time) or `address` (a
 # literal), never both -- an entry names one destination one way. `port` is an
-# integer 1-65535. `reason` is required, like every other bypass in this schema:
+# integer 1-65535 -- ONE port, not a range, and `address` is ONE address, not a
+# CIDR. Each entry becomes one nftables element, so a span of ports or a subnet
+# is written as one entry each; there is no shorthand, and "8000-8010" is not a
+# value this key takes. `reason` is required, like every other bypass here:
 # the entry is a hole opened on purpose, and the operator who later has to
 # decide whether it is still needed is not the one who opened it.
 #
@@ -2227,6 +2237,19 @@ ports = ["8080:80", "8443:443"]
 #
 # `paths` matches the path ALONE; the query string is not part of it, so
 # paths = ["/v1/messages"] still permits "/v1/messages?stream=true".
+#
+# CASE IS NOT UNIFORM ACROSS THE THREE, and the rule is per-field rather than
+# per-entry, so it is worth stating rather than inferring:
+#   `host`    case-INSENSITIVE. Both sides are lowercased, and a trailing root
+#             dot is stripped, so "API.Example.COM." matches "api.example.com".
+#             DNS names are case-insensitive and the spelling must not become
+#             the bypass.
+#   `methods` case-INSENSITIVE. Compared uppercase, so "get" is fine.
+#   `paths`   case-SENSITIVE. "/V1/messages" does NOT match paths = ["/v1/*"].
+#             That is RFC-correct -- a URI path is case-sensitive -- but it is
+#             the odd one out here, and a server that happens to accept both
+#             spellings will accept one this policy refuses. Write the path the
+#             client actually sends.
 #
 # A method that is not a registered HTTP method is an ERROR, not a rule that
 # never matches -- "FETCH" and "GET " are both far likelier to be typos that

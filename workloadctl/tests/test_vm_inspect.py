@@ -548,6 +548,34 @@ class TestPolicyComposition(unittest.TestCase):
         self.assertTrue(vm_policy_permits(
             "api.example.com", "GET", "/anything", entries))
 
+    def test_case_sensitivity_is_per_field_and_paths_are_the_odd_one_out(self):
+        """P1-3, from reading OpenSnitch's rule engine (.reference/opensnitch).
+
+        Its `Operator` carries an explicit per-rule `Sensitive` flag, which
+        exists because operators get this wrong; ours is implicit and DIFFERS
+        BY FIELD, so the only place the rule is written down is here and in
+        docs/schema-reference.toml.
+
+          host    insensitive -- both sides lowercased, trailing root dot
+                  stripped. DNS names are case-insensitive and the spelling
+                  must not become the bypass.
+          method  insensitive -- compared uppercase.
+          path    SENSITIVE -- fnmatchcase against the raw path.
+
+        The path half is RFC-correct (a URI path is case-sensitive) and is
+        still the one that surprises: a server accepting both spellings will
+        accept a request this policy refuses. Pinned in both directions so a
+        "consistency" change that lowercased paths has to be a deliberate one.
+        """
+        entries = self._entries({"host": "api.example.com",
+                                 "methods": ["GET"], "paths": ["/v1/*"]})
+        self.assertTrue(vm_policy_permits(
+            "API.Example.COM", "get", "/v1/models", entries))
+        self.assertTrue(vm_policy_permits(
+            "api.example.com.", "GET", "/v1/models", entries))
+        self.assertFalse(vm_policy_permits(
+            "api.example.com", "GET", "/V1/models", entries))
+
     def test_an_absent_key_means_any_and_an_empty_one_would_mean_none(self):
         """None and () are different answers and the difference is §3's
         widening trap. Collapsing them makes a single-entry host with no
