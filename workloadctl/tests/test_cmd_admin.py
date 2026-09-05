@@ -2368,3 +2368,64 @@ user = "workload"
                               resolve=self._raise)
 
         self.assertFalse(self._checks(result))
+
+
+class ValidateSingleContainerInternalReachabilityTest(unittest.TestCase):
+    """P1-15/G9: the container counterpart of the class above, sourced from
+    [network].internal + container_uses_inspect(). Never exercised before --
+    proves the gate is routed, not merely present in the source."""
+
+    def _result(self, name, *, hosts_trigger=True, resolve=None):
+        self.tmp = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.enterContext(mock.patch.object(workload_lib, "WORKLOAD_CONFIG_DIR", self.tmp))
+        (self.tmp / name).mkdir()
+        net = '[[network.internal]]\nhost = "git.local"\nreason = "the forge"\n'
+        if hosts_trigger:
+            net = 'hosts = ["example.com"]\n' + net
+        (self.tmp / name / "workload.toml").write_text(f"""
+[workload]
+name = "{name}"
+
+[container]
+image = "example.com/test:latest"
+
+[network]
+{net}
+""")
+        if resolve is not None:
+            self.enterContext(mock.patch.object(
+                cmd_validate, "vm_internal_resolve", resolve))
+        config = WorkloadConfig(name)
+        manager = mock.Mock(spec=WorkloadManager)
+        manager.user_exists.return_value = True
+        manager.get_all_configs.return_value = []
+        pod = mock.Mock()
+        pod.container_status.return_value = ""
+        pod.image_id.return_value = ""
+        manager.podman.return_value = pod
+        return cmd_validate.validate_single(config, manager, json_mode=True)
+
+    @staticmethod
+    def _checks(result):
+        return [c for c in result["checks"]
+                if c["check"] == "container_internal_unresolvable"]
+
+    def _raise(self, host):
+        raise ValueError(f"[network].internal names {host!r}, which does "
+                         f"not resolve on this host")
+
+    def test_an_unresolvable_name_warns_on_a_triggered_container(self):
+        result = self._result("clitest-cint-dns", resolve=self._raise)
+
+        found = self._checks(result)
+        self.assertTrue(found, "expected a container_internal_unresolvable check")
+        self.assertEqual(found[0]["severity"], "warning")
+        self.assertIn("git.local", found[0]["message"])
+
+    def test_an_untriggered_container_is_quiet(self):
+        """No [network] trigger -> container_uses_inspect() is False -> the
+        gate this row exists to prove must not fire even with a bad entry."""
+        result = self._result("clitest-cint-untriggered", hosts_trigger=False,
+                              resolve=self._raise)
+
+        self.assertFalse(self._checks(result))

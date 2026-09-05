@@ -200,6 +200,20 @@ class DoctorReportTest(unittest.TestCase):
             self.assertIn(key, data)
         self.assertTrue(data["overall"]["healthy"])
 
+    def test_egress_block_gated_on_substrate_uses_inspect(self):
+        """P1-15/G6: the default `mock.Mock()` substrate used by every other
+        test in this class is truthy on `.uses_inspect()`, so those tests
+        would pass identically whether or not the report is actually routed
+        through the predicate. Pin both directions explicitly."""
+        with mock.patch.object(cmd_doctor, "_unit_rows", lambda config: []):
+            self.substrate.uses_inspect.return_value = False
+            _, out_off = self._run(json_mode=True)
+            self.substrate.uses_inspect.return_value = True
+            _, out_on = self._run(json_mode=True)
+        import json as _json
+        self.assertIsNone(_json.loads(out_off)["egress"])
+        self.assertIsNotNone(_json.loads(out_on)["egress"])
+
 
 class UnitRowsTest(unittest.TestCase):
     """_unit_rows against fake run-files and a mocked systemctl."""

@@ -497,6 +497,18 @@ class TestCommand(unittest.TestCase):
         self.assertEqual(rc, 1)
         self.assertIn("egress", err)
 
+    def test_an_inspected_container_reaches_the_record_read(self):
+        """P1-15/G4: the sibling test above only pins the False branch. An
+        inspected *container* (is_vm False) must not hit the same refusal --
+        the record path is name-keyed and substrate-agnostic."""
+        substrate = unittest.mock.Mock()
+        substrate.uses_inspect.return_value = True
+        with unittest.mock.patch.object(cmd_egress, "get_substrate",
+                                        return_value=substrate):
+            rc, _, err = self._run(json=True)
+        self.assertEqual(rc, 0)
+        self.assertEqual(err, "")
+
     def test_json_is_a_wrapper_so_no_records_differs_from_nothing_read(self):
         _write(self.path, [_rec()])
         _, out, _ = self._run(json=True)

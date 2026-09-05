@@ -176,6 +176,17 @@ VM_NO_RESOLVER_TOML = VM_FILTERED_TOML.replace(
 # A VM that references *another* workload and rides the shared bridge — the
 # adversarial input for the boundary contract. The excluded set (generate/bridge/
 # dnsmasq/cross-refs) must never appear in this workload's owned files.
+CONTAINER_FILTERED_TOML = """\
+[workload]
+name = "{name}"
+
+[container]
+image = "example.com/test:latest"
+
+[network]
+hosts = ["example.com"]
+"""
+
 VM_WITH_REFS_TOML = """\
 [workload]
 name = "{name}"
@@ -395,6 +406,22 @@ class TestRunFilesMembership(unittest.TestCase):
             self.assertIn('workload-forge-inspect.socket', got)
             self.assertNotIn('workload-forge-resolve.socket', got)
             self.assertNotIn('workload-forge-resolve.service', got)
+
+    def test_a_triggered_container_emits_its_own_inspector(self):
+        """P1-15/G3: the container `else` branch's own container_inspects
+        gate (workload_lib.py, sibling of the VM block above), never
+        exercised here before -- a plain container fixture proves absence,
+        this one proves presence."""
+        with _Config(CONTAINER_FILTERED_TOML, 'web') as config:
+            got = self._emitted_rel(config)
+            self.assertIn('workload-web-inspect.socket', got)
+            self.assertIn('workload-web-inspect.service', got)
+
+    def test_an_untriggered_container_emits_no_inspector(self):
+        with _Config(SINGLE_TOML, 'app') as config:
+            got = self._emitted_rel(config)
+            self.assertNotIn('workload-app-inspect.socket', got)
+            self.assertNotIn('workload-app-inspect.service', got)
 
     def test_an_open_vm_emits_neither(self):
         with _Config(VM_TOML, 'forge') as config:

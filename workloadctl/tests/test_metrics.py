@@ -286,6 +286,33 @@ class TestMetricsDiscovery(unittest.TestCase):
         # (workload-<name>-<container>), not the nonexistent workload-<name>.
         self.assertEqual(health_targets, [("db", "workload-multi-db")])
 
+    def test_inspected_container_flag_comes_from_container_uses_inspect(self):
+        """P1-15/G11: get_enabled_workloads()'s uses_inspect ternary calls
+        container_uses_inspect() for a non-VM workload -- pin both a
+        triggered and an untriggered container so collect_inspect()'s
+        upstream gate is provably wired, not accidentally always-False."""
+        write_config(self.config_dir, "filtered", """\
+            [workload]
+            name = "filtered"
+
+            [container]
+            image = "alpine:latest"
+
+            [network]
+            hosts = ["example.com"]
+        """)
+        write_config(self.config_dir, "plain", """\
+            [workload]
+            name = "plain"
+
+            [container]
+            image = "alpine:latest"
+        """)
+        workloads = {name: uses_inspect for name, _health, _is_vm, uses_inspect
+                     in _exporter_get_enabled_workloads(self.config_dir)}
+        self.assertTrue(workloads["filtered"])
+        self.assertFalse(workloads["plain"])
+
     def test_multi_container_no_health(self):
         """[[containers]] with no health checks reports has_health=False."""
         write_config(self.config_dir, "nohc", """\
