@@ -33,7 +33,7 @@ import tomllib
 from pathlib import Path
 
 from podman import Podman
-from workload_lib import ENABLED_MARKER_NAME, iter_workloads, normalize_containers, workload_container_name, workload_podman_container_name, workload_root_dir, workload_service_name, workload_username
+from workload_lib import ENABLED_MARKER_NAME, container_uses_inspect, iter_workloads, normalize_containers, workload_container_name, workload_podman_container_name, workload_root_dir, workload_service_name, workload_username
 from vm_metrics import find_vm_cgroup, get_vm_qmp_metrics, systemd_show
 from vm import vm_uses_inspect
 from vm_inspect_figures import (
@@ -136,8 +136,14 @@ def get_enabled_workloads():
             # The alternative — deciding from the presence of the runtime
             # directory — cannot tell a filtered VM that has not started this
             # boot from an unfiltered one, and those two owe opposite output:
-            # zeros for the first, nothing at all for the second.
-            uses_inspect = vm_uses_inspect(config)
+            # zeros for the first, nothing at all for the second. G11 in the
+            # container egress-parity build spec: this function reads raw
+            # TOML and can't build a WorkloadConfig/Substrate, so it calls
+            # each substrate's pure predicate directly rather than through
+            # get_substrate().
+            uses_inspect = (
+                vm_uses_inspect(config) if is_vm else container_uses_inspect(config)
+            )
             is_multi = "containers" in config
             health_targets = []
             if not is_vm:

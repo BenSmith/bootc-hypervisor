@@ -126,6 +126,13 @@ def pcap_vantages(config) -> list[Vantage]:
         # asked for. Saying "as it leaves this machine" there is not a rounding
         # error -- it is the one place an operator is told what the vantage
         # means, and nothing else fails when it is wrong.
+        # G10 in the container egress-parity build spec: VM-only by
+        # construction -- this whole branch is inside `if config.is_vm:`.
+        # The container vantage prose below (mode == "host"/"none"/pasta)
+        # doesn't yet distinguish an inspected container from an
+        # unfiltered one; that needs its own redirected-vantage wording
+        # once the container proxy exists (P1-7..P1-9), not a predicate
+        # swap here.
         inspected = vm_uses_inspect(config.config)
         return [
             Vantage(

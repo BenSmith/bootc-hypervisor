@@ -935,6 +935,10 @@ def workload_run_files(config) -> list[WorkloadRunFile]:
         # unit owns the arming — it binds its ListenStream= before the service
         # ever runs — and the service owns the process and its cgroup
         # exemptions.
+        # G3 in the container egress-parity build spec: VM-only by
+        # construction -- this whole block is inside `if config.is_vm:`.
+        # The container `else` branch below has no inspect run-files yet;
+        # they land with the generator/helper wiring (P1-7..P1-9).
         uses_inspect = vm_uses_inspect(config.config)
         files.append(WorkloadRunFile(
             run / f"workload-{name}-inspect.socket", "unit", "inspect-socket",
@@ -1474,6 +1478,33 @@ def container_allow_entries(net: dict) -> list[ContainerAllowEntry]:
         reason = reason.strip() if isinstance(reason, str) and reason.strip() else None
         entries.append(ContainerAllowEntry(host=host, address=address, port=port, reason=reason))
     return entries
+
+
+def container_uses_inspect(config: dict) -> bool:
+    """Whether this workload's egress is redirected into an inspector.
+
+    Mirrors ``vm_uses_inspect()`` (lib/vm.py) for the container substrate: the
+    single source of the predicate (D2 in the container egress-parity build
+    spec). ``ContainerSubstrate.uses_inspect()`` delegates here rather than
+    restating the logic, and ``get_enabled_workloads()``
+    (libexec/workload-exporter) calls it directly on the raw parsed TOML --
+    it reads config off disk and cannot build a WorkloadConfig/Substrate.
+    """
+    net = config.get("network", {})
+    if not isinstance(net, dict):
+        return False
+    if net.get("mode") == "host":
+        # Host-mode shares the host netns entirely, so uid would be the ONLY
+        # thing separating this workload's traffic from the host's own --
+        # whether the redirect and `meta skuid` still isolate it there is an
+        # open spike (P0-1 in the build spec), not yet confirmed on hardware.
+        # Never claim inspection this cannot yet prove it provides.
+        return False
+    # Any one of the three opt-in triggers, not policy alone: `hosts` and
+    # `allow` are each triggers on their own (a hosts-only workload gets a
+    # spliced proxy with no policy to speak of).
+    return bool(container_allowed_hosts(net) or container_policy_entries(net)
+                or container_allow_entries(net))
 
 
 class ContainerHostReasonEntry(NamedTuple):

@@ -1529,6 +1529,15 @@ def vm_inspect_check(config, *, elements4=PROBE, elements6=PROBE,
     Observations are injectable (PROBE sentinel) so the verdict logic is
     testable without a live host.
     """
+    # G7 in the container egress-parity build spec: VM-only for now, not
+    # just the predicate. Everything below checks a VM-shaped surface --
+    # workload-<name>-inspect.socket and the shared nft proxy maps -- that
+    # doesn't exist for a container until the generator/helper wiring lands
+    # (P1-7..P1-9). Routing the gate alone would make this run for an
+    # inspected container and report "nft proxy table absent, traffic
+    # reaching directly", which is true today but for the wrong reason
+    # (nothing built yet, not something broken) and would need its own
+    # container-shaped checks and prose to be worth showing.
     if not vm_uses_inspect(config.config):
         return None
     try:

@@ -1665,6 +1665,11 @@ def build_cloud_init_iso(pw, config: dict, name: str, config_path: Path | None =
         # rung 3 mints the CA, default mode writes no bundle either, and a
         # contract that refused custom seeds for omitting a file the built-in
         # seed also omits would be enforcing a rule against one path only.
+        # G14 in the container egress-parity build spec: VM-only by
+        # construction -- this whole function (build_cloud_init_iso) only
+        # runs for a VM. The container analogue is `ca_delivery`, and it
+        # ASSERTS rather than verifies (R9); do not overclaim its
+        # replacement by trying to fold it into this contract.
         if (VM_CA_BUNDLE_AVAILABLE and vm_uses_inspect(config)
                 and "ca" not in seed_provides
                 and VM_CA_BUNDLE_PATH not in live):
@@ -1792,6 +1797,11 @@ def build_cloud_init_iso(pw, config: dict, name: str, config_path: Path | None =
             # not gating is a PEM in the seed of a workload not currently
             # presenting anything under it, and that key is per-workload and
             # trusted by exactly one guest.
+            # G13 in the container egress-parity build spec: VM-only by
+            # construction, same as G14 above -- build_cloud_init_iso only
+            # runs for a VM. The container equivalent is env injection into
+            # the unit at ExecStartPre/generator time (G15), not a
+            # cloud-init argument.
             ca_cert=_read_vm_egress_ca(name) if vm_uses_inspect(config) else "",
         )
 
@@ -2091,6 +2101,11 @@ def _ensure_user(name: str) -> int:
         # carries it, so it must exist before the ISO is built. Filtered VMs
         # only -- an `egress = "open"` workload has no inspector to present
         # anything, so a CA would be a key with no purpose.
+        #
+        # G12 in the container egress-parity build spec: VM-only by
+        # construction -- this is inside `if kind == "vm":`. Per-workload
+        # egress CA generation for containers is P1-10, in the container
+        # branch below this one.
         if vm_uses_inspect(config):
             try:
                 generate_vm_egress_ca(pw, name)

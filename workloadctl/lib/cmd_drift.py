@@ -189,6 +189,12 @@ def _rendered_policy(name: str) -> str:
         # silently omitting the workload would make "No drift detected" a false
         # all-clear for the one workload most likely to have drifted.
         raise RuntimeError(f"could not read {path}: {e}") from None
+    # G8 in the container egress-parity build spec: VM-only for now, not
+    # just the predicate. vm_inspect_policy_text() reads [vm.network] and
+    # defaults `tls` to VM_TLS_DEFAULT, which is wrong for a container (no
+    # policy => "splice", not "inspect" -- §3), same reason cmd_rules.py's
+    # G5 stays VM-only. Revisit once the container document renderer exists
+    # (Phase 3).
     if not vm_uses_inspect(config):
         return ""
     return vm_inspect_policy_text(config.get("vm", {}).get("network", {}) or {})

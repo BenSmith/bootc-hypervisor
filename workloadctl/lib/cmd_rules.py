@@ -427,11 +427,19 @@ def cmd_rules(args, manager):
     workload = str(args.workload)
     config = load_config_or_exit(workload, json_mode=json_mode)
 
+    # G5 in the container egress-parity build spec: VM-only for now, not just
+    # the predicate. load_document()/vm_inspect_policy() render off
+    # [vm.network] and default `tls` to VM_TLS_DEFAULT, which is wrong for a
+    # container (no policy => "splice", not "inspect" -- §3). Routing the
+    # gate alone would report a wrong effective tls for an inspected
+    # container. Revisit once the container document renderer exists
+    # (Phase 3).
     if not vm_uses_inspect(config.config):
         cli_log.error(
             f"{workload} has no inspected egress, so there is no policy "
-            "document. Egress filtering is [vm.network].egress = \"filtered\" "
-            "on a VM workload without a bridge.")
+            "document. Egress filtering is a [network] trigger on a "
+            "container, or [vm.network].egress = \"filtered\" on a VM "
+            "without a bridge.")
         return 1
 
     try:

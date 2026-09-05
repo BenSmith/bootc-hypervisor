@@ -1966,6 +1966,12 @@ def vm_ca_env(config: dict) -> dict[str, str]:
     who switches egress mode on a live workload gets a guest whose environment
     still describes the previous mode.
     """
+    # G15 in the container egress-parity build spec: VM-only by
+    # construction -- vm_ca_env() is a cloud-init guest-env block. The
+    # container equivalent is env injection directly into the unit (not a
+    # cloud-init seed), built alongside the container's own CA generation
+    # (P1-10). These five vars REPLACE the trust store (VM_RESERVED_GUEST_ENV,
+    # V10), so that container path must not ship before the CA exists.
     if not vm_uses_inspect(config) or not VM_CA_BUNDLE_AVAILABLE:
         return {}
     return {var: VM_CA_BUNDLE_PATH for var in VM_CA_ENV_VARS}
@@ -2216,6 +2222,12 @@ def vm_uses_credentials(config: dict) -> bool:
     credential therefore has its instance unlinked rather than left behind
     holding material nothing selects.
     """
+    # G16 in the container egress-parity build spec: VM-only for now.
+    # Container credential brokering is Phase 2 (P2-1..P2-4) -- resolved as
+    # a comment here per that phase's own instruction, so this predicate is
+    # not silently extended ahead of the broker wiring it would gate. The
+    # run-file `present=` half matters just as much as the emission half
+    # (G3-shaped leak if missed) when Phase 2 lands.
     if not vm_uses_inspect(config):
         return False
     net = (config.get("vm", {}) or {}).get("network", {}) or {}
@@ -3114,6 +3126,11 @@ def vm_uses_resolve(config: dict) -> bool:
     told about it in the same breath, so a disagreement here is a guest pointed
     at a port with nothing behind it.
     """
+    # G17 in the container egress-parity build spec: resolved VM-only (D7).
+    # A container resolves through the host/podman resolver, not a
+    # per-workload nameserver, so there is no container analogue to extend
+    # this to. D7 names two properties lost without one; closing this row
+    # by comment alone is not enough -- see P1-13's disclosures.
     if not vm_uses_inspect(config):
         return False
     net = (config.get("vm", {}) or {}).get("network", {}) or {}

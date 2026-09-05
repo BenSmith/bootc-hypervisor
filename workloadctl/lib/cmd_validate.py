@@ -14,6 +14,8 @@ import sys
 from typing import NoReturn
 
 from workload_lib import (
+    container_internal_entries,
+    container_uses_inspect,
     CREDSTORE_DIR,
     expand_volume_path,
     GENERATOR_OWNED_DIRECTIVES,
@@ -635,6 +637,44 @@ def validate_single(config: WorkloadConfig, manager: WorkloadManager, json_mode=
                            f"VM host, or remove the entry (it authorises "
                            f"nothing on its own; the guest simply loses reach "
                            f"to that host).",
+                })
+                warnings += 1
+
+    # Container counterpart (G9 in the container egress-parity build spec):
+    # same validate-time resolve, sourced from [network].internal now that
+    # P1-1b has ported the array. The container inspector does not exist yet
+    # (P1-7..P1-11), so an unresolvable name has no start-time consequence
+    # today -- this only warns what will happen once it does, same as the VM
+    # side warns ahead of its own start-time failure.
+    if not config.config.get("vm") and container_uses_inspect(config.config):
+        net = config.config.get("network", {}) or {}
+        for entry in container_internal_entries(net):
+            problem = None
+            try:
+                addresses = _resolve_within(entry.host, INTERNAL_RESOLVE_TIMEOUT)
+            except ValueError as e:
+                problem = str(e)
+            else:
+                for addr in addresses:
+                    reserved = vm_internal_reserved_reason(addr)
+                    if reserved:
+                        problem = f"[network.internal]: {reserved}"
+                        break
+            if problem:
+                checks.append({
+                    "check": "container_internal_unresolvable",
+                    "passed": False,
+                    "severity": "warning",
+                    "message": f"[[network.internal]] names {entry.host!r}, "
+                               f"which cannot be resolved to a private "
+                               f"address on this host right now: {problem}. "
+                               f"It will not be exempted from the internal-"
+                               f"drop once egress inspection arms for this "
+                               f"workload.",
+                    "fix": f"Make {entry.host} resolve to a private address "
+                           f"on the container host, or remove the entry (it "
+                           f"authorises nothing on its own; the workload "
+                           f"simply loses reach to that host).",
                 })
                 warnings += 1
 

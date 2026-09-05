@@ -17,7 +17,7 @@ from cmd_diagnose import collect_diagnose_checks
 from cmd_drift import collect_drift, collect_policy_drift
 from cmd_validate import report_config_load_failure
 from substrate import get_substrate
-from vm import vm_inspect_digest_short, vm_uses_inspect
+from vm import vm_inspect_digest_short
 from vm_inspect_figures import (
     drop_reasons,
     figure_lines,
@@ -203,7 +203,12 @@ def cmd_doctor(args, manager):
     # definition of "is the inspector healthy" that agrees with the first only
     # until someone edits one of them.
     egress = None
-    if vm_uses_inspect(config.config):
+    # Routed through the substrate predicate (G6 in the container
+    # egress-parity build spec) rather than vm_uses_inspect() directly: the
+    # figures below are read purely off the on-disk status JSON keyed by
+    # workload name (vm_inspect_figures.read_inspect_status/read_resolve_status),
+    # which carries nothing VM-specific, so this block already generalises.
+    if get_substrate(config, manager).uses_inspect():
         status = read_inspect_status(name)
         resolve = read_resolve_status(name)
         egress = {

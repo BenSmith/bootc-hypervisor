@@ -489,8 +489,10 @@ class TestCommand(unittest.TestCase):
         return rc, out.getvalue(), err.getvalue()
 
     def test_an_uninspected_workload_is_a_sentence_not_an_empty_report(self):
-        with unittest.mock.patch.object(cmd_egress, "vm_uses_inspect",
-                                        return_value=False):
+        substrate = unittest.mock.Mock()
+        substrate.uses_inspect.return_value = False
+        with unittest.mock.patch.object(cmd_egress, "get_substrate",
+                                        return_value=substrate):
             rc, _, err = self._run()
         self.assertEqual(rc, 1)
         self.assertIn("egress", err)

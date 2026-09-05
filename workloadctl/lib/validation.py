@@ -24,6 +24,7 @@ from workload_lib import (
     infer_workload_kind,
     infer_workload_mode,
     normalize_containers,
+    validate_container_network,
 )
 from vm import validate_vm_config, vm_network_warnings
 
@@ -207,6 +208,12 @@ def validate_workload_config(config: dict) -> list[str]:
         infer_workload_mode(config)
     except ValueError as e:
         errors.append(str(e))
+
+    # Mirrors validate_vm_network(vm.get("network", {})) below the VM branch
+    # above (vm.py:4934) -- the container schema's own hard-error checks
+    # (V1-V18 in the container egress-parity build spec), not yet run
+    # anywhere until this call.
+    errors.extend(validate_container_network(config.get("network", {})))
 
     # Keep the shape (is_multi = "containers" in config) and the topology
     # (mode) in lockstep so `is_multi <=> mode != "single"` holds. The generator

@@ -175,6 +175,12 @@ def inspection_applies(net: dict) -> bool:
     also gates the generator's inspect socket/service units: re-stating the
     not-bridged-and-filtered rule here would let the helper and the generator
     disagree about which workloads have an inspector at all.
+
+    G18 in the container egress-parity build spec: this script (and this
+    function) is VM-only by construction -- the container arming helper is
+    a separate script (P1-8), not yet built. When it lands it must delegate
+    the same way, to the same source (container_uses_inspect), for the same
+    reason this one does.
     """
     return vm_uses_inspect({"vm": {"network": net}})
 

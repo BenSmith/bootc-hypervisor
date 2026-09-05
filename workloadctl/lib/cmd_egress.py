@@ -37,6 +37,7 @@ from pathlib import Path
 
 import cli_log
 from cmd_validate import load_config_or_exit
+from substrate import get_substrate
 from vm import (
     VM_INSPECT_LOG_ID_FIELD,
     VM_INSPECT_LOG_REQ_FIELD,
@@ -47,7 +48,6 @@ from vm import (
     vm_hostname_match,
     vm_inspect_record_dir,
     vm_inspect_record_path,
-    vm_uses_inspect,
 )
 
 LINES_DEFAULT = 50
@@ -552,11 +552,16 @@ def cmd_egress(args, manager):
     workload, _, _container = str(args.workload).partition("/")
     config = load_config_or_exit(workload, json_mode=json_mode)
 
-    if not vm_uses_inspect(config.config):
+    # Routed through the substrate predicate (G4 in the container
+    # egress-parity build spec): everything below keys purely on workload
+    # name (vm_inspect_record_dir/_path), nothing VM-specific, so this
+    # already generalises to a container once one is actually inspected.
+    if not get_substrate(config, manager).uses_inspect():
         cli_log.error(
             f"{workload} has no inspected egress, so there is no request "
-            "record. Egress filtering is [vm.network].egress = \"filtered\" "
-            "on a VM workload without a bridge.")
+            "record. Egress filtering is a [network] trigger on a "
+            "container, or [vm.network].egress = \"filtered\" on a VM "
+            "without a bridge.")
         return 1
 
     directory = vm_inspect_record_dir(workload)

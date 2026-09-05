@@ -395,16 +395,16 @@ class DoctorSectionTest(unittest.TestCase):
         self.enterContext(mock.patch.object(
             cmd_doctor, "collect_diagnose_checks",
             lambda config, manager: self.CHECKS))
-        substrate = mock.Mock()
-        substrate.liveness.return_value = dict(self.LIVENESS)
+        self.substrate = mock.Mock()
+        self.substrate.liveness.return_value = dict(self.LIVENESS)
         self.enterContext(mock.patch.object(
-            cmd_doctor, "get_substrate", lambda config, manager: substrate))
+            cmd_doctor, "get_substrate",
+            lambda config, manager: self.substrate))
 
     def _run(self, *, filtered=True, status=FULL_STATUS, json_mode=False):
+        self.substrate.uses_inspect.return_value = filtered
         out = io.StringIO()
-        with mock.patch.object(cmd_doctor, "vm_uses_inspect",
-                               return_value=filtered), \
-             mock.patch.object(cmd_doctor, "read_inspect_status",
+        with mock.patch.object(cmd_doctor, "read_inspect_status",
                                return_value=status), \
              mock.patch.object(cmd_doctor, "read_resolve_status",
                                return_value=None):
