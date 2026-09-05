@@ -95,9 +95,9 @@ EXPECTED = {
                "hmspk1k": "subrange"},
     "pasta":  {"hmspk": "exact-uid", "hmspk0": "exact-uid",
                "hmspk1k": "exact-uid"},
-    # Bridge gives each container its own netns and re-originates the same way
-    # pasta does; expected identical, never measured. Run it before believing
-    # this row.
+    # Bridge gives each container its OWN netns, unlike pod mode -- but it
+    # re-originates the same way pasta does, so the in-container uid is erased
+    # identically. Measured 2026-09-05, not inferred from the pasta row.
     "bridge": {"hmspk": "exact-uid", "hmspk0": "exact-uid",
                "hmspk1k": "exact-uid"},
 }
