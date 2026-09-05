@@ -33,6 +33,10 @@ from workload_lib import (
     ContainerAllowEntry, container_allow_entries,
     ContainerHostReasonEntry, container_internal_entries, container_splice_entries,
     container_effective_tls_mode, validate_container_network,
+    container_allow_resolve, container_allow_resolved,
+    container_filter_elements, container_filter_commands,
+    container_internal_resolve, container_inspect_policy,
+    container_inspect_policy_text,
 )
 from vm import parse_memory_mib, vm_mac_address, vm_mac_collisions
 from validation import (
@@ -2447,6 +2451,92 @@ class TestValidateContainerNetwork(unittest.TestCase):
                            "auth_format": "Bearer {secret}"}],
         }
         self.assertEqual(validate_container_network(net), [])
+
+
+class TestContainerFilterElements(unittest.TestCase):
+    """P1-7/P1-8: the nft element/command builders container_uses_inspect's
+    triggers feed into workload-container-filter."""
+
+    def test_address_entry_needs_no_resolution(self):
+        entry = ContainerAllowEntry(host=None, address="10.0.0.5", port=8080,
+                                    reason="db")
+        self.assertEqual(container_allow_resolve(entry),
+                         [__import__("ipaddress").ip_address("10.0.0.5")])
+
+    def test_host_entry_resolves_and_raises_on_failure(self):
+        entry = ContainerAllowEntry(
+            host="definitely-not-a-real-host.invalid", address=None, port=443,
+            reason="x")
+        with self.assertRaises(ValueError) as cm:
+            container_allow_resolve(entry)
+        self.assertIn("does not resolve", str(cm.exception))
+
+    def test_filter_elements_splits_by_family_and_carries_uid(self):
+        allow = [ContainerAllowEntry(host=None, address="10.0.0.5", port=8080,
+                                     reason="db")]
+        elements = container_filter_elements(1234, allow)
+        self.assertEqual(elements["wl_filtered"], ["1234"])
+        self.assertEqual(elements["wl_allow4"], ["1234 . 10.0.0.5 . 8080"])
+        self.assertNotIn("wl_allow6", elements)
+
+    def test_filter_elements_refuses_listener_range(self):
+        # 198.18.0.0/16 is VM_INSPECT_NETWORK -- another workload's listener
+        # plane, never a legitimate allow destination (mirrors
+        # vm_allow_reserved_reason's VM-side refusal).
+        allow = [ContainerAllowEntry(host=None, address="198.18.1.5", port=443,
+                                     reason="oops")]
+        with self.assertRaises(ValueError) as cm:
+            container_filter_elements(1234, allow)
+        self.assertIn("listener range", str(cm.exception))
+
+    def test_filter_commands_are_add_or_delete(self):
+        allow = [ContainerAllowEntry(host=None, address="10.0.0.5", port=8080,
+                                     reason="db")]
+        add_cmds = container_filter_commands(1234, allow, "add")
+        self.assertTrue(any("add" in c for c in add_cmds[0]))
+        with self.assertRaises(ValueError):
+            container_filter_commands(1234, allow, "bogus")
+
+    def test_internal_resolve_raises_naming_host(self):
+        with self.assertRaises(ValueError) as cm:
+            container_internal_resolve("definitely-not-a-real-host.invalid")
+        self.assertIn("does not resolve", str(cm.exception))
+
+
+class TestContainerInspectPolicy(unittest.TestCase):
+    """P1-9: the JSON document workload-container-inspect writes for the
+    (substrate-generic) listener to read -- same shape vm_inspect_policy
+    produces, per D6."""
+
+    def test_shape_matches_listener_expectations(self):
+        net = {
+            "hosts": ["*.pypi.org"],
+            "internal": [{"host": "db.lan", "reason": "internal service"}],
+            "splice": [{"host": "pinned.example.com", "reason": "mTLS"}],
+            "policy": [{"host": "api.example.com", "methods": ["POST"],
+                       "credential": "anthropic"}],
+        }
+        doc = container_inspect_policy(net)
+        self.assertEqual(doc["tls"], "inspect")  # a policy entry is present
+        self.assertEqual(doc["hosts"], ["*.pypi.org"])
+        self.assertEqual(doc["internal"], ["db.lan"])
+        self.assertEqual(doc["splice"], ["pinned.example.com"])
+        self.assertEqual(doc["http2"], [])
+        self.assertEqual(doc["policy"], [
+            {"host": "api.example.com", "methods": ["POST"], "paths": None,
+             "credential": "anthropic"},
+        ])
+
+    def test_no_policy_entries_is_splice_mode(self):
+        doc = container_inspect_policy({"hosts": ["*.pypi.org"]})
+        self.assertEqual(doc["tls"], "splice")
+
+    def test_text_is_deterministic_and_sorted(self):
+        net = {"hosts": ["b.com", "a.com"]}
+        first = container_inspect_policy_text(net)
+        second = container_inspect_policy_text(net)
+        self.assertEqual(first, second)
+        self.assertTrue(first.endswith("\n"))
 
 
 if __name__ == "__main__":

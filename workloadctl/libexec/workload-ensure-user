@@ -35,6 +35,7 @@ from workload_lib import (
     workload_state_dir, workload_data_dir, workload_root_dir, subid_lock,
     workload_env_dir,
     append_subid_entries, replace_file_atomically, subgid_file, subuid_file,
+    container_uses_inspect,
 )
 from vm import (VM_SOCKET_DIR, VM_DEFAULT_GUEST_USER, VM_GUEST_HOME_BASE,
                 VM_GUEST_UID, VM_CA_BUNDLE_AVAILABLE, VM_CA_BUNDLE_PATH,
@@ -2155,6 +2156,26 @@ def _ensure_user(name: str) -> int:
         except Exception as e:
             log(f"  ERROR: Failed to configure subuid/subgid for {username}: {e}")
             return 1
+
+        # The egress CA (P1-10, G12's container half). generate_vm_egress_ca
+        # and provision_vm_pki_dirs are already name-keyed only -- nothing
+        # inside either reads [vm.network] -- so they are reused verbatim
+        # rather than duplicated. Must land before the container's own
+        # ExecStartPre (podman run, with the --volume the generator's
+        # _container_ca_delivery_args added) or that mount has nothing to
+        # bind: setup.service's ExecStartPre order is what enforces "before".
+        if container_uses_inspect(config):
+            try:
+                generate_vm_egress_ca(pw, name)
+            except Exception as e:
+                log(f"  ERROR: Failed to generate egress CA for {name}: {e}")
+                return 1
+            try:
+                provision_vm_pki_dirs(pw, name)
+            except Exception as e:
+                log(f"  ERROR: Failed to prepare the egress PKI directories "
+                    f"for {name}: {e}")
+                return 1
 
         try:
             setup_volume_directories(pw, config)

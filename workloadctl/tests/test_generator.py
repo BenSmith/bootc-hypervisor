@@ -3156,5 +3156,145 @@ class TestEnqueueStarts(unittest.TestCase):
         self.assertEqual(seen, [])
 
 
+class TestGeneratorContainerEgress(unittest.TestCase):
+    """P1-7/P1-9/P1-10/P1-15: element-lifecycle wiring, inspect units, and CA
+    delivery for a triggered container workload -- and R10's byte-identical
+    guarantee for one with no [network] trigger at all."""
+
+    def setUp(self):
+        self.config_dir = tempfile.mkdtemp()
+        self.services_dir = tempfile.mkdtemp()
+        self.sysusers_dir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        import shutil
+        for d in (self.config_dir, self.services_dir, self.sysusers_dir):
+            shutil.rmtree(d)
+
+    def run_gen(self):
+        return run_generator(self.config_dir, self.services_dir, self.sysusers_dir)
+
+    def read(self, relpath):
+        return (Path(self.services_dir) / relpath).read_text()
+
+    def test_untriggered_single_container_has_no_egress_lines(self):
+        """P1-15: this is the gate this test must catch reverting. A
+        workload with no [network] table gets no ExecStartPre/ExecStopPost
+        for workload-container-filter and no inspect units at all (R10)."""
+        write_config(self.config_dir, "plain", """\
+            [workload]
+            name = "plain"
+
+            [container]
+            image = "docker.io/library/nginx:latest"
+            """)
+        result = self.run_gen()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        service = self.read("workload-plain.service")
+        self.assertNotIn("workload-container-filter", service)
+        self.assertFalse(
+            (Path(self.services_dir) / "workload-plain-inspect.socket").exists())
+        self.assertFalse(
+            (Path(self.services_dir) / "workload-plain-inspect.service").exists())
+
+    def test_hosts_trigger_arms_filter_and_inspect_units_single_mode(self):
+        write_config(self.config_dir, "web", """\
+            [workload]
+            name = "web"
+
+            [container]
+            image = "docker.io/library/nginx:latest"
+
+            [network]
+            hosts = ["*.example.com"]
+            """)
+        result = self.run_gen()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        service = self.read("workload-web.service")
+        self.assertIn(
+            'ExecStartPre=+/usr/libexec/workloadctl/workload-container-filter '
+            'up "web"', service)
+        self.assertIn(
+            'ExecStopPost=-+/usr/libexec/workloadctl/workload-container-filter '
+            'down "web"', service)
+        socket_unit = self.read("workload-web-inspect.socket")
+        self.assertIn("workload-container-inspect up", socket_unit)
+        inspect_service = self.read("workload-web-inspect.service")
+        self.assertIn("workload-vm-inspect-listener", inspect_service)
+
+    def test_pod_mode_arms_filter_on_umbrella_not_members(self):
+        write_config(self.config_dir, "stack", """\
+            [workload]
+            name = "stack"
+            mode = "pod"
+
+            [network]
+            hosts = ["*.example.com"]
+
+            [[containers]]
+            name = "web"
+            [containers.container]
+            image = "docker.io/library/nginx:latest"
+
+            [[containers]]
+            name = "db"
+            [containers.container]
+            image = "docker.io/library/postgres:latest"
+            """)
+        result = self.run_gen()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        umbrella = self.read("workload-stack.service")
+        self.assertIn('workload-container-filter up "stack"', umbrella)
+        member = self.read("workload-stack-web.service")
+        self.assertNotIn("workload-container-filter", member)
+        self.assertTrue(
+            (Path(self.services_dir) / "workload-stack-inspect.socket").exists())
+
+    def test_ca_delivery_env_sets_volume_and_five_env_vars(self):
+        write_config(self.config_dir, "agent", """\
+            [workload]
+            name = "agent"
+
+            [container]
+            image = "docker.io/library/alpine:latest"
+
+            [network]
+            hosts = ["api.example.com"]
+            ca_delivery = "env"
+
+            [[network.policy]]
+            host = "api.example.com"
+            """)
+        result = self.run_gen()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        service = self.read("workload-agent.service")
+        self.assertIn("egress-ca.crt", service)
+        for var in ("SSL_CERT_FILE", "NODE_EXTRA_CA_CERTS",
+                    "REQUESTS_CA_BUNDLE", "GIT_SSL_CAINFO", "PIP_CERT"):
+            self.assertIn(f"--env {var}=", service)
+
+    def test_ca_delivery_mount_uses_operator_path_with_no_env_vars(self):
+        write_config(self.config_dir, "agent2", """\
+            [workload]
+            name = "agent2"
+
+            [container]
+            image = "docker.io/library/alpine:latest"
+
+            [network]
+            hosts = ["api.example.com"]
+            ca_delivery = "mount"
+            ca_mount_path = "/etc/ssl/certs/workload-ca.crt"
+
+            [[network.policy]]
+            host = "api.example.com"
+            """)
+        result = self.run_gen()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        service = self.read("workload-agent2.service")
+        self.assertIn("/etc/ssl/certs/workload-ca.crt", service)
+        self.assertNotIn("SSL_CERT_FILE", service)
+
+
 if __name__ == "__main__":
     unittest.main()

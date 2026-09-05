@@ -936,9 +936,9 @@ def workload_run_files(config) -> list[WorkloadRunFile]:
         # ever runs — and the service owns the process and its cgroup
         # exemptions.
         # G3 in the container egress-parity build spec: VM-only by
-        # construction -- this whole block is inside `if config.is_vm:`.
-        # The container `else` branch below has no inspect run-files yet;
-        # they land with the generator/helper wiring (P1-7..P1-9).
+        # construction -- this whole block is inside `if config.is_vm:`. The
+        # container `else` branch below carries its own uses_inspect,
+        # sourced from container_uses_inspect (P1-7..P1-9).
         uses_inspect = vm_uses_inspect(config.config)
         files.append(WorkloadRunFile(
             run / f"workload-{name}-inspect.socket", "unit", "inspect-socket",
@@ -1003,6 +1003,22 @@ def workload_run_files(config) -> list[WorkloadRunFile]:
                 files.append(WorkloadRunFile(
                     run / f"workload-{name}-{cname}.service", "unit", "container", True
                 ))
+        # Container counterpart of the VM inspect-socket/service pair above
+        # (P1-9). Superset semantics, same as -pod/-net: always listed so the
+        # removable view unlinks stale units, emitted only when
+        # container_uses_inspect() fires. No container broker/resolve
+        # run-files yet -- the credential broker is Phase 2 (G16 notes the
+        # present= leak to watch for when it lands) and containers get no
+        # synthesising DNS responder at all (D7).
+        container_inspects = container_uses_inspect(config.config)
+        files.append(WorkloadRunFile(
+            run / f"workload-{name}-inspect.socket", "unit", "inspect-socket",
+            container_inspects,
+        ))
+        files.append(WorkloadRunFile(
+            run / f"workload-{name}-inspect.service", "unit", "inspect",
+            container_inspects,
+        ))
 
     # Runtime-written env tree — never produced by the generator (emitted False),
     # removed only on --purge. .secrets is over-listed per container (missing_ok).
@@ -2035,6 +2051,159 @@ def validate_container_network(net: dict) -> list[str]:
                 f"workload to rung 3 first")
 
     return errors
+
+
+# --- Container egress: nft element lifecycle (P1-7/P1-8) ---
+#
+# The low-level uid-keyed nft builders (element commands for the DNAT maps,
+# the internal-destination exemptions, the cgroup exemptions) live in
+# lib/vm.py and take nothing but a uid and already-resolved addresses -- no
+# VM-specific state -- so they are reused verbatim for containers (imported
+# directly by libexec/workload-container-filter and
+# libexec/workload-container-inspect). What differs, and what lives here, is
+# resolving and shaping the CONTAINER schema's own entry types
+# (ContainerAllowEntry keeps `host`/`address`/`port` apart, where VmAllowEntry
+# packs them into one 'addr:port' string) into the inputs those builders take.
+
+def container_allow_resolve(entry: ContainerAllowEntry) -> list:
+    """Resolve one [[network.allow]] entry to concrete addresses.
+
+    Mirrors vm_allow_resolve (lib/vm.py), adapted to ContainerAllowEntry's
+    separate `address`/`host` fields. An address entry is returned as-is; a
+    host entry is resolved here, once, at arm time. Not tolerant: an
+    unresolvable name must arm nothing, and arming nothing silently is worse
+    than failing loudly -- the workload would otherwise hang against the
+    default-deny... except containers have none (R3), so here it would simply
+    reach nothing on that destination with no message saying why.
+    """
+    import ipaddress
+    import socket
+    if entry.address is not None:
+        return [ipaddress.ip_address(entry.address)]
+    try:
+        infos = socket.getaddrinfo(entry.host, None, type=socket.SOCK_STREAM)
+    except OSError as exc:
+        raise ValueError(
+            f"[[network.allow]] names {entry.host!r}, which does not resolve "
+            f"on this host ({exc}). It is resolved once at arm time, so an "
+            f"unresolvable name arms nothing and the workload cannot reach "
+            f"it") from None
+    seen = []
+    for info in infos:
+        addr = ipaddress.ip_address(info[4][0])
+        if addr not in seen:
+            seen.append(addr)
+    return seen
+
+
+def container_allow_resolved(allow: list) -> list:
+    """[(ContainerAllowEntry, [addr...])] for every [[network.allow]] entry,
+    resolved once. Mirrors vm_allow_resolved."""
+    return [(entry, container_allow_resolve(entry)) for entry in allow]
+
+
+def container_filter_elements(uid: int, allow: list, resolved=None) -> dict:
+    """Map set name -> element expressions for one container workload.
+
+    Mirrors vm_filter_elements (lib/vm.py), but built from
+    ContainerAllowEntry rather than VmAllowEntry. Reuses the VM module's set
+    names and reserved-range check (NFT_SET_FILTERED/ALLOW4/ALLOW6,
+    vm_allow_reserved_reason): both substrates share the one filter table
+    (D3), so a container's would-be element in another workload's listener
+    range is refused by the identical rule a VM's is.
+    """
+    from vm import NFT_SET_ALLOW4, NFT_SET_ALLOW6, NFT_SET_FILTERED, vm_allow_reserved_reason
+    if resolved is None:
+        resolved = container_allow_resolved(allow)
+    elements: dict[str, list[str]] = {NFT_SET_FILTERED: [str(uid)]}
+    v4: list[str] = []
+    v6: list[str] = []
+    for entry, addresses in resolved:
+        for addr in addresses:
+            reserved = vm_allow_reserved_reason(addr)
+            if reserved:
+                where = f"{entry.host!r} resolves there -- " if entry.host else ""
+                raise ValueError(f"[network].allow: {where}{reserved}")
+            (v6 if addr.version == 6 else v4).append(
+                f"{uid} . {addr} . {entry.port}")
+    if v4:
+        elements[NFT_SET_ALLOW4] = v4
+    if v6:
+        elements[NFT_SET_ALLOW6] = v6
+    return elements
+
+
+def container_filter_commands(uid: int, allow: list, action: str, resolved=None) -> list:
+    """argv lists that arm ('add') or disarm ('delete') one container
+    workload's allowlist elements. Mirrors vm_filter_commands."""
+    from vm import NFT_BIN, NFT_TABLE
+    if action not in ("add", "delete"):
+        raise ValueError(f"action must be 'add' or 'delete', got {action!r}")
+    commands = []
+    for set_name, entries in container_filter_elements(uid, allow, resolved).items():
+        commands.append([NFT_BIN, action, "element", *NFT_TABLE.split(), set_name,
+                         "{ " + ", ".join(entries) + " }"])
+    return commands
+
+
+def container_internal_resolve(host: str) -> list:
+    """Resolve one [[network.internal]] host, or raise ValueError naming it.
+    Mirrors vm_internal_resolve. Fatal by design (see that function and
+    workload-vm-inspect's internal_failure): an exemption armed for the wrong
+    address, or not armed at all, leaves the host refused by the drop the
+    entry existed to except.
+    """
+    import ipaddress
+    import socket
+    try:
+        infos = socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)
+    except OSError as exc:
+        raise ValueError(
+            f"[[network.internal]] names {host!r}, which does not resolve on "
+            f"this host ({exc}). The exemption is armed per ADDRESS, so an "
+            f"unresolvable name arms nothing and the host stays refused by "
+            f"the internal-destination drop the entry existed to except") from None
+    seen = []
+    for info in infos:
+        addr = ipaddress.ip_address(info[4][0])
+        if addr not in seen:
+            seen.append(addr)
+    return seen
+
+
+def container_inspect_policy(net: dict) -> dict:
+    """The inspector's policy document for one container workload.
+
+    Same JSON shape as vm_inspect_policy (lib/vm.py) -- D6: the listener
+    binary (workload-vm-inspect-listener) does not change between substrates,
+    so whichever wrote the file, it reads the same keys. `http2` is always
+    empty: [[network.http2]] is deferred for containers (§5 of the build
+    spec). `tls` is the EFFECTIVE mode (container_effective_tls_mode), not
+    the literal key, since the container schema computes it per the
+    three-rung ladder rather than defaulting it the way the VM schema does.
+    """
+    return {
+        "tls": container_effective_tls_mode(net),
+        "hosts": container_allowed_hosts(net),
+        "internal": [e.host for e in container_internal_entries(net)],
+        "splice": [e.host for e in container_splice_entries(net)],
+        "http2": [],
+        "policy": [
+            {"host": e.host,
+             "methods": None if e.methods is None else list(e.methods),
+             "paths": None if e.paths is None else list(e.paths),
+             **({"credential": e.credential} if e.credential else {})}
+            for e in container_policy_entries(net)],
+    }
+
+
+def container_inspect_policy_text(net: dict) -> str:
+    """The policy document as the exact bytes that land on disk. Mirrors
+    vm_inspect_policy_text -- same formatting, so a future drift/digest
+    comparison cannot disagree with itself over which substrate rendered the
+    file."""
+    import json
+    return json.dumps(container_inspect_policy(net), indent=2, sort_keys=True) + "\n"
 
 
 # --- Per-workload SELinux identifiers ---

@@ -125,6 +125,10 @@ install -Dpm 0755 %{_sourcedir}/libexec/workload-vm-build-disk \
     %{buildroot}%{_libexecdir}/workloadctl/workload-vm-build-disk
 install -Dpm 0755 %{_sourcedir}/libexec/workload-vm-filter \
     %{buildroot}%{_libexecdir}/workloadctl/workload-vm-filter
+install -Dpm 0755 %{_sourcedir}/libexec/workload-container-filter \
+    %{buildroot}%{_libexecdir}/workloadctl/workload-container-filter
+install -Dpm 0755 %{_sourcedir}/libexec/workload-container-inspect \
+    %{buildroot}%{_libexecdir}/workloadctl/workload-container-inspect
 install -Dpm 0755 %{_sourcedir}/libexec/workload-vm-netdev \
     %{buildroot}%{_libexecdir}/workloadctl/workload-vm-netdev
 install -Dpm 0755 %{_sourcedir}/libexec/workload-vm-inspect \
@@ -507,6 +511,8 @@ fi
 %{_libexecdir}/workloadctl/workload-pcap
 %{_libexecdir}/workloadctl/workload-vm-build-disk
 %{_libexecdir}/workloadctl/workload-vm-filter
+%{_libexecdir}/workloadctl/workload-container-filter
+%{_libexecdir}/workloadctl/workload-container-inspect
 %{_libexecdir}/workloadctl/workload-vm-netdev
 %{_libexecdir}/workloadctl/workload-vm-notify
 %{_libexecdir}/workloadctl/workload-vm-inspect

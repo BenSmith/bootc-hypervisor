@@ -267,6 +267,9 @@ class TestCurrentDestructiveGolden(unittest.TestCase):
                 # deliberate superset (single mode emits neither):
                 'workload-app-pod.service',
                 'workload-app-net.service',
+                # deliberate superset (no [network] trigger, P1-9):
+                'workload-app-inspect.socket',
+                'workload-app-inspect.service',
             })
 
     def test_pod(self):
@@ -280,6 +283,9 @@ class TestCurrentDestructiveGolden(unittest.TestCase):
                 'workload-stack-net.service',
                 'workload-stack-web.service',
                 'workload-stack-db.service',
+                # deliberate superset (no [network] trigger, P1-9):
+                'workload-stack-inspect.socket',
+                'workload-stack-inspect.service',
             })
 
     def test_vm(self):
