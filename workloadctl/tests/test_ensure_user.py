@@ -2927,5 +2927,93 @@ class TestEnsureManagerSlice(unittest.TestCase):
         self.assertEqual(self._restarted(calls), [])
 
 
+class ContainerEgressCaGateTest(unittest.TestCase):
+    """G12's container half: the egress CA, the PKI directories and the
+    inspector's runtime directory are provisioned for a container workload IF
+    AND ONLY IF ``container_uses_inspect()`` fires.
+
+    This was the last §7 gate with no unit-level mutation check, deferred once
+    because ``_ensure_user()`` is a large integration surface. It is, but the
+    gate itself is three calls behind one ``if``, and the surface is only in
+    the way -- so every other step in the container branch is stubbed and the
+    three calls under test are the only real assertion. Stubbing them all also
+    means the test says nothing about whether those steps work, which is the
+    correct scope: their own tests do that.
+
+    The failure this catches is not a crash. A gate that stopped firing leaves
+    a workload whose units mount ``egress-ca.crt`` and whose inspector mints
+    leaves under a PKI directory that was never created -- so it fails at the
+    first HTTPS request, inside a container, as a certificate error. Nothing
+    upstream of that reports anything.
+    """
+
+    # Every module-level step _ensure_user() calls on the container path. Each
+    # is stubbed so the test exercises the branch and not the provisioning.
+    _STUBBED = (
+        "warn_if_stale_home", "setup_home_directory",
+        "record_deployment_provenance", "configure_subuid_subgid",
+        "setup_volume_directories", "setup_required_file_ownership",
+        "write_environment_file", "restore_selinux_labels", "enable_linger",
+        "ensure_manager_slice",
+    )
+    _GATED = ("setup_vm_socket_dir", "generate_vm_egress_ca",
+              "provision_vm_pki_dirs")
+
+    def _drive(self, network):
+        """Run _ensure_user() for a container config and report which of the
+        three gated steps ran."""
+        mod = _load_script()
+        config = {"workload": {"name": "wl"},
+                  "container": {"image": "example.test/img"}}
+        if network is not None:
+            config["network"] = network
+
+        pw = types.SimpleNamespace(pw_uid=10000, pw_gid=10000,
+                                   pw_name="_wl-wl", pw_dir="/nonexistent")
+        with contextlib.ExitStack() as stack:
+            for attr in self._STUBBED:
+                stack.enter_context(mock.patch.object(mod, attr, mock.MagicMock()))
+            gated = {attr: stack.enter_context(
+                mock.patch.object(mod, attr, mock.MagicMock()))
+                for attr in self._GATED}
+            stack.enter_context(mock.patch.object(
+                mod, "load_config", mock.MagicMock(return_value=config)))
+            stack.enter_context(mock.patch.object(
+                mod.pwd, "getpwnam", mock.MagicMock(return_value=pw)))
+            stack.enter_context(mock.patch.object(
+                mod, "WORKLOADS_BASE", Path(tempfile.mkdtemp())))
+            rc = mod._ensure_user("wl")
+
+        self.assertEqual(rc, 0)
+        return {attr: m.called for attr, m in gated.items()}
+
+    def test_a_triggered_container_gets_the_ca_and_the_pki_dirs(self):
+        ran = self._drive({"hosts": ["example.test"]})
+        self.assertEqual(ran, {a: True for a in self._GATED}, ran)
+
+    def test_an_untriggered_container_gets_none_of_it(self):
+        """R10's half of the gate. A workload with no [network] table must be
+        provisioned exactly as it was before this feature existed -- no CA
+        keypair on disk, no PKI subtree, no /run directory."""
+        ran = self._drive(None)
+        self.assertEqual(ran, {a: False for a in self._GATED}, ran)
+
+    def test_a_policy_entry_alone_is_enough(self):
+        """The gate reads container_uses_inspect(), which fires on any of the
+        three triggers -- not on `hosts` alone. A version that checked for
+        `hosts` would leave a policy-only workload terminating TLS with a CA
+        that was never generated."""
+        ran = self._drive({"ca_delivery": "env",
+                           "policy": [{"host": "example.test"}]})
+        self.assertEqual(ran, {a: True for a in self._GATED}, ran)
+
+    def test_host_mode_gets_none_of_it_despite_a_trigger(self):
+        """Pins the P0-1 silent disable at this layer too: host mode is not
+        inspected, so provisioning it a CA would put trust material on disk for
+        an inspector that never runs."""
+        ran = self._drive({"mode": "host", "hosts": ["example.test"]})
+        self.assertEqual(ran, {a: False for a in self._GATED}, ran)
+
+
 if __name__ == "__main__":
     unittest.main()
