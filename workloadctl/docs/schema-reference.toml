@@ -880,10 +880,17 @@ name = "schema-reference"
 # the process exits — which is the wrong shape for a persistent setting. See
 # docs/workloads.md.
 #
-# Break-glass, if the filter itself is the problem:
-#   nft delete table inet workload_filter
-# The table is rebuilt by the next VM start. An abandoned table is inert: the
-# chain's policy is accept and the drop rule matches only uids in the set.
+# Break-glass, if the filter itself is the problem. There are TWO tables, and
+# which one you want depends on the symptom:
+#   nft delete table inet workload_proxy    # nothing is redirected any more;
+#                                           # 80 and 443 leave unintercepted
+#   nft delete table inet workload_filter   # nothing is dropped any more
+# Either is rebuilt by the next start of any workload that arms it -- which is
+# no longer VM-only: a container with a [network] egress trigger arms both
+# tables the same way. An abandoned table is inert: the chain's policy is accept
+# and each rule matches only uids or cgroups in its own set, so deleting one
+# leaves every unrelated workload untouched and leaves the OTHER table still
+# doing its half.
 #
 # [vm.cloud_init]
 # Optional: Override the seed ISO's user-data with a custom #cloud-config.
@@ -1780,6 +1787,576 @@ mode = "pasta"
 # Note: Port publishing works with pasta mode and custom networks (ignored for host/none)
 # Note: Rootless containers cannot bind to ports < 1024 without special config
 ports = ["8080:80", "8443:443"]
+
+# ----------------------------------------------------------------------------
+# EGRESS FILTERING AND TLS INSPECTION -- the rest of [network]
+# ----------------------------------------------------------------------------
+#
+# Everything from here to the end of [network] is OPT-IN AND OFF BY DEFAULT. A
+# workload that writes none of these keys gets exactly the units it got before
+# this feature existed: no inspector, no socket unit, no nftables element, no
+# change of any kind. That is a promise the test suite asserts byte for byte.
+#
+# THE THREE-RUNG LADDER. Read this before any individual key below; it is the
+# whole semantic, and each key only makes sense against it.
+#
+#   What you write                        What runs                    CA?
+#   ------------------------------------  ---------------------------  -----
+#   nothing from this section             No proxy at all. The units    --
+#                                         are byte-identical to a
+#                                         workload from before the
+#                                         feature existed.
+#
+#   .hosts and/or [[network.allow]]       Proxy, SPLICED. The SNI is    no
+#                                         read out of the ClientHello,
+#                                         matched against .hosts, and
+#                                         the container's own bytes
+#                                         are relayed upstream
+#                                         unmodified. Nothing is
+#                                         decrypted.
+#
+#   either of those, PLUS a               Proxy, INSPECTING. The        YES
+#   [[network.policy]] entry              connection is terminated and  ca_delivery
+#                                         re-minted, so `methods`,      is REQUIRED
+#                                         `paths` and credential
+#                                         injection can apply.
+#
+# RUNG 2 IS THE ONE A 443-ONLY HABIT SKIPS, and it is the one that works on any
+# image -- including an image whose trust store cannot be modified, which is
+# most images you did not build. Reach for it before rung 3.
+#
+# .tls IS COMPUTED, NOT DEFAULTED. With no policy entries the effective mode is
+# "splice"; with any policy entry it is "inspect". You may state .tls
+# explicitly in either direction, and then it is what it says -- writing
+# tls = "inspect" on a rung-2 workload is legal and makes ca_delivery required
+# just as a policy entry would. Writing tls = "splice" alongside policy entries
+# is an error, not a silent no-op (there would be no decrypted request for the
+# rules to govern).
+#
+# BECAUSE THE MODE IS COMPUTED, READING workload.toml NO LONGER TELLS YOU WHAT
+# IS RUNNING. `workloadctl doctor <name>` and `workloadctl egress <name>` report
+# the EFFECTIVE mode; the file may not mention .tls at all while a proxy is
+# terminating every connection.
+#
+# THERE IS NO `egress` KEY HERE, and its absence is deliberate -- do not look
+# for the [vm.network] one. A VM could default to egress = "filtered" because
+# none were deployed when that work started; container workloads were already
+# running in the field, so nothing here may change a workload that did not ask
+# for it. Presence of a trigger IS the statement. Correspondingly, THERE IS NO
+# DEFAULT-DENY for containers: an untriggered container is not in `wl_filtered`
+# and no drop rule applies to it.
+#
+# mode = "host" DISABLES ALL OF THIS, SILENTLY, AND ON PURPOSE. A host-mode
+# container shares the host's network namespace outright, so the workload uid
+# would be the only thing separating its traffic from the host's own -- and
+# whether the redirect and `meta skuid` still isolate it there has not been
+# confirmed on hardware. Rather than claim an inspection it cannot prove it
+# provides, workloadctl treats a host-mode workload as untriggered whatever
+# these keys say. Do not combine mode = "host" with anything below.
+#
+# TWO THINGS FILTERING HERE DOES NOT DO, both of which it DOES do for a VM.
+# They are consequences of one decision: a container resolves names through the
+# host's (or podman's) resolver, and there is no per-workload DNS responder in
+# front of it the way passt gives a VM one.
+#
+#   1. FILTERING DOES NOT CONSTRAIN DNS. A hostname allowlist here is an
+#      access control on HTTP and HTTPS destinations. It is NOT an
+#      exfiltration control, because the container can still emit arbitrary
+#      DNS queries and read arbitrary answers, and that channel carries data
+#      in both directions. For a filtered VM the synthesising responder makes
+#      DNS tunnelling ABSENT rather than filtered; here it is simply open. If
+#      that matters for a workload, the remedy is at the host resolver, not
+#      in this file.
+#   2. AN [[network.allow]] ENTRY WRITTEN BY NAME IS PINNED TO ITS ARM-TIME
+#      RESOLUTION. The name is resolved once, when the rules are armed, and
+#      the resulting addresses are what the kernel matches. If the name later
+#      answers with a different address, the entry stops covering the
+#      destination and the connection is dropped -- and because there is no
+#      default-deny to fail against loudly, the symptom is an intermittent
+#      unreachability with nothing logged saying why. Re-arm (see APPLYING A
+#      CHANGE, below) after a destination moves.
+#
+# APPLYING A CHANGE: USE `workloadctl recreate <name>`, NOT `restart`.
+# `restart` restarts the workload's service and nothing else -- it does not
+# regenerate unit files and does not reload systemd, so a change that adds,
+# removes or re-shapes the inspector's units is simply not read. `recreate`
+# re-runs the generator, reloads systemd, and reprovisions; it is what picks up
+# a new key, a new rung, a changed allowlist, and a re-resolution of the names
+# in point 2 above. This is true of every key from here to the end of the
+# section.
+#
+# Optional: hostnames this container may reach over HTTP and HTTPS.
+# Type: array of hostnames or fnmatch patterns
+# Default: []
+# THIS IS A TRIGGER: setting it is what turns filtering on. The workload gets
+# its own egress inspector -- a socket-activated listener on an address only
+# this workload's traffic is redirected to, running as _wl-<name> and confined
+# to its own SELinux domain. The container is told nothing and is not asked to
+# cooperate: it dials 80 and 443 the way it would on any network, and a DNAT
+# keyed on the workload uid lands the connection on that inspector, which reads
+# the name and matches it against the patterns here. There is no http_proxy to
+# honour or to strip, and no client library that can opt out.
+#
+# WHERE THE NAME COMES FROM, per plane:
+#   HTTP  -- the Host header, read before anything is forwarded. A match is
+#            forwarded upstream; a miss is answered 403 to the container.
+#   HTTPS -- the SNI in the ClientHello. What happens to a match depends on
+#            .tls: under "inspect" the connection is terminated and every
+#            request inside it is authorised by its Host header, exactly as on
+#            the HTTP plane; under "splice" the same bytes are replayed
+#            upstream unmodified and nothing is decrypted.
+# Enforcement is at the NAME and never at an address, which is what resolving
+# the list to addresses at rule-install time could not do -- that races DNS,
+# breaks on CDN churn, and opens everything sharing an address.
+#
+# A connection carrying no readable name is dropped, not guessed at: a literal
+# dialled with no Host header, or a non-TLS byte stream on 443, has nothing to
+# match a pattern against.
+#
+# Patterns match the hostname only, so no scheme, no path and no port -- each is
+# rejected by `validate` rather than silently matching nothing. Ports 80 and 443
+# are the only ones redirected; use [[network.allow]] for anything else.
+# "*" alone is rejected: it filters nothing while looking configured. Drop the
+# whole section to run unfiltered.
+#
+# fnmatch, NOT a DNS suffix match. `*.example.com` requires something before the
+# dot, so it does not cover the bare `example.com` -- list the apex separately
+# when you want both, as the example below does.
+# hosts = ["example.com", "*.fedoraproject.org"]
+#
+# Optional: what happens to this workload's redirected TLS connections.
+# Type: string, one of "inspect", "splice"
+# Default: COMPUTED, see the ladder above -- "inspect" if any [[network.policy]]
+#          entry exists, "splice" otherwise. Writing it is the exception.
+#  "inspect" -- the inspector completes the container's handshake itself, using
+#               a leaf signed by THIS WORKLOAD's own egress CA, and opens a
+#               separately verified session to the origin. Every request inside
+#               is authorised by its Host header, so the allowlist means the
+#               same thing on 443 as on 80, and a refused name gets a real 403
+#               through a chain the container trusts rather than a closed
+#               connection.
+#
+#               THE CONTAINER MUST TRUST THAT CA, which is what ca_delivery
+#               below is for. The CA is per workload and never shared, so it
+#               can impersonate sites only to the one workload that trusts it.
+#
+#               Three things it cannot carry, all by construction: a host
+#               requiring a CLIENT certificate (the inspector has none to
+#               present) answers 502 naming the host; a host whose certificate
+#               THIS HOST cannot verify answers 502 as well -- a private root
+#               has to be added to the host's anchors, not the container's; and
+#               443 is read as HTTP/1.1, so a host this workload speaks some
+#               other protocol to over 443 (a database wire protocol, a tunnel,
+#               HTTP/2) has its connection CLOSED, journalled as
+#               `reason='not HTTP'`. A [[network.splice]] entry for that host
+#               is the answer.
+#
+#               THE OPTIONAL CLIENT CERTIFICATE IS THE QUIET ONE. A host that
+#               merely OFFERS client authentication does not fail: the session
+#               completes without one and the workload is simply
+#               unauthenticated, so the symptom is a host that starts answering
+#               its own 401 or 403 only under termination, while it worked
+#               under "splice" and works from anywhere else. No counter can see
+#               it, because nothing failed. Splice such a host.
+#
+#  "splice"  -- the inspector reads the SNI out of the ClientHello, matches it
+#               against .hosts, and replays those exact bytes upstream. Nothing
+#               is decrypted, no CA is involved, and the image needs no trust
+#               store change at all. A weaker property, not a deprecated one:
+#               the name is checked ONCE, at the front of a connection whose
+#               contents nothing can see, and a refusal is a closed connection
+#               indistinguishable from the host being down. This is rung 2, and
+#               it is the right answer for most images.
+#
+#               WRITING tls = "splice" EXPLICITLY REQUIRES .tls_reason. Reaching
+#               rung 2 by simply having no policy entries does not -- there is
+#               nothing to justify, because no narrower mode was given up.
+# tls = "splice"
+#
+# Required when tls = "splice" is written explicitly, and refused without it.
+# Free text; nothing reads it at runtime. It is here because the person deciding
+# whether a bypass is still needed is not the person who opened it, and months
+# later "this image's trust store cannot be modified" and "we never tried
+# terminating" are the same line without it.
+# tls_reason = "vendor image; its trust store cannot be modified"
+#
+# REQUIRED on rung 3: how this workload's CA reaches the container.
+# Type: string, one of "env" | "mount" | "image"
+# Default: unset, which is an ERROR whenever the effective .tls is "inspect".
+# This key has no [vm.network] counterpart, and the reason it exists is the one
+# real asymmetry between the substrates. A VM is provisioned: cloud-init writes
+# the workload CA into the guest's trust store once per instance-id, and there
+# is exactly one route. A container is an image someone else built, and there
+# are three routes with nothing able to tell from here which one that image
+# takes.
+#
+#   "env"   -- workloadctl seeds the five conventional CA environment variables
+#              (SSL_CERT_FILE, REQUESTS_CA_BUNDLE and friends) pointing at the
+#              workload's bundle, and does nothing else. Right for anything
+#              built on Python requests, Go's crypto/x509, curl, or a Fedora-ish
+#              base whose tools honour them.
+#   "mount" -- workloadctl bind-mounts the CA bundle read-only at
+#              .ca_mount_path, and the image's own entrypoint is expected to
+#              install it (update-ca-trust, update-ca-certificates, or a copy
+#              into the language runtime's store). Right for an image with an
+#              entrypoint you control.
+#   "image" -- the image was BUILT trusting this workload's CA. Only meaningful
+#              for a bundle with its own Containerfile, since the claim is that
+#              we built the trust in -- which cannot be true of a pulled image.
+#
+# IT ASSERTS, IT DOES NOT VERIFY. Nothing here opens the image and checks. This
+# key catches an UNSTATED CA route, never a WRONG one. A workload whose value is
+# wrong validates clean, starts clean, reports healthy, and then fails on its
+# FIRST HTTPS REQUEST with a certificate error from inside the container -- the
+# failure is legible once you are looking at it and invisible until then. The
+# five environment variables in particular do not reach a statically linked
+# binary with an embedded root store; such an image needs "mount" plus an
+# entrypoint, or a [[network.splice]] entry, or rung 2.
+#
+# A rung-2 workload (.hosts only, no policy entries) needs NONE OF THIS. Nothing
+# is terminated, so there is no certificate for the container to distrust. That
+# is most of the reason rung 2 exists.
+# ca_delivery = "env"
+#
+# Required when ca_delivery = "mount", refused otherwise -- the path is only
+# meaningful when workloadctl is the one bind-mounting the bundle.
+# Type: string, an absolute path inside the container
+# ca_mount_path = "/etc/pki/workload-ca/ca.crt"
+#
+# WHERE THINGS GO IN THE FILE -- the ordering trap, which produces no error.
+# Every [network] SCALAR (mode, ports, hosts, tls, tls_reason, ca_delivery,
+# ca_mount_path) must be written ABOVE the first array-of-tables below, because
+# the first [[network.allow]] / [[network.internal]] / [[network.splice]] /
+# [[network.policy]] / [[network.credential]] header ENDS the [network] section.
+# A scalar written after one is read by TOML as part of THAT ENTRY, not of
+# [network]: not a typo, not a missing key, just a key that quietly belongs to
+# the wrong table in a file that looks fine and parses fine. Re-declaring
+# [network] further down does not fix it -- TOML rejects a table declared twice.
+#
+# Everything above this point is a scalar and everything below it is a table, so
+# this section is in valid file order: reading it top to bottom and writing as
+# you go produces a file that parses the way it reads.
+#
+# Optional: destinations on ports OTHER than 80 and 443.
+# Type: array of [[network.allow]] tables, each with `host` OR `address`, a
+#       `port`, and a `reason`
+# Default: []
+# THIS IS A TRIGGER, like .hosts: an [[network.allow]] entry on its own turns
+# filtering on. It is the non-HTTP surface hostname policy cannot carry -- ssh,
+# a database, an NTP peer, a registry on a nonstandard port.
+#
+# Write `host` (a name, resolved on the HOST once at arm time) or `address` (a
+# literal), never both -- an entry names one destination one way. `port` is an
+# integer 1-65535. `reason` is required, like every other bypass in this schema:
+# the entry is a hole opened on purpose, and the operator who later has to
+# decide whether it is still needed is not the one who opened it.
+#
+# Each family has its own nftables set, so v4 and v6 entries never match each
+# other, and a name answering in both families arms both.
+#
+# It is also the escape hatch for the internal-destination guard: the egress
+# inspector is barred from OPENING a connection into RFC 1918, loopback or
+# link-local space, so a destination that legitimately lives there needs it
+# named. For a name reached over HTTP or HTTPS that is [[network.internal]]
+# below; this key covers the other ports.
+#
+# REFUSED: port 80 or 443. Those are redirected into this workload's inspector
+# before the filter chain consults this list at all, so the element would be
+# armed and never matched while the config read as if the destination were
+# exempt from inspection. The redirect keys on the workload uid and the port
+# alone -- never on the destination -- so this holds for the name form exactly
+# as for the address form. Allowlist the hostname in .hosts instead.
+#
+# See disclosure 2 at the top of this section: a `host` entry is pinned to its
+# arm-time resolution and is refreshed only by `workloadctl recreate`.
+#
+# [[network.allow]]
+# host   = "git.local"
+# port   = 2222
+# reason = "git-over-SSH to the homelab forge; not a port any redirect touches"
+#
+# [[network.allow]]
+# address = "192.168.0.10"
+# port    = 22
+# reason  = "backup target; SSH, so hostname policy cannot carry it"
+#
+# Optional: allowlisted names that are SUPPOSED to resolve into private address
+# space.
+# Type: array of [[network.internal]] tables, each with `host` and `reason`
+# Default: []
+# The inspector is barred from opening a connection into RFC 1918, loopback or
+# link-local space -- that drop is what stops an allowlisted PUBLIC name from
+# being pointed at your LAN. A homelab forge on .hosts is the case where that is
+# exactly what you meant, and without this key it fails as
+# `403 <host> resolves to an internal address` on the one host you wanted.
+#
+# It weakens nothing else: the host stays inspected and a denial is still a
+# readable refusal. It is a different axis from what a host may be asked FOR,
+# which is why it is its own table rather than a flag on a policy entry -- and
+# it carries a `reason` because it is a bypass, like [[network.allow]].
+#
+# An entry naming a host that neither .hosts nor a [[network.policy]] entry
+# covers is an ERROR, not a no-op: the workload is refused before the exception
+# is ever reached, which is the failure the key exists to remove.
+#
+# It is NOT refused under tls = "splice". The internal-destination check lives
+# on the inspector's UPSTREAM leg, which a spliced connection still has, so a
+# spliced host can still resolve into private space and still needs the
+# exemption. (Contrast [[network.policy]], which IS refused there.)
+#
+# THE NAME IS RESOLVED AT ARM TIME, AND A FAILURE THERE STOPS THE WORKLOAD. The
+# exemption is armed per ADDRESS, so a name that does not resolve on this host
+# -- or that answers with a public address, which the internal drop would never
+# have matched -- arms nothing, and arming nothing silently would leave the
+# workload refused by the very drop this entry exists to except. So it fails the
+# start instead, with a message naming the unit, the name and the remedy rather
+# than leaving you to join a DNS error on one unit to a container that will not
+# start on another. `Restart=` on the unit heals a name that comes back.
+#
+# [[network.internal]]
+# host   = "git.local"
+# reason = "homelab forge; clone and API over HTTPS"
+#
+# Optional: allowlisted hosts that must NOT be intercepted.
+# Type: array of [[network.splice]] tables, each with `host` and `reason`
+# Default: []
+# The per-host form of tls = "splice", and the escape hatch to reach for first
+# ON RUNG 3. Under an inspecting workload the inspector terminates TLS with a
+# certificate the container trusts because the workload's CA is in its store.
+# Some clients cannot be made to trust it -- one that pins a certificate, or
+# that verifies a signed transparency log rather than a chain, or a static
+# binary with an embedded root store -- and some hosts on 443 are not speaking
+# HTTP at all. A host listed here keeps its end-to-end TLS: the inspector reads
+# the name out of the ClientHello, matches it against .hosts, and then relays
+# the container's own bytes without ever holding a key to the session.
+#
+# WHAT YOU GIVE UP IS EVERYTHING INSIDE THE SESSION. A spliced host is enforced
+# by its name alone, checked once at the front of the connection -- no Host
+# binding, no method or path policy, and no visibility into what was asked for.
+# That is why it carries a `reason`.
+#
+# `host` is an fnmatch pattern like .hosts, with the same apex trap:
+# "*.example.com" does not cover "example.com".
+#
+# An entry matching no allowlisted name is an ERROR, not a no-op -- it means you
+# believe a host is exempt that is not, and the host you meant to exempt is
+# being inspected instead. That failure arrives as a TLS error rather than as a
+# policy message, which is exactly what this key exists to avoid.
+#
+# AN ENTRY ON A WORKLOAD ALREADY ON RUNG 2 IS AN ERROR, not an inert one. If the
+# effective .tls is already "splice", every host is spliced and this entry
+# exempts nothing -- and the required `reason` has just made you write a
+# justification for a hole you did not open. Add a [[network.policy]] entry to
+# reach rung 3 first, or drop this. (A VM never hits this: its .tls defaults to
+# "inspect".)
+#
+# [[network.splice]]
+# host   = "sum.golang.org"
+# reason = "client verifies a signed log, not the chain; cannot take our CA"
+#
+# Optional: method and path rules for an inspected host.
+# Type: array of [[network.policy]] tables, each with `host` and optional
+#       `methods`, `paths` and `credential`
+# Default: []
+# THIS IS A TRIGGER, and it is also what moves a workload to RUNG 3 -- adding
+# the first one makes ca_delivery required, and `validate` refuses the config
+# until you state it. That refusal is an interlock, not a nicety: without it the
+# same edit would silently change whether the image needs a trust store.
+#
+# .hosts says WHICH hosts a workload may reach. This says WHAT it may ask them
+# for. `host` is an fnmatch pattern like .hosts; `methods` is HTTP method names
+# (compared uppercase, so "get" is fine); `paths` is fnmatch patterns matched
+# against the request target's path.
+#
+# `methods` and `paths` inside one entry are a CROSS PRODUCT: two methods and
+# two paths permit all four combinations. That is the common case.
+#
+#   [[network.policy]]
+#   host    = "registry.example.com"
+#   methods = ["GET", "POST"]
+#   paths   = ["/v2/*", "/token"]
+#
+# To vary methods BY path, repeat the host -- one entry per rule:
+#
+#   [[network.policy]]
+#   host    = "api.example.com"
+#   methods = ["POST"]
+#   paths   = ["/v1/messages"]
+#
+#   [[network.policy]]
+#   host    = "api.example.com"
+#   methods = ["GET"]
+#   paths   = ["/v1/models", "/v1/models/*"]
+#
+# HOW THIS COMPOSES WITH .hosts, WHICH IS THE THING TO GET RIGHT. A host that
+# ANY policy entry matches is governed by policy ALONE -- being in .hosts
+# allowlists it and contributes no rules. A host no entry matches is allowed by
+# .hosts with no method or path constraint. A policy entry allowlists on its
+# own, so a host named here need not also be in .hosts.
+#
+# The reason it works that way: if .hosts unioned in, a single wildcard written
+# for an unrelated reason would contribute "any method, any path" to every host
+# it covers -- including the one you gave a path restriction -- and the diff
+# that added the wildcard would look like it added access rather than removing a
+# restriction.
+#
+# ENTRIES UNION, so reordering the file cannot change what is allowed: a request
+# is permitted if ANY entry for that host permits both its method and its path.
+# Two consequences look like bugs and are not:
+#   * There is no way to subtract. A narrower entry cannot carve an exception
+#     out of a wider one. If a host needs a hole punched in it, the wide entry
+#     is what has to change.
+#   * Host patterns union too. "*.example.com" and "api.example.com" both govern
+#     api.example.com, and the specific one does not override the general one.
+#     So the file does not show what a given name may actually do: to read the
+#     effective rules for one host, collect EVERY entry whose `host` pattern
+#     matches it and union them.
+#
+# An omitted `methods` means any method and an omitted `paths` means any path.
+# That shorthand is safe in a single-entry host and dangerous under union, so
+# WHERE MORE THAN ONE ENTRY MATCHES A HOST -- by pattern, not by identical
+# `host` strings -- every one of those entries must state BOTH keys. Otherwise
+# one entry omitting `paths` permits every path and silently defeats every
+# sibling you narrowed, while the file reads as if it were stricter.
+#
+# The apex trap is here too and is worse than in .hosts: "*.api.example.com"
+# does not constrain "api.example.com". If .hosts allowlists an apex and the
+# only entry naming it is the wildcard under it, that is an ERROR -- the apex
+# would stay allowlisted and inspected with NO rules applied, which is a hole
+# rather than an outage.
+#
+# `paths` matches the path ALONE; the query string is not part of it, so
+# paths = ["/v1/messages"] still permits "/v1/messages?stream=true".
+#
+# A method that is not a registered HTTP method is an ERROR, not a rule that
+# never matches -- "FETCH" and "GET " are both far likelier to be typos that
+# silently deny than intents. CONNECT and PRI are refused by name: the inspector
+# is transparent and is never sent a CONNECT, and PRI is the HTTP/2 preface's
+# method.
+#
+# REFUSED with tls = "splice" written explicitly: the connection is never
+# decrypted, so there is no request for these rules to govern and they would be
+# silently inert.
+#
+# `credential = "<name>"` on an entry makes that host CREDENTIAL-BACKED: the
+# inspector sends its requests to this workload's own broker instead of to the
+# origin, and the broker attaches the sealed material. The name is a
+# [[network.credential]] block below; naming one that no block declares is an
+# error, because the request would otherwise go straight to the provider
+# carrying the container's placeholder and be refused there, on a request this
+# layer considered fully authorised.
+#
+#   [[network.policy]]
+#   host       = "api.anthropic.com"
+#   methods    = ["POST"]
+#   paths      = ["/v1/messages"]
+#   credential = "anthropic"
+#
+# The credential does not widen anything: `methods` and `paths` are applied
+# first, on the same terms as an unbrokered host, so it only changes WHO
+# attaches the authorisation. And it is per EXACT host -- a wildcard `host` with
+# a credential is an error, because the broker's table has no patterns in it and
+# every request matching the pattern would be authorised here and refused there.
+#
+# Optional: the material a credential-backed host's requests are attached with.
+# Type: array of [[network.credential]] tables, each with `name`, `placeholder`
+#       and `env`, and optionally `auth_header` / `auth_format`
+# Default: []
+# THE CONTAINER NEVER HOLDS THE KEY. It holds `placeholder` in the variable
+# named by `env`, its client sends that, and the broker discards it and sets the
+# real one. The material itself is sealed in the credstore under
+# broker/<workload>/<name> -- `workloadctl secret create broker/myapp/anthropic`
+# -- and is decrypted only into the broker instance's own tmpfs, as a dynamic
+# user disjoint from the workload's.
+#
+#   [[network.credential]]
+#   name        = "anthropic"
+#   placeholder = "sk-ant-placeholder-not-a-real-key"
+#   env         = "ANTHROPIC_API_KEY"
+#
+# `placeholder` is required and is not decoration: with nothing in the variable,
+# an SDK that refuses to send a request without a key fails INSIDE the
+# container, before a packet, which looks nothing like a policy failure. It must
+# not be a real key.
+#
+# `env` is yours to pick and is separate from `name` on purpose: `name` is the
+# filename the sealed material lands under, so binding it to a provider-owned
+# variable would force a re-seal when the provider renames its variable. It may
+# not be one of the five CA variables workloadctl already seeds.
+#
+# auth_header = "Authorization"
+# auth_format = "Bearer {secret}"
+#
+# Optional, and together they are the PROVIDER'S HTTP CONVENTION. Default to
+# "x-api-key" and "{secret}", which is Anthropic's; a provider wanting a bearer
+# token needs the pair above, and Gemini wants auth_header = "x-goog-api-key"
+# with the default format. `auth_format` must name {secret} exactly once. A
+# header name that frames the message or is hop-by-hop (Content-Length, Host,
+# Connection, ...) is refused: the credential would be overwritten or stripped,
+# and the provider would answer 401 with nothing on this host able to say why.
+#
+# A block nothing selects is an error, and so is a `credential` naming no block.
+# Both are the same mistake in opposite directions: material sealed and loaded
+# into a broker for a host it is never attached to reads, in the file and in
+# `doctor`, exactly like a credential that is in use.
+#
+# REQUIRES the effective tls to be "inspect" and a policy entry that names it.
+# A spliced host cannot be credential-backed -- it is not decrypted into a
+# request the broker could dispatch on -- and that is refused rather than
+# ignored.
+#
+# THERE IS NO [[network.http2]] FOR CONTAINERS. The [[vm.network.http2]] opt-out
+# is deliberately not ported; a host that must keep h2 is a [[network.splice]]
+# entry here, which leaves enforcement at the server name in exactly the same
+# way and additionally gives the host back its end-to-end TLS.
+#
+# Example Container-EGRESS-1: rung 2, the one that works on any image
+# ------------------------------------------------------------------
+# [workload]
+# name = "pip-builder"
+#
+# [container]
+# image = "docker.io/library/python:3.12-slim"
+# command = ["sleep", "infinity"]
+#
+# [network]
+# mode  = "pasta"
+# hosts = ["pypi.org", "*.pypi.org", "files.pythonhosted.org"]
+#                                   # No .tls, no ca_delivery: with no policy
+#                                   # entries the effective mode is "splice",
+#                                   # nothing is terminated, and the image's
+#                                   # trust store is never touched.
+
+# Example Container-EGRESS-2: rung 3, with method and path rules
+# --------------------------------------------------------------
+# [workload]
+# name = "agent-sandbox"
+#
+# [container]
+# image = "localhost/agent-sandbox:latest"
+# command = ["/usr/bin/agent"]
+#
+# [network]
+# mode        = "pasta"
+# hosts       = ["*.pypi.org", "files.pythonhosted.org"]
+# ca_delivery = "env"               # REQUIRED: the policy entries below put
+#                                   # this workload on rung 3. `tls` is
+#                                   # computed and need not be written.
+#                                   # Scalars first -- the table below ends
+#                                   # the [network] section (see above).
+#
+# [[network.policy]]
+# host       = "api.anthropic.com"
+# methods    = ["POST"]
+# paths      = ["/v1/messages"]
+# credential = "anthropic"
+#
+# [[network.credential]]
+# name        = "anthropic"         # sealed at broker/agent-sandbox/anthropic
+# placeholder = "sk-ant-placeholder-not-a-real-key"
+# env         = "ANTHROPIC_API_KEY"
+# auth_header = "Authorization"     # omitting these two 401s a request this
+# auth_format = "Bearer {secret}"   # layer considered fully authorised
 
 [host]
 # Optional: Host setup script, run during workloadctl enable/disable.
