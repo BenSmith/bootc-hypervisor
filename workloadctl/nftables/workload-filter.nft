@@ -259,21 +259,42 @@ add rule inet workload_filter output meta skuid . ip6 daddr @wl_inspect_self6 ct
 # The range guard: anything left after the per-workload rules is a
 # cross-workload attempt, on the shared counter where attribution is not
 # needed. Both qualifiers are load-bearing and for different halves:
-# `meta skuid @wl_filtered` keeps host tooling out of the rule so
-# `diagnose`/`doctor` can still probe a listener as root; `ct direction
-# original` keeps the inspector's own replies out of it — the inspector runs
-# as _wl-<name>, so its replies are output traffic from a filtered uid,
-# and once the resolver synthesises, every connection's reply is addressed
-# back into the range. Without the qualifier, every inspected connection
-# hangs with the SYN already accepted. Measured: the qualified form works,
-# the unqualified one does not.
-add rule inet workload_filter output meta skuid @wl_filtered ct direction original ip  daddr 198.18.0.0/16 drop
+# `meta skuid != 0` keeps host tooling out of the rule so `diagnose`/`doctor`
+# can still probe a listener as root; `ct direction original` keeps the
+# inspector's own replies out of it — the inspector runs as _wl-<name>, so
+# its replies are output traffic from a filtered uid, and once the resolver
+# synthesises, every connection's reply is addressed back into the range.
+# Without the qualifier, every inspected connection hangs with the SYN
+# already accepted. Measured: the qualified form works, the unqualified one
+# does not.
+#
+# THE FIRST QUALIFIER WAS `meta skuid @wl_filtered` AND THAT WAS A HOLE.
+# The exemption this rule needs is for the HOST'S OWN TOOLING, and
+# `@wl_filtered` expressed it as "workloads already under policy" — a
+# strictly narrower set. Everything outside it walked through: an
+# `egress = "open"` VM, a container with no [network] table, and any
+# ordinary shell on the box, none of which is ever a member. Measured on
+# hardware 2026-09-05 on both substrates: an unfiltered workload reached a
+# filtered workload's listener on 8080 (a 400 from the listener's own
+# parser — proof of reach) and on 8443 (handshake then reset), and the
+# dials were WRITTEN INTO THE VICTIM'S EGRESS RECORDS, so a filtered
+# workload's audit trail was not an account of its own traffic. Reproduced
+# from the bare host as an ordinary user, which is what rules out anything
+# pasta- or substrate-specific: the exposure was "any local socket".
+#
+# `!= 0` is the exemption the comment above always meant. Both `diagnose`
+# and `doctor` call require_root() (lib/cmd_diagnose.py, lib/cmd_doctor.py),
+# so root is the whole of the legitimate probing population and nothing else
+# on the host has business dialling this range. A workload's own redirected
+# traffic is unaffected: @wl_inspect_dst accepts it several rules above,
+# before control ever reaches here.
+add rule inet workload_filter output meta skuid != 0 ct direction original ip  daddr 198.18.0.0/16 drop
 
 # The v6 twin. A v4-only guard leaves the same hole open on the path clients
 # try first: one workload reaching another's v6 listener, admitted by the
 # loopback accept exactly as measured on v4. ip daddr matches v4 only and
 # ip6 daddr v6 only, so the split is the same one the allow sets carry.
-add rule inet workload_filter output meta skuid @wl_filtered ct direction original ip6 daddr 2001:2::/48 drop
+add rule inet workload_filter output meta skuid != 0 ct direction original ip6 daddr 2001:2::/48 drop
 
 # Host-side name resolution, which is not guest-chosen egress: the inspector
 # resolves through whatever the host is configured to use, which may be a stub
