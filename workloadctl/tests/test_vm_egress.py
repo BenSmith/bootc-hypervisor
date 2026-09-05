@@ -107,9 +107,21 @@ class TestSkeleton(unittest.TestCase):
         units, which only exist for filtered VMs; `wl_inspect_self`/`self6`
         hold one element per armed workload. All are empty on a host running
         no filtered workload, which is what makes an abandoned table inert.
+
+        THE PROPERTY IS INERTNESS, NOT SET MEMBERSHIP, and there is a second
+        way to get it. The two listener-range guards are bounded by
+        DESTINATION instead: 198.18.0.0/16 is RFC 2544 benchmarking space and
+        2001:2::/48 its v6 counterpart, so an abandoned table drops non-root
+        traffic to two ranges nothing on a normal host routes anyway. That is
+        the same trade the INPUT chain already makes for the same two ranges
+        (§7.2.6), and it is accepted here for the same reason. It is allowed
+        for these ranges and nothing else: a destination-bounded drop on any
+        other prefix has a real blast radius on an abandoned table and must
+        still carry a set.
         """
         guards = (f"@{NFT_SET_FILTERED}", f"@{NFT_SET_EGRESS_CG}",
                   f"@{NFT_SET_INSPECT_SELF}", f"@{NFT_SET_INSPECT_SELF6}")
+        reserved = ("198.18.0.0/16", "2001:2::/48")
         # The output chain only. The input chain's drops are deliberately
         # unguarded on any set — there is no uid on the input path — and are
         # bounded by destination plus `iif != lo` instead (§7.2.6).
@@ -118,8 +130,10 @@ class TestSkeleton(unittest.TestCase):
                  and d.startswith("add rule inet workload_filter output")]
         self.assertTrue(drops, "no drop rule in the skeleton")
         for rule in drops:
-            self.assertTrue(any(g in rule for g in guards),
-                            f"unguarded drop rule: {rule}")
+            self.assertTrue(
+                any(g in rule for g in guards)
+                or any(r in rule for r in reserved),
+                f"unguarded drop rule: {rule}")
 
     def test_chain_policy_is_accept(self):
         """So an abandoned table is inert rather than a host-wide outage.
@@ -490,8 +504,8 @@ class TestRuleOrderIsPinned(unittest.TestCase):
         ("inspector redirect accept v6", ("@wl_inspect_dst6", "accept")),
         ("inspector self drop v4",  ("@wl_inspect_self", "ct direction original", "drop")),
         ("inspector self drop v6",  ("@wl_inspect_self6", "ct direction original", "drop")),
-        ("inspector range guard v4", ("@wl_filtered", "ct direction original", "198.18.0.0/16", "drop")),
-        ("inspector range guard v6", ("@wl_filtered", "ct direction original", "2001:2::/48", "drop")),
+        ("inspector range guard v4", ("meta skuid != 0", "ct direction original", "198.18.0.0/16", "drop")),
+        ("inspector range guard v6", ("meta skuid != 0", "ct direction original", "2001:2::/48", "drop")),
         ("host-side name resolution", ("@wl_egress_cg", "th dport 53", "accept")),
         ("internal exemption v4",   ("@wl_egress_cg", "@wl_internal_ok4",
                                     "ct direction original", "accept")),
@@ -522,6 +536,40 @@ class TestRuleOrderIsPinned(unittest.TestCase):
         for rule, (label, required) in zip(self.rules, self.EXPECTED):
             for token in required:
                 self.assertIn(token, rule, f"rule {label!r} lost {token!r}: {rule}")
+
+    def test_the_range_guards_are_not_scoped_to_workloads_under_policy(self):
+        """The listener-range guards must exempt ROOT, not `@wl_filtered`.
+
+        This is a regression pin for a measured hole, not a style rule. The
+        guards were once written `meta skuid @wl_filtered ... drop`, which
+        reads as "stop cross-workload dials" and in fact means "stop dials
+        from workloads ALREADY UNDER POLICY". Every caller outside that set
+        went through: an `egress = "open"` VM, a container with no [network]
+        table, and any ordinary shell on the host. Confirmed on hardware
+        2026-09-05 on both substrates -- the unfiltered caller reached the
+        filtered workload's listener AND its dials landed in that workload's
+        egress records.
+
+        The exemption the rule actually needs is for host tooling, which is
+        root by construction (`diagnose` and `doctor` both call
+        require_root()). So `!= 0` is both narrower where it matters and
+        wider where it must be. Asserted in both directions: the guards carry
+        the root exemption, and they do NOT carry a membership qualifier that
+        would let a non-member past.
+        """
+        guards = [r for r in self.rules
+                  if "198.18.0.0/16" in r or "2001:2::/48" in r]
+        self.assertEqual(len(guards), 2, f"expected both family guards: {guards}")
+        for rule in guards:
+            self.assertIn(
+                "meta skuid != 0", rule,
+                "the range guard lost its root exemption -- host tooling "
+                f"probes as root and would now be dropped: {rule}")
+            self.assertNotIn(
+                "@wl_filtered", rule,
+                "the range guard is scoped to workloads already under "
+                "policy, so an unfiltered VM, an untriggered container or "
+                f"an ordinary host user walks straight through it: {rule}")
 
     def test_every_destination_drop_is_qualified_to_the_original_direction(self):
         """A drop that does not say `ct direction original` also drops replies.
