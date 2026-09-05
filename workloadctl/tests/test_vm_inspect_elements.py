@@ -22,15 +22,20 @@ import unittest.mock
 from types import SimpleNamespace
 
 import cmd_diagnose
-from cmd_diagnose import INSPECT_ACCEPT_SETS, INSPECT_SELF_SETS
+from cmd_diagnose import (
+    INSPECT_ACCEPT_SETS, INSPECT_GUARD_SETS, INSPECT_SELF_SETS,
+)
 from vm import (
     NFT_SET_INSPECT_DST, NFT_SET_INSPECT_DST6,
     NFT_SET_INSPECT_SELF, NFT_SET_INSPECT_SELF6,
-    NFT_TABLE, vm_inspect_dst_elements, vm_inspect_element_commands,
+    NFT_SET_INSPECT_LIVE, NFT_SET_INSPECT_LIVE6,
+    NFT_TABLE, vm_inspect_address, vm_inspect_dst_elements,
+    vm_inspect_element_commands, vm_inspect_live_elements,
     vm_inspect_self_elements,
 )
 
 UID = 10001
+ALL_SETS = INSPECT_ACCEPT_SETS + INSPECT_SELF_SETS + INSPECT_GUARD_SETS
 
 
 class TestTheSetNamesAreTheOnesArmed(unittest.TestCase):
@@ -51,7 +56,14 @@ class TestTheSetNamesAreTheOnesArmed(unittest.TestCase):
         self.assertEqual(set(INSPECT_SELF_SETS),
                          set(vm_inspect_self_elements(UID)))
 
-    def test_all_four_live_in_the_filter_table(self):
+    def test_the_guard_sets_are_the_ones_the_arming_helper_writes(self):
+        """The cross-workload guard's sets, whose absence is silent in a way
+        the other two kinds are not: the guest keeps working and the counters
+        keep reconciling while the inspector stands open to every local uid."""
+        self.assertEqual(set(INSPECT_GUARD_SETS),
+                         set(vm_inspect_live_elements(UID)))
+
+    def test_all_six_live_in_the_filter_table(self):
         """Read out of one `nft list table <NFT_TABLE>`. The two DNAT maps
         live in the proxy table and are read separately; a set that moved
         tables would be looked for in a document that cannot contain it and
@@ -63,13 +75,16 @@ class TestTheSetNamesAreTheOnesArmed(unittest.TestCase):
                                          argv.index("element") + 1
                                          + len(NFT_TABLE.split())]}
         self.assertEqual(filter_sets,
-                         set(INSPECT_ACCEPT_SETS) | set(INSPECT_SELF_SETS))
+                         set(INSPECT_ACCEPT_SETS) | set(INSPECT_SELF_SETS)
+                         | set(INSPECT_GUARD_SETS))
 
-    def test_the_four_are_disjoint(self):
-        """The two kinds get different verdicts, so a set in both lists would
+    def test_the_six_are_disjoint(self):
+        """The three kinds get different verdicts, so a set in two lists would
         produce a failing line and a passing fragment about the same fact."""
-        self.assertEqual(set(INSPECT_ACCEPT_SETS) & set(INSPECT_SELF_SETS),
-                         set())
+        kinds = (set(INSPECT_ACCEPT_SETS), set(INSPECT_SELF_SETS),
+                 set(INSPECT_GUARD_SETS))
+        self.assertEqual(sum(len(k) for k in kinds),
+                         len(set().union(*kinds)))
 
 
 class TestTheVerdicts(unittest.TestCase):
@@ -175,8 +190,20 @@ class TestTheReadCostsOneExec(unittest.TestCase):
     """
 
     def _table(self, *, names, uid=UID):
+        # Two element shapes, because the sets have two shapes. The accept and
+        # self sets are keyed on a uid concatenation; the guard sets hold a
+        # bare inspector address and no uid at all, which is the whole reason
+        # _inspect_filter_sets reads them on a second branch. A fixture that
+        # gave them all the uid shape would let a reader that used
+        # vm_owned_elements on the guard sets pass here and report every real
+        # host's guard as missing.
+        addr = vm_inspect_address(uid)
+        by_family = {NFT_SET_INSPECT_LIVE: str(addr.v4),
+                     NFT_SET_INSPECT_LIVE6: str(addr.v6)}
         sets = [{"set": {"name": name,
-                         "elem": [{"concat": [uid, 80]}]}} for name in names]
+                         "elem": ([by_family[name]] if name in by_family
+                                  else [{"concat": [uid, 80]}])}}
+                for name in names]
         return {"nftables": [{"metainfo": {}}] + sets}
 
     def _read(self, payload):
@@ -189,13 +216,11 @@ class TestTheReadCostsOneExec(unittest.TestCase):
         with unittest.mock.patch.object(cmd_diagnose, "_nft_json", fake):
             return cmd_diagnose._inspect_filter_sets(UID), calls
 
-    def test_all_four_come_from_a_single_nft_call(self):
-        result, calls = self._read(
-            self._table(names=INSPECT_ACCEPT_SETS + INSPECT_SELF_SETS))
+    def test_all_six_come_from_a_single_nft_call(self):
+        result, calls = self._read(self._table(names=ALL_SETS))
         self.assertEqual(len(calls), 1, calls)
         self.assertEqual(calls[0][:2], ("list", "table"))
-        self.assertEqual(set(result), set(INSPECT_ACCEPT_SETS
-                                          + INSPECT_SELF_SETS))
+        self.assertEqual(set(result), set(ALL_SETS))
         self.assertTrue(all(result.values()), result)
 
     def test_each_name_reads_its_own_set_and_not_the_first_one(self):
@@ -206,12 +231,16 @@ class TestTheReadCostsOneExec(unittest.TestCase):
         armed = INSPECT_ACCEPT_SETS[0]
         result, _calls = self._read(self._table(names=[armed]))
         self.assertIs(result[armed], True)
-        for name in INSPECT_ACCEPT_SETS[1:] + INSPECT_SELF_SETS:
-            self.assertIsNone(result[name], name)
+        for name in ALL_SETS:
+            if name != armed:
+                self.assertIsNone(result[name], name)
 
     def test_a_set_present_without_this_uid_is_the_failure_not_silence(self):
-        payload = self._table(names=INSPECT_ACCEPT_SETS + INSPECT_SELF_SETS,
-                              uid=UID + 7)
+        """`uid + 7` moves the accept and self elements off this uid and, via
+        vm_inspect_address, the guard elements off this uid's inspector
+        address -- so all six read as armed-for-somebody-else, which is the
+        failure, not the silence."""
+        payload = self._table(names=ALL_SETS, uid=UID + 7)
         result, _calls = self._read(payload)
         self.assertEqual(set(result.values()), {False})
 

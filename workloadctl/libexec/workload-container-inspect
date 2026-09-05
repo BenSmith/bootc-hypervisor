@@ -174,7 +174,7 @@ def up(name: str) -> int:
             raise RuntimeError(f"could not add listener address: "
                                f"{result.stderr.strip()}")
 
-    # Six elements, both tables -- see vm_inspect_element_commands's
+    # Eight elements, both tables -- see vm_inspect_element_commands's
     # docstring. Purge before adding: `add element` on an existing key does
     # not overwrite a stale one.
     for argv in vm_inspect_element_commands(uid, "delete"):

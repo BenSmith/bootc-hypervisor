@@ -21,6 +21,7 @@ from vm import (
     NFT_MAP_INSPECT4, NFT_MAP_INSPECT6, NFT_SET_ALLOW4, NFT_SET_ALLOW6,
     NFT_SET_FILTERED, NFT_SET_INSPECT_CG, NFT_SET_INSPECT_DST,
     NFT_SET_INSPECT_DST6, NFT_SET_INSPECT_SELF, NFT_SET_INSPECT_SELF6,
+    NFT_SET_INSPECT_LIVE, NFT_SET_INSPECT_LIVE6,
     NFT_SET_INTERNAL4, NFT_SET_INTERNAL6, NFT_SET_EGRESS_CG, NFT_SKELETON,
     VM_INSPECT_ADDR6_PREFIX, VM_INSPECT_NETWORK,
     VM_INSPECT_PORT_CLEARTEXT, VM_INSPECT_PORT_TLS,
@@ -105,23 +106,24 @@ class TestSkeleton(unittest.TestCase):
         The qualifying sets hold only per-workload state. `wl_filtered` holds
         workload uids; `wl_egress_cg` holds the cgroup paths of hostname-proxy
         units, which only exist for filtered VMs; `wl_inspect_self`/`self6`
-        hold one element per armed workload. All are empty on a host running
-        no filtered workload, which is what makes an abandoned table inert.
+        hold one element per armed workload; `wl_inspect_live`/`live6` hold one
+        address per armed inspector. All are empty on a host running no
+        filtered workload, which is what makes an abandoned table inert.
 
-        THE PROPERTY IS INERTNESS, NOT SET MEMBERSHIP, and there is a second
-        way to get it. The two listener-range guards are bounded by
-        DESTINATION instead: 198.18.0.0/16 is RFC 2544 benchmarking space and
-        2001:2::/48 its v6 counterpart, so an abandoned table drops non-root
-        traffic to two ranges nothing on a normal host routes anyway. That is
-        the same trade the INPUT chain already makes for the same two ranges
-        (§7.2.6), and it is accepted here for the same reason. It is allowed
-        for these ranges and nothing else: a destination-bounded drop on any
-        other prefix has a real blast radius on an abandoned table and must
-        still carry a set.
+        THIS HELD ONLY BECAUSE THE GUARD WAS REWRITTEN TO GET IT BACK. The
+        first repair of the cross-workload hole (§7.2.3) bounded the guard by
+        DESTINATION instead, naming 198.18.0.0/16 and 2001:2::/48 literally,
+        and the argument for it was that those are reserved ranges nothing on
+        a normal host routes — so an abandoned table would drop traffic nobody
+        sends. That argument is about the world, not about the ruleset, and it
+        bought inertness at the price of a workload-scoped tool dropping every
+        non-root packet on the host bound for a /16 it does not own. The guard
+        now reads @wl_inspect_live, so this test does not need the carve-out
+        and does not have one: EVERY output-chain drop carries a set.
         """
         guards = (f"@{NFT_SET_FILTERED}", f"@{NFT_SET_EGRESS_CG}",
-                  f"@{NFT_SET_INSPECT_SELF}", f"@{NFT_SET_INSPECT_SELF6}")
-        reserved = ("198.18.0.0/16", "2001:2::/48")
+                  f"@{NFT_SET_INSPECT_SELF}", f"@{NFT_SET_INSPECT_SELF6}",
+                  f"@{NFT_SET_INSPECT_LIVE}", f"@{NFT_SET_INSPECT_LIVE6}")
         # The output chain only. The input chain's drops are deliberately
         # unguarded on any set — there is no uid on the input path — and are
         # bounded by destination plus `iif != lo` instead (§7.2.6).
@@ -130,10 +132,8 @@ class TestSkeleton(unittest.TestCase):
                  and d.startswith("add rule inet workload_filter output")]
         self.assertTrue(drops, "no drop rule in the skeleton")
         for rule in drops:
-            self.assertTrue(
-                any(g in rule for g in guards)
-                or any(r in rule for r in reserved),
-                f"unguarded drop rule: {rule}")
+            self.assertTrue(any(g in rule for g in guards),
+                            f"unguarded drop rule: {rule}")
 
     def test_chain_policy_is_accept(self):
         """So an abandoned table is inert rather than a host-wide outage.
@@ -276,6 +276,36 @@ class TestSkeleton(unittest.TestCase):
                         f"declaration of {name}")
             self.assertIn("counter", decl)
             self.assertNotIn("th dport", decl)
+
+    def test_the_live_sets_hold_a_bare_address_and_nothing_else(self):
+        """The cross-workload guard's sets are keyed on DESTINATION alone.
+
+        A uid in the key would make them say "workload X's own inspector",
+        which is what the self sets already say one rule earlier and is the
+        opposite of what a cross-workload guard has to match — a dial from
+        another workload carries the other uid and would miss every element.
+        A port would let a cross-workload caller in on any port the inspector
+        does not serve, which is the half of the guard the self sets exist to
+        attribute. Both mistakes fail open and neither has a runtime tell, so
+        the shape is pinned rather than left to the arming helper.
+        """
+        for name in (NFT_SET_INSPECT_LIVE, NFT_SET_INSPECT_LIVE6):
+            decl = only(self, [d for d in self.directives
+                               if d.startswith("add set")
+                               and d.split()[4] == name],
+                        f"declaration of {name}")
+            self.assertNotIn("meta skuid", decl, name)
+            self.assertNotIn("th dport", decl, name)
+        self.assertIn("type ipv4_addr",
+                      only(self, [d for d in self.directives
+                                  if d.startswith("add set")
+                                  and d.split()[4] == NFT_SET_INSPECT_LIVE],
+                           NFT_SET_INSPECT_LIVE))
+        self.assertIn("type ipv6_addr",
+                      only(self, [d for d in self.directives
+                                  if d.startswith("add set")
+                                  and d.split()[4] == NFT_SET_INSPECT_LIVE6],
+                           NFT_SET_INSPECT_LIVE6))
 
     def test_the_inspect_rules_reference_the_sets_by_their_constants(self):
         """A declaration a rule never reads is a guard that is off while the
@@ -504,8 +534,8 @@ class TestRuleOrderIsPinned(unittest.TestCase):
         ("inspector redirect accept v6", ("@wl_inspect_dst6", "accept")),
         ("inspector self drop v4",  ("@wl_inspect_self", "ct direction original", "drop")),
         ("inspector self drop v6",  ("@wl_inspect_self6", "ct direction original", "drop")),
-        ("inspector range guard v4", ("meta skuid != 0", "ct direction original", "198.18.0.0/16", "drop")),
-        ("inspector range guard v6", ("meta skuid != 0", "ct direction original", "2001:2::/48", "drop")),
+        ("cross-workload guard v4", ("meta skuid != 0", "ct direction original", "@wl_inspect_live", "drop")),
+        ("cross-workload guard v6", ("meta skuid != 0", "ct direction original", "@wl_inspect_live6", "drop")),
         ("host-side name resolution", ("@wl_egress_cg", "th dport 53", "accept")),
         ("internal exemption v4",   ("@wl_egress_cg", "@wl_internal_ok4",
                                     "ct direction original", "accept")),
@@ -537,8 +567,8 @@ class TestRuleOrderIsPinned(unittest.TestCase):
             for token in required:
                 self.assertIn(token, rule, f"rule {label!r} lost {token!r}: {rule}")
 
-    def test_the_range_guards_are_not_scoped_to_workloads_under_policy(self):
-        """The listener-range guards must exempt ROOT, not `@wl_filtered`.
+    def test_the_cross_workload_guards_exempt_root_and_no_one_else(self):
+        """The guards must exempt ROOT, not `@wl_filtered`.
 
         This is a regression pin for a measured hole, not a style rule. The
         guards were once written `meta skuid @wl_filtered ... drop`, which
@@ -558,18 +588,46 @@ class TestRuleOrderIsPinned(unittest.TestCase):
         would let a non-member past.
         """
         guards = [r for r in self.rules
-                  if "198.18.0.0/16" in r or "2001:2::/48" in r]
+                  if f"@{NFT_SET_INSPECT_LIVE}" in r
+                  or f"@{NFT_SET_INSPECT_LIVE6}" in r]
         self.assertEqual(len(guards), 2, f"expected both family guards: {guards}")
         for rule in guards:
             self.assertIn(
                 "meta skuid != 0", rule,
-                "the range guard lost its root exemption -- host tooling "
-                f"probes as root and would now be dropped: {rule}")
+                "the cross-workload guard lost its root exemption -- host "
+                f"tooling probes as root and would now be dropped: {rule}")
             self.assertNotIn(
-                "@wl_filtered", rule,
-                "the range guard is scoped to workloads already under "
-                "policy, so an unfiltered VM, an untriggered container or "
-                f"an ordinary host user walks straight through it: {rule}")
+                f"@{NFT_SET_FILTERED}", rule,
+                "the guard is scoped to workloads already under policy, so "
+                "an unfiltered VM, an untriggered container or an ordinary "
+                f"host user walks straight through it: {rule}")
+
+    def test_the_cross_workload_guards_do_not_name_the_listener_ranges(self):
+        """The guard's destination is the live set, never the bare prefix.
+
+        A regression pin for the FIRST repair of the hole above, which read
+        `meta skuid != 0 ... ip daddr 198.18.0.0/16 drop`. That closes the
+        hole, and in closing it makes a workload-scoped tool drop every
+        non-root packet on the host bound for a /16 workloadctl does not own
+        -- an operator using that range for anything of their own loses it
+        whether or not they run a single workload. There is no runtime tell:
+        the workloads keep working, and the breakage lands on something that
+        has nothing to do with workloadctl.
+
+        @wl_inspect_live holds only addresses workloadctl allocated itself,
+        so the guard reaches exactly as far as its own listeners -- and being
+        a set, it restores the inertness property
+        test_the_drop_is_guarded_by_set_membership defends.
+        """
+        for rule in self.rules:
+            if not rule.endswith("drop") or "output" not in rule:
+                continue
+            for prefix in ("198.18.0.0/16", "2001:2::/48"):
+                self.assertNotIn(
+                    prefix, rule,
+                    "an output-chain drop names the listener range literally "
+                    "instead of @wl_inspect_live, which drops host traffic "
+                    f"workloadctl has no business dropping: {rule}")
 
     def test_every_destination_drop_is_qualified_to_the_original_direction(self):
         """A drop that does not say `ct direction original` also drops replies.

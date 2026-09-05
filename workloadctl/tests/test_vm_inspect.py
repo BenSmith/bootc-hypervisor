@@ -15,12 +15,14 @@ from vm import (
     IP_BIN, NFT_BIN, NFT_MAP_INSPECT4, NFT_MAP_INSPECT6, NFT_PROXY_TABLE,
     NFT_SET_INSPECT_CG, NFT_SET_INSPECT_DST,
     NFT_SET_INSPECT_DST6, NFT_SET_INSPECT_SELF, NFT_SET_INSPECT_SELF6,
+    NFT_SET_INSPECT_LIVE, NFT_SET_INSPECT_LIVE6,
     NFT_SET_EGRESS_CG, NFT_TABLE, VM_INSPECT_ORIG_CLEARTEXT,
     VM_INSPECT_ORIG_TLS, VM_INSPECT_PORT_CLEARTEXT, VM_INSPECT_PORT_TLS,
     VM_ADVERTISED_IFACE, vm_inspect_cgroup, vm_inspect_cgroup_command,
     vm_inspect_cgroup_filter_command, vm_inspect_dst_elements,
     vm_inspect_element_commands, vm_inspect_link_address_commands,
     vm_inspect_link_delete_commands, vm_inspect_map_elements,
+    vm_inspect_live_elements,
     vm_inspect_policy, vm_inspect_policy_path, vm_inspect_self_elements,
     vm_allowed_hosts, vm_runtime_dir, VM_TLS_DEFAULT,
     vm_http2_hosts, vm_policy_entries, vm_policy_governs,
@@ -137,12 +139,34 @@ class TestSelfElements(unittest.TestCase):
                 self.assertEqual(element.count(" . "), 1)
 
 
-class TestElementCommands(unittest.TestCase):
-    """The six arming commands: both tables, by their constants."""
+class TestLiveElements(unittest.TestCase):
+    """The cross-workload guard's elements: a bare address, no uid, no port."""
 
-    def test_six_argv_two_per_family(self):
+    def test_the_worked_example(self):
+        self.assertEqual(
+            vm_inspect_live_elements(10004)[NFT_SET_INSPECT_LIVE],
+            ["198.18.1.4"])
+        self.assertEqual(
+            vm_inspect_live_elements(10004)[NFT_SET_INSPECT_LIVE6],
+            ["2001:2::c612:104"])
+
+    def test_a_uid_in_the_key_would_defeat_the_guard(self):
+        """These match a dial from ANOTHER workload, which carries another
+        uid. A uid in the element would make the set say what wl_inspect_self
+        already says one rule earlier, and every cross-workload dial -- the
+        thing the rule exists for -- would miss it."""
+        for family in (NFT_SET_INSPECT_LIVE, NFT_SET_INSPECT_LIVE6):
+            for element in vm_inspect_live_elements(10004)[family]:
+                self.assertNotIn(" . ", element)
+                self.assertNotIn("10004", element)
+
+
+class TestElementCommands(unittest.TestCase):
+    """The eight arming commands: both tables, by their constants."""
+
+    def test_eight_argv_two_per_family(self):
         commands = vm_inspect_element_commands(10004, "add")
-        self.assertEqual(len(commands), 6)
+        self.assertEqual(len(commands), 8)
         self.assertTrue(all(c[0] == NFT_BIN for c in commands))
 
     def test_every_argv_names_a_constant_not_a_literal(self):
@@ -154,7 +178,8 @@ class TestElementCommands(unittest.TestCase):
             objects,
             [NFT_MAP_INSPECT4, NFT_MAP_INSPECT6,
              NFT_SET_INSPECT_DST, NFT_SET_INSPECT_DST6,
-             NFT_SET_INSPECT_SELF, NFT_SET_INSPECT_SELF6])
+             NFT_SET_INSPECT_SELF, NFT_SET_INSPECT_SELF6,
+             NFT_SET_INSPECT_LIVE, NFT_SET_INSPECT_LIVE6])
 
     def test_the_maps_arm_in_the_proxy_table_only(self):
         """Both tables named: the DNAT maps live in inet workload_proxy, the
@@ -166,7 +191,8 @@ class TestElementCommands(unittest.TestCase):
             self.assertEqual(argv_of(commands, name)[3:5],
                              NFT_PROXY_TABLE.split())
         for name in (NFT_SET_INSPECT_DST, NFT_SET_INSPECT_DST6,
-                     NFT_SET_INSPECT_SELF, NFT_SET_INSPECT_SELF6):
+                     NFT_SET_INSPECT_SELF, NFT_SET_INSPECT_SELF6,
+                     NFT_SET_INSPECT_LIVE, NFT_SET_INSPECT_LIVE6):
             self.assertEqual(argv_of(commands, name)[3:5],
                              NFT_TABLE.split())
 

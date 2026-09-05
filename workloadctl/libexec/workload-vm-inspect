@@ -282,7 +282,7 @@ def up(name: str) -> int:
             raise RuntimeError(f"could not add listener address: "
                                f"{result.stderr.strip()}")
 
-    # Six elements, both tables, for the reason vm_inspect_element_commands's
+    # Eight elements, both tables, for the reason vm_inspect_element_commands's
     # docstring carries: arming one table and not the other leaves a workload
     # that looks configured and reaches nothing. Purge before adding, because
     # `add element` on an existing key does not overwrite a stale one.

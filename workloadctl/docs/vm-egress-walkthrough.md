@@ -77,9 +77,12 @@ root:
 4. Adds this workload's listener addresses to the link: `198.18.1.4` and
    `2001:2::c612:104`, derived from uid 10004, so uniqueness is inherited from
    the uid allocator — no registry, no allocation step, no collision.
-5. Arms **six elements across two tables**: the DNAT maps `wl_inspect4` /
-   `wl_inspect6` (uid . port → listener), and the guard sets `wl_inspect_dst`,
-   `wl_inspect_dst6`, `wl_inspect_self`, `wl_inspect_self6`. Purge-then-add, so
+5. Arms **eight elements across two tables**: the DNAT maps `wl_inspect4` /
+   `wl_inspect6` (uid . port → listener), the guard sets `wl_inspect_dst`,
+   `wl_inspect_dst6`, `wl_inspect_self`, `wl_inspect_self6`, and the
+   cross-workload guard sets `wl_inspect_live` / `wl_inspect_live6`, which
+   hold this workload's listener address bare — no uid, no port, because they
+   are what a dial from *another* uid has to match. Purge-then-add, so
    the armed state is a function of the current config alone. Arming one table
    and not the other leaves a workload that looks configured and reaches nothing.
 6. Resolves each `[[vm.network.internal]]` host and arms `wl_internal_ok4/6`.
@@ -136,8 +139,8 @@ predicate, so it can reach the traffic class but cannot tell one VM from another
  6  meta skuid . ip6 daddr . th dport @wl_inspect_dst6            accept
  7  meta skuid . ip  daddr @wl_inspect_self  ct dir original      drop
  8  meta skuid . ip6 daddr @wl_inspect_self6 ct dir original      drop
- 9  meta skuid @wl_filtered ct dir original ip  daddr 198.18.0.0/16  drop
-10  meta skuid @wl_filtered ct dir original ip6 daddr 2001:2::/48    drop
+ 9  meta skuid != 0 ct dir original ip  daddr @wl_inspect_live   drop
+10  meta skuid != 0 ct dir original ip6 daddr @wl_inspect_live6  drop
 11  @wl_egress_cg th dport 53                                     accept
 12  @wl_egress_cg meta skuid . ip  daddr @wl_internal_ok4 ct dir original  accept
 13  @wl_egress_cg meta skuid . ip6 daddr @wl_internal_ok6 ct dir original  accept
@@ -430,8 +433,26 @@ Two things bound what rule 16 now admits, and neither is rule 16:
   workload's uid cannot reach *another* workload's plane — the addresses are
   derived from the uid, so they are guessable by construction. This was
   measured, not assumed: workload B reached A's listener on the first try
-  before the guard existed. A blanket range guard catches whatever the
-  per-workload rules do not.
+  before the guard existed. Rules 9 and 10 catch whatever the per-workload
+  rules do not.
+
+  Rules 9 and 10 exempt **root and nothing else**, and match on
+  `@wl_inspect_live` — the set of addresses actually armed for a live
+  inspector. Both halves are corrections of shapes that were measured wrong.
+  The rule first read `meta skuid @wl_filtered`, which sounds like "stop
+  cross-workload dials" and means "stop dials from workloads already under
+  policy": an `egress = "open"` VM, a container with no `[network]` table and
+  an ordinary shell on the host are none of them members, and all three
+  reached a filtered workload's listener, with the dials landing in *that
+  workload's* egress records. Root is the right exemption because `diagnose`
+  and `doctor` both `require_root()` and are the whole of the legitimate
+  probing population. The destination is a set rather than the literal
+  `198.18.0.0/16` because a non-root source qualifier plus a bare prefix makes
+  a workload-scoped tool drop every non-root packet on the host bound for a
+  range workloadctl does not own — collateral on anything else an operator
+  put there, with no runtime tell. The set holds only addresses workloadctl
+  allocated itself, and being a set it keeps the property every other drop in
+  this chain has: nothing armed, empty set, inert table.
 
 The invariant behind that ordering is enforced rather than assumed: an `allow`
 entry naming an address inside a listener range is refused, in both families,
