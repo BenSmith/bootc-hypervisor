@@ -901,6 +901,11 @@ VM_DROP_UNREADABLE_REQUEST = "unreadable request"
 VM_DROP_UNREACHABLE = "upstream unreachable"
 VM_DROP_INTERNAL = "internal destination"
 VM_DROP_CEILING = "connection ceiling reached"
+# Connection-level like the ceiling, and refused before any byte is read: the
+# caller's uid is not this workload's. The listener identifies callers through
+# lib/peer_identity.py; `workload_filter` is the primary control and this is
+# the layer behind it.
+VM_DROP_FOREIGN_CALLER = "caller is not this workload"
 VM_DROP_RELAY_FAILED = "relay failed"
 VM_DROP_TIMED_OUT = "timed out"
 VM_DROP_UNVERIFIED = "upstream certificate unverified"
@@ -928,6 +933,7 @@ VM_INSPECT_RECORD_REASONS = (
     VM_DROP_UNREACHABLE,
     VM_DROP_INTERNAL,
     VM_DROP_CEILING,
+    VM_DROP_FOREIGN_CALLER,
     VM_DROP_RELAY_FAILED,
     VM_DROP_TIMED_OUT,
     VM_DROP_UNVERIFIED,

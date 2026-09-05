@@ -138,6 +138,7 @@ from vm import (
 from vm_clock import vm_resync_guest_clock_if_skewed
 from vm_mint import MintFailed, MintThrottled, Minter
 from vm_status import STATUS_TOP_N, BoundedCounts, write_status
+from peer_identity import local_endpoints, peer_uid
 from workload_lib import workload_state_dir
 
 
@@ -1955,6 +1956,9 @@ DROP_UNREADABLE_REQUEST = "unreadable request"
 DROP_UNREACHABLE = "upstream unreachable"
 DROP_INTERNAL = "internal destination"
 DROP_CEILING = "connection ceiling reached"
+# Connection-level like DROP_CEILING, and refused for the same reason: decided
+# before any byte is read, so it never reaches a plane or a policy.
+DROP_FOREIGN_CALLER = "caller is not this workload"
 DROP_RELAY_FAILED = "relay failed"
 DROP_TIMED_OUT = "timed out"
 DROP_UNVERIFIED = "upstream certificate unverified"
@@ -2014,6 +2018,7 @@ DROP_REASONS = (
     DROP_UNREACHABLE,
     DROP_INTERNAL,
     DROP_CEILING,
+    DROP_FOREIGN_CALLER,
     DROP_RELAY_FAILED,
     DROP_TIMED_OUT,
     DROP_UNVERIFIED,
@@ -2464,6 +2469,12 @@ class Counters:
         # itself IS recorded (mode "h2"); this is the count of how many such
         # blind spots there are.
         self.h2_unrecorded = 0
+        # Connections whose caller the peer-identity lookup could not name.
+        # Not a drop: they are admitted (see _handle). Counted because the
+        # alternative is a hardening layer that degrades to inert with nothing
+        # anywhere saying so -- a counter with no writer reads 0, and so does
+        # a check that never resolves.
+        self.caller_unresolved = 0
         # Pre-seeded from DROP_REASONS rather than grown on first use. A reason
         # absent from the file and a reason reading zero are the same fact and
         # must look the same, or an operator reads "no key" as "not measured".
@@ -2582,6 +2593,11 @@ class Counters:
         with self._lock:
             self.record_failures += 1
 
+    def record_caller_unresolved(self) -> None:
+        """One connection admitted without naming its caller."""
+        with self._lock:
+            self.caller_unresolved += 1
+
     def record_h2_unrecorded(self) -> None:
         """One h2 session whose requests this process never decoded."""
         with self._lock:
@@ -2649,6 +2665,7 @@ class Counters:
                 "bumped": self.bumped,
                 "record_failures": self.record_failures,
                 "h2_unrecorded": self.h2_unrecorded,
+                "caller_unresolved": self.caller_unresolved,
                 "internal_refusals": self.internal_refusals.snapshot(),
                 "internal_refusals_total": self.internal_refusals.total,
                 "per_host": {reason: counts.snapshot()
@@ -2835,6 +2852,53 @@ class Listener:
         # the record file this keys outlives that restart -- two unrelated
         # connections would share a key in the one file a reader joins on.
         cid = secrets.token_hex(6)
+        # WHO IS CALLING. Before the ceiling, so a foreign caller cannot spend
+        # a slot the workload needs, and before any byte is read.
+        #
+        # This is defence in depth, not the primary control: `workload_filter`
+        # already drops a non-root packet aimed at any live inspector address
+        # that is not the sender's own. It exists because that guard is one
+        # rule in a table this program does not own and cannot verify, and
+        # because of what leaked past it before it was fixed -- a dial from any
+        # local uid reached this listener AND was written into this workload's
+        # egress records, so the records described traffic the workload never
+        # sent. A record an operator cannot trust is worse than no record.
+        #
+        # Root is refused here even though the nft guard exempts it. The
+        # exemption exists so `diagnose` and `doctor` are not caught by a
+        # host-wide drop, and neither dials this listener -- nothing in the
+        # tree does. So the exemption is about packets, not about callers, and
+        # root's manual probe landing in a workload's records was the second
+        # half of the same defect.
+        try:
+            caller = peer_uid(local_endpoints(conn), peer[:2])
+        except Exception:
+            # A check that can throw is worse than one that fails soft: this is
+            # the second layer, and taking the connection path down with it
+            # would turn a hardening measure into an outage. Treated as
+            # unresolved, which is handled below.
+            caller = None
+        if caller is not None and caller != os.getuid():
+            self._log(
+                f"rejected {LOG_ID_FIELD}={cid} plane={plane} "
+                f"local={_fmt(local)} peer={_fmt(peer)} caller_uid={caller} "
+                f"reason='{DROP_FOREIGN_CALLER}'")
+            self.counters.record_drop(DROP_FOREIGN_CALLER)
+            conn.close()
+            return
+        # `None` means the lookup could not name the owner -- a row that had
+        # already left the table, or a /proc read that failed. Admitted, not
+        # refused: the nft guard is the control that must hold, this layer
+        # cannot distinguish "hostile" from "raced", and failing closed on an
+        # unresolvable read would drop the workload's OWN traffic under exactly
+        # the load that makes the table churn. Logged so the silence is
+        # visible rather than assumed absent.
+        if caller is None:
+            # Counted, not logged. A line per connection would be noise for a
+            # routine race -- the row can leave the table before we read it --
+            # and it would carry a connection id, putting entries in the log an
+            # operator joins on for connections that were served normally.
+            self.counters.record_caller_unresolved()
         if not self._ceiling.admit():
             # Reject rather than queue: close now, count it, spawn no thread.
             self._log(

@@ -67,6 +67,15 @@ def _mock_conn():
     """
     m = unittest.mock.MagicMock()
     m.recv.return_value = b""
+    # Answer getsockname/getsockopt the way a real accepted socket does. A
+    # MagicMock returns a MagicMock for both, which is not a bytes-like object
+    # and not an address -- the peer-identity lookup reads them, and a mock
+    # that lied about their TYPE made every _handle test raise where the
+    # product cannot.
+    m.getsockname.return_value = ("198.18.0.1", 8080)
+    # OSError is what a socket with no conntrack entry gives, i.e. nothing
+    # translated this connection -- the ordinary local case.
+    m.getsockopt.side_effect = OSError
     return m
 
 
@@ -3221,3 +3230,100 @@ class TestTheNormalisedFormIsWhatGoesUpstream(_CleartextRig):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestCallerIdentity(unittest.TestCase):
+    """Only this workload may talk to its own inspector.
+
+    Defence in depth behind `workload_filter`, which already drops a non-root
+    packet aimed at a live inspector address that is not the sender's own. This
+    layer exists because that guard is one rule in a table the listener does
+    not own and cannot verify -- and because of what got past it before it was
+    fixed: a dial from any local uid both REACHED this listener and was written
+    into the workload's egress records, so the records described traffic the
+    workload never sent.
+
+    The identification is `lib/peer_identity.py` (shared with agent-broker),
+    which reads /proc/net rather than using SO_PEERCRED -- that is AF_UNIX-only
+    and yields nothing on a listener bound to an address.
+    """
+
+    def _handled(self, mod, caller_uid):
+        """Drive one connection with the caller lookup answering `caller_uid`."""
+        local = ("198.18.0.1", VM_INSPECT_PORT_CLEARTEXT)
+        out = io.StringIO()
+        listener = mod.Listener([_listener_with(local)], out)
+        conn = _mock_conn()
+        with unittest.mock.patch.object(mod, "peer_uid",
+                                        return_value=caller_uid):
+            listener._handle(conn, ("192.0.2.1", 1024), _listener_with(local))
+        return listener, conn, out.getvalue()
+
+    def test_a_foreign_uid_is_refused_and_counted(self):
+        mod = _mod()
+        listener, conn, log = self._handled(mod, os.getuid() + 1)
+        self.assertIn(mod.DROP_FOREIGN_CALLER, log)
+        self.assertIn("rejected", log)
+        conn.close.assert_called()
+        snap = listener.status()
+        self.assertEqual(snap["drop_reasons"][mod.DROP_FOREIGN_CALLER], 1)
+        self.assertEqual(snap["dispositions"]["dropped"], 1)
+
+    def test_the_workloads_own_uid_is_admitted(self):
+        """The listener runs as _wl-<name>, so its own uid IS the workload's."""
+        mod = _mod()
+        listener, _conn, log = self._handled(mod, os.getuid())
+        self.assertNotIn(mod.DROP_FOREIGN_CALLER, log)
+        self.assertEqual(
+            listener.status()["drop_reasons"][mod.DROP_FOREIGN_CALLER], 0)
+
+    def test_root_is_refused_even_though_nftables_exempts_it(self):
+        """The nft guard exempts `meta skuid != 0` so a host-wide drop does not
+        catch `diagnose`/`doctor`. Neither dials this listener -- nothing in the
+        tree does -- so that exemption is about packets, not about callers. Root
+        probing a workload's inspector by hand and landing in its egress records
+        was the second half of the defect this closes."""
+        mod = _mod()
+        listener, conn, log = self._handled(mod, 0)
+        self.assertIn(mod.DROP_FOREIGN_CALLER, log)
+        conn.close.assert_called()
+
+    def test_an_unresolvable_caller_is_admitted_and_counted(self):
+        """Fail soft, and say so. The row can leave the table before it is
+        read, and failing closed on that would drop the workload's OWN traffic
+        under exactly the load that makes the table churn. The nft guard is the
+        control that must hold; this layer must not become an outage."""
+        mod = _mod()
+        listener, conn, log = self._handled(mod, None)
+        self.assertNotIn(mod.DROP_FOREIGN_CALLER, log)
+        self.assertEqual(listener.status()["caller_unresolved"], 1)
+        # Admitted means no connection id was logged for a refusal...
+        self.assertNotIn("rejected", log)
+
+    def test_a_raising_lookup_does_not_take_the_connection_path_down(self):
+        """A hardening check that can throw is worse than one that fails soft:
+        it would turn this layer into an outage for the traffic it protects."""
+        mod = _mod()
+        local = ("198.18.0.1", VM_INSPECT_PORT_CLEARTEXT)
+        listener = mod.Listener([_listener_with(local)], io.StringIO())
+        with unittest.mock.patch.object(mod, "peer_uid",
+                                        side_effect=RuntimeError("boom")):
+            listener._handle(_mock_conn(), ("192.0.2.1", 1024),
+                             _listener_with(local))
+        self.assertEqual(listener.status()["caller_unresolved"], 1)
+
+    def test_the_check_runs_before_the_ceiling(self):
+        """A foreign caller must not be able to spend a slot the workload
+        needs. With limit=0 every connection is over capacity, so whichever
+        check runs first is the reason that gets recorded."""
+        mod = _mod()
+        local = ("198.18.0.1", VM_INSPECT_PORT_CLEARTEXT)
+        out = io.StringIO()
+        listener = mod.Listener([_listener_with(local)], out, limit=0)
+        with unittest.mock.patch.object(mod, "peer_uid",
+                                        return_value=os.getuid() + 1):
+            listener._handle(_mock_conn(), ("192.0.2.1", 1024),
+                             _listener_with(local))
+        snap = listener.status()
+        self.assertEqual(snap["drop_reasons"][mod.DROP_FOREIGN_CALLER], 1)
+        self.assertEqual(snap["drop_reasons"][mod.DROP_CEILING], 0)

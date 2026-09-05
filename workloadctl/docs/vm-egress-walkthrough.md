@@ -454,6 +454,23 @@ Two things bound what rule 16 now admits, and neither is rule 16:
   allocated itself, and being a set it keeps the property every other drop in
   this chain has: nothing armed, empty set, inert table.
 
+  **The listener checks too, and refuses root.** Rules 9 and 10 are the
+  primary control; the listener asks a second time, on each accepted
+  connection, whether the caller's uid is this workload's own — and refuses
+  every other uid *including root*. The two are not in conflict: the nft
+  exemption is about **packets**, keeping `diagnose` and `doctor` clear of a
+  host-wide drop, and neither of them (nor anything else in the tree) dials a
+  listener. So root reaching the socket by hand was never a supported path,
+  and root's manual probe landing in a workload's egress records was the
+  second half of the same defect the guard fixed. The check reads the kernel's
+  socket table (`lib/peer_identity.py`, shared with `agent-broker`) rather
+  than `SO_PEERCRED`, which is AF_UNIX-only and says nothing about the peer of
+  a TCP connection. It fails **soft**: a lookup that cannot name the owner
+  admits the connection and increments `caller_unresolved` in the status file,
+  because the row can leave the table before it is read and failing closed
+  there would drop the workload's own traffic under exactly the load that
+  makes the table churn. A refusal counts `caller is not this workload`.
+
 The invariant behind that ordering is enforced rather than assumed: an `allow`
 entry naming an address inside a listener range is refused, in both families,
 by `validate` and again by the helper that arms the element. It has to be, and
