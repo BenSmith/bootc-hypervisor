@@ -14,6 +14,7 @@ import re
 import stat
 from dataclasses import dataclass
 from pathlib import Path
+from typing import NamedTuple
 
 
 # --- Constants ---
@@ -1272,6 +1273,119 @@ def infer_workload_mode(config: dict) -> str:
             )
         return mode
     return "pod" if "containers" in config else "single"
+
+
+# --- Container egress policy/credential schema ---
+#
+# [network.policy] / [network.credential], parsed the same way and for the
+# same reason as [[vm.network.policy]] / [[vm.network.credential]] in
+# lib/vm.py: shape-tolerant here, with real validation living in a separate
+# validate_* function (not yet written -- there is no container inspector to
+# validate against yet). Deliberately its own small NamedTuple pair rather
+# than reuse of VmPolicyEntry/VmCredential: those are keyed on `[vm.network]`
+# specifically, and container topology has no `[vm]` section to key off of.
+# Widening them instead would put a substrate branch inside a pair of
+# structures whose whole job is to describe one substrate's table.
+
+class ContainerPolicyEntry(NamedTuple):
+    """One [[network.policy]] entry, normalised.
+
+    `methods` and `paths` are `None` where the key was absent, not an empty
+    tuple -- absent means "any", empty would mean "none". Same convention as
+    VmPolicyEntry, for the same reason: collapsing the two would make a
+    single-entry host with no `paths` deny everything instead of permitting
+    everything.
+    """
+
+    host: str
+    methods: tuple | None
+    paths: tuple | None
+    credential: str | None = None
+
+
+def container_policy_entries(net: dict) -> list[ContainerPolicyEntry]:
+    """The [[network.policy]] entries for one container's [network] table,
+    normalised, in file order. Shape-tolerant; a future validate function
+    owns rejecting malformed entries."""
+    entries: list[ContainerPolicyEntry] = []
+    raw = net.get("policy", [])
+    if not isinstance(raw, list):
+        return entries
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        host = item.get("host")
+        if not isinstance(host, str) or not host.strip():
+            continue
+        credential = item.get("credential")
+        if not isinstance(credential, str) or not credential.strip():
+            credential = None
+        else:
+            credential = credential.strip()
+        entries.append(ContainerPolicyEntry(
+            host=host.strip(),
+            methods=_normalise_container_policy_list(item.get("methods"), upper=True),
+            paths=_normalise_container_policy_list(item.get("paths")),
+            credential=credential))
+    return entries
+
+
+class ContainerCredential(NamedTuple):
+    """One [[network.credential]] block, normalised. Same shape as
+    VmCredential (lib/vm.py) and for the same reasons -- see that class's
+    docstring for why `auth_header`/`auth_format` are optional and live here
+    rather than on the policy entry."""
+
+    name: str
+    placeholder: str
+    env: str
+    auth_header: str | None = None
+    auth_format: str | None = None
+
+
+def container_credential_entries(net: dict) -> list[ContainerCredential]:
+    """The [[network.credential]] blocks for one container's [network]
+    table, normalised, in file order. Shape-tolerant; a future validate
+    function owns rejecting malformed entries."""
+    creds: list[ContainerCredential] = []
+    raw = net.get("credential", [])
+    if not isinstance(raw, list):
+        return creds
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        values = []
+        for key in ("name", "placeholder", "env"):
+            value = item.get(key)
+            if not isinstance(value, str) or not value.strip():
+                values = []
+                break
+            values.append(value.strip())
+        if not values:
+            continue
+        optional = []
+        for key in ("auth_header", "auth_format"):
+            value = item.get(key)
+            optional.append(value.strip()
+                            if isinstance(value, str) and value.strip()
+                            else None)
+        creds.append(ContainerCredential(*values, *optional))
+    return creds
+
+
+def _normalise_container_policy_list(value, *, upper: bool = False) -> tuple | None:
+    """One `methods` or `paths` value as a tuple, or None where it was
+    absent. None and () are different answers; see ContainerPolicyEntry."""
+    if value is None:
+        return None
+    if not isinstance(value, list):
+        return ()
+    out = []
+    for item in value:
+        if not isinstance(item, str):
+            continue
+        out.append(item.upper() if upper else item)
+    return tuple(out)
 
 
 # --- Per-workload SELinux identifiers ---
