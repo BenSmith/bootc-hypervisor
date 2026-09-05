@@ -243,6 +243,25 @@ def inside(name, script, timeout=60):
                check=False, timeout=timeout)
 
 
+def dial_as_root(host, port, timeout=20):
+    """One dial from the HOST as root, returning whatever came back as text.
+
+    Root is the only caller nftables lets through to a listener (rules 9/10
+    exempt uid 0 so a host-wide drop cannot catch `diagnose`/`doctor`), which
+    makes this the only probe that can measure the listener's OWN check rather
+    than the packet filter in front of it.
+
+    Reads the error text, not the exit status, for the reason `fetch` does: a
+    refusal and an answer must be told apart by what the far end said, and
+    "400" from the listener's own parser IS an answer.
+    """
+    p = subprocess.run(
+        ["curl", "-sS", "-m", str(timeout), "-o", "-",
+         f"http://{host}:{port}/"],
+        capture_output=True, text=True)
+    return (p.stdout + p.stderr).strip().replace("\n", " ")
+
+
 def fetch(name, url, timeout=60):
     """One request from inside the container, as (seconds, ok, detail).
 
@@ -682,6 +701,13 @@ def check_reporting():
             detail = "not JSON"
     record("`doctor --json` carries an egress block for a container", ok, detail)
 
+    # TRIGGER IT, do not read whatever the timer last left. The drop file is
+    # written by workload-exporter.service on a timer, so reading it directly
+    # measures whenever that last fired -- which on this rig is typically
+    # before the workload under test was even enabled. It failed exactly that
+    # way (59 stale lines, no ceg-plain row) while the predicate was correct
+    # for every arm, i.e. the rig reported a product defect that did not exist.
+    run(["systemctl", "start", "workload-exporter.service"], check=False)
     drop = Path("/run/workload-exporter/workloads.prom")
     text = drop.read_text() if drop.exists() else ""
     record("the exporter marks the container inspected",
@@ -733,14 +759,25 @@ def check_cross_workload_gap():
 
     This is NOT scored, for two reasons. It is very likely a pre-existing
     property of the shared inspector design rather than anything this effort
-    introduced, so failing the container rig for it would attribute it wrongly;
-    and the remedy is a decision (a peer-credential check in the listener? an
-    input-chain rule that covers co-resident uids? accept it and document the
-    boundary?) that has not been made. Turn this into a `record()` on the day
-    that decision lands -- and if the decision is "accept it", invert the
-    assertion so the rig pins the accepted boundary rather than falling silent.
+    introduced, so failing the container rig for it would attribute it wrongly.
+
+    THE DECISION LANDED AND IT WAS "CLOSE IT", so this is scored now, as the
+    docstring it replaces asked for. Two layers, both required to hold:
+
+      - `workload_filter` drops a non-root packet whose destination is a live
+        inspector address that is not the sender's own (@wl_inspect_live). The
+        rule existed before, qualified `meta skuid @wl_filtered` -- "workloads
+        already under policy" -- which an `egress = "open"` VM, a container
+        with no [network] table and an ordinary shell all fail to be, so all
+        three went straight through.
+      - the listener refuses a caller whose uid is not the workload's own,
+        root included, via lib/peer_identity.py.
+
+    Not reaching it is therefore the assertion. A REACHED here is a real
+    regression in one of those two layers, and reaching it was never only a
+    reachability problem: the dials landed in the victim's egress records.
     """
-    say("\n== cross-workload reachability (measured, not scored) ==")
+    say("\n== cross-workload reachability ==")
     uid = workload_uid(FILTERED)
     if uid is None:
         skip("cross-workload reachability", "no uid for the filtered workload")
@@ -757,9 +794,32 @@ def check_cross_workload_gap():
         # a timeout would be the answer we want. So this reads the error text,
         # not wget's exit status.
         reached = ok or "400" in out or "reset" in out or "HTTP/" in out
-        record_gap(
-            f"{OPEN} -> {FILTERED}'s inspector on {addr}:{port} ({label})",
+        record(
+            f"{OPEN} cannot reach {FILTERED}'s inspector on {addr}:{port} "
+            f"({label})",
+            not reached,
             f"{'REACHED' if reached else 'not reached'}: {out[:70]}")
+
+    # THE ROOT PROBE IS THE ONLY ONE THAT REACHES THE LISTENER AT ALL, and
+    # therefore the only one that measures the listener's own check.
+    #
+    # The rules above drop every non-root caller, so the probes above time out
+    # at nftables and the listener never sees a packet -- they measure the nft
+    # layer and say nothing about the second one. Root is exempted from that
+    # drop on purpose (so a host-wide rule cannot catch `diagnose`/`doctor`),
+    # which makes root the only caller whose bytes arrive.
+    #
+    # Before the listener checked, root got `400` here -- the listener's own
+    # parser answering, i.e. proof of reach, with the dial landing in THIS
+    # workload's egress records. It must now get nothing at all.
+    for port, label in ((8080, "cleartext"), (8443, "tls")):
+        out = dial_as_root(addr, port)
+        answered = "400" in out or "HTTP/" in out
+        record(
+            f"root reaches {FILTERED}'s listener on {addr}:{port} ({label}) "
+            f"and is refused without an answer",
+            not answered,
+            f"{'ANSWERED' if answered else 'no answer'}: {out[:70]}")
 
 
 def check_disable_cleanliness():

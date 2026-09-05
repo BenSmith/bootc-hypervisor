@@ -772,9 +772,21 @@ renderer, so their refusal is the correct behaviour. A rig that asserted all
 seven surfaces report the container would fail four rows for a decision made on
 purpose.
 
-### The one thing it measures and does not score
+### Cross-workload inspector reachability — now scored
 
-Cross-workload inspector reachability. `nftables/workload-proxy.nft` argues
+**This was the one thing the rig measured and did not score. The decision it
+was waiting on has landed, and it was "close it", so the probe asserts.**
+
+Two layers now stop it, and the rig requires both to hold. `workload_filter`
+drops a non-root packet aimed at a live inspector address that is not the
+sender's own (`@wl_inspect_live`), and the listener refuses a caller whose uid
+is not the workload's own — root included — through `lib/peer_identity.py`,
+which reads the kernel's socket table because `SO_PEERCRED` is AF_UNIX-only
+and says nothing about a TCP peer. A `REACHED` line is a regression in one of
+those two.
+
+The original note is kept below because the shape of the hole is worth
+remembering: `nftables/workload-proxy.nft` argues
 that a uid with no element in the redirect maps cannot reach another workload's
 inspector, because its packet leaves untranslated and meets the default-deny
 drop in `workload_filter` — but that drop is itself guarded on `@wl_filtered`
@@ -783,15 +795,12 @@ So the argument does not close for a container, and reading the rule suggests
 it does not close for an `egress = "open"` VM either.
 
 The rig dials the filtered workload's listener from the unfiltered container,
-on the listener's real ports rather than through a redirect, and prints the
-result as a `GAP` line that does not affect the tally. Not scored because it is
-very likely a pre-existing property of the shared design rather than anything
-the container work introduced, and because the remedy is a decision nobody has
-made — a peer-credential check in the listener, an input-chain rule covering
-co-resident uids, or an accepted and documented boundary. When that decision
-lands, turn the `record_gap` into a `record`; if the decision is to accept it,
-invert the assertion so the rig pins the accepted boundary rather than going
-quiet.
+on the listener's real ports rather than through a redirect. Reaching it was
+never only a reachability problem: the dials landed in the *victim's* egress
+records, so a workload's own record of what it sent described traffic it never
+sent. Of the three remedies weighed — a peer-credential check in the listener,
+an input-chain rule covering co-resident uids, or an accepted and documented
+boundary — the first two were both taken, and the boundary was not accepted.
 
 ### What it deliberately does not measure
 
