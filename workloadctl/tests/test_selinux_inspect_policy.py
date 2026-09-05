@@ -407,3 +407,37 @@ class TestBoundary(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestCallerIdentification(unittest.TestCase):
+    """The inspector must be able to read the kernel's socket table.
+
+    The listener refuses a connection whose peer uid is not the workload's own,
+    and identifying a TCP peer means reading /proc/net -- SO_PEERCRED is
+    AF_UNIX-only and says nothing about the far end of a TCP connection.
+
+    WHY THIS IS PINNED RATHER THAN LEFT TO THE HARVEST. The lookup fails soft:
+    a peer it cannot name is admitted, deliberately, because the row can leave
+    the table before it is read. So a missing grant here does not break
+    anything an operator or a functional test would see -- it silently turns
+    the whole check into an admit-everyone. Measured exactly that way:
+    broker_rig.py passed all 34 of its functional assertions with this grant
+    missing and failed only its audit.log assertion.
+    """
+
+    def test_the_inspector_may_read_proc_net(self):
+        body = _body()
+        # The link FIRST: /proc/net is a symlink to self/net, so a policy that
+        # granted only the file read would still fail at the traversal and be
+        # just as silently inert.
+        self.assertIn("(allow wlinspect_t proc_net_t (lnk_file (read)))", body)
+        self.assertIn("(allow wlinspect_t proc_net_t (file (getattr open read)))",
+                      body)
+
+    def test_the_inspector_is_not_granted_write_to_proc_net(self):
+        """Read is the whole requirement; a write grant here would be a typo
+        nobody would notice, since nothing would exercise it."""
+        for line in _body().splitlines():
+            if "proc_net_t" in line and "wlinspect_t" in line:
+                self.assertNotIn("write", line, line)
+                self.assertNotIn("append", line, line)

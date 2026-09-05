@@ -1409,6 +1409,31 @@ def _credential_usage_fragments(status) -> list[str]:
     return out
 
 
+def _caller_identity_fragments(status) -> list[str]:
+    """The listener could not name some callers, so for those it checked nothing.
+
+    Read because this failure is SILENT by construction. The check fails soft --
+    a peer it cannot identify is admitted -- so every connection is served
+    exactly as before and no functional surface changes. The counter is the
+    only tell, and a counter nobody reads is worth no more than no counter:
+    broker_rig.py passed all 34 of its functional assertions with the check
+    fully inert, and only its audit.log assertion failed.
+    """
+    unresolved = status.get("caller_unresolved")
+    if not isinstance(unresolved, int) or not unresolved:
+        return []
+    return [
+        f"{unresolved} connection(s) were served without identifying the "
+        f"caller — the listener refuses a peer uid that is not this "
+        f"workload's, and here it could not read the peer's uid, so for those "
+        f"connections that check did nothing. The traffic still passed "
+        f"`workload_filter`, which is the control that must hold. Check "
+        f"audit.log for a wlinspect_t denial on proc_net_t: a missing SELinux "
+        f"rule there looks EXACTLY like this, breaks nothing visible, and is "
+        f"how an inert check reaches production"
+    ]
+
+
 def _binding_fragments(status) -> list[str]:
     """The name-to-`Host` binding rejections, as two readings and never one.
 
@@ -1795,6 +1820,7 @@ def vm_inspect_check(config, *, elements4=PROBE, elements6=PROBE,
 
     if status:
         for fragment in (_binding_fragments(status)
+                         + _caller_identity_fragments(status)
                          + _not_http_fragments(status)
                          + _credential_usage_fragments(status)
                          + _ca_fragments(status)):

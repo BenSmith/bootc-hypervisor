@@ -311,6 +311,28 @@
 ; that can, which is why the rig asserts on it rather than on the counter.
 (allow wlinspect_t transproxy_port_t (tcp_socket (name_connect)))
 
+; --- caller identification -------------------------------------------------
+;
+; The listener refuses a connection whose peer uid is not this workload's own
+; (lib/peer_identity.py). Identifying a TCP peer means reading the kernel's
+; socket table -- SO_PEERCRED is AF_UNIX-only and says nothing here -- so the
+; domain needs /proc/net/tcp and /proc/net/tcp6.
+;
+; WITHOUT THIS THE CHECK IS INERT AND SILENT. The lookup fails soft by design:
+; a peer it cannot name is admitted, because the row can leave the table before
+; it is read and failing closed would drop the workload's own traffic under
+; exactly the load that makes the table churn. So a denial here does not break
+; anything visible -- every functional assertion in broker_rig.py passed with
+; this missing, and only its audit.log assertion failed. That is the whole
+; reason that assertion exists.
+;
+; `/proc/net` is a symlink to `self/net`, so the lnk_file read is required
+; before the file read is ever attempted; granting only the file leaves the
+; same silent inertness.
+(allow wlinspect_t proc_net_t (lnk_file (read)))
+(allow wlinspect_t proc_net_t (dir (getattr open read search)))
+(allow wlinspect_t proc_net_t (file (getattr open read)))
+
 ; And a third thing getaddrinfo does that neither the harvest nor the first two
 ; enforcing runs could show: before it returns, glibc's __check_pf opens a
 ; NETLINK_ROUTE socket to enumerate the host's own addresses, so it can order
