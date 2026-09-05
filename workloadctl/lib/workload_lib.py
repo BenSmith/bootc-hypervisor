@@ -1388,6 +1388,127 @@ def _normalise_container_policy_list(value, *, upper: bool = False) -> tuple | N
     return tuple(out)
 
 
+# --- Container [network] scalars ---
+#
+# Read the same way as VM's vm_allowed_hosts()/net.get("tls")/etc.
+# (lib/vm.py) -- no dedicated parse function on that side either. `tls` is
+# deliberately returned raw (None when absent), not defaulted here: unlike
+# the VM's fixed default, the container's effective tls is *computed* from
+# whether any policy entry is present, and that computation belongs to
+# validate_container_network(), not to parsing.
+
+def container_allowed_hosts(net: dict) -> list[str]:
+    """The [network].hosts allowlist, in file order. Shape-tolerant."""
+    hosts = net.get("hosts", [])
+    if not isinstance(hosts, list):
+        return []
+    return [h for h in hosts if isinstance(h, str) and h.strip()]
+
+
+def container_tls_mode(net: dict) -> str | None:
+    """The literal [network].tls value, or None if absent. Not defaulted --
+    see module note above."""
+    value = net.get("tls")
+    return value if isinstance(value, str) and value.strip() else None
+
+
+def container_tls_reason(net: dict) -> str | None:
+    value = net.get("tls_reason")
+    return value.strip() if isinstance(value, str) and value.strip() else None
+
+
+def container_ca_delivery(net: dict) -> str | None:
+    value = net.get("ca_delivery")
+    return value.strip() if isinstance(value, str) and value.strip() else None
+
+
+def container_ca_mount_path(net: dict) -> str | None:
+    value = net.get("ca_mount_path")
+    return value.strip() if isinstance(value, str) and value.strip() else None
+
+
+# --- Container [[network.allow]] / [[network.internal]] / [[network.splice]] ---
+#
+# Shape-tolerant, like the policy/credential pair above -- validation is
+# validate_container_network()'s job, not parsing's. Unlike VM's
+# _host_reason_hosts() (lib/vm.py:1520-1534), `reason` is kept rather than
+# discarded: every entry is required to carry a reason, and unlike
+# the VM side -- where a malformed entry can never reach this code because
+# the boot path already ran validate_vm_network() -- there is no such
+# validator yet, so reporting code reading these tuples needs `reason`
+# available rather than assumed-valid-elsewhere.
+
+class ContainerAllowEntry(NamedTuple):
+    """One [[network.allow]] entry, normalised. `host` and `address` are
+    both surfaced raw (unlike VmAllowEntry, which resolves an address into
+    an ipaddress object at parse time) -- that split is a validation
+    decision (which regex matched, is it resolvable) this function does not
+    make."""
+
+    host: str | None
+    address: str | None
+    port: int | None
+    reason: str | None
+
+
+def container_allow_entries(net: dict) -> list[ContainerAllowEntry]:
+    """The [[network.allow]] entries for one container's [network] table,
+    normalised, in file order. Shape-tolerant."""
+    entries: list[ContainerAllowEntry] = []
+    raw = net.get("allow", [])
+    if not isinstance(raw, list):
+        return entries
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        host = item.get("host")
+        host = host.strip() if isinstance(host, str) and host.strip() else None
+        address = item.get("address")
+        address = address.strip() if isinstance(address, str) and address.strip() else None
+        if host is None and address is None:
+            continue
+        port = item.get("port")
+        port = port if isinstance(port, int) and not isinstance(port, bool) else None
+        reason = item.get("reason")
+        reason = reason.strip() if isinstance(reason, str) and reason.strip() else None
+        entries.append(ContainerAllowEntry(host=host, address=address, port=port, reason=reason))
+    return entries
+
+
+class ContainerHostReasonEntry(NamedTuple):
+    """One [[network.internal]] or [[network.splice]] entry, normalised.
+    Both arrays share this `{host, reason}` shape, same as the VM side's
+    shared `_host_reason_hosts()` helper."""
+
+    host: str
+    reason: str | None
+
+
+def container_internal_entries(net: dict) -> list[ContainerHostReasonEntry]:
+    return _container_host_reason_entries(net, "internal")
+
+
+def container_splice_entries(net: dict) -> list[ContainerHostReasonEntry]:
+    return _container_host_reason_entries(net, "splice")
+
+
+def _container_host_reason_entries(net: dict, key: str) -> list[ContainerHostReasonEntry]:
+    raw = net.get(key, [])
+    if not isinstance(raw, list):
+        return []
+    entries = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        host = item.get("host")
+        if not isinstance(host, str) or not host.strip():
+            continue
+        reason = item.get("reason")
+        reason = reason.strip() if isinstance(reason, str) and reason.strip() else None
+        entries.append(ContainerHostReasonEntry(host=host.strip(), reason=reason))
+    return entries
+
+
 # --- Per-workload SELinux identifiers ---
 #
 # Each workload that ships extra rights gets its own name-keyed type instead of

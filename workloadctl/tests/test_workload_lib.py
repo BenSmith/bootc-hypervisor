@@ -26,6 +26,12 @@ from workload_lib import (
     infer_workload_mode, normalize_containers,
     virtiofs_tag, parse_volume_spec, systemd_escape_path,
     selinux_module_name, selinux_type_name,
+    ContainerPolicyEntry, container_policy_entries,
+    ContainerCredential, container_credential_entries,
+    container_allowed_hosts, container_tls_mode, container_tls_reason,
+    container_ca_delivery, container_ca_mount_path,
+    ContainerAllowEntry, container_allow_entries,
+    ContainerHostReasonEntry, container_internal_entries, container_splice_entries,
 )
 from vm import parse_memory_mib, vm_mac_address, vm_mac_collisions
 from validation import (
@@ -2151,6 +2157,112 @@ class TestReplaceFileAtomically(unittest.TestCase):
                           side_effect=PermissionError("not root")):
             workload_lib.replace_file_atomically(self.path, "new\n", owner=(1, 1))
         self.assertEqual(self.path.read_text(), "new\n")
+
+
+class TestContainerNetworkPolicyCredentialParsing(unittest.TestCase):
+    """Shape-tolerant parsing -- validation is a separate, not-yet-written
+    function; these tests only lock the parse."""
+
+    def test_policy_entry_defaults(self):
+        entries = container_policy_entries({"policy": [{"host": "api.example.com"}]})
+        self.assertEqual(entries, [ContainerPolicyEntry(
+            host="api.example.com", methods=None, paths=None, credential=None)])
+
+    def test_policy_methods_uppercased_paths_not(self):
+        entries = container_policy_entries({"policy": [{
+            "host": "api.example.com", "methods": ["post"], "paths": ["/v1/Messages"],
+            "credential": "anthropic",
+        }]})
+        self.assertEqual(entries[0].methods, ("POST",))
+        self.assertEqual(entries[0].paths, ("/v1/Messages",))
+        self.assertEqual(entries[0].credential, "anthropic")
+
+    def test_policy_entry_missing_host_is_skipped(self):
+        self.assertEqual(container_policy_entries({"policy": [{"methods": ["GET"]}]}), [])
+
+    def test_policy_non_list_is_empty(self):
+        self.assertEqual(container_policy_entries({"policy": "oops"}), [])
+        self.assertEqual(container_policy_entries({}), [])
+
+    def test_credential_entry_round_trips_optional_auth_fields(self):
+        creds = container_credential_entries({"credential": [{
+            "name": "anthropic", "placeholder": "sk-ant-placeholder",
+            "env": "ANTHROPIC_API_KEY", "auth_header": "Authorization",
+            "auth_format": "Bearer {secret}",
+        }]})
+        self.assertEqual(creds, [ContainerCredential(
+            name="anthropic", placeholder="sk-ant-placeholder", env="ANTHROPIC_API_KEY",
+            auth_header="Authorization", auth_format="Bearer {secret}")])
+
+    def test_credential_entry_missing_required_field_is_skipped(self):
+        self.assertEqual(container_credential_entries({"credential": [{"name": "x"}]}), [])
+
+
+class TestContainerNetworkScalarParsing(unittest.TestCase):
+    def test_hosts_filters_non_strings_and_defaults_empty(self):
+        self.assertEqual(container_allowed_hosts({"hosts": ["*.pypi.org", 5, ""]}),
+                          ["*.pypi.org"])
+        self.assertEqual(container_allowed_hosts({}), [])
+
+    def test_tls_is_not_defaulted(self):
+        """Effective tls is computed by validate_container_network(), not here."""
+        self.assertIsNone(container_tls_mode({}))
+        self.assertEqual(container_tls_mode({"tls": "splice"}), "splice")
+
+    def test_tls_reason_ca_delivery_ca_mount_path(self):
+        net = {"tls_reason": " pinned cert ", "ca_delivery": "env",
+               "ca_mount_path": "/etc/ssl/wl-ca.pem"}
+        self.assertEqual(container_tls_reason(net), "pinned cert")
+        self.assertEqual(container_ca_delivery(net), "env")
+        self.assertEqual(container_ca_mount_path(net), "/etc/ssl/wl-ca.pem")
+        self.assertIsNone(container_tls_reason({}))
+        self.assertIsNone(container_ca_delivery({}))
+        self.assertIsNone(container_ca_mount_path({}))
+
+
+class TestContainerNetworkArrayParsing(unittest.TestCase):
+    def test_allow_entry_by_host(self):
+        entries = container_allow_entries({"allow": [
+            {"host": "smtp.example.com", "port": 587, "reason": "mail relay"},
+        ]})
+        self.assertEqual(entries, [ContainerAllowEntry(
+            host="smtp.example.com", address=None, port=587, reason="mail relay")])
+
+    def test_allow_entry_by_address(self):
+        entries = container_allow_entries({"allow": [
+            {"address": "10.0.0.5", "port": 22, "reason": "backup host"},
+        ]})
+        self.assertEqual(entries[0].host, None)
+        self.assertEqual(entries[0].address, "10.0.0.5")
+
+    def test_allow_entry_without_host_or_address_is_skipped(self):
+        self.assertEqual(container_allow_entries({"allow": [{"port": 22, "reason": "x"}]}), [])
+
+    def test_allow_entry_bool_port_is_not_an_int_port(self):
+        """isinstance(True, int) is True in Python -- must not leak through."""
+        entries = container_allow_entries({"allow": [
+            {"host": "x.example.com", "port": True, "reason": "x"},
+        ]})
+        self.assertIsNone(entries[0].port)
+
+    def test_internal_and_splice_entries_keep_reason(self):
+        net = {
+            "internal": [{"host": "nas.lan", "reason": "backup share"}],
+            "splice": [{"host": "pinned.example.com", "reason": "cert pinning"}],
+        }
+        self.assertEqual(container_internal_entries(net),
+                          [ContainerHostReasonEntry(host="nas.lan", reason="backup share")])
+        self.assertEqual(container_splice_entries(net),
+                          [ContainerHostReasonEntry(host="pinned.example.com",
+                                                     reason="cert pinning")])
+
+    def test_internal_entry_missing_host_is_skipped(self):
+        self.assertEqual(container_internal_entries({"internal": [{"reason": "x"}]}), [])
+
+    def test_arrays_non_list_is_empty(self):
+        self.assertEqual(container_allow_entries({"allow": "oops"}), [])
+        self.assertEqual(container_internal_entries({"internal": "oops"}), [])
+        self.assertEqual(container_splice_entries({"splice": "oops"}), [])
 
 
 if __name__ == "__main__":
