@@ -2165,6 +2165,19 @@ def _ensure_user(name: str) -> int:
         # _container_ca_delivery_args added) or that mount has nothing to
         # bind: setup.service's ExecStartPre order is what enforces "before".
         if container_uses_inspect(config):
+            # setup_vm_socket_dir is also name-keyed only, and the inspect
+            # socket's ExecStartPre (workload-container-inspect up) writes
+            # inspect.json under the directory it creates -- the socket's own
+            # Requires=/After= names only setup.service (never the workload's
+            # own unit, VM or container: generate_vm_inspect_socket's docstring
+            # is explicit that the listener must exist before the workload's
+            # first packet), so nothing else in the container path creates it.
+            try:
+                setup_vm_socket_dir(pw, name)
+            except Exception as e:
+                log(f"  ERROR: Failed to create the egress inspector's "
+                    f"runtime directory for {name}: {e}")
+                return 1
             try:
                 generate_vm_egress_ca(pw, name)
             except Exception as e:

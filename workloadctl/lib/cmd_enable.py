@@ -82,10 +82,12 @@ def cmd_enable(args, manager: WorkloadManager):
                       "reason": str(e)}], ok=False)
         sys.exit(1)
 
-    # Register the VM tree's fcontext rule (svirt_image_t rather than the
-    # blanket container_file_t). Enable is the right place for it and a
-    # workload's ExecStartPre is not: at boot N workloads would race the same
-    # semanage read lock, whereas an enable is one-time and operator-initiated.
+    # Register this workload's fcontext rules: the whole-tree svirt_image_t
+    # rule for a VM, and/or the CA/leaf PKI subtree rules for either substrate
+    # when it runs its own egress inspector. Enable is the right place for it
+    # and a workload's ExecStartPre is not: at boot N workloads would race the
+    # same semanage read lock, whereas an enable is one-time and
+    # operator-initiated.
     apply_vm_fcontext(config, "enable")
 
     info()

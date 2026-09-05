@@ -665,6 +665,13 @@ def generate_umbrella_service(workload_name, container_names, slice_name, mode,
           f"workload-{workload_name}-setup.service workload-{workload_name}-{helper}.service")
     u.add("Requires", sub_services)
     u.add("After", sub_services)
+    if uses_inspect:
+        # Same reasoning as generate_system_service's single-mode branch:
+        # without Requires=/After= the inspect socket is never started, so
+        # port-80/443 traffic that should be redirected into the inspector
+        # just hangs.
+        u.add("Requires", f"workload-{workload_name}-inspect.socket")
+        u.add("After", f"workload-{workload_name}-inspect.socket")
 
     svc = unit.section("Service")
     svc.set("Type", "oneshot")
@@ -1531,6 +1538,16 @@ def generate_system_service(workload, container, user_name, uid, mode="single"):
     u = unit.section("Unit")
     _unit_deps(u, workload, mode, unit_description, setup_service, pod_service,
                net_service, umbrella_service, gpu_vendor, external_volume_paths)
+    # Requires=, not Wants=: mirrors generate_vm_workload's prereqs.append for
+    # the VM's inspect socket. Without this the socket is generated but never
+    # started, so port-80/443 traffic that should be redirected into the
+    # inspector just hangs -- the workload looks healthy while nothing on
+    # those ports is reachable. Single mode only: this unit IS the
+    # workload-level service here (see the P1-7 gate below); pod/bridge mode
+    # gets the same wiring on the umbrella instead.
+    if mode == "single" and container_uses_inspect(workload):
+        u.add("Requires", f"workload-{name}-inspect.socket")
+        u.add("After", f"workload-{name}-inspect.socket")
 
     # container.systemd: "always", "true", "false", or unset
     systemd_mode = container.get("container", {}).get("systemd", None)

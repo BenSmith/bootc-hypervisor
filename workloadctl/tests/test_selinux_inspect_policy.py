@@ -289,9 +289,9 @@ class TestBoundary(unittest.TestCase):
     works, and it is what these tests exist to catch.
     """
 
-    def _perms(self, target, cls):
-        """Every permission granted to wlinspect_t on one type/class, as a set."""
-        pattern = (r"\(allow wlinspect_t " + re.escape(target)
+    def _perms(self, target, cls, subject="wlinspect_t"):
+        """Every permission granted to `subject` on one type/class, as a set."""
+        pattern = (r"\(allow " + re.escape(subject) + r" " + re.escape(target)
                    + r" \(" + re.escape(cls) + r" \(([^)]*)\)\)\)")
         found = re.findall(pattern, _body())
         return set(" ".join(found).split())
@@ -335,6 +335,27 @@ class TestBoundary(unittest.TestCase):
         self.assertEqual(
             self._perms("wlinspect_ca_t", "dir") & {"add_name", "remove_name",
                                                     "write"},
+            set())
+
+    def test_a_container_may_read_but_not_write_its_own_ca(self):
+        """[network].ca_delivery = "env"/"mount" bind-mounts this same
+        certificate into container_t -- confirmed on hardware 2026-09-05 to
+        EACCES without an explicit grant, since wlinspect_t's own read is a
+        different domain. Read-only, and the cert only: the private key gets
+        no grant here, matching the inspector's own boundary above.
+        """
+        self.assertTrue(
+            {"read", "open"}
+            <= self._perms("wlinspect_ca_t", "file", subject="container_t"))
+        self.assertEqual(
+            self._perms("wlinspect_ca_t", "file", subject="container_t")
+            & {"write", "create", "unlink", "rename"},
+            set())
+        self.assertEqual(
+            self._perms("wlinspect_leaf_t", "file", subject="container_t"),
+            set())
+        self.assertEqual(
+            self._perms("wlinspect_leaf_t", "dir", subject="container_t"),
             set())
 
     def test_the_leaf_caches_are_writable(self):

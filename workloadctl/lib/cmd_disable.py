@@ -229,8 +229,9 @@ def cmd_disable(args, manager: WorkloadManager):
     # an unambiguous teardown — nothing else depends on wl_<name>).
     attempt("remove SELinux module", lambda: apply_selinux_policy(config, "disable"))
 
-    # Unregister the VM tree's fcontext rule. Independent of the module above:
-    # different tool, different file in the store, different gate (is_vm vs
+    # Unregister this workload's fcontext rules (svirt_image_t tree and/or PKI
+    # subtree). Independent of the module above: different tool, different
+    # file in the store, different gate (is_vm/uses_inspect() vs
     # [security].selinux_policy).
     attempt("remove SELinux fcontext rule",
             lambda: apply_vm_fcontext(config, "disable"))

@@ -405,6 +405,17 @@
 (allow wlinspect_t wlinspect_ca_t (dir (getattr open read search)))
 (allow wlinspect_t wlinspect_ca_t (file (getattr map open read)))
 
+; A container workload's own [network].ca_delivery = "env"/"mount" bind-mounts
+; this same certificate (never the key) into container_t -- confirmed on
+; hardware 2026-09-05 to EACCES without this: `cat` on the mount got `avc:
+; denied { read } ... scontext=...container_t: tcontext=...wlinspect_ca_t:
+; tclass=file`. Read-only, and only the cert: a CA certificate is what a
+; workload hands to any client it wants trusting it, so container_t reading
+; it host-wide is the CA doing its job, not a leak -- the private key stays
+; 0600 with no grant here, which is the thing actually worth protecting.
+(allow container_t wlinspect_ca_t (dir (getattr open read search)))
+(allow container_t wlinspect_ca_t (file (getattr open read)))
+
 ; `create` and `rmdir` are the atomic landing, not an untidy extra: each mint
 ; stages into a TemporaryDirectory inside the cache so that os.replace is a
 ; same-filesystem rename and a reader never finds half a PEM. Measured

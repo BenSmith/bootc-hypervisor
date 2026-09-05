@@ -119,6 +119,18 @@ lifecycle = "pet"
 image = "example.com/test:latest"
 """
 
+_CONTAINER_INSPECT_TOML = """\
+[workload]
+name = "test-wl"
+
+[container]
+image = "example.com/test:latest"
+
+[network]
+hosts = ["example.com"]
+ca_delivery = "env"
+"""
+
 _VM_TOML = """\
 [workload]
 name = "test-vm"
@@ -1511,12 +1523,13 @@ class TestSelinuxHelpers(unittest.TestCase):
 # ── apply_vm_fcontext ───────────────────────────────────────────────────────
 
 class TestApplyVmFcontext(unittest.TestCase):
-    """The per-workload svirt_image_t rule for a VM tree.
+    """The per-workload svirt_image_t (VM) and PKI-subtree fcontext rules.
 
-    Gated on is_vm, NOT on [security].selinux_policy. Labelling is a
-    precondition for a confined VM booting at all, not optional hardening, and
-    that flag is opt-in — a VM that omitted it would fail to start with an
-    EPERM that looks like nothing is wrong.
+    Gated on is_vm OR container_uses_inspect(), NOT on
+    [security].selinux_policy. Labelling is a precondition for a confined VM
+    or an inspecting container's own inspector starting at all, not optional
+    hardening, and that flag is opt-in — a workload that omitted it would fail
+    to start with an EPERM that looks like nothing is wrong.
     """
 
     def _run_calls(self, toml, name, action, listing=""):
@@ -1535,10 +1548,44 @@ class TestApplyVmFcontext(unittest.TestCase):
         return calls
 
     def test_container_workload_is_untouched(self):
-        # A container tree must keep matching the blanket container_file_t
-        # rule; relabelling it svirt_image_t would deny rootless podman.
+        # A plain container has no PKI subtree and no disk to relabel; it must
+        # keep matching the blanket container_file_t rule.
         self.assertEqual(
             self._run_calls(_CONTAINER_TOML, 'test-wl', "enable"), [])
+
+    def test_inspected_container_registers_the_pki_subtree_only(self):
+        # P1-10 wired the CA/leaf directories and their restorecon into a
+        # container's own ensure-user branch, but restorecon can only apply a
+        # label already registered via semanage -- without this, an inspecting
+        # container's CA silently stayed container_file_t, wlinspect_t had no
+        # read on it, and EACCES read back through os.path.exists() exactly
+        # like the file being missing.
+        calls = self._run_calls(
+            _CONTAINER_INSPECT_TOML, 'test-wl', "enable")
+        adds = [c for c in calls if "-a" in c]
+        by_pattern = {c[-1]: c[c.index("-t") + 1] for c in adds}
+        self.assertEqual(
+            by_pattern.get("/var/lib/workloads/test-wl/state/ca(/.*)?"),
+            "wlinspect_ca_t")
+        for cache in ("leaves", "leaves-denied"):
+            self.assertEqual(
+                by_pattern.get(
+                    f"/var/lib/workloads/test-wl/state/{cache}(/.*)?"),
+                "wlinspect_leaf_t")
+        # No tree-wide rule: a container keeps the blanket container_file_t
+        # everywhere but its PKI subtree.
+        self.assertNotIn("svirt_image_t", [c[c.index("-t") + 1] for c in adds])
+
+    def test_inspected_container_disable_unregisters_pki_only(self):
+        calls = self._run_calls(
+            _CONTAINER_INSPECT_TOML, 'test-wl', "disable")
+        self.assertEqual(len(calls), 3)
+        self.assertTrue(all("-d" in c for c in calls), calls)
+        self.assertEqual(
+            {c[-1] for c in calls},
+            {"/var/lib/workloads/test-wl/state/ca(/.*)?",
+             "/var/lib/workloads/test-wl/state/leaves(/.*)?",
+             "/var/lib/workloads/test-wl/state/leaves-denied(/.*)?"})
 
     def test_enable_registers_svirt_image_t_for_the_subtree(self):
         calls = self._run_calls(_VM_TOML, 'test-vm', "enable")

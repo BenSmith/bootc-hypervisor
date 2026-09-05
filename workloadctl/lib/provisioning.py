@@ -28,6 +28,7 @@ from typing import NamedTuple
 
 from cli_log import error, info, warn
 from workload_lib import (
+    container_uses_inspect,
     selinux_module_name,
     selinux_type_name,
     workload_config_dir,
@@ -757,7 +758,7 @@ def vm_fcontext_pattern(name: str) -> str:
 
 
 def apply_vm_fcontext(config: WorkloadConfig, action: str):
-    """Register (enable) or unregister (disable) a VM workload's fcontext rule.
+    """Register (enable) or unregister (disable) a workload's PKI/tree fcontext rules.
 
     VM disks need svirt_image_t, not the container_file_t the blanket
     /var/lib/workloads rule gives them. A per-workload rule wins its whole
@@ -766,12 +767,26 @@ def apply_vm_fcontext(config: WorkloadConfig, action: str):
     rule, so the blanket rule does not move and existing hosts need no
     migration.
 
-    **Gated on is_vm, not on [security].selinux_policy.** Labelling is a
-    precondition for the VM booting at all once QEMU is confined, not an
-    optional hardening step, and that flag is opt-in — a VM that omitted it
-    would fail to start with an EPERM that looks like nothing is wrong. The two
-    are independent in both directions: this is `semanage`, the policy module is
-    `semodule`, and they land in different files in the store.
+    A container has no disk to relabel this way, but one running its own
+    egress inspector (`container_uses_inspect()`) still has a CA/leaf PKI
+    subtree that needs moving OFF container_file_t: wlinspect_t has read on
+    wlinspect_ca_t/wlinspect_leaf_t only, never on the blanket type (see
+    workload-inspect.cil). Skipping this for containers is exactly the bug
+    P1-10 shipped — `provision_vm_pki_dirs()`'s `restorecon` had nothing
+    registered to relabel the subtree TO, so it silently stayed
+    container_file_t and the inspector's own `os.path.exists()` on its CA
+    read back False (EACCES reads the same as ENOENT). So this registers the
+    PKI patterns for both substrates that need them, and the whole-tree
+    svirt_image_t pattern for a VM only — a container's tree otherwise stays
+    on the blanket rule on purpose.
+
+    **Gated on is_vm or container_uses_inspect(), not on
+    [security].selinux_policy.** Labelling is a precondition for the
+    inspector/VM starting at all, not an optional hardening step, and that
+    flag is opt-in — a workload that omitted it would fail to start with an
+    EPERM that looks like nothing is wrong. The two are independent in both
+    directions: this is `semanage`, the policy module is `semodule`, and they
+    land in different files in the store.
 
     Both rules must live in `file_contexts.local`, which is why this is
     `semanage` and not a CIL `filecon` shipped in the bundle: `.local` outranks
@@ -782,30 +797,36 @@ def apply_vm_fcontext(config: WorkloadConfig, action: str):
     Best-effort: a host without semanage, or with SELinux disabled, is not a
     reason to fail an enable.
     """
-    if not config.is_vm:
+    is_vm = config.is_vm
+    inspected_container = not is_vm and container_uses_inspect(config.config)
+    if not is_vm and not inspected_container:
         return
     if not shutil.which("semanage"):
         return
 
-    pattern = vm_fcontext_pattern(config.name)
+    pki_patterns = vm_pki_fcontext_patterns(config.name)
 
     if action == "disable":
         # The PKI rules first: they are more specific than the tree rule, so
         # removing the general one first would leave three orphans matching
-        # nothing registered above them.
-        for pki_pattern, _ in vm_pki_fcontext_patterns(config.name):
+        # nothing registered above them. A container has no tree rule to
+        # remove -- only the PKI subtree was ever registered for it.
+        for pki_pattern, _ in pki_patterns:
             subprocess.run(["semanage", "fcontext", "-d", pki_pattern],
                            check=False, capture_output=True)
-        subprocess.run(["semanage", "fcontext", "-d", pattern],
-                       check=False, capture_output=True)
+        if is_vm:
+            subprocess.run(
+                ["semanage", "fcontext", "-d", vm_fcontext_pattern(config.name)],
+                check=False, capture_output=True)
         return
 
     listed = subprocess.run(["semanage", "fcontext", "-l"],
                             capture_output=True, text=True)
     known = listed.stdout if listed.returncode == 0 else ""
 
-    wanted = [(pattern, VM_IMAGE_SELINUX_TYPE)] + vm_pki_fcontext_patterns(
-        config.name)
+    wanted = list(pki_patterns)
+    if is_vm:
+        wanted = [(vm_fcontext_pattern(config.name), VM_IMAGE_SELINUX_TYPE)] + wanted
     registered_any = False
     for one, selinux_type in wanted:
         # Each rule is checked on its own rather than short-circuiting on the
