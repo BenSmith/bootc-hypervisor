@@ -32,6 +32,7 @@ from workload_lib import (
     container_ca_delivery, container_ca_mount_path,
     ContainerAllowEntry, container_allow_entries,
     ContainerHostReasonEntry, container_internal_entries, container_splice_entries,
+    container_effective_tls_mode, validate_container_network,
 )
 from vm import parse_memory_mib, vm_mac_address, vm_mac_collisions
 from validation import (
@@ -2263,6 +2264,189 @@ class TestContainerNetworkArrayParsing(unittest.TestCase):
         self.assertEqual(container_allow_entries({"allow": "oops"}), [])
         self.assertEqual(container_internal_entries({"internal": "oops"}), [])
         self.assertEqual(container_splice_entries({"splice": "oops"}), [])
+
+
+class TestContainerEffectiveTlsMode(unittest.TestCase):
+    def test_no_policy_is_splice(self):
+        self.assertEqual(container_effective_tls_mode({"hosts": ["a.com"]}), "splice")
+
+    def test_policy_present_is_inspect(self):
+        net = {"hosts": ["a.com"], "policy": [{"host": "a.com"}]}
+        self.assertEqual(container_effective_tls_mode(net), "inspect")
+
+    def test_explicit_tls_wins_either_direction(self):
+        net = {"hosts": ["a.com"], "policy": [{"host": "a.com"}], "tls": "splice"}
+        self.assertEqual(container_effective_tls_mode(net), "splice")
+        net = {"hosts": ["a.com"], "tls": "inspect"}
+        self.assertEqual(container_effective_tls_mode(net), "inspect")
+
+
+class TestValidateContainerNetwork(unittest.TestCase):
+    """One assertion per V-rule from the container egress-parity build spec's
+    validation section, in numeric order. Not-a-dict and no-trigger inputs
+    bookend the class since they are the two cases every rule below assumes
+    past."""
+
+    def test_not_a_dict_is_one_error(self):
+        self.assertEqual(validate_container_network([]), ["[network] must be a table"])
+
+    def test_no_trigger_is_clean(self):
+        self.assertEqual(validate_container_network({}), [])
+
+    def test_hosts_only_needs_no_ca_delivery(self):
+        self.assertEqual(validate_container_network({"hosts": ["*.pypi.org"]}), [])
+
+    def test_v3_overlapping_entries_must_both_state_methods_and_paths(self):
+        net = {
+            "hosts": ["api.example.com"],
+            "policy": [
+                {"host": "api.example.com", "methods": ["GET"], "paths": ["/a"]},
+                {"host": "*.example.com"},
+            ],
+            "ca_delivery": "env",
+        }
+        errors = validate_container_network(net)
+        self.assertTrue(any("shares a host with" in e for e in errors), errors)
+
+    def test_v4_apex_not_covered_by_wildcard_policy_entry(self):
+        net = {
+            "hosts": ["example.com"],
+            "policy": [{"host": "*.example.com"}],
+            "ca_delivery": "env",
+        }
+        errors = validate_container_network(net)
+        self.assertTrue(any("does not cover the apex" in e for e in errors), errors)
+
+    def test_v4_apex_covered_is_clean(self):
+        net = {
+            "hosts": ["example.com"],
+            "policy": [{"host": "*.example.com"}, {"host": "example.com"}],
+            "ca_delivery": "env",
+        }
+        self.assertEqual(validate_container_network(net), [])
+
+    def test_v5_unregistered_method_is_error(self):
+        net = {"hosts": ["a.com"], "policy": [{"host": "a.com", "methods": ["FETCH"]}],
+               "ca_delivery": "env"}
+        errors = validate_container_network(net)
+        self.assertTrue(any("not a registered HTTP method" in e for e in errors), errors)
+
+    def test_v5_connect_is_refused_by_name(self):
+        net = {"hosts": ["a.com"], "policy": [{"host": "a.com", "methods": ["CONNECT"]}],
+               "ca_delivery": "env"}
+        errors = validate_container_network(net)
+        self.assertTrue(any("never sees" in e for e in errors), errors)
+
+    def test_v6_path_with_query_string_is_error(self):
+        net = {"hosts": ["a.com"], "policy": [{"host": "a.com", "paths": ["/x?y=1"]}],
+               "ca_delivery": "env"}
+        errors = validate_container_network(net)
+        self.assertTrue(any("query or fragment" in e for e in errors), errors)
+
+    def test_v7_credential_must_be_declared(self):
+        net = {"hosts": ["a.com"], "policy": [{"host": "a.com", "credential": "nope"}],
+               "ca_delivery": "env"}
+        errors = validate_container_network(net)
+        self.assertTrue(any("no [[network.credential]] block declares" in e for e in errors), errors)
+
+    def test_v8_wildcard_host_with_credential_is_error(self):
+        net = {
+            "hosts": ["example.com"],
+            "policy": [{"host": "*.example.com", "credential": "c"}],
+            "credential": [{"name": "c", "placeholder": "x", "env": "MY_KEY"}],
+            "ca_delivery": "env",
+        }
+        errors = validate_container_network(net)
+        self.assertTrue(any("attached per exact host" in e for e in errors), errors)
+
+    def test_v9_tls_splice_with_policy_is_error(self):
+        net = {"hosts": ["a.com"], "tls": "splice", "policy": [{"host": "a.com"}]}
+        errors = validate_container_network(net)
+        self.assertTrue(any("tls = 'splice'" in e for e in errors), errors)
+
+    def test_v10_credential_env_cannot_shadow_ca_var(self):
+        net = {
+            "hosts": ["a.com"],
+            "policy": [{"host": "a.com", "credential": "c"}],
+            "credential": [{"name": "c", "placeholder": "x", "env": "PIP_CERT"}],
+            "ca_delivery": "env",
+        }
+        errors = validate_container_network(net)
+        self.assertTrue(any("CA trust-store variables" in e for e in errors), errors)
+
+    def test_v12_internal_entry_not_on_any_list_is_error(self):
+        net = {"hosts": ["a.com"], "internal": [{"host": "nas.lan", "reason": "backup"}]}
+        errors = validate_container_network(net)
+        self.assertTrue(any("[network].internal: 'nas.lan' is on no list" in e for e in errors), errors)
+
+    def test_v12_internal_entry_justified_by_policy_host_is_clean(self):
+        net = {
+            "policy": [{"host": "nas.lan"}],
+            "internal": [{"host": "nas.lan", "reason": "backup"}],
+            "ca_delivery": "env",
+        }
+        self.assertEqual(validate_container_network(net), [])
+
+    def test_v14_splice_entry_missing_reason_is_error(self):
+        net = {"hosts": ["a.com"], "splice": [{"host": "a.com"}]}
+        errors = validate_container_network(net)
+        self.assertTrue(any("has no `reason`" in e for e in errors), errors)
+
+    def test_v14_internal_entry_missing_reason_is_error(self):
+        net = {"policy": [{"host": "nas.lan"}], "internal": [{"host": "nas.lan"}],
+               "ca_delivery": "env"}
+        errors = validate_container_network(net)
+        self.assertTrue(any("has no `reason`" in e for e in errors), errors)
+
+    def test_v12_splice_entry_not_allowlisted_is_error(self):
+        net = {"hosts": ["a.com"], "splice": [{"host": "b.com", "reason": "cert pinning"}]}
+        errors = validate_container_network(net)
+        self.assertTrue(any("matches no allowlisted name" in e for e in errors), errors)
+
+    def test_v16_policy_without_ca_delivery_is_error(self):
+        net = {"hosts": ["a.com"], "policy": [{"host": "a.com"}]}
+        errors = validate_container_network(net)
+        self.assertTrue(any("ca_delivery is required" in e for e in errors), errors)
+
+    def test_v16_explicit_tls_inspect_also_requires_ca_delivery(self):
+        net = {"hosts": ["a.com"], "tls": "inspect"}
+        errors = validate_container_network(net)
+        self.assertTrue(any("ca_delivery is required" in e for e in errors), errors)
+
+    def test_v16_ca_delivery_mount_requires_mount_path(self):
+        net = {"hosts": ["a.com"], "policy": [{"host": "a.com"}], "ca_delivery": "mount"}
+        errors = validate_container_network(net)
+        self.assertTrue(any("requires ca_mount_path" in e for e in errors), errors)
+
+    def test_ca_mount_path_without_mount_delivery_is_error(self):
+        net = {"hosts": ["a.com"], "ca_delivery": "env", "ca_mount_path": "/etc/x.crt"}
+        errors = validate_container_network(net)
+        self.assertTrue(any("ca_mount_path is set but ca_delivery" in e for e in errors), errors)
+
+    def test_v18_splice_entry_on_already_spliced_workload_is_error(self):
+        net = {"hosts": ["a.com"], "splice": [{"host": "a.com", "reason": "pinning"}]}
+        errors = validate_container_network(net)
+        self.assertTrue(any("is redundant" in e for e in errors), errors)
+
+    def test_credential_declared_but_unselected_is_error(self):
+        net = {
+            "hosts": ["a.com"],
+            "credential": [{"name": "c", "placeholder": "x", "env": "MY_KEY"}],
+        }
+        errors = validate_container_network(net)
+        self.assertTrue(any("attached to nothing" in e for e in errors), errors)
+
+    def test_full_rung3_example_is_clean(self):
+        net = {
+            "hosts": ["*.pypi.org", "files.pythonhosted.org"],
+            "ca_delivery": "env",
+            "policy": [{"host": "api.anthropic.com", "methods": ["POST"],
+                       "paths": ["/v1/messages"], "credential": "anthropic"}],
+            "credential": [{"name": "anthropic", "placeholder": "sk-ant-x",
+                           "env": "ANTHROPIC_API_KEY", "auth_header": "Authorization",
+                           "auth_format": "Bearer {secret}"}],
+        }
+        self.assertEqual(validate_container_network(net), [])
 
 
 if __name__ == "__main__":

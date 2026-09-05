@@ -34,6 +34,9 @@ from substrate import (
 )
 from workload_lib import (
     RUN_SYSTEMD_SYSTEM,
+    container_allow_entries,
+    container_allowed_hosts,
+    container_policy_entries,
     remove_subid_entries,
     subid_files_with_entries,
     workload_service_units,
@@ -216,6 +219,24 @@ class ContainerSubstrate(Substrate):
 
     def gating_units(self) -> list[str]:
         return []
+
+    def uses_inspect(self) -> bool:
+        net = self.config.config.get("network", {})
+        if not isinstance(net, dict):
+            return False
+        if net.get("mode") == "host":
+            # Host-mode shares the host netns entirely, so uid would be the
+            # ONLY thing separating this workload's traffic from the host's
+            # own -- whether the redirect and `meta skuid` still isolate it
+            # there is an open spike (P0-1 in the egress-parity build spec),
+            # not yet confirmed on hardware. Never claim inspection this
+            # cannot yet prove it provides.
+            return False
+        # Any one of the three opt-in triggers, not policy alone: `hosts` and
+        # `allow` are each triggers on their own (a hosts-only workload gets
+        # a spliced proxy with no policy to speak of).
+        return bool(container_allowed_hosts(net) or container_policy_entries(net)
+                    or container_allow_entries(net))
 
     def exec(
         self,

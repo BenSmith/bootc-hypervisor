@@ -8,6 +8,7 @@ Installed to /usr/libexec/workloadctl/workload_lib.py.
 
 import contextlib
 import fcntl
+import fnmatch
 import os
 import pwd
 import re
@@ -1507,6 +1508,502 @@ def _container_host_reason_entries(net: dict, key: str) -> list[ContainerHostRea
         reason = reason.strip() if isinstance(reason, str) and reason.strip() else None
         entries.append(ContainerHostReasonEntry(host=host.strip(), reason=reason))
     return entries
+
+
+# --- Container [network] validation ---
+#
+# The parse functions above are deliberately shape-tolerant; every semantic
+# rule lives here or nowhere. Mirrors validate_vm_network / _validate_egress
+# (lib/vm.py) where the two schemas share a rule. Diverges where the container
+# schema has no `egress` key (presence of a trigger is the whole statement)
+# and no bridge escape hatch. `mode = "host"` is not special-cased here: the
+# container topology under which uid attribution might not hold has not yet
+# been confirmed on hardware, so this function has nothing to key that check
+# on yet.
+
+_CONTAINER_HOST_RE = re.compile(r"^[A-Za-z0-9*?.\[\]!_-]+$")
+
+
+def _validate_container_host_pattern(pattern) -> list[str]:
+    """Validate one hostname pattern (`hosts`, `policy.host`, or an
+    `internal`/`splice` entry's `host`). Same shape rules as VM's
+    `_validate_proxy_host` (lib/vm.py) -- duplicated rather than imported
+    because workload_lib.py cannot import from vm.py at module level (vm.py
+    imports this module)."""
+    if not isinstance(pattern, str):
+        return [f"entries must be strings, got {pattern!r}"]
+    text = pattern.strip()
+    if not text:
+        return ["entries must not be empty"]
+    if "://" in text:
+        return [f"{pattern!r} looks like a URL -- patterns match the hostname "
+                f"only, so drop the scheme"]
+    if "/" in text:
+        return [f"{pattern!r} contains a path -- patterns match the hostname "
+                f"only, so a path never matches"]
+    if ":" in text:
+        return [f"{pattern!r} contains a port -- hostname policy applies to "
+                f"the redirected ports (80 and 443) only; use "
+                f"[[network.allow]] for other ports"]
+    if text == "*":
+        return ["'*' matches every host, which filters nothing but looks "
+                "configured -- drop the [network] table entirely to run "
+                "unfiltered"]
+    if not _CONTAINER_HOST_RE.match(text):
+        return [f"{pattern!r} is not a hostname or fnmatch pattern"]
+    return []
+
+
+def _container_patterns_overlap(a: str, b: str) -> bool:
+    """Whether two fnmatch host patterns can name a host in common. Same
+    approximation as VM's `_patterns_overlap` (lib/vm.py), duplicated for the
+    same import-cycle reason as `_validate_container_host_pattern`."""
+    a = a.strip().lower().rstrip(".")
+    b = b.strip().lower().rstrip(".")
+    if not a or not b:
+        return False
+    return a == b or fnmatch.fnmatchcase(a, b) or fnmatch.fnmatchcase(b, a)
+
+
+def container_effective_tls_mode(net: dict) -> str:
+    """The tls mode actually in force: the literal key if the operator wrote
+    one, else computed per the three-rung ladder -- no policy entries means
+    splice, any policy entry means inspect. Meaningless on a workload with no
+    trigger at all (no proxy exists for it to describe), but harmless to
+    compute. Reporting code (doctor/rules/egress) must call this, not read
+    `tls` directly, because the literal key may be absent while a proxy is
+    still running in one mode or the other."""
+    explicit = container_tls_mode(net)
+    if explicit is not None:
+        return explicit
+    return "inspect" if container_policy_entries(net) else "splice"
+
+
+def validate_container_network(net: dict) -> list[str]:
+    """Validate [network] on a container workload. Returns a list of error
+    strings. Implements every numbered rule in the container egress-parity
+    build spec's validation section except V13 (reserved for a deferred
+    [[network.http2]] array) and the mode="host" delta (blocked on a hardware
+    spike this function cannot run itself -- see module note above)."""
+    # Lazy import: vm.py imports this module, so a top-level import here
+    # would be circular (same pattern as workload_run_files() above).
+    from vm import (
+        VM_POLICY_METHODS, VM_POLICY_METHODS_REFUSED, VM_RESERVED_GUEST_ENV,
+        vm_hostname_match,
+    )
+
+    errors: list[str] = []
+    if not isinstance(net, dict):
+        return ["[network] must be a table"]
+
+    raw_hosts = net.get("hosts", [])
+    if not isinstance(raw_hosts, list):
+        errors.append(
+            f"[network].hosts must be an array of hostname patterns, got "
+            f"{type(raw_hosts).__name__}")
+        raw_hosts = []
+    else:
+        for pattern in raw_hosts:
+            errors.extend(f"[network].hosts: {e}"
+                          for e in _validate_container_host_pattern(pattern))
+    hosts = [h.strip() for h in raw_hosts if isinstance(h, str) and h.strip()]
+
+    # --- [[network.allow]] -- shape + reason (V14) ---
+    raw_allow = net.get("allow", [])
+    if not isinstance(raw_allow, list):
+        errors.append(
+            f"[network].allow must be an array of [[network.allow]] tables, "
+            f"got {type(raw_allow).__name__}")
+        raw_allow = []
+    for item in raw_allow:
+        if not isinstance(item, dict):
+            errors.append(f"[network].allow entries are tables with `host` "
+                          f"or `address`, `port` and `reason`, got {item!r}")
+            continue
+        host = item.get("host")
+        host = host.strip() if isinstance(host, str) and host.strip() else None
+        address = item.get("address")
+        address = address.strip() if isinstance(address, str) and address.strip() else None
+        label = host or address or repr(item)
+        if host is None and address is None:
+            errors.append(
+                f"[network].allow: entry {item!r} has neither `host` nor "
+                f"`address`")
+            continue
+        if host is not None and address is not None:
+            errors.append(
+                f"[network].allow: {label!r} has both `host` and `address` "
+                f"-- an entry names one destination one way")
+            continue
+        port = item.get("port")
+        if not isinstance(port, int) or isinstance(port, bool) or not 1 <= port <= 65535:
+            errors.append(
+                f"[network].allow: {label!r} `port` must be an integer "
+                f"1-65535, got {port!r}")
+        elif port in (80, 443):
+            # R5/§5: 80 and 443 are redirected into the inspector before this
+            # allowlist is ever consulted -- an element here for either would
+            # be armed and never matched, reporting a destination as exempt
+            # from inspection that is inspected regardless.
+            errors.append(
+                f"[network].allow: {label!r} names port {port}, which is "
+                f"always redirected to this workload's inspector -- "
+                f"[[network.allow]] is for non-80/443 destinations only "
+                f"(use .hosts or [[network.policy]] for HTTP/HTTPS)")
+        if not isinstance(item.get("reason"), str) or not item["reason"].strip():
+            errors.append(  # V14
+                f"[network].allow: {label!r} has no `reason`; it is a "
+                f"bypass of the internal-destination drop and carries one "
+                f"like [[network.internal]] does")
+
+    # --- [[network.internal]] / [[network.splice]] -- shape + reason (V14) ---
+    def _validate_host_reason_array(key: str, bypass_clause: str) -> list[str]:
+        out_hosts: list[str] = []
+        out_errors: list[str] = []
+        raw = net.get(key, [])
+        if not isinstance(raw, list):
+            return [], [f"[network].{key} must be an array of "
+                        f"[[network.{key}]] tables, got {type(raw).__name__}"]
+        for item in raw:
+            if not isinstance(item, dict):
+                out_errors.append(f"[network].{key} entries are tables with "
+                                  f"`host` and `reason`, got {item!r}")
+                continue
+            if "host" not in item:
+                out_errors.append(f"[network].{key}: entry {item!r} has no "
+                                  f"`host`")
+                continue
+            problems = _validate_container_host_pattern(item.get("host"))
+            if problems:
+                out_errors.extend(f"[network].{key}: {p}" for p in problems)
+                continue
+            host = item["host"].strip()
+            out_hosts.append(host)
+            if not isinstance(item.get("reason"), str) or not item["reason"].strip():
+                out_errors.append(  # V14
+                    f"[network].{key}: {host!r} has no `reason`; {bypass_clause}")
+        return out_hosts, out_errors
+
+    internal_hosts, internal_errors = _validate_host_reason_array(
+        "internal",
+        "it is a bypass of the internal-destination drop and carries one "
+        "like [[network.allow]] does")
+    errors.extend(internal_errors)
+
+    splice_hosts, splice_errors = _validate_host_reason_array(
+        "splice",
+        "it exempts a host from inspection and carries one like "
+        "[[network.allow]] does")
+    errors.extend(splice_errors)
+    for host in splice_hosts:
+        # V12: dead-entry check. Splice only excepts from the allowlist -- a
+        # policy entry already allowlists its own host (V1), so unlike
+        # `internal` below this does not also check policy_hosts: exempting a
+        # host from inspection that a policy entry intends to inspect is a
+        # contradiction, not redundancy.
+        if not any(_container_patterns_overlap(host, pattern) for pattern in hosts):
+            errors.append(
+                f"[network].splice: {host!r} matches no allowlisted name -- "
+                f"nothing in .hosts covers it, so the entry exempts a host "
+                f"the workload is refused before the exemption is reached. "
+                f"Add it to .hosts, or drop this entry")
+
+    # --- [[network.credential]] -- shape (feeds V7/V10) ---
+    raw_credentials = net.get("credential", [])
+    credentials: list[ContainerCredential] = []
+    if not isinstance(raw_credentials, list):
+        errors.append(
+            f"[network].credential must be an array of "
+            f"[[network.credential]] tables, got "
+            f"{type(raw_credentials).__name__}")
+        raw_credentials = []
+    seen_cred_names: set[str] = set()
+    seen_envs: set[str] = set()
+    for item in raw_credentials:
+        if not isinstance(item, dict):
+            errors.append(f"[network].credential entries are tables with "
+                          f"`name`, `placeholder` and `env`, got {item!r}")
+            continue
+        values = {}
+        for key in ("name", "placeholder", "env"):
+            value = item.get(key)
+            if not isinstance(value, str) or not value.strip():
+                errors.append(
+                    f"[network].credential: entry {item!r} has no `{key}`; a "
+                    f"block carries all three -- `name` selects the sealed "
+                    f"material, `placeholder` is the fiction the container "
+                    f"holds in its place, and `env` is the variable it is "
+                    f"seeded into")
+                values = {}
+                break
+            values[key] = value.strip()
+        if not values:
+            continue
+        name, placeholder, env = values["name"], values["placeholder"], values["env"]
+        if env in VM_RESERVED_GUEST_ENV:  # V10
+            errors.append(
+                f"[network].credential: {name!r} has `env` = {env!r}, which "
+                f"is one of the CA trust-store variables workloadctl may seed "
+                f"this container with. Choose another name")
+            continue
+        if env in seen_envs:
+            errors.append(
+                f"[network].credential: `env` = {env!r} is used by two "
+                f"credential blocks, so one placeholder overwrites the other "
+                f"and one credential's host answers 401 for a reason nothing "
+                f"here reports")
+            continue
+        seen_envs.add(env)
+        if name in seen_cred_names:
+            errors.append(
+                f"[network].credential: {name!r} is declared twice. A policy "
+                f"entry selects a credential by name, so two blocks sharing "
+                f"one make the selector ambiguous")
+            continue
+        seen_cred_names.add(name)
+        auth_header = item.get("auth_header")
+        auth_header = auth_header.strip() if isinstance(auth_header, str) and auth_header.strip() else None
+        auth_format = item.get("auth_format")
+        auth_format = auth_format.strip() if isinstance(auth_format, str) and auth_format.strip() else None
+        credentials.append(ContainerCredential(
+            name=name, placeholder=placeholder, env=env,
+            auth_header=auth_header, auth_format=auth_format))
+    credential_names = {c.name for c in credentials}
+
+    # --- [[network.policy]] -- shape + V1-V11 ---
+    raw_policy = net.get("policy", [])
+    policy_entries: list[ContainerPolicyEntry] = []
+    if not isinstance(raw_policy, list):
+        errors.append(
+            f"[network].policy must be an array of [[network.policy]] "
+            f"tables, got {type(raw_policy).__name__}")
+        raw_policy = []
+    for item in raw_policy:
+        if not isinstance(item, dict):
+            errors.append(f"[network].policy entries are tables with `host` "
+                          f"and optional `methods`/`paths`/`credential`, got "
+                          f"{item!r}")
+            continue
+        if "host" not in item:
+            errors.append(f"[network].policy: entry {item!r} has no `host`")
+            continue
+        problems = _validate_container_host_pattern(item.get("host"))
+        if problems:
+            errors.extend(f"[network].policy: {p}" for p in problems)
+            continue
+        host = item["host"].strip()
+
+        methods: tuple | None = None
+        if "methods" in item:
+            value = item["methods"]
+            if not isinstance(value, list):
+                errors.append(f"[network].policy: {host!r} `methods` must "
+                              f"be an array of HTTP method names, got "
+                              f"{type(value).__name__}")
+                methods = ()
+            else:
+                out = []
+                for token in value:
+                    if not isinstance(token, str) or token != token.strip() \
+                            or any(c.isspace() for c in token):
+                        errors.append(
+                            f"[network].policy: {host!r} `methods` names "
+                            f"{token!r}, which is not a usable HTTP method "
+                            f"token")
+                        continue
+                    name = token.upper()
+                    if name in VM_POLICY_METHODS_REFUSED:  # V5
+                        errors.append(
+                            f"[network].policy: {host!r} names the method "
+                            f"{token!r}, which this inspector never sees -- "
+                            f"{VM_POLICY_METHODS_REFUSED[name]}")
+                        continue
+                    if name not in VM_POLICY_METHODS:  # V5
+                        errors.append(
+                            f"[network].policy: {host!r} names {token!r}, "
+                            f"which is not a registered HTTP method")
+                        continue
+                    out.append(name)
+                if not out and value:
+                    pass  # per-token errors already reported above
+                elif not out:
+                    errors.append(
+                        f"[network].policy: {host!r} has an empty `methods` "
+                        f"list, which permits no method at all. Omit the key "
+                        f"to mean any method")
+                methods = tuple(out)
+
+        paths: tuple | None = None
+        if "paths" in item:
+            value = item["paths"]
+            if not isinstance(value, list):
+                errors.append(f"[network].policy: {host!r} `paths` must be "
+                              f"an array of path patterns, got "
+                              f"{type(value).__name__}")
+                paths = ()
+            else:
+                out = []
+                for pattern in value:
+                    if not isinstance(pattern, str) or not pattern.strip():
+                        errors.append(f"[network].policy: {host!r} `paths` "
+                                      f"entries must be non-empty strings, "
+                                      f"got {pattern!r}")
+                        continue
+                    if not pattern.startswith("/") or "?" in pattern or "#" in pattern:
+                        errors.append(  # V6
+                            f"[network].policy: {host!r} path {pattern!r} "
+                            f"must start with '/' and carry no query or "
+                            f"fragment -- `paths` matches the path alone")
+                        continue
+                    out.append(pattern)
+                if not value:
+                    errors.append(
+                        f"[network].policy: {host!r} has an empty `paths` "
+                        f"list, which permits no path at all. Omit the key "
+                        f"to mean any path")
+                paths = tuple(out)
+
+        credential = None
+        if "credential" in item:
+            value = item.get("credential")
+            if not isinstance(value, str) or not value.strip():
+                errors.append(f"[network].policy: {host!r} `credential` "
+                              f"must be the name of a [[network.credential]] "
+                              f"block, got {value!r}")
+            else:
+                credential = value.strip()
+                if credential not in credential_names:  # V7
+                    errors.append(
+                        f"[network].policy: {host!r} selects credential "
+                        f"{credential!r}, which no [[network.credential]] "
+                        f"block declares")
+                if credential and "*" in host:  # V8
+                    errors.append(
+                        f"[network].policy: {host!r} selects credential "
+                        f"{credential!r}, but a credential is attached per "
+                        f"exact host -- the broker's table has no patterns, "
+                        f"so every request matching this wildcard would be "
+                        f"authorised here and refused there. Name the exact "
+                        f"host this credential belongs to")
+
+        policy_entries.append(ContainerPolicyEntry(
+            host=host, methods=methods, paths=paths, credential=credential))
+
+    # A credential nothing selects.
+    for cred in credentials:
+        if not any(e.credential == cred.name for e in policy_entries):
+            errors.append(
+                f"[network].credential: {cred.name!r} is declared but no "
+                f"[[network.policy]] entry selects it, so it is sealed, "
+                f"loaded and attached to nothing")
+
+    policy_hosts = [e.host for e in policy_entries]
+
+    for host in internal_hosts:
+        # V12, deferred until policy_hosts exists: a name in `policy` need
+        # not also appear in `hosts` (V1), so an `internal` entry for such a
+        # name is live even though `hosts` alone does not cover it.
+        if not any(_container_patterns_overlap(host, pattern) for pattern in hosts) \
+                and not any(_container_patterns_overlap(host, pattern) for pattern in policy_hosts):
+            errors.append(
+                f"[network].internal: {host!r} is on no list -- nothing in "
+                f".hosts allowlists it and no .policy entry names it, so the "
+                f"entry excepts a destination the workload is refused before "
+                f"the exception is reached. Add it to .hosts, or drop this "
+                f"entry")
+
+    if policy_entries:
+        # V9: tls = "splice" plus any policy entry.
+        explicit_tls = container_tls_mode(net)
+        if explicit_tls == "splice":
+            errors.append(
+                "[network].policy with tls = 'splice' -- a spliced "
+                "connection is never decrypted, so there is no request for "
+                "`methods` and `paths` to be applied to and the entries "
+                "would be silently inert. Drop tls = 'splice' (inspect is "
+                "computed automatically once a policy entry exists), or "
+                "drop the policy entries and keep the name allowlist in "
+                ".hosts")
+
+        # V3: where more than one entry matches a host by pattern, every one
+        # of those entries must state both `methods` and `paths`.
+        for i, entry in enumerate(policy_entries):
+            siblings = [o for j, o in enumerate(policy_entries)
+                       if j != i and _container_patterns_overlap(entry.host, o.host)]
+            if not siblings:
+                continue
+            missing = [k for k, v in (("methods", entry.methods),
+                                      ("paths", entry.paths)) if v is None]
+            if missing:
+                errors.append(
+                    f"[network].policy: {entry.host!r} shares a host with "
+                    f"{siblings[0].host!r} and omits "
+                    f"{' and '.join(f'`{k}`' for k in missing)}. Where "
+                    f"entries overlap, an omitted key means ANY -- state "
+                    f"both keys on every overlapping entry")
+
+        # V4: apex trap. A wildcard entry beneath an allowlisted apex leaves
+        # the apex allowlisted and inspected with no rules applied.
+        for apex in hosts:
+            wildcard = f"*.{apex}"
+            if not any(e.host.strip().lower() == wildcard.lower() for e in policy_entries):
+                continue
+            if any(vm_hostname_match(apex, (e.host,)) for e in policy_entries):
+                continue
+            errors.append(
+                f"[network].policy: {wildcard!r} does not cover the apex "
+                f"{apex!r}, which .hosts also allowlists -- patterns are "
+                f"fnmatch, not DNS suffix matching, so the apex is "
+                f"allowlisted and inspected with NO method or path rules "
+                f"applied. Add an entry for {apex!r} too, or drop it from "
+                f".hosts")
+
+    # V16/V18: the interlock between the computed tls mode and ca_delivery.
+    effective_tls = container_effective_tls_mode(net)
+    ca_delivery = container_ca_delivery(net)
+    ca_mount_path = container_ca_mount_path(net)
+    is_triggered = bool(hosts or policy_entries or net.get("allow"))
+    if is_triggered and effective_tls == "inspect":
+        if ca_delivery is None:  # V16
+            errors.append(
+                "[network]: this workload's effective tls mode is 'inspect' "
+                "(a policy entry is present, or tls = 'inspect' was written "
+                "explicitly), which needs a trust-delivery route -- "
+                "ca_delivery is required. Set it to 'env', 'mount', or "
+                "'image'")
+        elif ca_delivery not in ("env", "mount", "image"):
+            errors.append(
+                f"[network].ca_delivery must be one of 'env', 'mount', "
+                f"'image', got {ca_delivery!r}")
+        elif ca_delivery == "mount" and not ca_mount_path:
+            errors.append(
+                "[network].ca_delivery = 'mount' requires ca_mount_path -- "
+                "the in-container path the CA bundle is mounted at")
+        # ca_delivery = "image" asserts the image was built trusting this
+        # workload's CA, which can only be true of a bundle with its own
+        # Containerfile (R9) -- but this function sees only [network], not
+        # the bundle directory, so that check belongs to whichever caller
+        # loads the whole workload (a TODO for P1-2's caller, not a gap in
+        # this function's contract).
+    if ca_mount_path and ca_delivery != "mount":
+        errors.append(
+            "[network].ca_mount_path is set but ca_delivery is not "
+            "'mount' -- the path is only meaningful when workloadctl is "
+            "the one bind-mounting the bundle")
+
+    for host in splice_hosts:
+        # V18: a per-host splice entry when the whole workload is already on
+        # rung 2 (splice) exempts nothing, and V14 just made the operator
+        # write a `reason` for a hole they did not open.
+        if effective_tls == "splice":
+            errors.append(
+                f"[network].splice: {host!r} is redundant -- this "
+                f"workload's effective tls mode is already 'splice', so "
+                f"every host is spliced and this entry exempts nothing. "
+                f"Drop it, or add a [[network.policy]] entry to move the "
+                f"workload to rung 3 first")
+
+    return errors
 
 
 # --- Per-workload SELinux identifiers ---

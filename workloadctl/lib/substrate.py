@@ -217,7 +217,8 @@ class Substrate(ABC):
 
     Required primitives (abstract, always present):
         liveness, gating_units, capture, exec, open_shell,
-        lifecycle, rollback_targets, rollback_to, rollback, control
+        lifecycle, rollback_targets, rollback_to, rollback, control,
+        uses_inspect
 
     Optional primitives (base-class default; override to support):
         resource_usage, logs, endpoints, addresses, reprovision, teardown,
@@ -365,6 +366,21 @@ class Substrate(ABC):
             parsed as command arguments.  Prints the JSON reply.
 
         Returns an exit code (0 on success).
+        """
+        ...
+
+    @abstractmethod
+    def uses_inspect(self) -> bool:
+        """Whether this workload's egress is redirected into an inspector.
+
+        Abstract rather than a `False` default (D2 in the container egress-
+        parity build spec): a default would let a third substrate silently
+        inherit "never inspected", turning "did every call site get updated"
+        from a class-instantiation error into a grep. The 18 call sites this
+        replaces all previously called `vm_uses_inspect()` directly and were
+        VM-gated by construction; `vm_uses_inspect` itself is untouched
+        (R2) and VMSubstrate delegates to it here rather than restating its
+        logic.
         """
         ...
 

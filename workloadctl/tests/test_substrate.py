@@ -1504,6 +1504,99 @@ ports = ["8080:80"]
             self.assertIn(prim, cm.exception.reason, f"reason for {prim!r} missing primitive name")
 
 
+# ── uses_inspect() ────────────────────────────────────────────────────────────
+
+class TestUsesInspect(unittest.TestCase):
+    """Substrate.uses_inspect() is abstract (D2 in the container egress-parity
+    build spec) precisely so a third substrate can't silently inherit "never
+    inspected" -- these lock what each real implementation answers."""
+
+    def test_vm_default_egress_open_is_false(self):
+        substrate = VMSubstrate(_make_vm_config(), None)
+        self.assertFalse(substrate.uses_inspect())
+
+    def test_vm_egress_filtered_is_true(self):
+        toml = """\
+[workload]
+name = "test-vm-filtered"
+
+[vm.network]
+egress = "filtered"
+hosts = ["api.example.com"]
+
+[vm]
+image = "example.com/guest:latest"
+"""
+        config = _make_config(toml, 'test-vm-filtered')
+        substrate = VMSubstrate(config, None)
+        self.assertTrue(substrate.uses_inspect())
+
+    def test_container_no_network_table_is_false(self):
+        substrate = ContainerSubstrate(_make_config(SINGLE_TOML, 'test-wl'), MagicMock())
+        self.assertFalse(substrate.uses_inspect())
+
+    def test_container_hosts_trigger_is_true(self):
+        toml = """\
+[workload]
+name = "test-hosts"
+
+[container]
+image = "example.com/test:latest"
+
+[network]
+hosts = ["*.pypi.org"]
+"""
+        substrate = ContainerSubstrate(_make_config(toml, 'test-hosts'), MagicMock())
+        self.assertTrue(substrate.uses_inspect())
+
+    def test_container_allow_trigger_is_true(self):
+        toml = """\
+[workload]
+name = "test-allow"
+
+[container]
+image = "example.com/test:latest"
+
+[[network.allow]]
+address = "10.0.0.5"
+port = 22
+reason = "ssh to nas"
+"""
+        substrate = ContainerSubstrate(_make_config(toml, 'test-allow'), MagicMock())
+        self.assertTrue(substrate.uses_inspect())
+
+    def test_container_policy_alone_is_true(self):
+        # Not "policy alone doesn't count" -- a policy entry allowlists its
+        # own host (D4's third trigger), so it must trip this on its own too.
+        toml = """\
+[workload]
+name = "test-policy"
+
+[container]
+image = "example.com/test:latest"
+
+[[network.policy]]
+host = "api.example.com"
+"""
+        substrate = ContainerSubstrate(_make_config(toml, 'test-policy'), MagicMock())
+        self.assertTrue(substrate.uses_inspect())
+
+    def test_container_host_mode_is_false_pending_p0_1(self):
+        toml = """\
+[workload]
+name = "test-hostmode"
+
+[container]
+image = "example.com/test:latest"
+
+[network]
+mode = "host"
+hosts = ["*.pypi.org"]
+"""
+        substrate = ContainerSubstrate(_make_config(toml, 'test-hostmode'), MagicMock())
+        self.assertFalse(substrate.uses_inspect())
+
+
 # ── rollback_targets / rollback_to ────────────────────────────────────────────
 
 class TestContainerRollbackTargets(unittest.TestCase):

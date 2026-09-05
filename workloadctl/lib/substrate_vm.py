@@ -42,6 +42,7 @@ from vm import (
     vm_guest_agent_socket,
     vm_mac_address,
     vm_management_address,
+    vm_uses_inspect,
 )
 from vm_clock import GUEST_AGENT_TIMEOUT, guest_agent_sync
 from vm_metrics import get_vm_qmp_metrics
@@ -392,6 +393,9 @@ class VMSubstrate(Substrate):
 
     def gating_units(self) -> list[str]:
         return workload_service_units(self.config, roles={"setup", "build"})
+
+    def uses_inspect(self) -> bool:
+        return vm_uses_inspect(self.config.config)
 
     def _guest_ip(self) -> tuple[str, int] | None:
         """The (host, port) the SSH paths need; None if not resolvable yet."""
