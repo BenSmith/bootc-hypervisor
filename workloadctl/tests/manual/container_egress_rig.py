@@ -71,10 +71,16 @@ target fails identically to a working internal-destination drop.
 
     sudo CEG_LAN_HOST=192.168.0.10 python3 tests/manual/container_egress_rig.py
 
-Last green: not yet run as a script. The checks it encodes were confirmed
-by hand on a bare-metal Fedora 44 host under enforcing on 2026-09-05; this
-file is the reusable form of that pass, and its first run is what makes it a
-measurement rather than a transcription.
+Last green 2026-09-05, 40/40 on a bare-metal Fedora 44 host under enforcing.
+Getting there took five product fixes and four rig fixes, and the split is
+worth knowing before reading a failure here: the product defects were all on
+the `recreate` path -- the one the schema reference tells operators to use --
+and every one of them presented as a HANG or as a misreport rather than as an
+error. The rig defects were all in how a probe's result was READ (wget's exit
+status taken from the wrong end of a pipe, a timeout raised instead of
+recorded, a capture verb invoked in its blocking form). Both classes look
+identical in the output. When a row here fails, check what the probe measured
+before believing what it says.
 """
 
 import json
@@ -254,6 +260,11 @@ def fetch(name, url, timeout=60):
     """
     started = time.monotonic()
     script = (
+        # Truncate both first. wget leaves the PREVIOUS request's body in place
+        # when it fails, so a refusal was printing the last success's HTML as
+        # its detail -- the assertion was right and the evidence beside it was
+        # from a different request, which is worse than no detail.
+        f": > /tmp/ceg-body; : > /tmp/ceg-err; "
         f"if wget -q -O /tmp/ceg-body -T 15 {url!r} 2>/tmp/ceg-err; "
         f"then echo '[OK]'; else echo '[NO]'; fi; "
         f"head -c 110 /tmp/ceg-body 2>/dev/null; echo; "
@@ -630,8 +641,13 @@ def check_internal():
         return
     time.sleep(5)
     elapsed, ok, out = fetch(FILTERED, f"http://{LAN_HOST}/")
+    # REACHED, not "answered 200". The operator's LAN host is whatever they
+    # pointed CEG_LAN_HOST at, and a 404 from it is a complete round trip
+    # through the exemption -- the thing under test -- while a 502 from the
+    # inspector is the drop. Keying this on wget's exit status made a target
+    # that serves nothing at `/` read as a failed exemption.
     record("with [[network.internal]]: the same host IS reached",
-           ok, f"{elapsed:.1f}s  {out}")
+           ok or "HTTP/" in out, f"{elapsed:.1f}s  {out}")
     rec = latest_for(FILTERED, LAN_HOST)
     record("and the record says it was forwarded",
            bool(rec) and rec.get("decision") == "forward",
@@ -689,8 +705,14 @@ def check_reporting():
     # so it is recorded rather than guessed at -- and a rig that asserted a
     # refusal here would have failed rows for a decision made on purpose while
     # missing the one below.
-    for verb in ("diagnose", "drift", "pcap"):
-        p = cli(verb, FILTERED)
+    # `pcap` is asked what vantages it offers (-D), NOT started. A bare
+    # `pcap <name>` STARTS a capture and runs until it is stopped, on both
+    # substrates -- that is the verb working, not hanging. Invoking it the
+    # obvious way cost this rig 300 seconds per run and recorded the timeout as
+    # if it meant something about containers.
+    for verb, extra in (("diagnose", ()), ("drift", ()),
+                        ("pcap", ("-D",))):
+        p = cli(verb, FILTERED, *extra, timeout=90)
         text = " ".join((p.stdout + p.stderr).split())
         record_gap(f"`{verb}` on an inspected container",
                    f"rc={p.returncode}: {text[:100]}")
