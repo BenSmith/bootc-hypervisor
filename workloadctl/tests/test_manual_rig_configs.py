@@ -130,27 +130,74 @@ class TestGeneratedConfigs(unittest.TestCase):
                     self.assertEqual(
                         errors, [], f"{name} arm {_arm_name(arm)}: {errors}")
 
-    def test_network_scalars_precede_the_allow_table(self):
+    def test_every_generated_container_network_validates(self):
+        """The container counterpart of the [vm.network] check above.
+
+        `validate_workload_config` already covers this rig-side, but the
+        narrower call is kept for the same reason its VM sibling is: its
+        failure message names the [network] key directly, where the whole-
+        document one reports a list a reader has to search. It is also the
+        check that stays meaningful if the whole-document validator ever stops
+        descending into [network].
+        """
+        from workload_lib import validate_container_network
+        for name, mod, arms in _rigs():
+            for arm in arms:
+                with self.subTest(rig=name, arm=_arm_name(arm)):
+                    doc = tomllib.loads(_generate(mod, arm))
+                    if "vm" in doc:
+                        continue      # the VM check above owns those
+                    net = doc.get("network")
+                    if net is None:
+                        continue
+                    errors = validate_container_network(net)
+                    self.assertEqual(
+                        errors, [], f"{name} arm {_arm_name(arm)}: {errors}")
+
+    def test_network_scalars_precede_the_first_array_of_tables(self):
         """The ordering trap, asserted on the generated TEXT rather than on the
         parsed document -- because a scalar written below [[vm.network.allow]]
         parses fine and lands in the allow entry, which is exactly the mistake
-        that is hard to see by reading."""
+        that is hard to see by reading.
+
+        Both schemas, and every array they have rather than only `allow`: it is
+        the FIRST array-of-tables that ends the scalar section, whichever one
+        that happens to be, so a rig whose first table is `policy` or
+        `internal` has the identical trap and the `allow`-only check would not
+        have looked.
+        """
+        vm_arrays = ("[[vm.network.allow]]", "[[vm.network.internal]]",
+                     "[[vm.network.splice]]", "[[vm.network.policy]]",
+                     "[[vm.network.credential]]", "[[vm.network.http2]]")
+        vm_scalars = ("egress", "hosts", "resolver", "ports", "bridge",
+                      "tls", "tls_reason", "outbound_if")
+        ct_arrays = ("[[network.allow]]", "[[network.internal]]",
+                     "[[network.splice]]", "[[network.policy]]",
+                     "[[network.credential]]")
+        ct_scalars = ("mode", "ports", "hosts", "tls", "tls_reason",
+                      "ca_delivery", "ca_mount_path")
+
         for name, mod, arms in _rigs():
             for arm in arms:
                 with self.subTest(rig=name, arm=_arm_name(arm)):
                     text = _generate(mod, arm)
-                    if "[[vm.network.allow]]" not in text:
-                        continue
-                    tail = text.split("[[vm.network.allow]]", 1)[1]
-                    for line in tail.splitlines():
-                        key = line.split("=")[0].strip()
-                        if key in ("egress", "hosts", "resolver", "ports",
-                                   "bridge", "tls"):
-                            self.fail(f"{name} arm {_arm_name(arm)}: "
-                                      f"`{key}` is "
-                                      f"written below [[vm.network.allow]] and "
-                                      f"belongs to the allow entry, not to "
-                                      f"[vm.network]")
+                    for arrays, scalars, section in (
+                            (vm_arrays, vm_scalars, "[vm.network]"),
+                            (ct_arrays, ct_scalars, "[network]")):
+                        starts = [text.index(a) for a in arrays if a in text]
+                        if not starts:
+                            continue
+                        tail = text[min(starts):]
+                        for line in tail.splitlines():
+                            if line.lstrip().startswith("#"):
+                                continue
+                            key = line.split("=")[0].strip()
+                            if key in scalars:
+                                self.fail(
+                                    f"{name} arm {_arm_name(arm)}: `{key}` is "
+                                    f"written below the first array-of-tables "
+                                    f"and belongs to that entry, not to "
+                                    f"{section}")
 
 
 if __name__ == "__main__":

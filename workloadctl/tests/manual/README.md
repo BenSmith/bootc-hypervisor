@@ -719,3 +719,86 @@ traffic, no socket activation and no status document — and the rig reported
 that as eight failures about `doctor` and the exporter, none of which named the
 cause. If the traffic line says a probe returned nothing, read no further down:
 everything below it is measuring an inspector that was never dialled.
+
+---
+
+## container_egress_rig.py — does the container substrate actually filter?
+
+The first rig here that needs **no KVM**. Everything the VM rigs prove about
+the egress path was proven on a guest; this asks the same questions of a
+container, where the traffic is re-originated by pasta as the workload's own
+uid rather than by passt on a guest's behalf. Needs root, podman and the
+installed RPM. Two throwaway container workloads, both prefixed `ceg-`.
+
+```bash
+sudo python3 tests/manual/container_egress_rig.py
+sudo CEG_LAN_HOST=192.0.2.10 python3 tests/manual/container_egress_rig.py
+sudo python3 tests/manual/container_egress_rig.py --keep   # leave them running
+```
+
+**The ladder is walked on one workload, not built three times.** Rung 1 (no
+`[network]` egress key), rung 2 (`hosts` only, spliced, no CA), rung 3 (a
+`[[network.policy]]` entry, refused until `ca_delivery` is stated, then
+terminating) are three states of one file with a `workloadctl recreate` between
+them. Three separately-enabled workloads would each prove their own end state
+and say nothing about the *transition*, which is where a silently-gained CA
+requirement would hide. It also settles the apply question by exercising it:
+`recreate`, never `restart` — `restart` regenerates no units, and the rung-3
+transition adds a bind mount and five environment variables to the podman argv.
+
+**Both redirected planes, and the cleartext one first.** A rig that checks 443
+and stops leaves plaintext HTTP unfiltered in a workload every report calls
+filtered. The assertion on port 80 is not that the request succeeded but that
+the record carries a `method` and a `path` — that the *Host header* was read,
+not merely that the dial landed somewhere.
+
+**The re-dial check is a stopwatch, not a return code.** A missing cgroup
+exemption in either table does not error: one loops the inspector into itself
+and the other filters its upstream leg like the workload's own, and both
+present as a request that eventually times out. So the rig asserts the elements
+are present *and* that a request which used them finished well inside a
+wall-clock budget.
+
+**`[[network.internal]]` is probed in both directions.** Testing only the
+entry-present case would pass against an inspector with no internal-destination
+guard at all — which is the guard that stops an allowlisted *public* name from
+being pointed at your LAN. Without `CEG_LAN_HOST`, and if that host does not
+answer on port 80 from the machine running the rig, this section **skips**: a
+probe against an unreachable target fails identically to a working drop.
+
+**Four reporting surfaces are asserted to REFUSE.** `rules`, `diagnose`,
+`drift` and `pcap` are VM-only by construction pending the container document
+renderer, so their refusal is the correct behaviour. A rig that asserted all
+seven surfaces report the container would fail four rows for a decision made on
+purpose.
+
+### The one thing it measures and does not score
+
+Cross-workload inspector reachability. `nftables/workload-proxy.nft` argues
+that a uid with no element in the redirect maps cannot reach another workload's
+inspector, because its packet leaves untranslated and meets the default-deny
+drop in `workload_filter` — but that drop is itself guarded on `@wl_filtered`
+membership, which an unfiltered workload of *either* substrate is also not in.
+So the argument does not close for a container, and reading the rule suggests
+it does not close for an `egress = "open"` VM either.
+
+The rig dials the filtered workload's listener from the unfiltered container,
+on the listener's real ports rather than through a redirect, and prints the
+result as a `GAP` line that does not affect the tally. Not scored because it is
+very likely a pre-existing property of the shared design rather than anything
+the container work introduced, and because the remedy is a decision nobody has
+made — a peer-credential check in the listener, an input-chain rule covering
+co-resident uids, or an accepted and documented boundary. When that decision
+lands, turn the `record_gap` into a `record`; if the decision is to accept it,
+invert the assertion so the rig pins the accepted boundary rather than going
+quiet.
+
+### What it deliberately does not measure
+
+**IPv6.** A v6 egress probe on a host with no global v6 address dies at the
+routing lookup before nftables sees it, so the row passes having tested
+nothing. Run it somewhere with v6, or record it as untested — do not let a
+v4-only host's green stand in for it. **A moved `[[network.allow]]` address**,
+which needs a real non-80/443 upstream and a mid-run change. **`ca_delivery =
+"env"` against an embedded root store**, which needs a base image whose client
+ignores the five CA variables.
