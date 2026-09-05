@@ -61,6 +61,7 @@ from vm import (
     NFT_PROXY_TABLE,
     NFT_MAP_INSPECT4, NFT_MAP_INSPECT6, NFT_SET_INSPECT_SELF,
     NFT_SET_INSPECT_SELF6, NFT_SET_INSPECT_DST, NFT_SET_INSPECT_DST6,
+    NFT_SET_INSPECT_LIVE, NFT_SET_INSPECT_LIVE6,
     VM_INSPECT_DIGEST_KEY, vm_inspect_policy_digest,
     VM_CA_EXPIRY_WARN_DAYS, vm_ca_cert_path,
     vm_inspect_policy_path, vm_inspect_digest_short, VM_INSPECT_DIGEST_SHORT,
@@ -1733,6 +1734,20 @@ def vm_inspect_check(config, *, elements4=PROBE, elements6=PROBE,
                  f"— the figure below reads 0 whether or not any happened. "
                  f"Re-arm: {restart}")
 
+    # The third verdict, and the loudest: not a broken guest and not a lost
+    # statistic, but this workload's inspector standing open to every other
+    # local uid on the host. Nothing else reports it -- the guest's traffic is
+    # fine, the counters reconcile, and the only visible trace is other
+    # workloads' requests appearing in THIS workload's egress records, where
+    # they read as its own.
+    missing_guard = [name for name in INSPECT_GUARD_SETS
+                     if filter_sets.get(name) is False]
+    if missing_guard:
+        tail += (f"; this guest's inspector address is missing from "
+                 f"{' and '.join(missing_guard)}, so any other local uid can "
+                 f"reach its listener and its dials land in this workload's "
+                 f"egress records. Re-arm: {restart}")
+
     if self_dials is PROBE:
         self_dials = _inspect_self_counter(uid)
     if self_dials and self_dials[0]:
@@ -1979,6 +1994,16 @@ def _inspect_map_elements(map_name):
 # families`, green, on a guest whose web traffic was dying.
 INSPECT_ACCEPT_SETS = (NFT_SET_INSPECT_DST, NFT_SET_INSPECT_DST6)
 INSPECT_SELF_SETS = (NFT_SET_INSPECT_SELF, NFT_SET_INSPECT_SELF6)
+# The cross-workload guard's sets, a third kind with a third verdict. A missing
+# element here breaks nothing this guest does and costs no statistic: it leaves
+# this workload's inspector REACHABLE BY EVERY OTHER LOCAL UID, silently, on a
+# workload that otherwise reads healthy end to end. That is the one of the
+# three an operator most needs told, and the one with no other signal at all.
+#
+# Keyed on the address, not the uid: these sets hold a bare inspector address
+# so the guard can match a dial from a DIFFERENT uid, which is why they cannot
+# be read with vm_owned_elements like the four above.
+INSPECT_GUARD_SETS = (NFT_SET_INSPECT_LIVE, NFT_SET_INSPECT_LIVE6)
 
 
 def _inspect_filter_sets(uid: int) -> dict:
@@ -2009,6 +2034,15 @@ def _inspect_filter_sets(uid: int) -> dict:
     for set_name in INSPECT_ACCEPT_SETS + INSPECT_SELF_SETS:
         found, elements = _named_set_elements(payload, set_name)
         out[set_name] = (bool(vm_owned_elements(uid, elements))
+                         if found else None)
+    # The guard sets by address. vm_owned_elements asks "does any element name
+    # this uid", and these elements name no uid at all -- run over them it
+    # returns empty for a correctly armed workload, i.e. it would report the
+    # guard missing on every host.
+    addr = vm_inspect_address(uid)
+    for set_name, want in zip(INSPECT_GUARD_SETS, (str(addr.v4), str(addr.v6))):
+        found, elements = _named_set_elements(payload, set_name)
+        out[set_name] = (any(want == e or want in str(e) for e in elements)
                          if found else None)
     return out
 

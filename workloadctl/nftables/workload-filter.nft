@@ -64,6 +64,17 @@ add set inet workload_filter wl_inspect_dst6 { typeof meta skuid . ip6 daddr . t
 add set inet workload_filter wl_inspect_self  { typeof meta skuid . ip  daddr ; counter ; }
 add set inet workload_filter wl_inspect_self6 { typeof meta skuid . ip6 daddr ; counter ; }
 
+# The live sets carry every armed inspector's address, bare -- no uid, no port.
+# They are what the cross-workload guard matches on, and the reason it does not
+# name 198.18.0.0/16 outright: that form dropped every non-root packet on the
+# host bound for a range workloadctl does not own, which is a host-wide side
+# effect from a workload-scoped tool. These hold only addresses workloadctl
+# allocated itself, so there is no collateral, and being a SET they give the
+# guard the same inertness every other drop here has -- nothing armed, nothing
+# in the set, nothing dropped.
+add set inet workload_filter wl_inspect_live  { type ipv4_addr ; }
+add set inet workload_filter wl_inspect_live6 { type ipv6_addr ; }
+
 # The host-side process that RE-ORIGINATES a workload's egress, by control
 # group: the egress inspector. It runs as its workload's own user *on purpose*,
 # so `meta skuid` cannot tell its traffic from the guest's — and under
@@ -256,7 +267,7 @@ add rule inet workload_filter output meta skuid . ip6 daddr . th dport @wl_inspe
 add rule inet workload_filter output meta skuid . ip  daddr @wl_inspect_self  ct direction original drop
 add rule inet workload_filter output meta skuid . ip6 daddr @wl_inspect_self6 ct direction original drop
 
-# The range guard: anything left after the per-workload rules is a
+# The cross-workload guard: anything left after the per-workload rules is a
 # cross-workload attempt, on the shared counter where attribution is not
 # needed. Both qualifiers are load-bearing and for different halves:
 # `meta skuid != 0` keeps host tooling out of the rule so `diagnose`/`doctor`
@@ -285,16 +296,27 @@ add rule inet workload_filter output meta skuid . ip6 daddr @wl_inspect_self6 ct
 # `!= 0` is the exemption the comment above always meant. Both `diagnose`
 # and `doctor` call require_root() (lib/cmd_diagnose.py, lib/cmd_doctor.py),
 # so root is the whole of the legitimate probing population and nothing else
-# on the host has business dialling this range. A workload's own redirected
-# traffic is unaffected: @wl_inspect_dst accepts it several rules above,
-# before control ever reaches here.
-add rule inet workload_filter output meta skuid != 0 ct direction original ip  daddr 198.18.0.0/16 drop
+# on the host has business dialling a live inspector. A workload's own
+# redirected traffic is unaffected: @wl_inspect_dst accepts it several rules
+# above, before control ever reaches here.
+#
+# THE DESTINATION IS THE LIVE SET, NOT THE /16, and that is not a detail.
+# The first repair of the hole above named 198.18.0.0/16 outright, which
+# combined with a non-root source qualifier means a workload-scoped tool
+# silently drops every non-root packet on the host bound for a /16 it does
+# not own. An operator using that range for anything of their own loses it
+# whether or not they run a workload — a host-wide behaviour change nobody
+# opted into, and out of all proportion to the hole being closed. The set
+# holds the addresses workloadctl allocated ITSELF, so the guard reaches
+# exactly as far as workloadctl's own listeners and no further, and it is
+# once again a set-guarded drop: no workload armed, empty set, inert table.
+add rule inet workload_filter output meta skuid != 0 ct direction original ip  daddr @wl_inspect_live  drop
 
 # The v6 twin. A v4-only guard leaves the same hole open on the path clients
 # try first: one workload reaching another's v6 listener, admitted by the
 # loopback accept exactly as measured on v4. ip daddr matches v4 only and
 # ip6 daddr v6 only, so the split is the same one the allow sets carry.
-add rule inet workload_filter output meta skuid != 0 ct direction original ip6 daddr 2001:2::/48 drop
+add rule inet workload_filter output meta skuid != 0 ct direction original ip6 daddr @wl_inspect_live6 drop
 
 # Host-side name resolution, which is not guest-chosen egress: the inspector
 # resolves through whatever the host is configured to use, which may be a stub

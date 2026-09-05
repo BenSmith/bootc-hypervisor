@@ -532,13 +532,26 @@ VM_INTERNAL_PREFIXES6 = (
 # by the filter helper: the dst sets hold the TRANSLATED tuple, which only the
 # redirect's installer knows. The self sets carry a per-element counter —
 # the load-bearing half, since it is what attributes a wrong-port self-dial to
-# its workload instead of the range guard's shared number. None of the four
-# is flushed in the skeleton; the two that hold per-workload state are never
-# emptied by it.
+# its workload instead of the cross-workload guard's shared number. None of
+# these is flushed in the skeleton; the ones that hold per-workload state are
+# never emptied by it.
 NFT_SET_INSPECT_DST = "wl_inspect_dst"
 NFT_SET_INSPECT_DST6 = "wl_inspect_dst6"
 NFT_SET_INSPECT_SELF = "wl_inspect_self"
 NFT_SET_INSPECT_SELF6 = "wl_inspect_self6"
+# The cross-workload guard's destination sets: every LIVE inspector address on
+# the host, one plain address per armed workload and no uid. Armed alongside
+# the four above, by the same helper, for the same reason.
+#
+# WHY A SET AND NOT THE /16. The guard used to name 198.18.0.0/16 outright,
+# which made a workload-scoped tool drop every non-root packet on the host
+# bound for a /16 workloadctl does not own — an operator using that range for
+# anything of their own lost it, whether or not they run workloads. Bounding
+# the guard to the addresses workloadctl ITSELF allocated removes that
+# entirely, and gives back the property the /16 form cost: the drop is guarded
+# on set membership, so an abandoned table holds an empty set and is inert.
+NFT_SET_INSPECT_LIVE = "wl_inspect_live"
+NFT_SET_INSPECT_LIVE6 = "wl_inspect_live6"
 NFT_SKELETON = "/usr/share/workloadctl/workload-filter.nft"
 
 
@@ -1302,13 +1315,36 @@ def vm_inspect_self_elements(uid: int) -> dict[str, list[str]]:
     }
 
 
-def vm_inspect_element_commands(uid: int, action: str) -> list[list[str]]:
-    """argv lists arming ("add") or disarming ("delete") all six elements.
+def vm_inspect_live_elements(uid: int) -> dict[str, list[str]]:
+    """The cross-workload guard's elements: this workload's inspector address.
 
-    Two families, three objects each, in a fixed order: both DNAT maps (in
-    inet workload_proxy), both accept sets and both wrong-port sets (in inet
-    workload_filter). One argv per object, because an object's elements belong
-    to one table and one transaction, and the six span two tables.
+    A bare address per family, with NO uid and no port. The uid is deliberately
+    absent because this set answers a question about the DESTINATION — "is this
+    a live inspector?" — and the rule that reads it supplies the source
+    qualifier itself (`meta skuid != 0`, so host tooling can still probe). A
+    uid here would make the set say "workload X's own inspector", which is what
+    wl_inspect_self already says one rule earlier and is the opposite of what
+    the cross-workload guard needs to match.
+
+    The port is absent for the reason it is absent from wl_inspect_self: the
+    guard's job includes dials to ports nothing serves, and naming 8080/8443
+    would let a cross-workload caller walk in on any other port.
+    """
+    addr = vm_inspect_address(uid)
+    return {
+        NFT_SET_INSPECT_LIVE: [str(addr.v4)],
+        NFT_SET_INSPECT_LIVE6: [str(addr.v6)],
+    }
+
+
+def vm_inspect_element_commands(uid: int, action: str) -> list[list[str]]:
+    """argv lists arming ("add") or disarming ("delete") all eight elements.
+
+    Two families, four objects each, in a fixed order: both DNAT maps (in
+    inet workload_proxy), both accept sets, both wrong-port sets and both
+    cross-workload guard sets (in inet workload_filter). One argv per object,
+    because an object's elements belong to one table and one transaction, and
+    the eight span two tables.
 
     A helper that arms one table and not the other leaves a workload that looks
     configured and reaches nothing: the redirect without the accept set drops
@@ -1323,6 +1359,7 @@ def vm_inspect_element_commands(uid: int, action: str) -> list[list[str]]:
         (NFT_PROXY_TABLE, vm_inspect_map_elements(uid)),
         (NFT_TABLE, vm_inspect_dst_elements(uid)),
         (NFT_TABLE, vm_inspect_self_elements(uid)),
+        (NFT_TABLE, vm_inspect_live_elements(uid)),
     )
     for table, elements in groups:
         for set_name, entries in elements.items():
