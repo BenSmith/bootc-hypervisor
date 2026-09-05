@@ -124,111 +124,16 @@ def log(event, **fields):
 
 # --- caller identity -------------------------------------------------------
 #
-# The host's VM networking re-originates every guest flow as a host socket owned
-# by that workload's own user, so the source address is the same for all of them
-# and carries no information. The uid does: the host assigned it, the guest
-# cannot reach it, and it is the same primitive the host's egress rules match on.
-#
-# The kernel records the owner of every socket and /proc/net exposes it, so the
-# lookup is a table read -- no handshake, nothing for a caller to participate in
-# or lie about.
+# Moved to lib/peer_identity.py, which the egress inspector's listener now uses
+# too: both programs answer the same question about a caller and had no
+# business answering it two ways. The rationale for reading /proc/net rather
+# than SO_PEERCRED, and for keying on the uid rather than the address, lives
+# there.
 
-WORKLOAD_USER_PREFIX = "_wl-"
-PROC_NET_TCP = ("/proc/net/tcp", "/proc/net/tcp6")
-
-# Recovers what a connection was aimed at before the host translated it.
-SO_ORIGINAL_DST = 80
-
-
-def _norm(addr):
-    """Canonical address, with v4-mapped v6 collapsed to plain v4.
-
-    A dual-stack listener reports peers as ::ffff:a.b.c.d while the row for the
-    same socket may sit in either table, so both sides of a comparison have to
-    be flattened or an exact match never happens.
-    """
-    ip = ipaddress.ip_address(addr)
-    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped:
-        return ip.ipv4_mapped
-    return ip
-
-
-def _proc_addr(text):
-    """Decode a /proc/net address: 32-bit words, each little-endian, in hex."""
-    raw = bytes.fromhex(text)
-    return _norm(b"".join(raw[i:i + 4][::-1] for i in range(0, len(raw), 4)))
-
-
-def peer_uid_from(rows, locals_, peer):
-    """uid owning `peer`'s socket, given /proc/net/tcp data lines, or None.
-
-    The peer's row is this connection mirrored: its local address is our remote
-    and its remote is our local. `locals_` is every endpoint that "our local"
-    may be recorded as -- see local_endpoints, which explains why there is more
-    than one.
-
-    The port test before the split is a filter, not a shortcut: the row we want
-    carries the peer's port in its local column, so a line without that hex
-    anywhere cannot be it. The peer's port is ephemeral and therefore nearly
-    unique, so `in` -- which runs in C -- rejects almost every row before Python
-    touches it. Measured over a 1638-row table: 1.188ms to split and hex-decode
-    every row, 0.034ms with the filter, same uid. 34x, and it scales with the
-    host's socket count, which is not something a caller should be able to make
-    the broker pay per connection.
-
-    The survivors are checked exactly as before. This narrows the work without
-    widening the match.
-    """
-    want_local = (_norm(peer[0]), peer[1])
-    want_remotes = {(_norm(host), port) for host, port in locals_}
-    needle = f":{peer[1]:04X}"
-    for line in rows:
-        if needle not in line:
-            continue
-        f = line.split()
-        if len(f) < 10:
-            continue
-        try:
-            local_host, local_port = f[1].split(":")
-            if (_proc_addr(local_host), int(local_port, 16)) != want_local:
-                continue
-            remote_host, remote_port = f[2].split(":")
-            if (_proc_addr(remote_host), int(remote_port, 16)) not in want_remotes:
-                continue
-            # inode 0 is a socket with no owning process -- a TIME_WAIT remnant,
-            # which the kernel reports with uid 0. Reading that as identity
-            # would silently attribute the request to root.
-            if int(f[9]) == 0:
-                continue
-            return int(f[7])
-        except ValueError:
-            continue
-    return None
-
-
-def peer_uid(locals_, peer):
-    """uid owning the far end of an accepted connection, or None."""
-    for path in PROC_NET_TCP:
-        try:
-            with open(path) as fh:
-                rows = fh.readlines()[1:]
-        except OSError:
-            continue
-        uid = peer_uid_from(rows, locals_, peer)
-        if uid is not None:
-            return uid
-    return None
-
-
-def workload_name(uid):
-    """Workload name behind a uid, or None if it is not a workload user."""
-    try:
-        user = pwd.getpwuid(uid).pw_name
-    except KeyError:
-        return None
-    if not user.startswith(WORKLOAD_USER_PREFIX):
-        return None
-    return user[len(WORKLOAD_USER_PREFIX):]
+from peer_identity import (  # noqa: E402
+    PROC_NET_TCP, SO_ORIGINAL_DST, WORKLOAD_USER_PREFIX, _norm, _proc_addr,
+    local_endpoints, peer_uid, peer_uid_from, workload_name,
+)
 
 
 def userns_ranges(uid_map):
@@ -705,27 +610,6 @@ def response_framing(status, headers):
     # 204 and 304 must not carry a body; framing them as chunked (even as a bare
     # terminator) is a protocol violation that strict clients reject.
     return passthrough, declared, status in (204, 304)
-
-
-def local_endpoints(sock):
-    """Every endpoint this connection's local end may be recorded under.
-
-    The host reaches a guest's broker by rewriting one advertised destination
-    per uid, and the *client* socket keeps recording the address it dialled
-    rather than the one we ended up bound to. Matching only getsockname()
-    therefore misses precisely the traffic the redirect creates -- and misses it
-    as a 403, which looks like a config error rather than a lookup that cannot
-    match. SO_ORIGINAL_DST recovers what the caller aimed at; both are accepted
-    so the untranslated path (local testing) keeps working.
-    """
-    endpoints = [tuple(sock.getsockname()[:2])]
-    try:
-        raw = sock.getsockopt(socket.SOL_IP, SO_ORIGINAL_DST, 16)
-        port, packed = struct.unpack("!2xH4s8x", raw)
-        endpoints.append((socket.inet_ntoa(packed), port))
-    except (OSError, struct.error):
-        pass  # no conntrack entry: nothing translated this
-    return endpoints
 
 
 class Handler(http.server.BaseHTTPRequestHandler):

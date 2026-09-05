@@ -92,7 +92,9 @@ Virtiofs volumes have their own design doc, `workloadctl/docs/vm-virtiofs.md` â€
 
 `libexec/agent-broker` holds a provider API key that a sandboxed coding-agent VM
 is never given, and attaches it to outbound requests the guest makes through it.
-It is a whole program (stdlib only, ~600 lines) shipped by the workloadctl RPM.
+It is a whole program shipped by the workloadctl RPM: stdlib, plus
+`lib/peer_identity.py` for caller identification, which it shares with the
+egress inspector's listener.
 Callers are identified by the uid owning the far end of the connection.
 
 **One instance per workload, and the guest is never told where it is.** A

@@ -155,9 +155,12 @@ install -Dpm 0755 %{_sourcedir}/libexec/workload-vm-shutdown \
 # writes one instance's broker.toml -- and two names a hyphen apart for the
 # config writer and the daemon is a confusion nobody needs at 3am.
 #
-# It imports nothing from lib/, so being installed beside those modules costs
-# it nothing and buys the same thing every other entrypoint gets: one directory
-# the package owns.
+# It imports one module from lib/ -- peer_identity, the caller-identification
+# it shares with the egress inspector's listener, which is where that logic was
+# written and where its edge cases were paid for. Being installed beside those
+# modules is therefore load-bearing now rather than merely tidy: it is how the
+# import resolves, via this entrypoint's own sys.path[0]. Everything else it
+# uses is stdlib.
 install -Dpm 0755 %{_sourcedir}/libexec/agent-broker \
     %{buildroot}%{_libexecdir}/workloadctl/agent-broker
 
