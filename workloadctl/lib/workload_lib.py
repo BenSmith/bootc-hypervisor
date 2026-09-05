@@ -1510,11 +1510,27 @@ def container_uses_inspect(config: dict) -> bool:
     if not isinstance(net, dict):
         return False
     if net.get("mode") == "host":
-        # Host-mode shares the host netns entirely, so uid would be the ONLY
-        # thing separating this workload's traffic from the host's own --
-        # whether the redirect and `meta skuid` still isolate it there is an
-        # open spike (P0-1 in the build spec), not yet confirmed on hardware.
-        # Never claim inspection this cannot yet prove it provides.
+        # Host mode is never inspected, and validate_container_network()
+        # rejects the combination outright -- this is the belt to that
+        # braces, for a config already on disk when the rule landed.
+        #
+        # P0-1 measured it on hardware rather than assuming. Two findings,
+        # only one of them the expected one:
+        #   - the host's OWN traffic is not captured. Root and uid 1000 both
+        #     matched no workload selector even with the netns shared, so
+        #     host mode does not drag host sockets into a workload's policy.
+        #   - but a container's processes do not share ONE uid. Under the
+        #     default `userns = "keep-id"` exactly one in-container uid maps
+        #     to the workload uid; in-container root and any other user map
+        #     into the workload's 65536-wide subuid window. Measured: an
+        #     image default matched `meta skuid <uid>`, while `user = "0"`
+        #     and `user = "1000"` both left as subuids.
+        # Every selector in workload-filter.nft is keyed on the single uid,
+        # so filtering here would silently cover only bundles that happen to
+        # run as the keep-id uid -- an image detail, not a policy decision.
+        # Pasta and bridge mode are unaffected: their traffic is re-originated
+        # by a host process owned by the workload uid, and all three arms
+        # measured `exact-uid` there.
         return False
     # Any one of the three opt-in triggers, not policy alone: `hosts` and
     # `allow` are each triggers on their own (a hosts-only workload gets a
@@ -1563,10 +1579,11 @@ def _container_host_reason_entries(net: dict, key: str) -> list[ContainerHostRea
 # rule lives here or nowhere. Mirrors validate_vm_network / _validate_egress
 # (lib/vm.py) where the two schemas share a rule. Diverges where the container
 # schema has no `egress` key (presence of a trigger is the whole statement)
-# and no bridge escape hatch. `mode = "host"` is not special-cased here: the
-# container topology under which uid attribution might not hold has not yet
-# been confirmed on hardware, so this function has nothing to key that check
-# on yet.
+# and no bridge escape hatch. `mode = "host"` IS special-cased below:
+# P0-1 measured on hardware that a host-mode container's processes span the
+# workload's whole subuid window rather than its single uid, which is what
+# every selector in workload-filter.nft is keyed on. See the comment in
+# container_uses_inspect() for the measurements.
 
 _CONTAINER_HOST_RE = re.compile(r"^[A-Za-z0-9*?.\[\]!_-]+$")
 
@@ -1630,8 +1647,8 @@ def validate_container_network(net: dict) -> list[str]:
     """Validate [network] on a container workload. Returns a list of error
     strings. Implements every numbered rule in the container egress-parity
     build spec's validation section except V13 (reserved for a deferred
-    [[network.http2]] array) and the mode="host" delta (blocked on a hardware
-    spike this function cannot run itself -- see module note above)."""
+    [[network.http2]] array), plus the mode="host" delta (§6 delta 2),
+    settled by the P0-1 hardware spike -- see the module note above."""
     # Lazy import: vm.py imports this module, so a top-level import here
     # would be circular (same pattern as workload_run_files() above).
     from vm import (
@@ -1642,6 +1659,31 @@ def validate_container_network(net: dict) -> list[str]:
     errors: list[str] = []
     if not isinstance(net, dict):
         return ["[network] must be a table"]
+
+    # --- The mode = "host" delta (build spec §6 delta 2) ---
+    # First, and on its own: every other rule below describes how to spell an
+    # egress policy, and under host mode none of them can be honoured. Naming
+    # the keys the workload actually set keeps the message actionable when a
+    # bundle sets several.
+    if net.get("mode") == "host":
+        named = [key for key in ("hosts", "policy", "allow", "internal",
+                                 "splice", "tls", "ca_delivery")
+                 if net.get(key)]
+        if named:
+            keys = ", ".join(f"[network].{k}" for k in named)
+            errors.append(
+                f'[network]: mode = "host" cannot be combined with egress '
+                f'inspection ({keys}). A host-mode container shares the host '
+                f'network namespace, so its processes appear on the wire as '
+                f'host sockets spanning this workload\'s whole subuid range '
+                f'-- not as the single uid every egress rule selects on, so '
+                f'the policy would apply only to whichever containers happen '
+                f'to run as the keep-id uid. Remove mode = "host" to get '
+                f'egress inspection, or remove {keys} to keep host '
+                f'networking.')
+            # Nothing below can be satisfied under host mode; reporting the
+            # shape of a policy that will never be armed is noise.
+            return errors
 
     raw_hosts = net.get("hosts", [])
     if not isinstance(raw_hosts, list):

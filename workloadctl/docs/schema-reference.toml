@@ -1853,13 +1853,32 @@ ports = ["8080:80", "8443:443"]
 # DEFAULT-DENY for containers: an untriggered container is not in `wl_filtered`
 # and no drop rule applies to it.
 #
-# mode = "host" DISABLES ALL OF THIS, SILENTLY, AND ON PURPOSE. A host-mode
-# container shares the host's network namespace outright, so the workload uid
-# would be the only thing separating its traffic from the host's own -- and
-# whether the redirect and `meta skuid` still isolate it there has not been
-# confirmed on hardware. Rather than claim an inspection it cannot prove it
-# provides, workloadctl treats a host-mode workload as untriggered whatever
-# these keys say. Do not combine mode = "host" with anything below.
+# mode = "host" CANNOT BE COMBINED WITH ANY OF THIS, and saying otherwise is a
+# validation error -- the workload will not enable, and will not generate units
+# if the config predates the rule. It fails closed: a workload that asked for an
+# egress policy stops running rather than running unfiltered.
+#
+# The reason was measured on hardware, not assumed. A host-mode container shares
+# the host's network namespace outright, so the workload uid is the only thing
+# separating its traffic from the host's own. Two findings:
+#
+#   - The host's own traffic is NOT captured -- root and an ordinary user both
+#     matched no workload selector even with the namespace shared.
+#   - But a container's processes do not share ONE uid. Under the default
+#     `[security] userns = "keep-id"` exactly one in-container uid maps to the
+#     workload uid; in-container root, and any other user, map into the
+#     workload's 65536-wide subuid window. An image's default user measured as
+#     the workload uid, while `[container] user = "0"` and `user = "1000"` both
+#     left as subuids.
+#
+# Every rule in workload-filter.nft selects on the single workload uid, so a
+# host-mode policy would silently cover only those containers that happen to run
+# as the keep-id uid -- an image detail, not a policy decision. Refusing beats
+# filtering an arbitrary subset while reporting the workload as filtered.
+#
+# This is specific to host mode. Under pasta and bridge mode the container's
+# traffic is re-originated by a host process owned by the workload uid, so all
+# in-container uids attribute correctly and the single-uid selectors are exact.
 #
 # TWO THINGS FILTERING HERE DOES NOT DO, both of which it DOES do for a VM.
 # They are consequences of one decision: a container resolves names through the

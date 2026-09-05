@@ -2300,6 +2300,65 @@ class TestValidateContainerNetwork(unittest.TestCase):
     def test_hosts_only_needs_no_ca_delivery(self):
         self.assertEqual(validate_container_network({"hosts": ["*.pypi.org"]}), [])
 
+    # --- the mode = "host" delta (build spec §6 delta 2), settled by P0-1 ---
+    #
+    # Measured on hardware: under the default `userns = "keep-id"` only ONE
+    # in-container uid maps to the workload uid; `[container] user = "0"` and
+    # `user = "1000"` both leave as subuids. Every egress rule selects on the
+    # single uid, so a host-mode policy would cover only bundles that happen
+    # to run as the keep-id uid. The combination is refused rather than
+    # honoured-for-some-containers.
+
+    def test_host_mode_with_an_egress_key_is_refused(self):
+        errors = validate_container_network(
+            {"mode": "host", "hosts": ["*.pypi.org"]})
+        self.assertTrue(any('mode = "host"' in e for e in errors), errors)
+        self.assertTrue(any("[network].hosts" in e for e in errors), errors)
+
+    def test_host_mode_without_any_egress_key_is_clean(self):
+        """Host networking on its own is untouched -- the rule is about the
+        combination, not about host mode."""
+        self.assertEqual(validate_container_network({"mode": "host"}), [])
+
+    def test_host_mode_refusal_names_every_key_the_workload_set(self):
+        """The message has to be actionable for a bundle that set several;
+        naming only the first would send the operator round the loop."""
+        errors = validate_container_network({
+            "mode": "host",
+            "hosts": ["a.example.com"],
+            "policy": [{"host": "a.example.com"}],
+            "allow": [{"address": "10.0.0.1", "port": 22, "reason": "r"}],
+            "internal": [{"host": "a.example.com", "reason": "r"}],
+        })
+        self.assertEqual(len(errors), 1, errors)
+        for key in ("hosts", "policy", "allow", "internal"):
+            self.assertIn(f"[network].{key}", errors[0])
+
+    def test_host_mode_refusal_states_the_remedy(self):
+        errors = validate_container_network(
+            {"mode": "host", "hosts": ["a.example.com"]})
+        self.assertTrue(any("Remove" in e for e in errors), errors)
+
+    def test_host_mode_suppresses_the_rest_of_the_policy_shape_errors(self):
+        """Under host mode no policy can be armed, so reporting how a policy
+        that will never exist is misspelled is noise. One error, not six."""
+        errors = validate_container_network({
+            "mode": "host",
+            "policy": [{"host": "a.example.com"}],   # would demand ca_delivery
+            "allow": [{"host": "b.example.com", "port": 443}],  # 443 + no reason
+        })
+        self.assertEqual(len(errors), 1, errors)
+
+    def test_non_host_modes_are_not_caught_by_the_host_rule(self):
+        """pasta/bridge re-originate through a host process owned by the
+        workload uid -- measured `exact-uid` on all three in-container uids,
+        so their single-uid selectors are sound."""
+        for mode in ("pasta", "bridge", None):
+            net = {"hosts": ["*.pypi.org"]}
+            if mode is not None:
+                net["mode"] = mode
+            self.assertEqual(validate_container_network(net), [], mode)
+
     def test_v3_overlapping_entries_must_both_state_methods_and_paths(self):
         net = {
             "hosts": ["api.example.com"],

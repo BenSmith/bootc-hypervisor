@@ -802,3 +802,88 @@ v4-only host's green stand in for it. **A moved `[[network.allow]]` address**,
 which needs a real non-80/443 upstream and a mid-run change. **`ca_delivery =
 "env"` against an embedded root store**, which needs a base image whose client
 ignores the five CA variables.
+
+## uid_attribution_rig.py — which uid does a container's egress actually leave as?
+
+Needs root and the workloadctl RPM; no KVM and no base image, so this is the
+cheapest rig here to run. Deploys three throwaway single-container workloads
+that differ only in `[container] user`, and counts one SYN from each against
+three competing nftables selectors.
+
+```bash
+sudo python3 tests/manual/uid_attribution_rig.py          # host mode
+sudo python3 tests/manual/uid_attribution_rig.py pasta    # the shipped path
+```
+
+### What it answers
+
+P0-1 from the container egress-parity build spec: does `[network] mode =
+"host"` keep uid attribution? Every rule in `nftables/workload-filter.nft`
+selects on the single workload uid, so the whole design rests on a container's
+packets carrying it. Measured 2026-09-05 on a KVM host under enforcing:
+
+|                    | image default | `user = "0"` | `user = "1000"` |
+| ------------------ | ------------- | ------------ | --------------- |
+| `mode = "pasta"`   | workload uid  | workload uid | workload uid    |
+| `mode = "host"`    | workload uid  | **subuid**   | **subuid**      |
+
+The cause is that `[security] userns` defaults to `keep-id`: exactly one
+in-container uid maps to the workload uid, and every other one — including
+in-container root — maps into the workload's 65536-wide subuid window. Pasta
+hides this entirely, because it re-originates the container's traffic as a host
+socket that it owns. Host mode has no such indirection: the container's sockets
+*are* host sockets, and two arms of three leave as subuids no shipped rule
+matches. That is why `validate_container_network()` refuses `mode = "host"`
+combined with any egress key — the alternative was filtering whichever
+containers happened to run as the keep-id uid while reporting the workload as
+filtered.
+
+Both arms also confirm the other half of P0-1: the host's own traffic is never
+captured. Root and an ordinary user matched no workload selector on any arm,
+even with the network namespace shared.
+
+### Why counters rather than an end-to-end dial
+
+Nothing is armed for a host-mode workload, so there is nothing to dial through.
+Three counters competing for one packet at the output hook measure the
+primitive itself and cannot be confounded by whether an inspector is up,
+whether a route exists, or whether anything is listening. The destination is
+unroutable on purpose (TEST-NET-3), so every probe is a single SYN and the only
+variable is which rule claimed it.
+
+### Four ways this rig lied before it told the truth
+
+Each read as a product defect first, and the code is shaped by all four. A rig
+that lies is worse than no rig: its failure looks exactly like the thing under
+test, which is the same decay `tests/test_manual_rig_configs.py` exists to
+catch one level up.
+
+1. **`nft reset counters table` resets named counters only**, not the anonymous
+   per-rule ones used here. Every row inherited the previous row's count, and
+   one probe that sent *no packet at all* was dressed up as a match. Now deltas.
+2. **busybox `su` is not GNU `su`** and refused to drop privileges with `must
+   be suid to work properly`. The "non-root" probe would have measured root and
+   read as a clean falsification of the hypothesis it existed to test. It now
+   proves the uid changed before its verdict counts.
+3. **keep-id injects the host username into the container's `/etc/passwd`**, so
+   `id` inside prints `uid=10002(_wl-<name>)` — which looks exactly like an
+   `exec` that escaped to the host. It had not; that *is* the container, and
+   the surprise was the finding rather than a bug.
+4. **Retransmits cross probe boundaries.** An unroutable destination leaves
+   every probe retransmitting on a doubling backoff, and under pasta those are
+   re-originated by a long-lived host process owned by the workload uid — so
+   they land in the next probe's window and attribute the host's own `curl` to
+   the workload. A settle-and-hope window fits *inside* a backoff gap; each
+   probe now gets its own destination port and a freshly built table, which
+   makes the contamination unmatchable rather than unlikely.
+
+### What it deliberately does not measure
+
+**IPv6**, for the reason `container_egress_rig.py` gives above. **Whether the
+DNAT redirect would capture host traffic in host mode** — it cannot, because
+nothing arms a redirect for a host-mode workload; the rig measures the uid
+selector, which is the part the design depends on. **`userns = "host"`**, where
+in-container root maps to the workload uid directly and the mapping question
+does not arise; the refusal covers it regardless, which is deliberate — a
+`[network]`-level rule that changed meaning based on a `[security]` key would
+be the kind of coupling nobody remembers.

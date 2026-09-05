@@ -3329,22 +3329,22 @@ class TestGeneratorContainerEgress(unittest.TestCase):
         self.assertTrue(
             (Path(self.services_dir) / "workload-agent3-inspect.service").exists())
 
-    def test_host_mode_emits_no_inspector_even_with_a_trigger(self):
-        """P1-14, pinning the P0-1 silent disable.
+    def test_host_mode_emits_no_inspector_and_says_so(self):
+        """P1-14, updated by P0-1's answer -- the deliberate change this
+        test's previous docstring called for.
 
-        ``container_uses_inspect()`` returns False for ``mode = "host"``
-        whatever else is written, because a host-mode container shares the
-        host's netns and whether ``meta skuid`` still isolates its traffic has
-        not been confirmed on hardware. Nothing REFUSES this config -- it
-        validates clean and starts clean -- so the emitted units are the only
-        place the decision is observable, and this is the only test that looks.
+        P0-1 measured it on hardware: under the default ``userns = "keep-id"``
+        only one in-container uid maps to the workload uid, so a host-mode
+        container's processes span the workload's subuid range while every
+        egress rule selects on the single uid. The combination is now a
+        validation error, so it cannot be enabled at all.
 
-        If P0-1 clears host mode, this test is the one to change, deliberately.
-        If P0-1 instead decides host mode plus a trigger should be a validation
-        error, this test should start asserting the refusal rather than the
-        silence. Either way it must not be quietly deleted: a green suite with
-        neither assertion is how a workload reported as filtered runs
-        unfiltered."""
+        The consequence at boot is deliberate and worth stating plainly: a
+        config already on disk when the rule landed no longer generates ANY
+        units, so the workload stops running rather than running unfiltered.
+        That is the fail-closed direction for a workload that asked for an
+        egress policy which cannot be honoured -- and unlike the old silence,
+        the generator names the reason on every boot."""
         write_config(self.config_dir, "hostnet", """\
             [workload]
             name = "hostnet"
@@ -3357,13 +3357,39 @@ class TestGeneratorContainerEgress(unittest.TestCase):
             hosts = ["api.example.com"]
             """)
         result = self.run_gen()
+        # Always exit 0 -- a bad config must never block boot.
         self.assertEqual(result.returncode, 0, result.stderr)
-        service = self.read("workload-hostnet.service")
-        self.assertNotIn("workload-container-filter", service)
-        self.assertFalse(
-            (Path(self.services_dir) / "workload-hostnet-inspect.socket").exists())
-        self.assertFalse(
-            (Path(self.services_dir) / "workload-hostnet-inspect.service").exists())
+        # No units at all, inspector or otherwise: it does not run unfiltered.
+        for unit in ("workload-hostnet.service",
+                     "workload-hostnet-inspect.socket",
+                     "workload-hostnet-inspect.service"):
+            self.assertFalse((Path(self.services_dir) / unit).exists(), unit)
+        # And it says why, naming the workload and the offending key.
+        combined = result.stdout + result.stderr
+        self.assertIn("hostnet", combined)
+        self.assertIn('mode = "host"', combined)
+        self.assertIn("[network].hosts", combined)
+
+    def test_host_mode_without_egress_keys_warns_about_nothing(self):
+        """The warning is about the combination. A plain host-mode workload is
+        an ordinary, supported thing and must not be nagged on every boot."""
+        write_config(self.config_dir, "plainhost", """\
+            [workload]
+            name = "plainhost"
+
+            [container]
+            image = "docker.io/library/alpine:latest"
+
+            [network]
+            mode = "host"
+            """)
+        result = self.run_gen()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn('mode = "host" cannot be combined',
+                         result.stdout + result.stderr)
+        # ...and it still gets its units.
+        self.assertTrue(
+            (Path(self.services_dir) / "workload-plainhost.service").exists())
 
     def test_bridge_mode_arms_the_filter_on_the_umbrella(self):
         """P1-14. Bridge mode gives every container its OWN netns, unlike pod
