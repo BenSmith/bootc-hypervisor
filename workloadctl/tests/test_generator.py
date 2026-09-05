@@ -3295,6 +3295,118 @@ class TestGeneratorContainerEgress(unittest.TestCase):
         self.assertIn("/etc/ssl/certs/workload-ca.crt", service)
         self.assertNotIn("SSL_CERT_FILE", service)
 
+    def test_ca_delivery_image_delivers_nothing(self):
+        """P1-14. "image" asserts the image was BUILT trusting this workload's
+        CA, so workloadctl has nothing left to do -- no bind mount, no
+        environment. That makes it indistinguishable from the untriggered CA
+        case in the emitted unit, which is precisely why it is worth pinning:
+        a regression that made "image" fall through to the "env" branch would
+        still produce a working workload and would silently stop being the
+        thing the operator asserted."""
+        write_config(self.config_dir, "agent3", """\
+            [workload]
+            name = "agent3"
+
+            [container]
+            image = "docker.io/library/alpine:latest"
+
+            [network]
+            hosts = ["api.example.com"]
+            ca_delivery = "image"
+
+            [[network.policy]]
+            host = "api.example.com"
+            """)
+        result = self.run_gen()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        service = self.read("workload-agent3.service")
+        self.assertNotIn("egress-ca.crt", service)
+        self.assertNotIn("SSL_CERT_FILE", service)
+        # ...but it is still a filtered workload: the inspector is emitted and
+        # the filter is still armed. Losing THAT is the failure this half
+        # catches.
+        self.assertIn('workload-container-filter up "agent3"', service)
+        self.assertTrue(
+            (Path(self.services_dir) / "workload-agent3-inspect.service").exists())
+
+    def test_host_mode_emits_no_inspector_even_with_a_trigger(self):
+        """P1-14, pinning the P0-1 silent disable.
+
+        ``container_uses_inspect()`` returns False for ``mode = "host"``
+        whatever else is written, because a host-mode container shares the
+        host's netns and whether ``meta skuid`` still isolates its traffic has
+        not been confirmed on hardware. Nothing REFUSES this config -- it
+        validates clean and starts clean -- so the emitted units are the only
+        place the decision is observable, and this is the only test that looks.
+
+        If P0-1 clears host mode, this test is the one to change, deliberately.
+        If P0-1 instead decides host mode plus a trigger should be a validation
+        error, this test should start asserting the refusal rather than the
+        silence. Either way it must not be quietly deleted: a green suite with
+        neither assertion is how a workload reported as filtered runs
+        unfiltered."""
+        write_config(self.config_dir, "hostnet", """\
+            [workload]
+            name = "hostnet"
+
+            [container]
+            image = "docker.io/library/alpine:latest"
+
+            [network]
+            mode = "host"
+            hosts = ["api.example.com"]
+            """)
+        result = self.run_gen()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        service = self.read("workload-hostnet.service")
+        self.assertNotIn("workload-container-filter", service)
+        self.assertFalse(
+            (Path(self.services_dir) / "workload-hostnet-inspect.socket").exists())
+        self.assertFalse(
+            (Path(self.services_dir) / "workload-hostnet-inspect.service").exists())
+
+    def test_bridge_mode_arms_the_filter_on_the_umbrella(self):
+        """P1-14. Bridge mode gives every container its OWN netns, unlike pod
+        mode where they share one -- so it is not obvious that the umbrella is
+        still the right place to arm the filter, and today it is where the
+        arming goes.
+
+        That is defensible under pasta (every container's traffic is
+        re-originated as the ONE workload uid either way, so a uid-keyed rule
+        does not care which netns it came from), but it has not been confirmed
+        on hardware for bridge mode specifically.
+
+        Pins current emission rather than asserting it is right: P1-9's
+        bridge-mode DNAT question is still open, and the point of the pin is
+        that answering it shows up here as a diff instead of as a silent
+        change of which unit carries the hook."""
+        write_config(self.config_dir, "br", """\
+            [workload]
+            name = "br"
+            mode = "bridge"
+
+            [network]
+            hosts = ["*.example.com"]
+
+            [[containers]]
+            name = "web"
+            [containers.container]
+            image = "docker.io/library/nginx:latest"
+            """)
+        result = self.run_gen()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(
+            (Path(self.services_dir) / "workload-br-inspect.socket").exists())
+        umbrella = self.read("workload-br.service")
+        member = self.read("workload-br-web.service")
+        armed = [n for n, t in (("umbrella", umbrella), ("member", member))
+                 if "workload-container-filter" in t]
+        self.assertEqual(
+            armed, ["umbrella"],
+            "bridge mode arms the umbrella, same as pod mode; if that changes, "
+            "the DNAT question in P1-9 has been answered and this pin is what "
+            "should carry the new answer")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -2453,6 +2453,194 @@ class TestValidateContainerNetwork(unittest.TestCase):
         self.assertEqual(validate_container_network(net), [])
 
 
+class TestValidateContainerNetworkAllowAndHostPatterns(unittest.TestCase):
+    """P1-14: the half of validate_container_network() the V-rule class above
+    does not reach.
+
+    Every rule here is one the VM schema also has, which is exactly why it went
+    untested -- a rule that reads like a port of a proven one looks covered.
+    They are separate implementations (workload_lib.py cannot import vm.py at
+    module level), so a port that dropped a clause fails on the container side
+    alone and no VM test can see it."""
+
+    # --- `hosts` pattern shape (_validate_container_host_pattern) ---
+
+    def test_a_url_is_refused_with_the_scheme_named(self):
+        errors = validate_container_network({"hosts": ["https://example.com"]})
+        self.assertTrue(any("drop the scheme" in e for e in errors), errors)
+
+    def test_a_path_is_refused_because_it_can_never_match(self):
+        errors = validate_container_network({"hosts": ["example.com/v2/"]})
+        self.assertTrue(any("contains a path" in e for e in errors), errors)
+
+    def test_a_port_is_refused_and_points_at_the_allow_array(self):
+        """The remedy matters as much as the refusal: hostname policy governs
+        the two redirected ports only, and the operator who wrote a port meant
+        a destination [[network.allow]] carries."""
+        errors = validate_container_network({"hosts": ["example.com:8443"]})
+        self.assertTrue(any("contains a port" in e for e in errors), errors)
+        self.assertTrue(any("[[network.allow]]" in e for e in errors), errors)
+
+    def test_bare_star_is_refused_as_filtering_nothing(self):
+        """Not an error about syntax -- '*' parses fine and matches every host.
+        It is refused because it reads as configured and enforces nothing, and
+        the message has to say so or the operator just writes it again."""
+        errors = validate_container_network({"hosts": ["*"]})
+        self.assertTrue(any("filters nothing" in e for e in errors), errors)
+
+    def test_an_empty_pattern_is_refused(self):
+        errors = validate_container_network({"hosts": ["   "]})
+        self.assertTrue(any("must not be empty" in e for e in errors), errors)
+
+    def test_hosts_must_be_an_array(self):
+        errors = validate_container_network({"hosts": "example.com"})
+        self.assertTrue(any("must be an array" in e for e in errors), errors)
+
+    def test_a_wildcard_pattern_is_accepted(self):
+        """The negative cases above are only meaningful beside this one: the
+        pattern rules must not have tightened into rejecting the ordinary
+        shape."""
+        self.assertEqual(
+            validate_container_network({"hosts": ["*.example.com", "example.com"]}),
+            [])
+
+    # --- [[network.allow]] ---
+
+    def _allow(self, entry, **net):
+        return validate_container_network({"allow": [entry], **net})
+
+    def test_an_allow_entry_with_neither_host_nor_address_is_refused(self):
+        errors = self._allow({"port": 22, "reason": "r"})
+        self.assertTrue(any("neither `host` nor `address`" in e for e in errors),
+                        errors)
+
+    def test_an_allow_entry_with_both_is_refused(self):
+        """One destination, named one way. Accepting both would leave which of
+        the two is armed decided by parse order and reported by nothing."""
+        errors = self._allow({"host": "git.local", "address": "10.0.0.1",
+                              "port": 22, "reason": "r"})
+        self.assertTrue(any("names one destination one way" in e for e in errors),
+                        errors)
+
+    def test_port_80_is_refused_and_the_message_says_why(self):
+        """R5. 80 and 443 are redirected into the inspector before the filter
+        chain consults this list, so an element here is armed and never
+        matched -- while the config reads as if the destination were exempt
+        from inspection. That is the misreport, not the wasted element."""
+        errors = self._allow({"address": "10.0.0.1", "port": 80, "reason": "r"})
+        self.assertTrue(any("always redirected" in e for e in errors), errors)
+
+    def test_port_443_is_refused_the_same_way(self):
+        errors = self._allow({"host": "example.com", "port": 443, "reason": "r"})
+        self.assertTrue(any("always redirected" in e for e in errors), errors)
+
+    def test_a_missing_port_is_refused(self):
+        errors = self._allow({"address": "10.0.0.1", "reason": "r"})
+        self.assertTrue(any("`port` must be an integer" in e for e in errors),
+                        errors)
+
+    def test_a_boolean_is_not_a_port(self):
+        """bool is an int in Python, so `port = true` would otherwise pass the
+        isinstance check and arm element 1."""
+        errors = self._allow({"address": "10.0.0.1", "port": True, "reason": "r"})
+        self.assertTrue(any("`port` must be an integer" in e for e in errors),
+                        errors)
+
+    def test_an_out_of_range_port_is_refused(self):
+        errors = self._allow({"address": "10.0.0.1", "port": 70000, "reason": "r"})
+        self.assertTrue(any("`port` must be an integer" in e for e in errors),
+                        errors)
+
+    def test_v14_an_allow_entry_needs_a_reason(self):
+        errors = self._allow({"address": "10.0.0.1", "port": 22})
+        self.assertTrue(any("has no `reason`" in e for e in errors), errors)
+
+    def test_allow_must_be_an_array(self):
+        errors = validate_container_network({"allow": {"host": "x"}})
+        self.assertTrue(any("must be an array" in e for e in errors), errors)
+
+    def test_a_well_formed_allow_entry_is_clean(self):
+        """And it is a trigger on its own -- no `hosts`, no policy, and this
+        must still validate rather than being refused for having nothing to
+        inspect."""
+        self.assertEqual(
+            self._allow({"host": "git.local", "port": 2222,
+                         "reason": "git over SSH"}),
+            [])
+
+    def test_an_allow_entry_alone_does_not_pull_in_the_ca_requirement(self):
+        """V16 keys on the EFFECTIVE tls mode, and an allow-only workload has
+        no policy entries, so it is rung 2 and needs no trust delivery. A
+        version that keyed on `is_triggered` instead would demand ca_delivery
+        from a workload whose traffic is never terminated."""
+        errors = self._allow({"address": "10.0.0.1", "port": 22, "reason": "r"})
+        self.assertFalse([e for e in errors if "ca_delivery" in e], errors)
+
+    # --- the `tls` scalar and its tls_reason interlock ---
+    #
+    # Found by writing this class: both rules exist on the VM side and neither
+    # had been ported, because `tls` is computed for almost every workload and
+    # the hand-written branch is the one nothing constrained.
+
+    def test_an_unrecognised_tls_value_is_refused(self):
+        """The dangerous one. container_effective_tls_mode() returns the
+        literal verbatim, so a typo is an effective mode that is neither
+        'inspect' (V16 never asks for ca_delivery) nor 'splice' (V18 never
+        fires) -- it validates clean and runs with a mode the inspector does
+        not implement."""
+        errors = validate_container_network({"hosts": ["a.example.com"],
+                                             "tls": "inspct"})
+        self.assertTrue(any("must be 'inspect' or 'splice'" in e for e in errors),
+                        errors)
+
+    def test_case_matters_because_nothing_downstream_normalises_it(self):
+        errors = validate_container_network({"hosts": ["a.example.com"],
+                                             "tls": "Splice"})
+        self.assertTrue(any("must be 'inspect' or 'splice'" in e for e in errors),
+                        errors)
+
+    def test_explicit_splice_requires_a_reason(self):
+        errors = validate_container_network({"hosts": ["a.example.com"],
+                                             "tls": "splice"})
+        self.assertTrue(any("requires tls_reason" in e for e in errors), errors)
+
+    def test_splice_by_omission_requires_no_reason(self):
+        """The container-only half, and the reason this is not a straight copy
+        of the VM rule: a workload with no policy entries is spliced because
+        that is rung 2, not because anything narrower was given up. Demanding a
+        justification there would make the minimum filtered workload two keys,
+        one of them an apology."""
+        self.assertEqual(
+            validate_container_network({"hosts": ["a.example.com"]}), [])
+
+    def test_a_reason_without_an_explicit_splice_is_refused(self):
+        errors = validate_container_network({"hosts": ["a.example.com"],
+                                             "tls_reason": "vendor image"})
+        self.assertTrue(any("was never chosen" in e for e in errors), errors)
+
+    def test_explicit_splice_with_a_reason_is_clean(self):
+        self.assertEqual(
+            validate_container_network({"hosts": ["a.example.com"],
+                                        "tls": "splice",
+                                        "tls_reason": "vendor image"}),
+            [])
+
+    # --- V15 ---
+
+    def test_v15_internal_is_not_refused_under_explicit_splice(self):
+        """The delta from V9, and the one that is easy to fold in by mistake.
+        The internal-destination check lives on the inspector's UPSTREAM leg,
+        which a spliced connection still has -- so a spliced host can still
+        resolve into private space and still needs the exemption."""
+        net = {
+            "hosts": ["git.local"],
+            "tls": "splice",
+            "tls_reason": "appliance image",
+            "internal": [{"host": "git.local", "reason": "homelab forge"}],
+        }
+        self.assertEqual(validate_container_network(net), [])
+
+
 class TestContainerFilterElements(unittest.TestCase):
     """P1-7/P1-8: the nft element/command builders container_uses_inspect's
     triggers feed into workload-container-filter."""

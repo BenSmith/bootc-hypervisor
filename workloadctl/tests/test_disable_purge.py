@@ -59,6 +59,18 @@ image = "example.com/web:latest"
 """
 
 
+FILTERED_TOML = """\
+[workload]
+name = "{name}"
+
+[container]
+image = "example.com/test:latest"
+
+[network]
+hosts = ["example.test"]
+"""
+
+
 VM_TOML = """\
 [workload]
 name = "{name}"
@@ -402,6 +414,75 @@ class TestDisableRemovesRunFiles(unittest.TestCase):
         self.assertIsNone(exit_code, "absent user must not abort disable")
         for p in mine:
             self.assertFalse(p.exists(), f"{p} should still be removed with user gone")
+
+    def test_a_filtered_containers_inspect_units_are_removed(self):
+        """P1-14: `disable` must leave no inspect socket or service behind for a
+        container that had an egress trigger.
+
+        Removal is driven by the REAL workload_run_files() — the same list G3
+        gates — rather than a stub, because the whole failure mode here is a
+        unit the run-file list forgot to claim: it is written by the generator,
+        never unlinked, and survives as a loaded socket pointing at an
+        inspector that no longer arms anything. A stub for run_files cannot see
+        that, since it is exactly the list under test. The companion test below
+        pins the `emitted` half.
+        """
+        run = Path(tempfile.mkdtemp())
+        with _Env(FILTERED_TOML, 'ff') as (config, _env_dir):
+            (run / "multi-user.target.wants").mkdir()
+            mine = [
+                run / "workload-ff.service",
+                run / "workload-ff-setup.service",
+                run / "workload-ff.conf",
+                run / "workload-ff-inspect.service",
+                run / "workload-ff-inspect.socket",
+                run / "multi-user.target.wants" / "workload-ff.service",
+            ]
+            for p in mine:
+                p.write_text("x\n")
+
+            args = SimpleNamespace(workload='ff', purge=False)
+            with patch.object(cmd_disable, 'require_root', lambda: None), \
+                 patch.object(substrate_container, 'RUN_SYSTEMD_SYSTEM', run), \
+                 patch.object(workload_lib, 'RUN_SYSTEMD_SYSTEM', run), \
+                 patch.object(cmd_disable.subprocess, 'run', MagicMock()), \
+                 patch.object(cmd_disable, 'run_host_setup', MagicMock()), \
+                 patch.object(cmd_disable, 'apply_selinux_policy', MagicMock()), \
+                 patch.object(cmd_disable, '_stop_user_manager', MagicMock(return_value=False)), \
+                 patch.object(VMSubstrate, 'teardown', MagicMock(return_value=[])), \
+                 patch.object(cmd_disable, 'workload_enabled_marker',
+                              MagicMock(return_value=MagicMock())), \
+                 patch.object(type(config), 'uid', property(lambda self: 10005)):
+                cmd_disable.cmd_disable(args, MagicMock())
+
+        for p in mine:
+            self.assertFalse(p.exists(), f"{p} should have been removed")
+
+    def test_the_inspect_units_are_listed_for_removal_either_way(self):
+        """The other half of the contract, and the reason the test above says
+        nothing about the trigger by itself.
+
+        The inspect pair has SUPERSET semantics, like -pod/-net: it is listed
+        for BOTH shapes so the removable view unlinks a unit left behind by a
+        config edited between `enable` and `disable`. What the trigger governs
+        is `emitted`, not membership -- so that is what this asserts, in both
+        directions. Reading it the other way (expecting the untriggered
+        workload not to list them) is the mistake that would make removal
+        depend on the CURRENT file rather than on what is actually on disk."""
+        def entries(toml, name):
+            with _Env(toml, name) as (config, _env_dir):
+                return {Path(f.path).name: f.emitted
+                        for f in workload_lib.workload_run_files(config)}
+
+        plain = entries(SINGLE_TOML, 'pp')
+        filtered = entries(FILTERED_TOML, 'ff')
+
+        for suffix in ("service", "socket"):
+            self.assertIn(f"workload-pp-inspect.{suffix}", plain)
+            self.assertFalse(plain[f"workload-pp-inspect.{suffix}"],
+                             "an untriggered container emits no inspector")
+            self.assertTrue(filtered[f"workload-ff-inspect.{suffix}"],
+                            "a triggered container emits its own inspector")
 
 
 class TestDisableStopsWholeTopology(unittest.TestCase):

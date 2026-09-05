@@ -2005,6 +2005,44 @@ def validate_container_network(net: dict) -> list[str]:
                 f"applied. Add an entry for {apex!r} too, or drop it from "
                 f".hosts")
 
+    # --- The `tls` scalar itself, and its `tls_reason` interlock ---
+    #
+    # Both of these are rules the VM side has and the first port of this
+    # function did not, which is a shape worth naming: a value that is only
+    # ever COMPUTED needs no domain check, and `tls` is computed for almost
+    # every workload -- so the branch where an operator writes it by hand was
+    # the one nothing constrained. An unrecognised literal is the worse of the
+    # two. It is not merely accepted: container_effective_tls_mode() returns it
+    # verbatim, so `tls = "inspct"` is an effective mode of "inspct", which is
+    # neither "inspect" (so V16 never asks for ca_delivery) nor "splice" (so
+    # V18 never fires), and the workload validates clean, starts clean, and
+    # runs with a policy naming a mode the inspector does not implement.
+    explicit_tls = container_tls_mode(net)
+    if explicit_tls is not None and explicit_tls not in ("inspect", "splice"):
+        errors.append(
+            f"[network].tls must be 'inspect' or 'splice', got "
+            f"{explicit_tls!r}. It is normally omitted -- the mode is computed "
+            f"from whether any [[network.policy]] entry is present")
+
+    tls_reason = container_tls_reason(net)
+    if explicit_tls == "splice" and tls_reason is None:
+        # Same rule as the VM's, for the same reason: this is the widest bypass
+        # in the schema (every host, not a named one), and every narrower one
+        # -- allow, internal, splice entries -- has carried a written reason
+        # since it existed.
+        errors.append(
+            "[network].tls = 'splice' requires tls_reason. Writing it "
+            "explicitly gives up per-request policy on EVERY host, which is "
+            "wider than any [[network.splice]] entry; the person deciding "
+            "months from now whether the bypass is still needed is not the one "
+            "opening it. (Reaching splice by simply having no policy entries "
+            "needs no reason -- nothing narrower was given up.)")
+    if tls_reason is not None and explicit_tls != "splice":
+        errors.append(
+            "[network].tls_reason is set but tls = 'splice' is not written "
+            "explicitly -- a reason recording a bypass that was never chosen "
+            "sends a reviewer looking for an exposure that is not there")
+
     # V16/V18: the interlock between the computed tls mode and ca_delivery.
     effective_tls = container_effective_tls_mode(net)
     ca_delivery = container_ca_delivery(net)

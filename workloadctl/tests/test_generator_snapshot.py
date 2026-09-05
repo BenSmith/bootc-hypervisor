@@ -388,6 +388,59 @@ FIXTURES = {
         """),
     ],
 
+    # Container egress, rung 2 (P1-14). `hosts` alone is a trigger, so this
+    # emits the inspect socket/service pair for a CONTAINER — the units the VM
+    # fixtures below cover only for a guest. No policy entries, so the
+    # effective tls is "splice" and no ca_delivery is required or emitted;
+    # that asymmetry with the rung-3 fixture is the point of having both.
+    "container-egress-splice": [
+        ("cegsplice", """\
+            [workload]
+            name = "cegsplice"
+
+            [container]
+            image = "myapp"
+
+            [network]
+            mode = "pasta"
+            hosts = ["example.test", "*.example.test"]
+
+            [[network.internal]]
+            host = "example.test"
+            reason = "fixture; exercises the internal-exemption ExecStartPre"
+        """),
+    ],
+
+    # Container egress, rung 3 (P1-14). A policy entry moves the workload to
+    # inspect, which is what makes ca_delivery required (V16) and what puts the
+    # CA environment onto the container. Here for systemd-analyze verify above
+    # all: this is the only container fixture emitting an inspect unit pair
+    # with a policy file written at ExecStartPre.
+    "container-egress-inspect": [
+        ("ceginspect", """\
+            [workload]
+            name = "ceginspect"
+
+            [container]
+            image = "myapp"
+
+            [network]
+            mode = "pasta"
+            hosts = ["example.test"]
+            ca_delivery = "env"
+
+            [[network.allow]]
+            host = "example.test"
+            port = 2222
+            reason = "fixture; the non-80/443 surface, so wl_allow* is armed too"
+
+            [[network.policy]]
+            host = "example.test"
+            methods = ["GET"]
+            paths = ["/v1/*"]
+        """),
+    ],
+
     # VM path — managed bridge, virtiofs volumes, data disk, on-reboot restart,
     # resource caps. Exercises generate_vm_service (memfd/virtiofs branch, data
     # disk, qmp-notify socket, resource lines), the two virtiofsd sidecars, the
