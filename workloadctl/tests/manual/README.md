@@ -896,3 +896,66 @@ in-container root maps to the workload uid directly and the mapping question
 does not arise; the refusal covers it regardless, which is deliberate — a
 `[network]`-level rule that changed meaning based on a `[security]` key would
 be the kind of coupling nobody remembers.
+
+---
+
+## deployed_snapshot_rig.py — do the workloads nobody opted in still get the same units?
+
+The one guarantee an opt-in phase owes above all others: a workload that did
+not opt in gets **exactly** what it got before. `tests/test_generator_snapshot.py`
+asserts that against the bundles committed to this repo — the smaller set, and
+the one whose shapes were chosen by whoever wrote the feature. A `[network]`
+shape that no bundle contains but a live host does is precisely what a
+bundle-derived snapshot is structurally unable to cover.
+
+So this rig reads the other set: `/etc/workloads.d` on real hosts. It pulls
+every deployed config, renders each one through the generator from two git
+revisions (`git archive`, so neither the worktree nor the current branch is
+touched), and diffs every emitted unit and sysusers file byte-for-byte.
+
+```
+./deployed_snapshot_rig.py --before <rev> [--after HEAD] --self-check <ssh-target>...
+```
+
+It needs ssh and passwordless sudo on each host, and nothing else — no root
+here, no KVM, no podman. The generator is a pure function from config to unit
+text, which is what makes this cheap enough to run against every host on every
+phase.
+
+### What it answers
+
+- **Byte-identical, per deployed config.** Rows are tagged `no trigger` or
+  `opted in via <key>`; an opted-in workload is *supposed* to change, so the
+  tag is reported and never asserted.
+- **Does the `mode = "host"` refusal take a live workload down?** The refusal
+  fails closed — the generator emits no units, so a workload pairing host mode
+  with an egress key stops running rather than running unfiltered. That is the
+  right direction and still an outage, and "no shipped bundle uses that
+  combination" was only ever a claim about this repository.
+- **Can the differ see a difference at all?** `--self-check` perturbs the
+  "after" generator, asserts every row goes red, then reverts and asserts they
+  all go green again. A rig that compares nothing prints the same clean sweep
+  as one that works.
+
+### Three ways it lied before it told the truth
+
+1. **The render root is in the output.** Each render gets a fresh `mkdtemp`
+   whose path lands in the emitted `ExecStart=/usr/bin/systemd-sysusers ...`
+   line, so *every* unit differed for a reason having nothing to do with the
+   generator. First run: 2/18 identical, all 16 "failures" spurious.
+2. **A disabled workload renders nothing, and nothing equals nothing.** Two
+   deployed workloads carry no `.enabled` marker, so the generator skipped them
+   and they compared equal having emitted zero units — passing rows that tested
+   precisely nothing (the same shape as a permission that is granted but never exercised).
+   The marker is now forced and a zero-unit render is a hard error.
+3. **The self-check's mutation ignored indentation.** Pasted at column 0 it was
+   an `IndentationError`, the generator emitted nothing for any config, and the
+   rig reported 18 broken workloads instead of one broken rig. The probe is now
+   re-indented to its anchor's own column, and a mutation that fails to apply
+   is itself a FAIL rather than a silent no-op.
+
+### What it deliberately does not measure
+
+Whether the deployed units on disk match what the generator *would* now write —
+that is `workloadctl drift`, and it is a different question. This rig compares
+two generators against one config, not one generator against one host.
