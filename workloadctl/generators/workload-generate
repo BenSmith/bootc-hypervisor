@@ -533,8 +533,11 @@ def _head_unit(name, user_name, uid, slice_name, header_comment, description,
     startup the workload had no element in `wl_filtered`, no DNAT, and no
     listener: it ran completely unfiltered, image pull included, and then
     became filtered mid-flight. Single mode was never affected (the arming is
-    an ExecStartPre on the container's own unit, ahead of `podman run`), which
-    is exactly why nothing caught it -- every rig workload is single-mode.
+    an ExecStartPre on the container's own unit, ahead of `podman run`). What
+    hid it in the topologies that WERE affected is that every rig row probed
+    steady state -- enable, recreate, sleep, probe -- and by then a late arming
+    and a correct one look identical. container_egress_rig.py's
+    check_head_unit_ordering now asserts the ordering itself.
 
     The head unit is the right owner because the ordering it needs already
     exists in both directions: members are `Requires=`/`After=`/`BindsTo=`

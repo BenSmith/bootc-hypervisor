@@ -728,7 +728,10 @@ The first rig here that needs **no KVM**. Everything the VM rigs prove about
 the egress path was proven on a guest; this asks the same questions of a
 container, where the traffic is re-originated by pasta as the workload's own
 uid rather than by passt on a guest's behalf. Needs root, podman and the
-installed RPM. Throwaway container workloads, all prefixed `ceg-`. **78/78 on a bare-metal Fedora 44 host under enforcing, 2026-09-06.**
+installed RPM. Throwaway container workloads, all prefixed `ceg-`. **104/104 on a bare-metal
+Fedora 44 host under enforcing, 2026-09-06**, against an RPM built from the
+branch under review — up from 78/78 after two PR-shaped reviews added the pod,
+ordering and resolver sections below.
 
 ```bash
 sudo python3 tests/manual/container_egress_rig.py
@@ -865,6 +868,97 @@ rewritten and the caches flushed, but the *container* was still being answered
 with the old address, so the probe reached the old origin and read as a pass.
 It was measuring a DNS cache and reporting it as the arm-time pin. Both are now
 preconditions the rig asserts before the row it guards.
+
+### Pod mode, and the ordering that no steady-state row can see
+
+**Added 2026-09-06, after two PR-shaped reviews found the hole these rows now
+guard.** The egress arming used to live on the umbrella
+(`workload-<name>.service`), which looked right — `[network]` is
+workload-level, one uid per workload, and the umbrella is the unit that
+represents "this workload is up". But the umbrella is `After=` its members, so
+systemd started every container *first* and ran the arming afterwards. For the
+whole of member startup the workload had no `wl_filtered` element, no DNAT and
+no listener: it ran completely unfiltered, image pull included, and then became
+filtered mid-flight.
+
+**Why 78/78 was green over it.** Not "the rigs are single-mode" — this rig has
+deployed a filtered bridge workload since P1-9. It is that every row measured
+**steady state**: enable, recreate, sleep, probe. By the time anything is
+probed, a workload that armed late and one that armed on time are identical.
+The bug lives entirely in the window before the first probe.
+
+So `check_head_unit_ordering` asserts the *ordering*, not the presence of a
+string — a containment check passes for any unit ordered after the members,
+which is exactly how the original P1-14 test passed over this. Five of its six
+rows read systemd's parsed state rather than the generated file, because only
+the host can say what the manager actually loaded, and the two differ after an
+RPM upgrade without a regenerate — the state the `%post` scriptlet warns about.
+
+**The load-bearing row is the one about the umbrella, not the head unit.**
+`the umbrella really is ordered AFTER its members` pins the *premise*. Without
+it, "the arming is on the head unit" is a preference; with it, the old
+placement is provably a hole. It reads 2/2 on a live host.
+
+The sixth row is an observation rather than a configuration reading: monotonic
+start timestamps for the head unit and each member. Head-first by 0.09 s in
+bridge mode and 0.33 s in pod mode.
+
+**Pod mode had never run on a host at all.** `check_bridge_mode` covered one
+multi-container topology and nothing covered the other, so pod mode reached a
+release exercised by unit tests alone — on the substrate where the ordering
+hole lived. `ceg-pod` carries **two** members deliberately: with one member
+there is less window, and the claim is that the arming precedes *all* of them.
+The second member is also probed against a denied host on its own, because it
+shares the pod's netns and therefore the redirect; if only the first were
+filtered, every other assertion here would still pass with half the pod
+unfiltered.
+
+### The default deny takes DNS, and it is a fact about the host
+
+`check_container_resolver` (S10). **Measured 2026-09-06; before that it was a
+reading of the rule and nothing more.** A triggered container's uid enters
+`wl_filtered` and meets the last rule in the output chain. The port-53 accept
+in `workload-filter.nft` is scoped to `wl_egress_cg` — the **inspector's**
+cgroup, which a container is never in — so a container's queries survive only
+through `oif lo`. A loopback stub (127.0.0.53) resolves fine; a LAN resolver is
+a workload-uid socket to a routable address on port 53 that no rule accepts,
+and the container then resolves **nothing**, including the hostnames its own
+`hosts` allowlist names.
+
+**Every host this rig has ever run on uses the resolved stub**, this one
+included. That is why the whole hardware history passed through the `oif lo`
+accept without anyone choosing it — the green measured the branch that ran.
+
+**The fixture is a routable resolver, not another host.** What the row needs is
+a port-53 destination the kernel will route off loopback, and the far side of
+the existing veth is one. The namespace is load-bearing for the reason it is
+everywhere else here: an address on a dummy link is *local*, `oif lo` accepts a
+filtered uid's traffic to it unconditionally, and the row would pass having
+measured the exemption instead of the drop.
+
+**Both protocols.** The drop carries no protocol qualifier and the accept above
+it matches `th dport`, which is TCP and UDP alike — but real DNS is UDP first,
+and a TCP-only probe leaves the protocol resolvers actually use unmeasured.
+
+**A drop is not always a timeout, and the difference turned out to be the best
+evidence in the section.** An nftables `drop` in the *output* chain rejects a
+**local** sender synchronously, so the blocked UDP query fails at `send()` with
+`EPERM` rather than waiting — measured, not predicted. (The green run reported
+it as the raw `ERR 1`; the `DROPPED-EPERM` label was added afterwards and
+changes the printed detail only, never a verdict.) That is the filter's own
+signature: an absent reply is also what a dead responder looks like, `EPERM` is
+not. The TCP half does time out, and the control row is what makes *that*
+readable. Connection-refused means the packet *arrived* and nothing was
+listening — a dead fixture reporting itself as a working filter. So a refusal
+counts as `reached`, and an unfiltered uid must reach the responder before any
+other row is scored. Without that control, a responder that never came up
+satisfies every assertion in the section.
+
+The remedy is asserted too, not just the break: an `[[network.allow]]` entry
+for the resolver **on port 53 specifically** — the element is
+(uid, address, port), and an entry written without the port arms nothing that
+matches, which is why `diagnose`'s message spells the TOML out rather than
+saying "add an allow entry".
 
 ### What it still does not measure
 
