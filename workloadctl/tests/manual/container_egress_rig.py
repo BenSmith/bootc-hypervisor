@@ -1407,13 +1407,20 @@ def check_reporting():
     """Which commands report a container as inspected -- and which do not, BY
     DESIGN, because that half is what a stale premise gets wrong.
 
-    `egress`, `doctor`, the exporter and -- since G7 -- `diagnose` are routed
-    through the substrate predicate. `rules` is explicitly VM-only pending the
-    container document renderer, so its refusal is the correct behaviour and is
-    asserted as such; `drift` and `pcap` are simply unrouted, which is not the
-    same thing as declining, and are measured rather than asserted. See the
-    comment on that loop below: the row this rig was written from called all
-    four "VM-only as though each refuses", and three of them never did.
+    ALL SEVEN ARE ROUTED NOW. `egress`, `doctor`, the exporter and `diagnose`
+    (G7) went first; `rules` (G5), `drift` (G8) and `pcap` (G10) followed once
+    the container renderer was wired to them. The three late ones were measured
+    gaps here for exactly as long as they were unrouted, which is why this
+    section reads as it does: a gap row records what an operator meets without
+    claiming it is right, and it converts to an assertion the moment there is a
+    right answer to assert.
+
+    Each of the three has a CONTROL on the uninspected workload, because every
+    one of them has a plausible wrong answer that looks like success. `rules`
+    can render the VM document for a container (right shape, wrong `tls`);
+    `drift` can report no drift because it compared nothing; `pcap` can print a
+    vantage line that is simply the old sentence. A single green row on the
+    filtered workload distinguishes none of those.
     """
     say("\n== reporting ==")
     p = cli("egress", FILTERED, "--json", "-n", "1")
@@ -1445,56 +1452,164 @@ def check_reporting():
            f'workload="{FILTERED}"' in text and "inspect" in text,
            "no drop file" if not text else f"{len(text.splitlines())} lines")
 
-    # `rules` is the one that refuses outright, and its message names the
-    # trigger rather than saying "not supported". That is the shape a VM-only
-    # surface is supposed to have.
+    # --- G5: `rules` renders a container's policy document ---
     #
-    # THIS ROW ASSERTED THE WRONG MESSAGE AND PASSED ON IT until 2026-09-06.
-    # It pinned "no inspected egress" -- which is the sentence an UNINSPECTED
-    # workload gets, and `ceg-plain` at this point in the run is inspected. The
-    # CLI reached it because the refusal branched on the VM predicate alone, so
-    # an inspected container was told it had no inspected egress (false), and
-    # offered as the remedy the `[network]` trigger it had already written.
-    # e07f279 split the branch; this row now pins the half that applies here.
-    # Both halves are asserted, because "refuses" alone is satisfied by the
-    # sentence that was wrong: the message must NOT deny the trigger, and it
-    # must name the document that does exist on disk, which is the only thing
-    # in it an operator can act on.
+    # HISTORY, because this row has been wrong twice and green both times.
+    # First it pinned "no inspected egress" -- the sentence an UNINSPECTED
+    # workload gets, while ceg-plain here is inspected -- and passed because
+    # the CLI branched on the VM predicate alone and printed exactly that. Then
+    # it pinned the container-specific refusal, which was correct while the
+    # renderer was VM-only. Now the renderer is routed and the answer is the
+    # document itself.
     p = cli("rules", FILTERED)
     out = (p.stdout + p.stderr)
-    record("`rules` refuses a container without denying its trigger",
-           p.returncode != 0 and "no inspected egress" not in out
-           and "IS inspected" in out,
-           out.strip()[:90])
-    # And the path it names must be the one that is actually there. A refusal
-    # naming a plausible-but-wrong path is worse than one naming none: the
-    # operator goes and looks, finds nothing, and concludes the feature is
-    # broken rather than unrendered. So this checks the file too.
-    doc = f"/run/workload-vm/{FILTERED}/inspect.json"
-    record("`rules`' refusal names the live policy document, and it exists",
-           doc in out and Path(doc).exists(),
-           f"named={doc in out} present={Path(doc).exists()}")
+    record("`rules` renders an inspected container's document",
+           p.returncode == 0 and "no inspected egress" not in out
+           and ALLOWED in out,
+           f"rc={p.returncode} " + " ".join(out.split())[:80])
 
-    # THE OTHER THREE ARE MEASURED, NOT ASSERTED, because the row this rig was
-    # written from had a stale premise: it called `diagnose`, `drift` and
-    # `pcap` "VM-only" as though each refuses. They do not. `diagnose` is a
-    # general workload check that runs fine for a container and simply says
-    # nothing about its egress; `drift` and `pcap` were left unrouted, which is
-    # not the same thing as declining. Whatever they do, an operator meets it,
-    # so it is recorded rather than guessed at -- and a rig that asserted a
-    # refusal here would have failed rows for a decision made on purpose while
-    # missing the one below.
-    # `pcap` is asked what vantages it offers (-D), NOT started. A bare
-    # `pcap <name>` STARTS a capture and runs until it is stopped, on both
-    # substrates -- that is the verb working, not hanging. Invoking it the
-    # obvious way cost this rig 300 seconds per run and recorded the timeout as
-    # if it meant something about containers.
-    for verb, extra in (("diagnose", ()), ("drift", ()),
-                        ("pcap", ("-D",))):
-        p = cli(verb, FILTERED, *extra, timeout=90)
-        text = " ".join((p.stdout + p.stderr).split())
-        record_gap(f"`{verb}` on an inspected container",
-                   f"rc={p.returncode}: {text[:100]}")
+    # THE LOAD-BEARING ROW, and the reason routing the predicate alone was
+    # refused -- but it has to be asked of the branch that actually changed.
+    #
+    # WHAT THIS ROW GOT WRONG FIRST: it read ceg-plain's own document and
+    # expected tls "splice", on the premise that the workload is at rung 2
+    # here. It is not -- check_internal runs immediately before this section
+    # and rewrites it at rung 3 -- so the answer was "inspect", which is what
+    # the container ladder correctly says for a workload WITH a
+    # [[network.policy]] entry. The row failed against a correct product.
+    #
+    # It was also asking the wrong origin. For a started workload `rules`
+    # prefers the document ON DISK, which the inspector wrote; no renderer in
+    # the CLI is involved. The renderer split only decides the "config" origin
+    # -- a workload that has not started -- so that is what this deploys: a
+    # config-only workload, hosts and nothing else, never enabled. Rung 2 by
+    # construction, so the ladder says "splice" and the VM renderer's default
+    # would say "inspect".
+    probe = f"{FILTERED}-cfg"
+    probe_dir = WORKLOAD_DIR / probe
+    try:
+        write_config(probe, toml_for(Arm(probe, 2)))
+        p = cli("rules", probe, "--json")
+        modes, origin, ok = None, None, False
+        if p.returncode == 0:
+            try:
+                doc = json.loads(p.stdout)
+                origin = doc.get("origin")
+                # The FIELD, not a substring of the blob. Each literal view
+                # carries a `tls_treatment` sentence that quotes a mode name in
+                # prose, so a `'"inspect"' in blob` test reads the explanation
+                # rather than the value and would go red on a correct document
+                # that merely mentions the other mode.
+                modes = sorted({v.get("tls") for v in doc.get("literals", [])})
+                ok = origin == "config" and modes == ["splice"]
+            except (json.JSONDecodeError, AttributeError):
+                modes = "not JSON"
+        record("`rules` renders an unstarted container with the CONTAINER "
+               "renderer", ok,
+               f"origin={origin!r} tls={modes!r} "
+               f"(want 'config'/['splice']; the VM default is 'inspect')")
+    finally:
+        # Config-only: nothing was enabled, so there is no unit, no user and
+        # no /var to purge -- removing the directory is the whole cleanup, and
+        # it runs even if the rows above raised.
+        shutil.rmtree(probe_dir, ignore_errors=True)
+
+    # The control. An uninspected container must still be refused, or the row
+    # above is satisfied by a `rules` that renders anything for anybody.
+    p = cli("rules", OPEN)
+    out = (p.stdout + p.stderr)
+    record("control: `rules` still refuses an UNinspected container",
+           p.returncode != 0 and "no inspected egress" in out,
+           f"rc={p.returncode} " + " ".join(out.split())[:70])
+
+    # --- G8: `drift` compares the container's document ---
+    #
+    # A GREEN "no drift" IS THE INERT READING. It is what the command printed
+    # for every inspected container while the renderer returned None and the
+    # caller skipped -- nothing was compared, and the all-clear was about
+    # nothing. So the clean run is only the control here; the row that means
+    # something is the perturbation below.
+    p = cli("drift", FILTERED)
+    out = (p.stdout + p.stderr)
+    record("control: a freshly started container reports no policy drift",
+           p.returncode == 0 and "No drift" in out,
+           f"rc={p.returncode} " + " ".join(out.split())[:70])
+
+    doc_path = Path(f"/run/workload-vm/{FILTERED}/inspect.json")
+    original = None
+    try:
+        original = doc_path.read_text()
+        # Perturb the DOCUMENT, not the TOML: that is the direction the real
+        # failure runs. An operator edits the allowlist, the listener is not
+        # restarted, and what is on disk is no longer what the config says.
+        # Making it invalid JSON would test the error path instead, so this
+        # stays a well-formed document that simply disagrees.
+        stale = original.replace(f'"{ALLOWED}"', '"stale.example.com"')
+        if stale == original:
+            record("`drift` DETECTS a stale container document", False,
+                   f"could not perturb: {ALLOWED} not in the document")
+        else:
+            doc_path.write_text(stale)
+            p = cli("drift", FILTERED)
+            out = (p.stdout + p.stderr)
+            record("`drift` DETECTS a stale container document",
+                   p.returncode != 0 and FILTERED in out
+                   and "stale.example.com" in out,
+                   f"rc={p.returncode} " + " ".join(out.split())[:80])
+    except OSError as exc:
+        record("`drift` DETECTS a stale container document", False,
+               f"could not read/write {doc_path}: {exc}")
+    finally:
+        # Restore unconditionally. A killed rig that left a poisoned document
+        # behind would make the NEXT run's control fail for a reason that has
+        # nothing to do with the product -- and, per the break-script lesson,
+        # a restore that only runs on the happy path is not a restore.
+        if original is not None:
+            try:
+                doc_path.write_text(original)
+            except OSError:
+                pass
+
+    # --- G10: `pcap -D` says the host vantage shows a redirect ---
+    #
+    # -D BEFORE the workload, and that ordering is the whole of a rig bug this
+    # row inherited. `pcap`'s trailing FILTER positional is argparse.REMAINDER,
+    # so everything after WORKLOAD is taken verbatim as a BPF filter --
+    # `pcap ceg-plain -D` passes "-D" as the filter and exits 2 with "a BPF
+    # filter cannot be applied to 'host'". The gap row that preceded these
+    # assertions recorded exactly that rc=2 for two hardware runs and read it
+    # as a fact about containers. It was a fact about the rig.
+    #
+    # -D at all, rather than a bare `pcap`: a bare one STARTS a capture and
+    # runs until stopped, on both substrates. That is the verb working, not
+    # hanging, and invoking it the obvious way cost this rig 300 seconds a run
+    # while recording the timeout as though it meant something.
+    p = cli("pcap", "-D", FILTERED, timeout=90)
+    out = " ".join((p.stdout + p.stderr).split())
+    record("`pcap -D` tells an inspected container the capture is REDIRECTED",
+           p.returncode == 0 and "REDIRECTED" in out
+           and "as it leaves this machine, after pasta" not in out,
+           f"rc={p.returncode} " + out[:90])
+
+    # The control, and it is the half that fails if the branch is inverted
+    # rather than merely wrong: an uninspected container's traffic really does
+    # leave as the original sentence says, and warning it about a redirect that
+    # does not happen is the same defect pointed the other way.
+    p = cli("pcap", "-D", OPEN, timeout=90)
+    out = " ".join((p.stdout + p.stderr).split())
+    record("control: an UNinspected container keeps the original promise",
+           p.returncode == 0 and "REDIRECTED" not in out
+           and "as it leaves this machine" in out,
+           f"rc={p.returncode} " + out[:90])
+
+    # `diagnose` stays a gap ON PURPOSE. It is routed (G7) but it is a general
+    # workload check, so what it prints about egress is one line among many and
+    # pinning a substring here would be pinning the layout of a different
+    # command. The G7 row that owns it lives with the diagnose rows.
+    p = cli("diagnose", FILTERED, timeout=90)
+    text = " ".join((p.stdout + p.stderr).split())
+    record_gap("`diagnose` on an inspected container",
+               f"rc={p.returncode}: {text[:100]}")
 
 
 def check_bridge_mode():
