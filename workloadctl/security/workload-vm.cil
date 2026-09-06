@@ -275,7 +275,11 @@
 ; The vhost-user control socket QEMU hands over. Same shape as the passt rule
 ; below: a socket created by QEMU, so labelled svirt_t, that the helper must
 ; use. Also dontaudit'd upstream, so it does not appear in an ordinary harvest.
-(allow wlvfsd_t svirt_t (unix_stream_socket (read write)))
+; `map` belongs with read/write: the backend mmaps this socket's shared-memory
+; region rather than copying through it, and without it the sidecar accepts the
+; guest's connection and then dies on the first request with an opaque
+; `Waiting for daemon failed: ... Mmap(PermissionDenied)`.
+(allow wlvfsd_t svirt_t (unix_stream_socket (map read write)))
 
 ; /run/workload-vm(/.*)? is svirt_var_run_t — an alias of qemu_var_run_t, which
 ; CIL resolves to. Registered by the RPM's %post, not per workload.
