@@ -77,6 +77,27 @@
 ; stdout/stderr to the journal.
 (allow wlresolve_t init_t (unix_stream_socket (read write)))
 
+; DELIBERATELY NOT GRANTED. Three denials appear in an enforcing run and all
+; three are the interpreter starting up, not the responder working. Each is
+; silent -- the probe's failure is indistinguishable from a negative answer --
+; so the run is green with them denied, and granting any of them would widen
+; the domain for nothing. Same rule as the inspect module: an entry leaves this
+; list only when the domain acquires a real reason for it, never because a
+; harvest shows it being attempted.
+;
+;   getattr, ioctl on init_t:unix_stream_socket   Python asking whether its
+;     stdout is a tty. The answer is "no" either way.
+;   search on container_file_t:dir ("workloads")  site.py stat'ing
+;     $HOME/.local/lib/pythonX.Y/site-packages. $HOME is
+;     /var/lib/workloads/<name> because the unit sets User= to the workload
+;     user, so the probe crosses /var/lib/workloads. There is no user
+;     site-packages dir to find, and one must never be on this path anyway.
+;   search on cert_t:dir ("pki")                  libcrypto reading its
+;     OPENSSLDIR config, pulled in transitively: the responder imports vm.py,
+;     which imports hashlib. This domain terminates no TLS and verifies
+;     nothing, so the trust store is not its to read -- contrast the
+;     inspector, which cannot work without it.
+
 ; The inherited listening sockets, created by init_t in this domain. Both
 ; transports, for the reason in the header.
 (allow init_t wlresolve_t (udp_socket (bind create getattr getopt read setopt shutdown write)))
