@@ -134,7 +134,7 @@ made the way it always is, and the rig leaves no trust anchor behind on a
 machine it borrowed. Nothing about the path under test is weakened — the drop-in
 adds one environment variable and changes no directive.
 
-**Last green 2026-09-02: 35/35, on a KVM host under enforcing, against the
+**Last green 2026-09-02, all rows, on a KVM host under enforcing, against the
 installed RPM.** It has now found five defects, none of which any unit test
 could see. The first two made the brokered path inert for a real guest:
 
@@ -225,7 +225,7 @@ assertion still passes against a rule that has lost `meta skuid` and is
 dropping the address for everyone, host tooling included. Absent and zero are
 also held apart — an unarmed element reads as absent, not as zero.
 
-Last green 2026-08-25, 11 assertions, on a bare-metal Fedora 44 host.
+Last green 2026-08-25, all rows, on a bare-metal Fedora 44 host.
 
 ## inspect_rig.py — does a guest told nothing land in the inspector?
 
@@ -338,7 +338,7 @@ workload's plane. It is an artifact of the rig's own route, not a policy
 finding: the guards match on destination, and a host with a real v6 uplink
 sources from a global address. Worth recognising rather than re-investigating.
 
-Last green 2026-08-25, **37 assertions**, on a bare-metal Fedora 44 KVM host
+Last green 2026-08-25, **all rows**, on a bare-metal Fedora 44 KVM host
 under plain **enforcing** with the shipped dontaudit rules in place. That is the
 first recorded run of the post-deletion shape: the rig was rewritten in the same
 commit that deleted the proxy, so every earlier figure describes a different rig.
@@ -474,7 +474,7 @@ the 4x needs a second leg, which arrives only when the inspector re-originates.
 Every packet a socket sent is captured twice; bare ACKs the kernel emits on its
 own behalf appear once, because there is no owner for `meta skuid` to match.
 
-Last green 2026-08-25, 12 assertions, on a bare-metal Fedora 44 host.
+Last green 2026-08-25, all rows, on a bare-metal Fedora 44 host.
 
 ## splice_rig.py — does a real session survive the splice, and a real request get authorised?
 
@@ -533,7 +533,7 @@ It writes `/run/workload-vm/wlspl/inspect.json` and refuses to start if that
 path already exists, since it would be a real workload's policy. Teardown
 removes the namespace and the directory.
 
-Last green 2026-08-25, 24 assertions, on a bare-metal Fedora 44 host against
+Last green 2026-08-25, all rows, on a bare-metal Fedora 44 host against
 the installed RPM.
 
 Verified by breaking the splice on purpose — replaying the buffer without its
@@ -612,7 +612,7 @@ binds over `/etc/hosts` inside the namespace alone — editing the host's own
 would leave six entries pointing at a listener that is gone. Teardown removes
 all of it.
 
-Last green 2026-08-27, 42 assertions, four consecutive runs on a bare-metal
+Last green 2026-08-27, all rows, four consecutive runs on a bare-metal
 Fedora 44 host under enforcing, against the installed RPM.
 
 Verified by emptying each rung-4 list in the policy document in turn, on a
@@ -662,10 +662,10 @@ somewhere inside the `workloadctl exec` round-trip, so the reading is bracketed
 by two host reads and the interval's *width* is that latency. The upper bound is
 the stable one; the lower tracks the round-trip.
 
-**Last green 2026-09-02: 19/19, on a TSC-clocksource KVM host under enforcing,
-against the installed RPM.** The same 19/19 was recorded on 2026-08-27; the
-re-run was against a later build, on a host also carrying live production
-workloads, with clean teardown and nothing else disturbed. Rungs since then
+**Last green 2026-09-02, all rows, on a TSC-clocksource KVM host under
+enforcing, against the installed RPM.** The same rows were green on
+2026-08-27; the re-run was against a later build, on a host also carrying live
+production workloads, with clean teardown and nothing else disturbed. Rungs since then
 deliberately deferred this rig — they touch nothing it covers — so the re-run
 exists to close one residual doubt: a later rung deleted an `ExecStopPost` from
 *every* VM unit, including ones with no broker, which is the generic VM unit
@@ -793,12 +793,19 @@ The first rig here that needs **no KVM**. Everything the VM rigs prove about
 the egress path was proven on a guest; this asks the same questions of a
 container, where the traffic is re-originated by pasta as the workload's own
 uid rather than by passt on a guest's behalf. Needs root, podman and the
-installed RPM. Throwaway container workloads, all prefixed `ceg-`. **144/144 on a bare-metal
-Fedora 44 host under enforcing, 2026-09-06**, against an RPM built from the
-branch under review — up from 78/78 after two PR-shaped reviews added the pod,
-ordering and resolver sections below, from 104/104 after the credential
-broker arm, and from 123/123 after the record-reader, rotation and purge
-sections.
+installed RPM. Throwaway container workloads, all prefixed `ceg-`. **Last green all rows on a
+bare-metal Fedora 44 host under enforcing, 2026-09-06**, against an RPM built
+from the branch under review, with the `rules`/`drift`/`pcap` reporting rows
+re-run after they were converted from measured gaps to assertions.
+
+It has grown in four waves: two PR-shaped reviews added the pod, ordering and
+resolver sections; then the credential broker arm; then the record reader,
+rotation and purge; then the three reporting verbs above. That lineage is
+worth keeping. A row COUNT is not, which is why one is no longer written
+here: it went stale on every wave, it says nothing about what is covered —
+twenty rows over one surface and twenty over twenty are the same number — and
+a pinned total quietly invites keeping the number up rather than keeping the
+coverage honest. The count is in the run's own output, where it belongs.
 
 Use `--only=<section>,<section>` to iterate one arm. A full pass is ~40
 minutes, and three of the six defects below were found by re-running a single
