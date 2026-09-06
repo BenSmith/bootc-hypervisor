@@ -50,6 +50,7 @@ from pathlib import Path
 
 import cli_log
 from cmd_validate import load_config_or_exit
+from workload_lib import container_uses_inspect
 from vm import (
     VM_TLS_DEFAULT,
     VM_TLS_MODES,
@@ -434,7 +435,28 @@ def cmd_rules(args, manager):
     # gate alone would report a wrong effective tls for an inspected
     # container. Revisit once the container document renderer exists
     # (Phase 3).
+    #
+    # AN INSPECTED CONTAINER IS ITS OWN CASE and must not fall into the
+    # not-inspected message, which would be false in both halves: it HAS a
+    # [network] trigger, and workload-container-inspect's write_policy() has
+    # already written a real document to the path named below. Telling that
+    # operator "no inspected egress" and then offering the trigger they
+    # already set as the remedy is a wrong answer, not a missing feature --
+    # the same shape cmd_drift._rendered_policy refuses by returning None
+    # rather than "". Say what is actually true: the document exists, this
+    # renderer cannot read it yet, and here is where it is.
     if not vm_uses_inspect(config.config):
+        if container_uses_inspect(config.config):
+            cli_log.error(
+                f"{workload} IS inspected, but `rules` cannot render a "
+                f"container's policy document yet -- the renderer reads "
+                f"[vm.network] and defaults tls to "
+                f"\"{VM_TLS_DEFAULT}\", which is the wrong default for a "
+                f"container (no [[network.policy]] means \"splice\"), so "
+                f"routing it here would report an effective TLS mode this "
+                f"workload does not have. The live document is on disk: "
+                f"{vm_inspect_policy_path(workload)}")
+            return 1
         cli_log.error(
             f"{workload} has no inspected egress, so there is no policy "
             "document. Egress filtering is a [network] trigger on a "

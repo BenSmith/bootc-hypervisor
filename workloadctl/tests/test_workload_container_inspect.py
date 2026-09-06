@@ -148,8 +148,20 @@ class TestTheInternalFailureSaysWhatItCosts(unittest.TestCase):
     def test_it_keeps_the_underlying_cause(self):
         self.assertIn("does not resolve on this host", self._message())
 
-    def test_it_names_the_unit_that_will_not_start(self):
-        self.assertIn("workload-web.service", self._message())
+    def test_it_names_the_socket_and_not_the_requiring_unit(self):
+        """The unit that ARMS is nameable; the unit that requires it is not.
+
+        The ExecStartPre this runs from is always workload-<name>-inspect.socket,
+        so that name is safe to print. What Requires= that socket is not:
+        workload-<name>.service in `single` mode, and the pod/net head unit in
+        `pod`/`bridge` (the umbrella is After= its members, so the arming had
+        to move -- see _head_unit in generators/workload-generate). A literal
+        `workload-web.service` here, which is what this test used to pin, sends
+        a pod-mode operator to the wrong journal.
+        """
+        message = self._message()
+        self.assertIn("workload-web-inspect.socket", message)
+        self.assertNotIn("workload-web.service", message)
 
     def test_it_says_the_workload_will_not_start(self):
         """Not "boot" -- containers don't. Prose specific to the substrate,

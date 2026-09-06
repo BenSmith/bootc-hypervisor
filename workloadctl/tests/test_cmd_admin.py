@@ -2335,6 +2335,21 @@ user = "workload"
         self.assertTrue(found, "expected a vm_internal_unresolvable check")
         self.assertEqual(found[0]["severity"], "warning")
         self.assertIn("git.local", found[0]["message"])
+
+    def test_the_warning_names_the_start_failure_and_not_just_the_exemption(self):
+        """P1-7..P1-11 landed the container inspector, and that changed what
+        this entry costs. workload-container-inspect's `up()` raises on a name
+        it cannot resolve, it is the inspect socket's ExecStartPre with no `-`
+        prefix, and the workload requires that socket -- so the workload does
+        not start. The message used to say only that the host would not be
+        exempted, which is the VM wording this project already rejected for
+        understating the same thing.
+        """
+        result = self._result("clitest-cint-dns2", resolve=self._raise)
+        found = self._checks(result)
+        self.assertTrue(found)
+        self.assertIn("start", found[0]["message"])
+        self.assertNotIn("will not be exempted", found[0]["message"])
         self.assertTrue(result["passed"])
 
     def test_the_warning_says_it_costs_the_whole_start(self):

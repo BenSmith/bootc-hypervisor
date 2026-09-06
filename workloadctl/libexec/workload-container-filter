@@ -6,10 +6,14 @@ egress policy.
 Usage: workload-container-filter <up|down> <name>
 
 Container counterpart of workload-vm-filter (P1-8 in the container
-egress-parity build spec). `up` runs as ExecStartPre of the workload's own
-service unit (the single-container unit in `single` mode, the umbrella unit
-in `pod`/`bridge` mode -- either way, the ONE unit that represents "this
-uid's workload is up"), `down` as its ExecStopPost. Both operate on set
+egress-parity build spec). `up` runs as an ExecStartPre, `down` as the
+matching ExecStopPost, on the one unit that pod/bridge mode orders BEFORE
+every member container: the container's own unit in `single` mode, and the
+pod-create/network-create head unit (`workload-<name>-pod.service` /
+`-net.service`) in `pod`/`bridge`. NOT the umbrella -- it carries `After=`
+its members, so arming there ran only once every container was already up
+and the workload spent the whole of member startup unfiltered. See
+_head_unit()'s docstring in generators/workload-generate. Both operate on set
 *elements* in the shared `inet workload_filter` table; neither ever touches a
 rule. See workload-vm-filter's module docstring for why this has to be a
 script and not a handful of ExecStartPre lines -- the allowlist-edit /

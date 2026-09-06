@@ -18,7 +18,7 @@ asks the matcher the same question the listener asks it.
 import io
 import json
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest import mock
@@ -344,6 +344,32 @@ class CommandTest(unittest.TestCase):
         rung 5 defect found on hardware."""
         code, _ = self._run(self._args(), uses_inspect=False)
         self.assertEqual(code, 1)
+
+    def test_an_inspected_container_is_refused_with_its_OWN_message(self):
+        """Not the unfiltered one, which would be false in both halves.
+
+        `rules` renders off [vm.network] and defaults tls to the VM default,
+        so it stays VM-gated -- but an inspected container HAS a [network]
+        trigger and workload-container-inspect has already written a real
+        document to disk. The not-inspected text tells that operator they have
+        no inspected egress and then offers, as the remedy, the trigger they
+        already set. Saying "not implemented, and here is the file" is the
+        only accurate answer this verb can give today.
+        """
+        buf = io.StringIO()
+        cfg = mock.Mock()
+        cfg.config = {"container": {"image": "localhost/app:latest"},
+                      "network": {"hosts": ["a.example.com"]}}
+        with mock.patch.object(cmd_rules, "load_config_or_exit",
+                               return_value=cfg), \
+             mock.patch.object(cmd_rules, "vm_inspect_policy_path",
+                               return_value="/run/wl/capp/inspect.json"), \
+             redirect_stderr(buf):
+            code = cmd_rules.cmd_rules(self._args(), mock.Mock())
+        text = buf.getvalue()
+        self.assertEqual(code, 1)
+        self.assertIn("/run/wl/capp/inspect.json", text)
+        self.assertNotIn("has no inspected egress", text)
 
     def test_the_query_form_runs_when_a_host_is_given(self):
         code, out = self._run(self._args(host="a.example.com"))

@@ -131,12 +131,19 @@ def internal_failure(name: str, host: str, cause: Exception) -> str:
     """Mirrors workload-vm-inspect's internal_failure: state the blast radius
     (this is fatal to the whole workload's START, not only to the
     exemption -- this helper runs as the inspect socket's ExecStartPre and
-    the workload's Requires= on that socket) and both ways out."""
+    something the workload needs Requires= that socket) and both ways out.
+
+    The sentence does not NAME the requiring unit, and that is deliberate: it
+    is workload-<name>.service in `single` mode and the pod/net head unit in
+    `pod`/`bridge` (see _head_unit in generators/workload-generate), so a
+    literal name here is wrong in one topology and sends the operator to the
+    wrong journal. The remedy is the same either way -- fix the name or drop
+    the entry -- so the unit adds nothing the operator can act on."""
     return (f"{cause}\n"
             f"  This is fatal to the START, not only to the exemption: it "
-            f"runs as the inspect socket's ExecStartPre and "
-            f"workload-{name}.service Requires= that socket, so the "
-            f"workload will not start while it stands.\n"
+            f"runs as workload-{name}-inspect.socket's ExecStartPre, and "
+            f"{name}'s own units require that socket, so the workload will "
+            f"not start while it stands.\n"
             f"  Either make {host} resolve on this host, or drop the "
             f"[[network.internal]] entry naming it -- the entry authorises "
             f"nothing by itself, so dropping it costs only this workload's "

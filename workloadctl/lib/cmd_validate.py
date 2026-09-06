@@ -641,11 +641,16 @@ def validate_single(config: WorkloadConfig, manager: WorkloadManager, json_mode=
                 warnings += 1
 
     # Container counterpart (G9 in the container egress-parity build spec):
-    # same validate-time resolve, sourced from [network].internal now that
-    # P1-1b has ported the array. The container inspector does not exist yet
-    # (P1-7..P1-11), so an unresolvable name has no start-time consequence
-    # today -- this only warns what will happen once it does, same as the VM
-    # side warns ahead of its own start-time failure.
+    # same validate-time resolve, sourced from [network].internal, and the
+    # SAME start-time consequence as the VM side now that P1-7..P1-11 have
+    # landed. This comment used to say the container inspector did not exist
+    # yet and that an unresolvable name therefore cost nothing at start; that
+    # expired in this same branch. workload-container-inspect's `up()` raises
+    # internal_failure() on a name it cannot resolve, it is the inspect
+    # socket's ExecStartPre with no `-` prefix, and the workload Requires=
+    # that socket -- so the workload does not start at all. The message below
+    # has to say so, exactly as the VM one does, or it warns about losing one
+    # exemption when what is actually at stake is the next restart.
     if not config.config.get("vm") and container_uses_inspect(config.config):
         net = config.config.get("network", {}) or {}
         for entry in container_internal_entries(net):
@@ -666,11 +671,12 @@ def validate_single(config: WorkloadConfig, manager: WorkloadManager, json_mode=
                     "passed": False,
                     "severity": "warning",
                     "message": f"[[network.internal]] names {entry.host!r}, "
-                               f"which cannot be resolved to a private "
-                               f"address on this host right now: {problem}. "
-                               f"It will not be exempted from the internal-"
-                               f"drop once egress inspection arms for this "
-                               f"workload.",
+                               f"which cannot be armed on this host right "
+                               f"now, and that fails the workload's start "
+                               f"rather than only the exemption -- arming "
+                               f"runs as the inspect socket's ExecStartPre "
+                               f"and the workload requires that socket: "
+                               f"{problem}",
                     "fix": f"Make {entry.host} resolve to a private address "
                            f"on the container host, or remove the entry (it "
                            f"authorises nothing on its own; the workload "
