@@ -116,8 +116,28 @@ def test_vm_restart_on_reboot_cycles_but_poweroff_stays_down(target):
             "on-reboot did not relaunch the VM (boot_id stayed "
             f"{boot_id_before!r})"
         )
-        assert unit_state(target, SERVICE) == "active", (
-            f"{SERVICE} is not active after the guest reboot cycle"
+        # POLLED, NOT SAMPLED, and the reason is an ordering the boot_id above
+        # cannot see. The unit is Type=notify, so `active` tracks READY=1 from
+        # the notify wrapper -- which the wrapper sends only after a QMP
+        # handshake with the relaunched QEMU. The guest's own boot is
+        # independent of that handshake, so under host load the guest can be
+        # answering SSH while the unit is legitimately still `activating`.
+        # Sampling the state at the instant the new boot_id appears asserts a
+        # settled property at an unsettled moment; what the proof actually
+        # wants is that the unit CONVERGES to active after the cycle.
+        deadline = time.monotonic() + 180
+        state = unit_state(target, SERVICE)
+        while state != "active" and time.monotonic() < deadline:
+            time.sleep(5)
+            state = unit_state(target, SERVICE)
+        if state != "active":
+            dump_journal(target, WORKLOAD)
+        assert state == "active", (
+            f"{SERVICE} settled on {state!r}, not active, after the guest "
+            f"reboot cycle -- the guest itself came back (boot_id "
+            f"{boot_id_before!r} -> {boot_id_after!r}), so QEMU relaunched and "
+            f"only the unit's view of it is wrong. `activating` here means "
+            f"READY=1 never arrived; anything else means the relaunch failed."
         )
 
         # (2) Guest poweroff: QMP reason=guest-shutdown → wrapper exits 0 →
