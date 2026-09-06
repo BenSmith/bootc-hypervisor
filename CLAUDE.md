@@ -53,6 +53,8 @@ WLRT_MODE=gate just test-runtime       # gate: real bootc image via bootc-image-
                                        # both skip cleanly without /dev/kvm + QEMU
 ```
 
+**Before adding or editing a check in `workloadctl/tests/manual/`, read that directory's README preamble ("Writing a row here").** It is the accumulated list of ways a rig row goes green while measuring nothing — probing settled state instead of the window a control arms in, asserting that a string appears in a unit instead of asserting the ordering, and pinning an expected message that later became the wrong one. Each entry cost a real defect that shipped past a green rig.
+
 There is no Python package manager / venv — scripts run against the system `python3` (3.14; Fedora 43 and 44 both ship it). `lib/` has no third-party deps; everything is stdlib + `tomllib`.
 
 `lib/` is a flat set of top-level modules, not a package. On a host the RPM installs every entrypoint (the CLI, generator, and libexec helpers) *into* `/usr/libexec/workloadctl` alongside the modules, so each finds them via its own `sys.path[0]` — no `.pth`, nothing on any other process's path. The CLI reaches PATH through a thin `%{_bindir}/workloadctl` exec wrapper into that private dir. In the test suite, `tests/__init__.py` puts `lib/` on `sys.path` (and provides `load_script()` for the extension-less entrypoints and `script_env()` for subprocess launches). Test modules import as `tests.<name>` — hence `just test` runs `unittest discover -t .` — and no test module does its own `sys.path` surgery.

@@ -4,6 +4,71 @@ Checks that need a real KVM host and cannot run in the normal suites. Nothing
 here runs under `just test` or `just test-runtime`; each is invoked by hand on a
 host that has the workloadctl RPM installed.
 
+## Writing a row here
+
+These rigs exist because unit gates do not see the seam. They have blind spots
+of their own, and every rule below was paid for by a defect that shipped past a
+green rig. Read this before adding a row; the rest of the file is what each rig
+found.
+
+**Probe the window, not the settled state.** Every row in
+`container_egress_rig` followed one shape — enable, recreate, sleep, probe —
+and that shape is blind to a control that arms *too late*. The egress arming
+sat on the umbrella unit, which is `After=` its members, so every container
+started unfiltered and the workload became filtered mid-flight; by the time
+anything was probed, that is indistinguishable from correct. The class is
+general and it is most of what these rigs guard: a filter, a policy load, a
+seccomp profile, a cgroup move can all be right and late. If a row sleeps
+before it measures, ask what it would miss.
+
+**Assert the ordering, not the presence of a string.** A containment check
+(*"the arming appears in this unit"*) passes for any unit ordered after the
+members, which is exactly how the test covering the above stayed green. Read
+systemd's **parsed** state — `systemctl show <unit> -p ExecStartPre` and
+friends — not the generated file: only the host says what the manager actually
+loaded, and the two differ after an RPM upgrade without a regenerate, which is
+the state the `%post` scriptlet warns about. Where an observation is available
+rather than a configuration reading, prefer it;
+`ExecMainStartTimestampMonotonic` is comparable across units.
+
+**Pin the premise as its own row.** "The arming is on the head unit" only
+matters because the umbrella runs late. Without a row asserting *that*, the
+remedy is a preference, and a future change could quietly make it pointless.
+The premise row is usually the one worth writing first.
+
+**A row can assert the defect and pass on it.** The `rules` row here pinned
+`"no inspected egress"` — the sentence an *uninspected* workload gets — so for
+weeks it was green over precisely the bug a later review found. When a product
+message changes, the row that pinned it must be **re-derived from what the
+message should now say**, not edited until it goes green again. A row that only
+ever had to pass is a row that has stopped measuring.
+
+**Every "needs another host" deferral deserves re-reading.** Four rows here sat
+deferred on that basis and three needed a *fixture*: a veth, an `/etc/hosts`
+line, a routable address in a namespace. Ask what property the row actually
+needs before asking for a machine.
+
+**And check the fixture cannot satisfy the property by accident.** An origin on
+a dummy link is *local*, and `oif lo` accepts a filtered uid's traffic
+unconditionally — so a row measuring a drop would have measured the loopback
+exemption and passed. Put fixtures behind the veth. Where a row asserts
+something is blocked, add a **control row** proving an unblocked caller reaches
+the same fixture: without it, a responder that never started satisfies every
+assertion in the section.
+
+**A drop is not always a timeout.** An output-chain nft `drop` rejects a
+*local* sender synchronously, so a blocked UDP send fails with `EPERM` rather
+than hanging. Prefer that reading where it is available — an absent reply is
+also what a dead fixture looks like; `EPERM` is not. Conversely
+connection-*refused* means the packet arrived and nothing was listening, which
+is a broken fixture reporting itself as a working filter, and must never count
+as blocked.
+
+**Iterate under enforcing, never permissive**, and assert on `audit.log`
+directly rather than on functional success — a silent denial leaves the feature
+working and the counters reconciling. `ausearch -ts boot` is unreliable on at
+least one host here; grep the log.
+
 ## broker_rig.py — does a guest get a key it never holds, and can two brokers tell each other's callers apart?
 
 Needs root, KVM and the workloadctl RPM installed. Boots **two** throwaway VM
