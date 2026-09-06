@@ -140,6 +140,17 @@ origin and never written to, making the origin's reachability a prerequisite
 for a request that goes to loopback. None is visible without a real packet
 ([[unit-gates-dont-see-the-seam]]). See `workloadctl/tests/manual/README.md`.
 
+**The container shape is proven too, and it cost a sixth fix of the same
+kind.** `container_egress_rig.py` grew a broker arm -- 19/19 inside a 123/123
+run on a bare-metal host under enforcing on 2026-09-06, ending in a real
+request that left a container holding a placeholder and reached the provider
+carrying the sealed key. The defect it found was that NOTHING STARTED THE
+BROKER: the unit was generated, ordered ahead of the right unit, given its
+`IPAddressAllow=` and its internal-set exemption, and pulled in by nothing.
+`Before=` orders a unit; it does not start one. Forty-five unit rows passed
+with it in place because each of them reads the broker unit's own text and the
+missing half lived in a different unit.
+
 ## Docs policy: tracked files may not cite untracked docs
 
 A citation has to be followable from a clean checkout. `workloadctl/docs/wip/` is gitignored, so nothing tracked may point into it — and don't cite a doc you intend to write later; write it, or state the fact inline instead. `workloadctl/tests/test_doc_citations.py` enforces this repo-wide (every `*.md` reference in every tracked file must resolve to a tracked file) and runs in the normal `just test`.
