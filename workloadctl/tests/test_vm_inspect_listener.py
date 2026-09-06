@@ -3248,20 +3248,28 @@ class TestCallerIdentity(unittest.TestCase):
     and yields nothing on a listener bound to an address.
     """
 
-    def _handled(self, mod, caller_uid):
+    # The listener admits a caller whose uid equals its OWN, so every case here
+    # is relative to that uid -- and it must not be the uid running the tests.
+    # A root runner makes the listener's own uid 0, which turns "root is
+    # refused" into "the workload's own uid is admitted": green while measuring
+    # the opposite. Pinned to a synthetic workload uid instead.
+    OWN_UID = 10007
+
+    def _handled(self, mod, caller_uid, own_uid=OWN_UID):
         """Drive one connection with the caller lookup answering `caller_uid`."""
         local = ("198.18.0.1", VM_INSPECT_PORT_CLEARTEXT)
         out = io.StringIO()
         listener = mod.Listener([_listener_with(local)], out)
         conn = _mock_conn()
-        with unittest.mock.patch.object(mod, "peer_uid",
-                                        return_value=caller_uid):
+        with unittest.mock.patch("os.getuid", return_value=own_uid), \
+                unittest.mock.patch.object(mod, "peer_uid",
+                                           return_value=caller_uid):
             listener._handle(conn, ("192.0.2.1", 1024), _listener_with(local))
         return listener, conn, out.getvalue()
 
     def test_a_foreign_uid_is_refused_and_counted(self):
         mod = _mod()
-        listener, conn, log = self._handled(mod, os.getuid() + 1)
+        listener, conn, log = self._handled(mod, self.OWN_UID + 1)
         self.assertIn(mod.DROP_FOREIGN_CALLER, log)
         self.assertIn("rejected", log)
         conn.close.assert_called()
@@ -3272,7 +3280,7 @@ class TestCallerIdentity(unittest.TestCase):
     def test_the_workloads_own_uid_is_admitted(self):
         """The listener runs as _wl-<name>, so its own uid IS the workload's."""
         mod = _mod()
-        listener, _conn, log = self._handled(mod, os.getuid())
+        listener, _conn, log = self._handled(mod, self.OWN_UID)
         self.assertNotIn(mod.DROP_FOREIGN_CALLER, log)
         self.assertEqual(
             listener.status()["drop_reasons"][mod.DROP_FOREIGN_CALLER], 0)
@@ -3320,8 +3328,9 @@ class TestCallerIdentity(unittest.TestCase):
         local = ("198.18.0.1", VM_INSPECT_PORT_CLEARTEXT)
         out = io.StringIO()
         listener = mod.Listener([_listener_with(local)], out, limit=0)
-        with unittest.mock.patch.object(mod, "peer_uid",
-                                        return_value=os.getuid() + 1):
+        with unittest.mock.patch("os.getuid", return_value=self.OWN_UID), \
+                unittest.mock.patch.object(mod, "peer_uid",
+                                           return_value=self.OWN_UID + 1):
             listener._handle(_mock_conn(), ("192.0.2.1", 1024),
                              _listener_with(local))
         snap = listener.status()
