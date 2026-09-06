@@ -26,7 +26,7 @@ import struct
 from dataclasses import dataclass, field
 
 from vm import NFT_BIN, NFT_TABLE, vm_nflog_group, vm_uses_inspect
-from workload_lib import UID_MIN
+from workload_lib import UID_MIN, container_uses_inspect
 
 
 # --- what a vantage is ---
@@ -94,6 +94,31 @@ QEMU_MAXLEN_UNLIMITED = 65536
 LOSS_NOTE = ("nflog can drop under load and does not report it; the rule "
              "counters are summed and compared against the file on stop")
 
+# G10. What the host vantage means for an INSPECTED workload, on either
+# substrate -- ONE string, deliberately, because the mechanism is one
+# mechanism. The capture chain renders at `filter output priority filter - 10`
+# and the redirect is a nat `output` hook at dstnat (-100), so for locally
+# originated traffic the DNAT has always already happened by the time the
+# capture sees the packet. That is true of a guest's flow re-originated by
+# passt and of a container's re-originated by pasta alike: both leave as host
+# sockets owned by the workload uid, and both are redirected before the log
+# rule runs.
+#
+# It is worded once because two copies would drift, and this is the ONE PLACE
+# an operator is told what the vantage means. Nothing else fails when it is
+# wrong -- the capture still runs, the file still fills, every packet in it is
+# real -- so a wrong sentence here is not caught by anything downstream. It
+# stood wrong for containers from the moment they gained an inspector, which
+# is the whole of bug G10.
+INSPECTED_HOST_VANTAGE = (
+    "this workload's HTTP and HTTPS as REDIRECTED, not as it leaves this "
+    "machine: the capture hook runs after dstnat, so every 80/443 flow "
+    "carries the inspector's address as its destination and the host the "
+    "workload asked for appears only in the TLS SNI or the HTTP request "
+    "line, both inside the snaplen. Each packet also appears twice, once "
+    "per hook, because the redirect lands back on this same machine. ")
+
+
 
 @dataclass
 class Vantage:
@@ -126,13 +151,6 @@ def pcap_vantages(config) -> list[Vantage]:
         # asked for. Saying "as it leaves this machine" there is not a rounding
         # error -- it is the one place an operator is told what the vantage
         # means, and nothing else fails when it is wrong.
-        # G10 in the container egress-parity build spec: VM-only by
-        # construction -- this whole branch is inside `if config.is_vm:`.
-        # The container vantage prose below (mode == "host"/"none"/pasta)
-        # doesn't yet distinguish an inspected container from an
-        # unfiltered one; that needs its own redirected-vantage wording
-        # once the container proxy exists (P1-7..P1-9), not a predicate
-        # swap here.
         inspected = vm_uses_inspect(config.config)
         return [
             Vantage(
@@ -141,13 +159,8 @@ def pcap_vantages(config) -> list[Vantage]:
                  "re-originated it onto host sockets owned by this "
                  "workload. " + LOSS_NOTE)
                 if not bridged and not inspected else
-                ("this workload's HTTP and HTTPS as REDIRECTED, not as it "
-                 "leaves this machine: the capture hook runs after dstnat, so "
-                 "every 80/443 flow carries the inspector's address as its "
-                 "destination and the host the guest asked for appears only "
-                 "in the TLS SNI or the HTTP request line, both inside the "
-                 "snaplen. Everything else is post-passt as usual. Each "
-                 "packet also appears twice, once per hook. " + LOSS_NOTE)
+                (INSPECTED_HOST_VANTAGE
+                 + "Everything else is post-passt as usual. " + LOSS_NOTE)
                 if not bridged else
                 f"unavailable: [vm.network].bridge = {config.vm_bridge!r}, so "
                 f"the guest sends from its own LAN address and no host socket "
@@ -188,11 +201,21 @@ def pcap_vantages(config) -> list[Vantage]:
                     "unavailable: [network] mode = \"none\" — the namespace "
                     "exists but holds only a loopback"),
         ]
+    # G10, routed. `mode = "host"` and `mode = "none"` are handled above and
+    # neither can be inspected -- host mode is refused the combination outright
+    # (container_uses_inspect returns False for it), and a workload that
+    # originates no host sockets has no host vantage to describe -- so this,
+    # the pasta default, is the only container branch where the distinction
+    # exists.
+    inspected = container_uses_inspect(config.config)
     return [
         Vantage(VANTAGE_HOST, True,
-                "the traffic as it leaves this machine, after pasta "
-                "re-originated it onto host sockets owned by this workload. "
-                + LOSS_NOTE,
+                ("the traffic as it leaves this machine, after pasta "
+                 "re-originated it onto host sockets owned by this workload. "
+                 + LOSS_NOTE)
+                if not inspected else
+                (INSPECTED_HOST_VANTAGE
+                 + "Everything else is post-pasta as usual. " + LOSS_NOTE),
                 supports_filter=False),
         Vantage(VANTAGE_GUEST, True,
                 "what the workload put on the wire inside its own network "

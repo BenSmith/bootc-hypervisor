@@ -25,7 +25,8 @@ from pcap import (
     log_rule_handles, pcap_delete_command, pcap_first_timestamp,
     pcap_input_rule, pcap_output_rule, pcap_packet_count, pcap_rule_commands,
     pcap_shift_timestamps, pcap_unit_name,
-    pcap_vantages, render_plan, systemd_run_argv, tcpdump_argv,
+    INSPECTED_HOST_VANTAGE, pcap_vantages, render_plan, systemd_run_argv,
+    tcpdump_argv,
     validate_request,
 )
 
@@ -46,13 +47,20 @@ def vm_config(name="fj", uid=10003, bridge=None, egress=None):
 
 
 def container_config(name="web", uid=10004, mode="pasta", containers=None,
-                     topology=None):
+                     topology=None, hosts=None):
     """`mode` is the [network] mode; `topology` is workload.mode
-    (single|pod|bridge), which is what decides namespace sharing."""
+    (single|pod|bridge), which is what decides namespace sharing.
+
+    `hosts` is a [network].hosts allowlist, which is one of the three triggers
+    that make a container inspected -- and inspection is what decides whether
+    the host vantage shows a redirect (G10)."""
     names = containers or [name]
+    net = {"mode": mode}
+    if hosts is not None:
+        net["hosts"] = list(hosts)
     return SimpleNamespace(
         name=name, uid=uid, is_vm=False, vm_bridge=None, vm_network={},
-        config={"network": {"mode": mode}},
+        config={"network": net},
         get_network_mode=lambda: mode,
         mode=topology or ("single" if names == [name] else "pod"),
         container_names=lambda: names,
@@ -126,6 +134,54 @@ class TestVantages(unittest.TestCase):
         vantages = {v.name: v
                     for v in pcap_vantages(container_config(mode="host"))}
         self.assertIn("ONLY", vantages[VANTAGE_HOST].detail)
+
+    def test_an_inspected_container_is_told_the_capture_shows_a_redirect(self):
+        """G10, and the same claim that died for VMs when the inspector landed.
+
+        The mechanism is not substrate-specific: the capture chain is at
+        `filter output priority filter - 10` and the redirect is a nat output
+        hook at dstnat (-100), so for anything locally originated the DNAT has
+        already happened. A container's flow re-originated by pasta leaves as a
+        host socket owned by the workload uid exactly as a guest's does via
+        passt, so it is redirected before the log rule runs and every 80/443
+        packet in the file carries the inspector's address.
+
+        Nothing downstream fails when this is wrong -- the capture runs, the
+        file fills, every packet in it is real -- so the operator simply
+        misreads it. That is why it is a gate and not a comment.
+        """
+        host = {v.name: v for v in pcap_vantages(
+            container_config(hosts=["api.example.com"]))}[VANTAGE_HOST]
+        self.assertTrue(host.available)
+        self.assertIn("REDIRECTED", host.detail)
+        self.assertIn("SNI", host.detail)
+        self.assertNotIn("the traffic as it leaves this machine, after pasta",
+                         host.detail)
+
+    def test_an_uninspected_container_keeps_the_original_promise(self):
+        """The positive control. A container with no [network] trigger really
+        does put its traffic on the wire as the old wording says, and replacing
+        that with a warning about a redirect that does not happen would be the
+        same defect pointed the other way."""
+        host = {v.name: v
+                for v in pcap_vantages(container_config())}[VANTAGE_HOST]
+        self.assertIn("as it leaves this machine, after pasta", host.detail)
+        self.assertNotIn("REDIRECTED", host.detail)
+
+    def test_both_substrates_explain_the_redirect_with_the_SAME_words(self):
+        """One mechanism, one string (INSPECTED_HOST_VANTAGE).
+
+        Two copies would drift, and the drift would be invisible: each side
+        reads fine on its own, and the substrate an operator does not use is
+        the one whose wording goes stale. This is how G10 happened in the
+        first place -- the VM branch was corrected and the container prose,
+        which had no inspector when it was written, was left behind.
+        """
+        vm_host = {v.name: v for v in pcap_vantages(vm_config())}[VANTAGE_HOST]
+        c_host = {v.name: v for v in pcap_vantages(
+            container_config(hosts=["api.example.com"]))}[VANTAGE_HOST]
+        self.assertIn(INSPECTED_HOST_VANTAGE, vm_host.detail)
+        self.assertIn(INSPECTED_HOST_VANTAGE, c_host.detail)
 
     def test_mode_none_offers_nothing(self):
         self.assertEqual(available_vantages(container_config(mode="none")), [])
