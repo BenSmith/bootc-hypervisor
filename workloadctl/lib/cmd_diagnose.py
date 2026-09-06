@@ -19,6 +19,8 @@ import sys
 import time
 
 from workload_lib import (
+    ContainerAllowEntry,
+    container_allow_entries, container_allow_resolve,
     container_effective_tls_mode,
     container_uses_inspect,
     derived_subid_range,
@@ -77,6 +79,7 @@ from vm import (
     VM_RESOLVE_PORT, vm_resolve_address, vm_resolve_policy_path,
     vm_uses_resolve,
     vm_broker_hosts,
+    parse_vm_allow, vm_allow_resolve,
 )
 from vm_mint import pem_fingerprint
 from vm_status import OTHER_KEY
@@ -1184,6 +1187,149 @@ def vm_egress_check(config) -> tuple[str, bool, str] | None:
     return ("vm_egress", True,
             f"egress filtered on uid {uid} with {len(allowed)} allow "
             f"entr{'y' if len(allowed) == 1 else 'ies'}{tail}")
+
+
+def allow_drift_check(config) -> tuple[str, bool, str] | None:
+    """Does every NAMED `allow` entry still resolve to what was armed for it?
+
+    THE ONE PROPERTY IN THE ALLOW PATH THAT NOTHING ELSE WATCHES. An entry that
+    names a host is resolved exactly ONCE -- in the filter helper's `up`, by
+    container_allow_resolve or vm_allow_resolve -- and what goes into nftables
+    is a literal address. Nothing re-resolves it afterwards. When the name's
+    answer changes underneath (a redeployment, a failover, a lease, a
+    round-robin that was never stable) the workload dials an address no element
+    authorises, the packet falls past every accept to the default deny, and it
+    is counted on a drop counter SHARED with every other filtered workload on
+    the host.
+
+    The disposition is right. Its legibility was not, and that is what this
+    check exists for. Measured on hardware 2026-09-06, with
+    container_egress_rig.py's rotation row: after the name behind a live
+    `allow` entry was pointed at a second origin, `diagnose`, `doctor` and
+    `validate` between them named neither the stale address nor the entry that
+    pinned it; `egress` had no record at all, because the inspector is not in
+    this path and never sees the connection; and the whole operator-visible
+    symptom was a dial that used to work. There was no route from that symptom
+    to this cause.
+
+    BOTH SUBSTRATES, and the VM is not the safer one. A VM has a synthesising
+    resolver, so a guest's view of an INSPECTED hostname stays current -- but
+    `allow` is the path that bypasses the inspector entirely, and its element
+    is pinned there exactly as it is here. The only substrate difference is
+    which parser reads the entries.
+
+    A FAILURE, not a warning: an entry that no longer resolves to what is armed
+    is not a preference, it is a workload that cannot reach a destination its
+    own config says it may.
+
+    UNRESOLVABLE IS REPORTED SEPARATELY from drifted, because the remedies
+    differ and a restart is right for only one of them. `up` is not tolerant of
+    an unresolvable name -- it fails the start -- so a name that has stopped
+    resolving since is a workload whose NEXT restart will not come back, and
+    saying "restart it" there would be advice to break it.
+    """
+    if not _uses_inspect(config):
+        return None
+    try:
+        uid = config.uid
+    except Exception:
+        return None                      # no user yet; check 1 reports it
+
+    if config.is_vm:
+        section, net = "vm.network", (config.vm_network or {})
+        entries = []
+        for item in (net.get("allow") or []):
+            try:
+                entries.append(parse_vm_allow(item))
+            except Exception:            # noqa: BLE001
+                continue                 # `validate` owns malformed entries
+        named = [(e.host, e.port) for e in entries if e.host and e.port]
+        resolve = vm_allow_resolve
+    else:
+        section = "network"
+        net = config.config.get("network", {})
+        if not isinstance(net, dict):
+            net = {}
+        named = [(e.host, e.port) for e in container_allow_entries(net)
+                 if e.host and e.port]
+
+        def resolve(host):
+            return container_allow_resolve(
+                ContainerAllowEntry(host=host, address=None, port=None,
+                                    reason=None))
+
+    if not named:
+        return None                      # nothing that CAN drift
+
+    table = NFT_TABLE.split()
+    armed: set[tuple[str, str]] = set()
+    for set_name in (NFT_SET_ALLOW4, NFT_SET_ALLOW6):
+        payload = _nft_json("list", "set", *table, set_name)
+        if payload is None:
+            continue
+        for elem in vm_owned_elements(uid, nft_set_elements(payload)):
+            parts = [part.strip() for part in elem.split(" . ")]
+            if len(parts) == 3:
+                armed.add((parts[1], parts[2]))
+
+    listed = ", ".join(f"{host}:{port}" for host, port in named)
+    if not armed:
+        return ("allow_drift", False,
+                f"[{section}].allow names {len(named)} host-based "
+                f"entr{'y' if len(named) == 1 else 'ies'} ({listed}) but uid "
+                f"{uid} owns no element in {NFT_SET_ALLOW4} or "
+                f"{NFT_SET_ALLOW6} — none of them is authorised, and a dial to "
+                f"any of them is dropped on the shared counter with nothing "
+                f"naming the entry. Re-arm: "
+                f"systemctl restart workload-{config.name}.service")
+
+    drifted, unresolvable = [], []
+    for host, port in named:
+        try:
+            current = {str(addr) for addr in resolve(host)}
+        except Exception as exc:         # noqa: BLE001
+            unresolvable.append(f"{host}:{port} ({exc})")
+            continue
+        pinned = {addr for addr, elem_port in armed if elem_port == str(port)}
+        # NO ELEMENT FOR THIS ENTRY'S PORT IS NOT "no drift". An earlier
+        # version skipped this case on the grounds that the empty-`armed`
+        # branch above covers it -- and it does not, because a workload with
+        # two allow entries and one armed element has a non-empty `armed`.
+        # That entry is simply unauthorised, and skipping it reported the
+        # workload as clean. Caught by the unit test that arms the same address
+        # on a DIFFERENT port; nothing on hardware would have shown it, because
+        # the symptom is identical to drift.
+        if not pinned:
+            drifted.append(f"{host}:{port} has no element armed for it at all")
+        elif not (pinned & current):
+            drifted.append(
+                f"{host}:{port} is armed as {'/'.join(sorted(pinned))} but now "
+                f"resolves to {'/'.join(sorted(current))}")
+
+    if drifted:
+        return ("allow_drift", False,
+                f"[{section}].allow is pinned to its ARM-TIME resolution and "
+                f"{len(drifted)} entr{'y is' if len(drifted) == 1 else 'ies are'} "
+                f"not authorised as written: {'; '.join(drifted)}. A dial to an "
+                f"address no element names matches nothing, falls through to "
+                f"the default deny, and is counted on a host-wide drop counter "
+                f"that names neither the workload nor the entry. Re-arm to "
+                f"re-resolve: "
+                f"systemctl restart workload-{config.name}.service")
+    if unresolvable:
+        return ("allow_drift", False,
+                f"[{section}].allow names "
+                f"{len(unresolvable)} host{'' if len(unresolvable) == 1 else 's'} "
+                f"that no longer resolve on this host: {'; '.join(unresolvable)}. "
+                f"The armed elements still work, so nothing is broken yet — but "
+                f"arming is not tolerant of an unresolvable name, so the next "
+                f"restart of this workload will FAIL to start. Fix the name or "
+                f"the resolver before restarting it")
+    return ("allow_drift", True,
+            f"{len(named)} host-based [{section}].allow "
+            f"entr{'y' if len(named) == 1 else 'ies'} still "
+            f"resolve{'s' if len(named) == 1 else ''} to what is armed "
+            f"({listed})")
 
 
 def capture_check(config, *, unit_active=PROBE, log_rules=PROBE
@@ -3021,6 +3167,15 @@ def collect_diagnose_checks(config, manager: WorkloadManager):
         resolve_result = vm_resolve_check(config)
         if resolve_result:
             _check(*resolve_result)
+
+    # Not gated on is_vm either, and for the same reason G7 is not: the
+    # pinning it reports is a property of the nft element, which both
+    # substrates arm identically. Placed after the resolver's line because on a
+    # VM the two are read together -- the resolver keeps an INSPECTED name
+    # current, and this is the path that has no such thing.
+    drift_result = allow_drift_check(config)
+    if drift_result:
+        _check(*drift_result)
 
     # Not gated on is_vm: the host-side vantage works on every substrate,
     # because `meta skuid` does not care what produced the socket.

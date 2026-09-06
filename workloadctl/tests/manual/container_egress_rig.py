@@ -42,16 +42,32 @@ WHAT IT MEASURES, and the failure each row exists to catch:
      `check_cross_workload_gap` for why it is a gap rather than a failure and
      what has to be decided before it becomes an assertion.
 
-WHAT IT DOES NOT MEASURE, deliberately:
+  9. THE THREE ROWS THAT WERE DEFERRED FOR WANTING ANOTHER HOST, and two of
+     them never did. Each is built from a fixture this rig now stands up and
+     tears down itself:
 
-  * IPv6. A v6 egress probe on a host with no global v6 address dies at the
-    routing lookup, BEFORE nftables sees it, so the row passes having tested
-    nothing. Run it somewhere with v6 or record it as untested; do not let a
-    v4-only host's green stand in for it.
-  * A non-80/443 [[network.allow]] entry whose address changes after arming.
-    Needs a real non-80/443 upstream and a mid-run address change.
-  * `ca_delivery = "env"` on an image with an embedded root store. Needs a
-    non-glibc-ish base image whose client ignores the five CA variables.
+       * IPv6 (check_ipv6). The old note said a v6 probe needs an uplink or it
+         dies at the routing lookup having tested nothing. True of a probe at
+         a public v6 address, and beside the point: what the row needs is a v6
+         destination the kernel will ROUTE, and a ULA on a dummy link is one.
+         An uplink would have added an ISP to the measurement, not removed a
+         doubt from it. Runs anywhere now.
+       * The [[network.allow]] address rotation (check_allow_rotation). Needed
+         "a real non-80/443 upstream and a mid-run address change" -- which is
+         two stub origins with different bodies and one line in /etc/hosts.
+       * `ca_delivery = "env"` against an embedded root store
+         (check_embedded_root_store). The one that genuinely needed something
+         absent, and what was absent was an IMAGE, so it is a pull. A JDK: the
+         five CA variables workloadctl delivers include NODE_EXTRA_CA_CERTS,
+         so the obvious Node example proves the opposite of the row, and Go
+         reads SSL_CERT_FILE. A JVM reads none of them.
+
+WHAT IT STILL DOES NOT MEASURE:
+
+  * A GLOBAL-SCOPE v6 destination. The redirect map keys on `tcp dport` alone,
+    so translation is scope-blind and the ULA result carries -- but that is a
+    reading of workload-proxy.nft, not a measurement, and it is the one claim
+    here that would still be worth a v6-capable host.
 
 RUNNING IT
 
@@ -71,14 +87,26 @@ target fails identically to a working internal-destination drop.
 
     sudo CEG_LAN_HOST=192.168.0.10 python3 tests/manual/container_egress_rig.py
 
-Last green 2026-09-05, 40/40 on a bare-metal Fedora 44 host under enforcing.
-Getting there took five product fixes and four rig fixes, and the split is
-worth knowing before reading a failure here: the product defects were all on
-the `recreate` path -- the one the schema reference tells operators to use --
-and every one of them presented as a HANG or as a misreport rather than as an
-error. The rig defects were all in how a probe's result was READ (wget's exit
-status taken from the wrong end of a pipe, a timeout raised instead of
-recorded, a capture verb invoked in its blocking form). Both classes look
+Last green 2026-09-06, 78/78 on a bare-metal Fedora 44 host under enforcing.
+Getting there took seven product fixes and eight rig fixes, and the split is
+worth knowing before reading a failure here.
+
+The five product defects of the first pass were all on the `recreate` path --
+the one the schema reference tells operators to use -- and every one of them
+presented as a HANG or as a misreport rather than as an error. The two the
+three rows in (9) added are a different kind: both are LEGIBILITY defects, and
+every functional assertion around each of them was green. A stale
+`[[network.allow]]` address was refused correctly and named by nothing; a
+client that refused the minted leaf was refused correctly and told to apply a
+remedy it does not have. Neither is visible to a test that asks whether the
+right thing happened -- only to one that asks what an operator would be told.
+
+The rig defects were all in how a probe's result was READ: wget's exit status
+taken from the wrong end of a pipe, a timeout raised instead of recorded, a
+capture verb invoked in its blocking form, an origin on a dummy link that every
+`oif lo` accept admitted regardless of policy, a probe that measured a DNS
+cache and reported it as an arm-time pin, and an address with a `g` in it that
+`ip` rejected and this rig reported as "nothing could bind". Both classes look
 identical in the output. When a row here fails, check what the probe measured
 before believing what it says.
 """
@@ -86,8 +114,10 @@ before believing what it says.
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -124,6 +154,84 @@ LAN_HOST = os.environ.get("CEG_LAN_HOST")
 # that stopped validating, and the arm most likely to break is the one most
 # hosts skip. The runtime section still skips; only the text is unconditional.
 LAN_HOST_IN_CONFIG = LAN_HOST or "10.99.99.1"
+
+# --- The three rows that need host fixtures rather than an uplink -----------
+#
+# Each of these was deferred on the grounds that it "needs a host this one is
+# not". Two of the three did not: what the IPv6 row needs is a v6 destination
+# the kernel will ROUTE, which a ULA on a dummy link supplies without any
+# uplink at all, and what the rotation row needs is a name whose answer changes
+# under it, which /etc/hosts supplies. Only the embedded-root-store row needed
+# something genuinely absent, and that was an IMAGE, which is a pull.
+#
+# The fixture is a veth pair with the origins in a NETWORK NAMESPACE, and the
+# namespace is the load-bearing part rather than a tidiness measure. The first
+# version of this put the addresses on a dummy link, which made every one of
+# them LOCAL -- and `workload-filter.nft`'s output chain accepts a filtered
+# uid's traffic unconditionally when `oif lo`, because loopback is the
+# workload's own control plane (exec, the DNS forward) and not egress. A
+# local origin is therefore reached whether or not any element authorises it,
+# so the rotation row would have passed its dial and proved nothing about the
+# pin. Behind a veth the origins are off-box as far as the routing table is
+# concerned, and the allow element is the only thing that can admit them.
+#
+# Created rather than borrowed: an address on a real interface would make these
+# rows depend on the operator's LAN, which is the coupling CEG_LAN_HOST already
+# has to apologise for.
+NETNS = "ceg-rig"
+VETH_HOST, VETH_NS = "ceg-rig0", "ceg-rig1"
+HOST_V4, HOST_V6 = "10.99.98.1", "fd00:cec::1"
+
+# The v6 origin. fc00::/7 is in `wl_internal6`, so a ULA destination is an
+# INTERNAL one and this row needs a [[network.internal]] entry to reach it --
+# not incidental, and worth knowing before reading a failure here: it makes the
+# v6 twin of the internal-exemption set load-bearing, which no other row
+# exercises. What it does NOT prove is a global-scope v6 destination; the
+# redirect map keys on `tcp dport` alone (workload-proxy.nft), so translation
+# is scope-blind, but that is a reading of the rule and not a measurement.
+# `fd00:cec::`, not `fd00:ceg::`: `g` is not a hexadecimal digit, and `ip`
+# rejects the address with "inet6 prefix is expected" -- which this rig then
+# reported as "nothing could bind", three layers from the cause. The first
+# hardware run of the v6 row skipped for exactly this and nothing in the output
+# pointed at a typo.
+V6_ADDR = "fd00:cec::10"
+V6_HOST = "ceg6.test"
+V6_DENIED = "ceg6-denied.test"   # same address, NOT allowlisted; see check_ipv6
+
+# The rotation origins. TWO addresses with DIFFERENT bodies, because the whole
+# question is WHICH one answered: a dial that succeeds against the address the
+# element was armed with and a dial that succeeds against the address the name
+# resolves to now are indistinguishable by success alone.
+ROT_A, ROT_B = "10.99.98.10", "10.99.98.11"
+ROT_BODY_A, ROT_BODY_B = "ORIGIN-A", "ORIGIN-B"
+ROT_HOST = "ceg-rotate.test"
+# NOT 80 or 443. An `[[network.allow]]` entry on a redirected port would be
+# tested through the inspector, and the arm-time pinning this row exists to
+# measure is a property of the nft element, which only carries the un-redirected
+# ports. Choosing 80 here would make the row pass while measuring nothing.
+ROT_PORT = 8888
+
+HOSTS_FILE = Path("/etc/hosts")
+# Every line this rig adds to /etc/hosts carries this, and cleanup removes by
+# it rather than by restoring a saved copy: a saved copy loses whatever else
+# edited the file while the rig ran, on a host that is not ours to be careless
+# with.
+HOSTS_TAG = "# ceg-rig"
+
+# The embedded-root-store workload (R9). A JDK, because the five CA variables
+# workloadctl delivers (VM_CA_ENV_VARS, lib/vm.py) are read by OpenSSL, Node,
+# python-requests, git and pip -- and NODE_EXTRA_CA_CERTS is one of them, so the
+# obvious "Node ignores SSL_CERT_FILE" example is exactly wrong here. A JVM
+# reads none of the five: its trust store is `cacerts` inside the image, and
+# there is no environment variable that adds to it. That is the shape this row
+# exists to catch, and it is the shape an operator hits without warning.
+NODE_WL = "ceg-jvm"
+NODE_IMAGE = "docker.io/library/eclipse-temurin:21-jdk-alpine"
+# A second allowlisted name so the workload can KEEP a policy entry -- and
+# therefore stay rung 3, with `ca_delivery` still required -- while the host
+# under test is exempted from inspection. Splicing the only policy host would
+# drop the workload to rung 2 and prove the remedy by removing the feature.
+NODE_OTHER = "example.org"
 
 WORKLOAD_DIR = Path("/etc/workloads.d")
 RECORD_ROOT = Path("/var/log/workloadctl/egress")
@@ -162,6 +270,12 @@ class Arm:
     # [[containers]], which puts each container in its OWN netns reached
     # through an auto-created workload-<name>-net rather than pasta. P1-9.
     topology: str = "single"
+    # The three host-fixture rows, each of which needs a [network] shape the
+    # rung/topology axes cannot express. Dispatched in toml_for, so every one
+    # of them stays on the path tests/test_manual_rig_configs.py validates --
+    # these are the shapes MOST likely to rot, because they are the ones a
+    # normal run on a normal host never writes.
+    variant: str = ""
 
 
 # Every SHAPE this rig writes, so tests/test_manual_rig_configs.py validates
@@ -181,10 +295,19 @@ ARMS = (
     Arm(OPEN, 1),
     Arm(BRIDGE, 1, topology="bridge"),
     Arm(BRIDGE, 3, topology="bridge"),
+    Arm(FILTERED, 2, variant="v6"),
+    Arm(FILTERED, 2, variant="rotate"),
+    Arm(NODE_WL, 1, variant="node-rung1"),
+    Arm(NODE_WL, 3, variant="node"),
+    Arm(NODE_WL, 3, variant="node-spliced"),
 )
 
 results = []
 gaps = []
+
+# Scratch for the throwaway TLS material the v6 origin serves. Made in
+# preflight so a failure to create it is a startup error rather than a row.
+FIXTURE_DIR = Path(tempfile.mkdtemp(prefix="ceg-fixtures-"))
 
 
 def record(label, ok, detail=""):
@@ -269,7 +392,7 @@ def dial_as_root(host, port, timeout=20):
     return (p.stdout + p.stderr).strip().replace("\n", " ")
 
 
-def fetch(name, url, timeout=60):
+def fetch(name, url, timeout=60, extra=""):
     """One request from inside the container, as (seconds, ok, detail).
 
     `ok` IS WGET'S OWN EXIT STATUS, and getting that right took a rewrite.
@@ -291,7 +414,7 @@ def fetch(name, url, timeout=60):
         # its detail -- the assertion was right and the evidence beside it was
         # from a different request, which is worse than no detail.
         f": > /tmp/ceg-body; : > /tmp/ceg-err; "
-        f"if wget -q -O /tmp/ceg-body -T 15 {url!r} 2>/tmp/ceg-err; "
+        f"if wget -q {extra} -O /tmp/ceg-body -T 15 {url!r} 2>/tmp/ceg-err; "
         f"then echo '[OK]'; else echo '[NO]'; fi; "
         f"head -c 110 /tmp/ceg-body 2>/dev/null; echo; "
         f"head -c 110 /tmp/ceg-err 2>/dev/null"
@@ -315,6 +438,8 @@ def toml_for(arm):
     the text rather than the parsed document, because the parsed document is
     where the mistake becomes invisible.
     """
+    if arm.variant:
+        return _variant_toml(arm)
     if arm.topology == "bridge":
         return _bridge_toml(arm)
 
@@ -428,6 +553,112 @@ def _bridge_toml(arm):
     return "\n".join(lines) + "\n"
 
 
+def _variant_toml(arm):
+    """The [network] shapes for the three host-fixture rows.
+
+    REACHED THROUGH toml_for for _bridge_toml's reason: the gate in
+    tests/test_manual_rig_configs.py selects this file on the text
+    `def toml_for(` and then calls `toml_for(arm)` once per ARMS entry, so a
+    generator it cannot reach is the one shape in the file nothing validates.
+    These three are the shapes that most need it -- an ordinary run on an
+    ordinary host writes none of them, so a schema change would break them
+    silently and the breakage would surface weeks later, on hardware, looking
+    exactly like the product defect the row was written to find.
+    """
+    head = [
+        f"# {arm.name} -- generated by container_egress_rig.py ({arm.variant}).",
+        "# Throwaway; safe to purge.",
+        "[workload]",
+        f'name = "{arm.name}"',
+        "enabled = false",
+        "",
+        "[container]",
+        f'image = "{NODE_IMAGE if arm.name == NODE_WL else IMAGE}"',
+        'command = ["sleep", "infinity"]',
+    ]
+
+    if arm.variant == "v6":
+        # Rung 2 deliberately: `hosts` alone splices, so this row needs no CA
+        # and no trust store in the container, and what it measures -- whether
+        # a v6 dial to 80/443 is TRANSLATED -- is unaffected by which of the two
+        # tls postures the inspector then takes. Adding a policy entry would
+        # put an image's trust store in the path of an IPv6 measurement.
+        #
+        # V6_DENIED is deliberately NOT in `hosts`. It resolves to the same
+        # address, which is the whole trick: a refusal for it can only have
+        # come from the inspector reading the name, so it is the one probe that
+        # tells "the v6 packet reached the inspector" apart from "the v6 packet
+        # went somewhere and something answered".
+        return "\n".join(head + [
+            "",
+            "[network]",
+            'mode = "pasta"',
+            f'hosts = ["{V6_HOST}"]',
+            "",
+            "[[network.internal]]",
+            f'host   = "{V6_HOST}"',
+            'reason = "the rig v6 origin is a ULA, and fc00::/7 is in '
+            'wl_internal6 -- without this the inspector is barred from the '
+            'address the row measures"',
+        ]) + "\n"
+
+    if arm.variant == "rotate":
+        # `hosts` AND an allow entry. The allow entry alone would be a trigger,
+        # but the workload also needs a redirected path so a failure here can
+        # be told apart from a workload that armed nothing at all.
+        return "\n".join(head + [
+            "",
+            "[network]",
+            'mode = "pasta"',
+            f'hosts = ["{ALLOWED}"]',
+            "",
+            "[[network.allow]]",
+            f'host   = "{ROT_HOST}"',
+            f"port   = {ROT_PORT}",
+            'reason = "rig target for the D7 arm-time-pinning row: this '
+            'address is resolved ONCE, when the element is armed"',
+        ]) + "\n"
+
+    if arm.variant == "node-rung1":
+        # No [network] table at all. The JDK image is ~180MB and the pull is
+        # the WORKLOAD'S OWN TRAFFIC (see deploy()), so it has to happen before
+        # anything is armed or it is dialled at 443, lands on this workload's
+        # own inspector, and is refused because a registry is not in `hosts`.
+        return "\n".join(head) + "\n"
+
+    if arm.variant in ("node", "node-spliced"):
+        policy_host = NODE_OTHER if arm.variant == "node-spliced" else ALLOWED
+        lines = head + [
+            "",
+            "[network]",
+            'mode = "pasta"',
+            f'hosts = ["{ALLOWED}", "{NODE_OTHER}"]',
+            'ca_delivery = "env"',
+            "",
+            "[[network.policy]]",
+            # The policy entry moves to the OTHER host in the spliced arm, so
+            # the workload stays rung 3 -- still inspecting, still owing
+            # `ca_delivery` -- while the host under test is exempted. Splicing
+            # the only policy host would drop it to rung 2 and "prove" the
+            # remedy by deleting the feature.
+            f'host    = "{policy_host}"',
+            'methods = ["GET"]',
+            'paths   = ["/*"]',
+        ]
+        if arm.variant == "node-spliced":
+            lines += [
+                "",
+                "[[network.splice]]",
+                f'host   = "{ALLOWED}"',
+                'reason = "this image carries its own trust store and reads '
+                'none of the five CA variables, so inspection cannot be made '
+                'to work for it -- splice, or change the image"',
+            ]
+        return "\n".join(lines) + "\n"
+
+    raise ValueError(f"unknown arm variant {arm.variant!r}")
+
+
 def _toml_missing_ca_delivery():
     """A rung-3 config with `ca_delivery` omitted. Must be REFUSED.
 
@@ -513,6 +744,182 @@ def audit_since(marker):
 
 def audit_marker():
     return AUDIT_LOG.stat().st_size if AUDIT_LOG.exists() else 0
+
+
+# --- host fixtures -----------------------------------------------------------
+#
+# Everything below builds state on the HOST rather than in a workload, and all
+# of it is torn down in cleanup(). It is the half of these three rows that was
+# mistaken for "needs a different host".
+
+_servers = []          # Popen handles for the stub origins
+_fixtures_up = False   # so cleanup() can be tolerant without being silent
+
+
+def fixtures_up():
+    """A veth into a namespace holding every origin address, v4 and v6.
+
+    See NETNS above for why the origins may not be host-local. The v6 half also
+    settles the question that kept the IPv6 row unrun: it needs no uplink,
+    because what it needs is a v6 destination the kernel will ROUTE, and the
+    far side of a veth is one.
+
+    `nodad` on both v6 addresses: duplicate address detection costs a second of
+    silence during which a bind fails with EADDRNOTAVAIL, which presents as the
+    stub origin dying at startup -- one layer away from anything this rig is
+    about, and indistinguishable from it in the output.
+    """
+    global _fixtures_up
+    run(["ip", "netns", "add", NETNS], check=False)
+    run(["ip", "link", "add", VETH_HOST, "type", "veth",
+         "peer", "name", VETH_NS], check=False)
+    if run(["ip", "link", "set", VETH_NS, "netns", NETNS],
+           check=False).returncode != 0:
+        return False
+    run(["ip", "addr", "add", f"{HOST_V4}/24", "dev", VETH_HOST], check=False)
+    run(["ip", "-6", "addr", "add", f"{HOST_V6}/64", "dev", VETH_HOST,
+         "nodad"], check=False)
+    if run(["ip", "link", "set", VETH_HOST, "up"], check=False).returncode != 0:
+        return False
+    for argv in (
+            ["-n", NETNS, "link", "set", "lo", "up"],
+            ["-n", NETNS, "addr", "add", f"{ROT_A}/24", "dev", VETH_NS],
+            ["-n", NETNS, "addr", "add", f"{ROT_B}/24", "dev", VETH_NS],
+            ["-n", NETNS, "-6", "addr", "add", f"{V6_ADDR}/64", "dev", VETH_NS,
+             "nodad"],
+            ["-n", NETNS, "link", "set", VETH_NS, "up"]):
+        run(["ip", *argv], check=False)
+    _fixtures_up = True
+    return True
+
+
+def fixtures_down():
+    # Deleting the namespace takes VETH_NS with it; the host side has to go
+    # separately, and does not vanish on its own if the pair was created but
+    # never moved.
+    run(["ip", "netns", "del", NETNS], check=False)
+    run(["ip", "link", "del", VETH_HOST], check=False)
+
+
+def hosts_write(pairs):
+    """Rewrite this rig's OWN lines in /etc/hosts, leaving everything else.
+
+    Removes by tag rather than restoring a saved copy: a saved copy silently
+    reverts whatever else edited the file while the rig ran, and this runs on a
+    host that is not the rig's to be careless with.
+    """
+    kept = [ln for ln in HOSTS_FILE.read_text().splitlines()
+            if HOSTS_TAG not in ln]
+    kept += [f"{addr}\t{name}\t{HOSTS_TAG}" for addr, name in pairs]
+    HOSTS_FILE.write_text("\n".join(kept) + "\n")
+    # resolved answers /etc/hosts from a cache it does not invalidate quickly
+    # enough for a rotation measured in seconds. Without this the row measures
+    # the cache and reports it as the pinning under test.
+    run(["resolvectl", "flush-caches"], check=False)
+
+
+def hosts_clear():
+    hosts_write([])
+
+
+def serve_origin(bind, port, body, tls_pair=None):
+    """Start one stub origin and wait until it actually accepts a connection.
+
+    Returning as soon as Popen returns races the bind: a probe fired at a
+    socket that is not listening yet fails with connection-refused, which is
+    also what a working drop looks like. Every row here would then be measuring
+    the rig's own startup.
+    """
+    argv = ["ip", "netns", "exec", NETNS,
+            sys.executable, "-B", str(Path(__file__).parent / "stub_origin.py"),
+            bind, str(port), body]
+    if tls_pair:
+        argv += list(tls_pair)
+    proc = subprocess.Popen(argv, stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT, text=True)
+    _servers.append(proc)
+    import socket as _socket
+    family = _socket.AF_INET6 if ":" in bind else _socket.AF_INET
+    deadline = time.time() + 15
+    while time.time() < deadline:
+        if proc.poll() is not None:
+            return False
+        try:
+            with _socket.socket(family, _socket.SOCK_STREAM) as sk:
+                sk.settimeout(1)
+                sk.connect((bind, port))
+            return True
+        except OSError:
+            time.sleep(0.3)
+    return False
+
+
+def stop_origins():
+    for proc in _servers:
+        proc.terminate()
+    for proc in _servers:
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+    _servers.clear()
+
+
+def self_signed(directory):
+    """A throwaway certificate for the v6 TLS origin.
+
+    Self-signed on purpose and it is enough: the row measures whether a v6 dial
+    to 443 is TRANSLATED, and rung 2 SPLICES -- the origin's own certificate
+    reaches the client untouched, so the client is run with verification off
+    and the evidence is the inspector's record rather than the chain.
+    """
+    cert, key = directory / "origin.crt", directory / "origin.key"
+    p = run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
+             "-keyout", str(key), "-out", str(cert), "-days", "1",
+             "-subj", f"/CN={V6_HOST}",
+             "-addext", f"subjectAltName=DNS:{V6_HOST},DNS:{V6_DENIED}"],
+            check=False, timeout=60)
+    return (str(cert), str(key)) if p.returncode == 0 else None
+
+
+def wait_up(ref, why, seconds=180):
+    deadline = time.time() + seconds
+    while time.time() < deadline:
+        q = inside(ref, "echo UP", timeout=30)
+        if q.returncode == 0 and "UP" in q.stdout:
+            return True
+        time.sleep(5)
+    record(why, False, f"{ref} never answered exec")
+    return False
+
+
+def host_resolves(name, expect, tries=10):
+    """Wait until THE HOST resolves `name` to `expect`.
+
+    The host is the right vantage and the only one that matters, because the
+    host is where the resolution that gets PINNED happens: the filter helper
+    runs as root on the host and calls getaddrinfo there. What the container
+    resolves is a separate question the rotation row deliberately no longer
+    depends on -- see check_allow_rotation on why its dials are literals.
+    """
+    for _ in range(tries):
+        p = run(["getent", "ahosts", name], check=False)
+        if expect in p.stdout:
+            return True
+        time.sleep(1)
+    return False
+
+
+def allow_elements(uid):
+    """The addresses currently armed in wl_allow4 for one uid, as text.
+
+    Read from nft rather than recomputed, because the whole question this
+    serves is whether the ARMED value still matches what the name resolves to
+    -- and a rig that derived both sides from one resolution could not tell.
+    """
+    dump = run(["nft", "list", "set", "inet", "workload_filter", "wl_allow4"],
+               check=False).stdout
+    return [ln.strip() for ln in dump.splitlines() if f"{uid} ." in ln]
 
 
 # --- sections ----------------------------------------------------------------
@@ -741,11 +1148,13 @@ def check_reporting():
     """Which commands report a container as inspected -- and which do not, BY
     DESIGN, because that half is what a stale premise gets wrong.
 
-    `egress`, `doctor` and the exporter are routed through the substrate
-    predicate. `rules`, `diagnose`, `drift` and `pcap` are explicitly VM-only
-    pending the container document renderer, so their refusal is the correct
-    behaviour and is asserted as such. A rig that asserted all seven would fail
-    four rows for a decision that was made on purpose.
+    `egress`, `doctor`, the exporter and -- since G7 -- `diagnose` are routed
+    through the substrate predicate. `rules` is explicitly VM-only pending the
+    container document renderer, so its refusal is the correct behaviour and is
+    asserted as such; `drift` and `pcap` are simply unrouted, which is not the
+    same thing as declining, and are measured rather than asserted. See the
+    comment on that loop below: the row this rig was written from called all
+    four "VM-only as though each refuses", and three of them never did.
     """
     say("\n== reporting ==")
     p = cli("egress", FILTERED, "--json", "-n", "1")
@@ -973,6 +1382,421 @@ def check_cross_workload_gap():
             f"{'ANSWERED' if answered else 'no answer'}: {out[:70]}")
 
 
+def check_ipv6():
+    """R5's v6 half: a dial to 80/443 over IPv6 must be TRANSLATED.
+
+    The failure this row exists to catch is not a wrong decision, it is the
+    absence of one: `proxy_dnat` has a v6 rule of its own (`dnat ip6 to ...
+    map @wl_inspect6`) because `dnat` and `dnat ip6` are different translations
+    in the inet family, and a v4-only redirect sends dual-stack traffic out
+    over v6 untranslated. That leaves a workload every report calls filtered
+    reaching v6 destinations with no inspector in the path -- and because the
+    packet then meets the default deny, the operator-visible symptom is a
+    TIMEOUT, which is what everyone attributes to the network.
+
+    WHY THIS CAN RUN ON A HOST WITH NO IPv6 UPLINK, which is the reason it sat
+    unrun for a fortnight. It never needed one. What it needs is a v6
+    destination the kernel will route, and a ULA on a dummy link is exactly
+    that -- the packet is built, the routing lookup succeeds, and it arrives at
+    the nftables hook under test. An uplink would add an ISP to the
+    measurement, not remove a doubt from it.
+
+    THE DISCRIMINATING PROBE IS THE DENIED ONE. A successful v6 fetch proves
+    something answered; it does not prove the inspector was in the path,
+    because an untranslated packet to a reachable origin also succeeds if the
+    workload is not filtered. V6_DENIED resolves to the SAME address and is not
+    in `hosts`, so a refusal for it can only have come from the inspector
+    reading the name -- which is the whole claim.
+    """
+    say("\n== IPv6 (R5), on a ULA behind a veth ==")
+    if not _fixtures_up:
+        skip("the IPv6 redirect", "the fixture namespace could not be built")
+        return
+    certs = self_signed(FIXTURE_DIR)
+    if not certs:
+        skip("the IPv6 redirect", "openssl could not make a throwaway cert")
+        return
+    if not serve_origin(V6_ADDR, 80, "V6-CLEARTEXT"):
+        skip("the IPv6 redirect", f"nothing could bind [{V6_ADDR}]:80")
+        return
+    if not serve_origin(V6_ADDR, 443, "V6-TLS", certs):
+        skip("the IPv6 redirect", f"nothing could bind [{V6_ADDR}]:443")
+        return
+    hosts_write([(V6_ADDR, V6_HOST), (V6_ADDR, V6_DENIED)])
+
+    # THE CONTAINER HAS NO IPv6 UNLESS THE HOST LOOKS LIKE IT HAS IPv6.
+    # Measured 2026-09-06: with the origin routable from the host and the
+    # redirect map correctly armed for this uid, every v6 probe still came back
+    # `Network unreachable` -- from the CONTAINER'S own stack, before pasta,
+    # before nftables, before anything this row is about. pasta configures the
+    # guest from the host's own template interface, and a host with no v6
+    # DEFAULT ROUTE gets a guest with no v6 at all.
+    #
+    # So the row adds one, via the fixture veth, at a metric nothing competes
+    # with. On a host with no v6 uplink this displaces nothing; on a host that
+    # HAS one the existing default is more specific by metric and keeps
+    # winning. It is removed in the `finally` below rather than in cleanup(),
+    # because a host that believes it has v6 connectivity makes every other
+    # section's happy-eyeballs client wait for a timeout first.
+    run(["ip", "-6", "route", "add", "default", "via", V6_ADDR,
+         "dev", VETH_HOST, "metric", "4096"], check=False)
+    try:
+        _check_ipv6_body()
+    finally:
+        run(["ip", "-6", "route", "del", "default", "via", V6_ADDR,
+             "dev", VETH_HOST, "metric", "4096"], check=False)
+
+
+def _check_ipv6_body():
+    """The v6 row proper. Split out only so check_ipv6 can guarantee the
+    temporary v6 default route is removed however this returns -- and it
+    returns early in three places."""
+    write_config(FILTERED, toml_for(Arm(FILTERED, 2, variant="v6")))
+    if cli("recreate", FILTERED, timeout=600).returncode != 0:
+        record("recreate onto the v6 arm", False, "recreate failed")
+        return
+    if not wait_up(FILTERED, "the container is back up on the v6 arm"):
+        return
+
+    # Reported before anything is probed, because a container with no v6
+    # address fails every row below with `Network unreachable` -- which is not
+    # a verdict about the redirect and must not be read as one.
+    q = inside(FILTERED, "ip -6 route 2>/dev/null | grep -v '^fe80\\|^unreachable' "
+                         "| head -4")
+    has_v6 = bool(q.stdout.strip())
+    record("the container has an IPv6 route at all, so a v6 probe reaches "
+           "the host's stack", has_v6,
+           " ".join(q.stdout.split())[:90] or
+           "no v6 route inside the container: pasta gives the guest v6 only "
+           "when the host has a v6 default route, so every probe below would "
+           "die in the container's own stack")
+
+    uid = workload_uid(FILTERED)
+    v6map = run(["nft", "list", "map", "inet", "workload_proxy", "wl_inspect6"],
+                check=False).stdout
+    # Read the map, not the rule. The rule is in the shipped skeleton and is
+    # always there; what a v4-only arming bug leaves out is the ELEMENT, and
+    # that is the difference between "the product ships a v6 rule" and "this
+    # workload is redirected on v6".
+    record("the v6 redirect map holds an element for this uid",
+           uid is not None and f"{uid} ." in v6map,
+           f"uid {uid}")
+
+    elapsed, ok, out = fetch(FILTERED, f"http://{V6_HOST}/")
+    record("v6 cleartext (80) round-trips to the v6 origin",
+           ok and "V6-CLEARTEXT" in out, f"{elapsed:.1f}s  {out}")
+    rec = latest_for(FILTERED, V6_HOST)
+    record("and the inspector RECORDED it, so the v6 packet was translated",
+           bool(rec) and rec.get("plane") == "cleartext",
+           json.dumps({k: rec.get(k) for k in ("plane", "mode", "decision")})
+           if rec else "NO RECORD -- the v6 dial went around the inspector")
+
+    # Verification off, deliberately: rung 2 splices, so the certificate that
+    # reaches the client is the throwaway origin's own. The chain is not what
+    # this row measures and checking it would fail the row for the rig's cert.
+    elapsed, ok, out = fetch(FILTERED, f"https://{V6_HOST}/",
+                             extra="--no-check-certificate")
+    record("v6 TLS (443) round-trips to the v6 origin",
+           ok and "V6-TLS" in out, f"{elapsed:.1f}s  {out}")
+    rec = latest_for(FILTERED, V6_HOST)
+    record("and the record shows the SNI was read on the v6 plane",
+           bool(rec) and rec.get("plane") == "tls",
+           json.dumps({k: rec.get(k) for k in ("plane", "mode", "decision")})
+           if rec else "no record")
+
+    # THE ROW'S ACTUAL ASSERTION. Same address, name not allowlisted.
+    elapsed, ok, out = fetch(FILTERED, f"http://{V6_DENIED}/")
+    record("a NON-allowlisted v6 name at the same address is refused",
+           not ok or "V6-CLEARTEXT" not in out, f"{elapsed:.1f}s  {out}")
+    rec = latest_for(FILTERED, V6_DENIED)
+    record("and the refusal came from the inspector, not from the network",
+           bool(rec) and rec.get("decision") == "drop",
+           json.dumps({k: rec.get(k) for k in ("decision", "reason")})
+           if rec else "NO RECORD -- an untranslated v6 packet leaves no trace, "
+                       "which is exactly the failure this row exists to catch")
+
+
+def check_allow_rotation():
+    """D7: an `[[network.allow]]` address is pinned at ARM TIME.
+
+    `container_allow_resolve` runs once, in `workload-container-filter up`, and
+    what it produces is an nft element naming a literal address. Nothing
+    re-resolves it afterwards -- there is no per-workload DNS responder for
+    containers (D7), so unlike a VM there is nothing keeping the address the
+    container DIALS and the address that got ARMED in agreement. When they
+    diverge the packet is not accepted by the allow rule, falls through to the
+    default deny, and is dropped on a counter shared with every other filtered
+    workload on the host.
+
+    So the row has two halves and only the second is in doubt. That the pinning
+    is real is a property to CONFIRM. That the divergence is legible is the
+    property under test -- "fails visibly, not as a silent intermittent drop"
+    is the whole reason this row was written, and an intermittent drop with no
+    surface naming it is indistinguishable from a flaky upstream.
+
+    Measured with TWO origins carrying DIFFERENT bodies rather than one origin
+    moved. Which address answered is the entire question, and a single origin
+    would make "the pin held" and "the rotation never took" the same reading.
+    """
+    say("\n== [[network.allow]] address rotation (D7) ==")
+    if not _fixtures_up:
+        skip("the allow-rotation row", "the fixture namespace could not be built")
+        return
+    if not serve_origin(ROT_A, ROT_PORT, ROT_BODY_A):
+        skip("the allow-rotation row", f"nothing could bind {ROT_A}:{ROT_PORT}")
+        return
+    if not serve_origin(ROT_B, ROT_PORT, ROT_BODY_B):
+        skip("the allow-rotation row", f"nothing could bind {ROT_B}:{ROT_PORT}")
+        return
+
+    hosts_write([(ROT_A, ROT_HOST)])
+    if not host_resolves(ROT_HOST, ROT_A):
+        skip("the allow-rotation row",
+             f"the host does not resolve {ROT_HOST} to {ROT_A}, so the "
+             f"element would be armed with something this row cannot predict")
+        return
+    write_config(FILTERED, toml_for(Arm(FILTERED, 2, variant="rotate")))
+    if cli("recreate", FILTERED, timeout=600).returncode != 0:
+        record("recreate onto the rotation arm", False, "recreate failed")
+        return
+    if not wait_up(FILTERED, "the container is back up on the rotation arm"):
+        return
+
+    uid = workload_uid(FILTERED)
+    armed = allow_elements(uid)
+    record("the allow element is armed with the address the name had THEN",
+           any(ROT_A in e for e in armed), "; ".join(armed) or "no element")
+    # THE DIALS ARE LITERAL ADDRESSES, NOT THE NAME, and that is the fix for a
+    # confound the first two hardware runs had. What the pin governs is which
+    # ADDRESS is authorised; involving the container's resolver in the probe
+    # adds a second variable that can disagree with the host's, and on
+    # 2026-09-06 it did -- the host resolved the rotated name and the container
+    # was still answered with the old address, so the "does not reach origin B"
+    # row reached origin A and read as a pass while measuring a DNS cache.
+    # Dialling the literal removes DNS from the probe path entirely. The
+    # arm-time resolution is still exercised, on the host, where it happens:
+    # the element assertion above IS that measurement.
+    elapsed, ok, out = fetch(FILTERED, f"http://{ROT_A}:{ROT_PORT}/")
+    record("the armed address is reachable on its non-80/443 port",
+           ok and ROT_BODY_A in out, f"{elapsed:.1f}s  {out}")
+
+    # Rotate. Nothing about the workload changes; only the answer does.
+    hosts_write([(ROT_B, ROT_HOST)])
+    followed = host_resolves(ROT_HOST, ROT_B)
+    record("the name now answers with origin B's address on the host, which "
+           "is the vantage arming uses",
+           followed, f"expected {ROT_B}")
+    if not followed:
+        return
+    elapsed, ok, out = fetch(FILTERED, f"http://{ROT_B}:{ROT_PORT}/")
+    record("the address the name has NOW is not authorised: the dial does "
+           "not reach origin B",
+           not (ok and ROT_BODY_B in out), f"{elapsed:.1f}s  {out}")
+    record("the element still names the OLD address, unchanged by the rotation",
+           any(ROT_A in e for e in allow_elements(uid)),
+           "; ".join(allow_elements(uid)) or "no element")
+
+    # The half that is actually in question. The drop is in nftables, so the
+    # inspector never sees the connection and `egress` cannot know about it --
+    # checked explicitly rather than assumed, because "there is no record" is
+    # itself the reason the operator has nowhere to look.
+    record("the drop leaves NO egress record, so `egress` cannot surface it",
+           latest_for(FILTERED, ROT_HOST) is None,
+           "confirmed: the inspector is not in this path")
+
+    surfaces = {}
+    for verb in (("diagnose", FILTERED), ("doctor",), ("validate", FILTERED)):
+        q = cli(*verb, timeout=180)
+        surfaces[verb[0]] = q.stdout + q.stderr
+    named = [verb for verb, text in surfaces.items() if ROT_A in text]
+    record("some workloadctl surface names the STALE address, so the "
+           "divergence is findable",
+           bool(named),
+           f"named by: {', '.join(named)}" if named else
+           f"none of {', '.join(surfaces)} mentions {ROT_A}; the dial is a "
+           f"silent drop on a shared counter and nothing points at the "
+           f"[[network.allow]] entry that caused it")
+
+    # D7's stated remedy, confirmed rather than assumed: a re-arm is the
+    # refresh, and there is no other one.
+    if cli("recreate", FILTERED, timeout=600).returncode != 0:
+        record("a re-arm refreshes the pinned address", False, "recreate failed")
+        return
+    if not wait_up(FILTERED, "the container is back up after the re-arm"):
+        return
+    record("a re-arm re-resolves: the element now names the NEW address",
+           any(ROT_B in e for e in allow_elements(uid)),
+           "; ".join(allow_elements(uid)) or "no element")
+    elapsed, ok, out = fetch(FILTERED, f"http://{ROT_B}:{ROT_PORT}/")
+    record("and origin B is now reachable", ok and ROT_BODY_B in out,
+           f"{elapsed:.1f}s  {out}")
+    # The other half of a re-arm, which is the half an operator does not
+    # expect: the OLD grant is gone. An element is replaced, not added to, so a
+    # destination that was reachable before the rotation stops being reachable
+    # after it -- and if the name was rotated by mistake, this is the row that
+    # says so.
+    elapsed, ok, out = fetch(FILTERED, f"http://{ROT_A}:{ROT_PORT}/")
+    record("and the address it USED to name is no longer authorised",
+           not (ok and ROT_BODY_A in out), f"{elapsed:.1f}s  {out}")
+
+
+def java_fetch(url, timeout=90):
+    """One HTTPS request from inside the JVM workload, as (ok, text).
+
+    A JDK single-file source launch rather than curl, and that IS the row: the
+    point is a client whose trust store is inside the image and that reads none
+    of the five CA variables workloadctl delivers. Running curl here would
+    measure OpenSSL, which reads SSL_CERT_FILE and therefore works -- the row
+    would pass and prove the opposite of what it claims.
+    """
+    script = (
+        "cat > /tmp/F.java <<'JEOF'\n"
+        "public class F { public static void main(String[] a) throws Exception {\n"
+        "  var c = (java.net.HttpURLConnection)"
+        " java.net.URI.create(a[0]).toURL().openConnection();\n"
+        "  c.setConnectTimeout(15000); c.setReadTimeout(15000);\n"
+        "  System.out.println(\"[OK] \" + c.getResponseCode());\n"
+        "}}\n"
+        "JEOF\n"
+        f"java /tmp/F.java {url!r} 2>&1 | tr '\\n' ' ' | head -c 400"
+    )
+    q = inside(NODE_WL, script, timeout=timeout)
+    text = " ".join((q.stdout + q.stderr).split())
+    return "[OK]" in text, text[:220]
+
+
+def check_embedded_root_store():
+    """R9: `ca_delivery = "env"` against an image that carries its own store.
+
+    R9 says workloadctl may not claim `ca_delivery` verifies anything -- it is
+    an operator ASSERTION, and it catches an unstated CA route, never a wrong
+    one. This is the row where that abstraction meets an image: the operator
+    states `env`, workloadctl delivers all five variables, every check on the
+    host is green, and the workload cannot make a single HTTPS request, because
+    a JVM's anchors live in `cacerts` inside the image and no environment
+    variable adds to them.
+
+    THE OBVIOUS EXAMPLE IS THE WRONG ONE. Node looks like the canonical
+    "ignores SSL_CERT_FILE" client and is not usable here: NODE_EXTRA_CA_CERTS
+    is one of the five workloadctl sets (VM_CA_ENV_VARS, lib/vm.py), so Node
+    trusts the CA and the row would pass having measured nothing. Go reads
+    SSL_CERT_FILE too. A JVM reads none of them.
+
+    THREE PROBES, and the middle one is the row:
+      1. UNFILTERED baseline. Without it a failure below is equally well
+         explained by the image, the network, or the probe.
+      2. Rung 3, inspecting. Must fail, and must fail as a TRUST failure --
+         a timeout here would mean the redirect broke, which is a different
+         defect wearing this one's clothes.
+      3. The remedy. `[[network.splice]]` for that host, with the policy entry
+         moved to a second allowlisted name so the workload STAYS rung 3.
+         Splicing the only policy host would demonstrate the remedy by
+         deleting the feature.
+    """
+    say("\n== an image with its own trust store (R9) ==")
+    write_config(NODE_WL, toml_for(Arm(NODE_WL, 1, variant="node-rung1")))
+    p = cli("enable", NODE_WL, timeout=1800)
+    if p.returncode != 0:
+        record("the JVM workload enables (pull is ~180MB, unfiltered)", False,
+               (p.stdout + p.stderr).strip()[-120:])
+        return
+    record("the JVM workload enables (pull is ~180MB, unfiltered)", True)
+    if not wait_up(NODE_WL, "the JVM container answers exec", seconds=600):
+        cli("disable", NODE_WL, "--purge", timeout=300)
+        return
+
+    try:
+        ok, text = java_fetch(f"https://{ALLOWED}/")
+        record("baseline: unfiltered, the JVM completes an HTTPS request",
+               ok, text)
+        if not ok:
+            record("the R9 row is measurable on this image", False,
+                   "the baseline failed, so a failure under inspection below "
+                   "would not be attributable to trust")
+            return
+
+        write_config(NODE_WL, toml_for(Arm(NODE_WL, 3, variant="node")))
+        if cli("recreate", NODE_WL, timeout=900).returncode != 0:
+            record("recreate onto the inspecting arm", False, "recreate failed")
+            return
+        if not wait_up(NODE_WL, "the JVM container is back up, inspected",
+                       seconds=300):
+            return
+
+        # Delivery happened. Asserted, because the row's claim is "the image
+        # ignores a mechanism that WORKED", and a broken delivery produces the
+        # same failed request while meaning something entirely different.
+        q = inside(NODE_WL,
+                   "for v in SSL_CERT_FILE NODE_EXTRA_CA_CERTS REQUESTS_CA_BUNDLE "
+                   "GIT_SSL_CAINFO PIP_CERT; do eval \"p=\\$$v\"; "
+                   "[ -n \"$p\" ] && [ -r \"$p\" ] && echo \"$v=ok\"; done")
+        delivered = q.stdout.count("=ok")
+        record("all five CA variables are delivered and point at a readable "
+               "bundle", delivered == 5, f"{delivered}/5: "
+               f"{' '.join(q.stdout.split())[:90]}")
+
+        ok, text = java_fetch(f"https://{ALLOWED}/")
+        record("inspected: the JVM CANNOT complete the request, "
+               "CA delivery notwithstanding", not ok, text)
+        trust = any(m in text for m in
+                    ("PKIX", "unable to find valid certification path",
+                     "SSLHandshakeException", "trustAnchors"))
+        record("and it fails as a TRUST failure, not as a timeout",
+               trust, text)
+
+        # Legibility. The operator has the client's error and whatever the
+        # inspector said; the question is whether either names a remedy that
+        # applies to a CONTAINER with a baked-in store.
+        rec = latest_for(NODE_WL, ALLOWED)
+        logs = cli("logs", NODE_WL, "-n", "200", timeout=120)
+        journal = run(["journalctl", "-u",
+                       f"workload-{NODE_WL}-inspect.service", "-n", "80",
+                       "--no-pager"], check=False).stdout
+        blob = (logs.stdout + logs.stderr + journal)
+        record("the inspector recorded the refused handshake",
+               bool(rec) and rec.get("decision") == "drop",
+               json.dumps({k: rec.get(k) for k in ("decision", "reason")})
+               if rec else "no record")
+        # NOT "it must not mention re-seeding". A VM instance seeded before
+        # the workload had a CA really does need re-seeding, and that sentence
+        # is right for it. The defect measured on 2026-09-06 was that
+        # re-seeding was the ONLY remedy named -- so an operator whose client
+        # has an embedded trust store was sent to repair a CA route that
+        # cannot be made to work, for a guest that does not exist.
+        names_remedy = "splice" in blob.lower()
+        record("the explanation names the remedy an embedded trust store "
+               "actually has",
+               names_remedy,
+               "names [[network.splice]]" if names_remedy else
+               "nothing in the record or the inspector's journal mentions "
+               "splice; the only remedy offered is one a container with a "
+               "baked-in store does not have")
+
+        write_config(NODE_WL, toml_for(Arm(NODE_WL, 3, variant="node-spliced")))
+        if cli("recreate", NODE_WL, timeout=900).returncode != 0:
+            record("recreate onto the spliced arm", False, "recreate failed")
+            return
+        if not wait_up(NODE_WL, "the JVM container is back up, spliced",
+                       seconds=300):
+            return
+        # Still rung 3: the policy entry moved to the second allowlisted name
+        # rather than being deleted, so `ca_delivery` is still required and the
+        # workload is still inspecting -- for every host but this one.
+        q = cli("validate", NODE_WL)
+        record("the spliced config still validates as an inspecting workload",
+               q.returncode == 0, (q.stdout + q.stderr).strip()[:90])
+        ok, text = java_fetch(f"https://{ALLOWED}/")
+        record("[[network.splice]] is the remedy: the JVM completes the "
+               "request again", ok, text)
+    finally:
+        cli("disable", NODE_WL, "--purge", timeout=300)
+        d = WORKLOAD_DIR / NODE_WL
+        if d.exists():
+            for c in d.iterdir():
+                c.unlink()
+            d.rmdir()
+
+
 def check_disable_cleanliness():
     """`disable` must leave no inspect units and no element in EITHER table.
 
@@ -1029,7 +1853,7 @@ def preflight():
     for tool in ("workloadctl", "podman", "nft", "getent"):
         if run(["which", tool], check=False).returncode != 0:
             sys.exit(f"missing {tool}")
-    for name in (FILTERED, OPEN):
+    for name in (FILTERED, OPEN, BRIDGE, NODE_WL):
         if (WORKLOAD_DIR / name).exists():
             sys.exit(f"{WORKLOAD_DIR / name} already exists -- purge it first "
                      f"(`workloadctl disable {name} --purge`) so this rig is "
@@ -1048,6 +1872,14 @@ def preflight():
                      f"(`sudo rm -rf {stale}`) -- a stale record makes this "
                      f"rig read another run's decisions, and its ownership "
                      f"stops the inspector from starting at all")
+
+
+    # The three host fixtures. Not fatal if they fail: their rows SKIP, which
+    # is the honest reading -- a rig that refused to start over a dummy
+    # interface would take the other forty assertions down with it.
+    if not fixtures_up():
+        say(f"  WARNING: could not build the {NETNS} namespace; the IPv6 and "
+            f"rotation rows will skip")
 
 
 def deploy():
@@ -1122,6 +1954,10 @@ def deploy():
 
 def cleanup():
     say("\n== cleanup ==")
+    stop_origins()
+    hosts_clear()
+    fixtures_down()
+    shutil.rmtree(FIXTURE_DIR, ignore_errors=True)
     for name in (FILTERED, OPEN):
         cli("disable", name, "--purge", timeout=300)
         d = WORKLOAD_DIR / name
@@ -1146,11 +1982,26 @@ def main():
         check_reporting()
         check_bridge_mode()
         check_cross_workload_gap()
+        # The three rows that needed host fixtures rather than another host.
+        # After the sections above, because both of the first two REWRITE the
+        # filtered workload's config, and before disable-cleanliness, which
+        # ends its life.
+        check_ipv6()
+        check_allow_rotation()
+        check_embedded_root_store()
         check_disable_cleanliness()
         check_audit(marker)
     finally:
         if keep:
-            say("\n--keep: workloads left in place")
+            # The WORKLOADS are what --keep is for. The host fixtures are not:
+            # leaving `ceg-rotate.test` in /etc/hosts and two python processes
+            # bound to a dummy link is not inspectable state, it is litter on
+            # somebody's machine.
+            stop_origins()
+            hosts_clear()
+            fixtures_down()
+            shutil.rmtree(FIXTURE_DIR, ignore_errors=True)
+            say("\n--keep: workloads left in place; host fixtures torn down")
         else:
             cleanup()
 

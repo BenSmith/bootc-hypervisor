@@ -337,6 +337,84 @@ class TestAnAllowlistedHostIsReachedThroughTheInspector(TerminationCase):
         self.assertEqual(listener.status()["mint"]["mints"], 1)
 
 
+class TestAClientThatRefusesTheLeafIsToldBothRemedies(TerminationCase):
+    """The drop when the GUEST rejects the leaf, and the sentence it produces.
+
+    There are exactly two reasons a client refuses a leaf this CA signed, and
+    they need opposite remedies:
+
+      1. It COULD have been given the CA and was not -- a VM instance seeded
+         before the workload had one (cloud-init will not revisit it), or a
+         container whose `ca_delivery` route is absent or wrong. Fixable.
+      2. It CANNOT be given the CA at all, because its trust store is embedded
+         in the image and it reads none of the five CA environment variables.
+         A JVM is the common one; anything on rustls with webpki-roots is the
+         same shape. There is no CA route to repair.
+
+    THIS SENTENCE NAMED ONLY (1) AND WAS THEREFORE WRONG HALF THE TIME.
+    Measured on hardware 2026-09-06 with container_egress_rig.py's R9 row: a
+    JDK image under `ca_delivery = "env"` had all five variables delivered and
+    readable, refused the leaf anyway, and the operator was told to re-seed a
+    guest that does not exist. The listener cannot tell the two apart -- it
+    sees a handshake that did not complete and nothing about how the client was
+    built -- so it must name both rather than guess.
+
+    Driven end to end rather than asserted against the source, because a
+    grep would pass on the sentence sitting in a branch nothing reaches.
+    """
+
+    def _stranger_context(self):
+        """A guest that trusts the ORIGIN's root and not the workload CA.
+
+        Deliberately not `CERT_NONE`: a client that verifies nothing completes
+        the handshake and takes this path nowhere near. The refusal has to be a
+        real one.
+        """
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        ctx.load_verify_locations(str(self.origin_ca_cert))
+        return ctx
+
+    def test_the_refusal_is_recorded_as_a_drop(self):
+        mod = _mod()
+        origin = _Origin(self.origin_pem)
+        self.addCleanup(origin.close)
+        listener, out = self._listener(mod, origin)
+        response, error = self._exchange(listener, origin,
+                                         guest_ctx=self._stranger_context())
+        self.assertEqual(response, b"")
+        self.assertIsNotNone(error)
+        self.assertIn("drop", out.getvalue())
+
+    def test_the_drop_names_the_embedded_store_case_and_its_remedy(self):
+        mod = _mod()
+        origin = _Origin(self.origin_pem)
+        self.addCleanup(origin.close)
+        listener, out = self._listener(mod, origin)
+        self._exchange(listener, origin, guest_ctx=self._stranger_context())
+        logged = out.getvalue()
+        # The remedy, and the host it applies to. An operator who has to work
+        # out which host to exempt from a message that does not say has the
+        # same problem one step later.
+        self.assertIn("splice", logged)
+        self.assertIn(self.HOST, logged)
+
+    def test_it_still_names_the_re_seeding_case(self):
+        """The old sentence was not wrong, it was incomplete.
+
+        A VM instance seeded before the CA existed really does need re-seeding,
+        and dropping that half to fix the other one would move the same defect
+        to the other substrate.
+        """
+        mod = _mod()
+        origin = _Origin(self.origin_pem)
+        self.addCleanup(origin.close)
+        listener, out = self._listener(mod, origin)
+        self._exchange(listener, origin, guest_ctx=self._stranger_context())
+        logged = out.getvalue()
+        self.assertIn("re-seed", logged)
+        self.assertIn("ca_delivery", logged)
+
+
 class TestADeniedNameIsBumpedRatherThanClosed(TerminationCase):
 
     def test_the_guest_gets_a_readable_403_through_a_chain_it_trusts(self):

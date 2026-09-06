@@ -728,7 +728,7 @@ The first rig here that needs **no KVM**. Everything the VM rigs prove about
 the egress path was proven on a guest; this asks the same questions of a
 container, where the traffic is re-originated by pasta as the workload's own
 uid rather than by passt on a guest's behalf. Needs root, podman and the
-installed RPM. Two throwaway container workloads, both prefixed `ceg-`.
+installed RPM. Throwaway container workloads, all prefixed `ceg-`. **78/78 on a bare-metal Fedora 44 host under enforcing, 2026-09-06.**
 
 ```bash
 sudo python3 tests/manual/container_egress_rig.py
@@ -766,11 +766,13 @@ being pointed at your LAN. Without `CEG_LAN_HOST`, and if that host does not
 answer on port 80 from the machine running the rig, this section **skips**: a
 probe against an unreachable target fails identically to a working drop.
 
-**Four reporting surfaces are asserted to REFUSE.** `rules`, `diagnose`,
-`drift` and `pcap` are VM-only by construction pending the container document
-renderer, so their refusal is the correct behaviour. A rig that asserted all
-seven surfaces report the container would fail four rows for a decision made on
-purpose.
+**One reporting surface is asserted to REFUSE; two more are measured, not
+asserted.** `rules` is VM-only pending the container document renderer and its
+refusal names the trigger, which is the shape a VM-only surface should have.
+`drift` and `pcap` are merely *unrouted*, which is not the same as declining —
+whatever they do, an operator meets it, so the rig records it rather than
+guessing. `diagnose` used to be in that list and no longer is: G7 routed it, so
+a filtered container now gets an inspector line like a VM's.
 
 ### Cross-workload inspector reachability — now scored
 
@@ -802,15 +804,74 @@ sent. Of the three remedies weighed — a peer-credential check in the listener,
 an input-chain rule covering co-resident uids, or an accepted and documented
 boundary — the first two were both taken, and the boundary was not accepted.
 
-### What it deliberately does not measure
+### The three rows that "needed another host", and two of them never did
 
-**IPv6.** A v6 egress probe on a host with no global v6 address dies at the
-routing lookup before nftables sees it, so the row passes having tested
-nothing. Run it somewhere with v6, or record it as untested — do not let a
-v4-only host's green stand in for it. **A moved `[[network.allow]]` address**,
-which needs a real non-80/443 upstream and a mid-run change. **`ca_delivery =
-"env"` against an embedded root store**, which needs a base image whose client
-ignores the five CA variables.
+These sat unrun for a fortnight each, deferred on the grounds that this host
+was the wrong one. Re-reading what each actually needed, two were a fixture
+rather than a machine, and the rig now stands both up and tears them down.
+
+**IPv6** needed a v6 destination the kernel will *route*, not an uplink. A
+ULA on the far side of a veth is one: the packet is built, the routing lookup
+succeeds, and it arrives at the nftables hook under test. An uplink would have
+added an ISP to the measurement rather than removing a doubt from it. The
+discriminating probe is the *denied* one — a second name at the **same
+address** that is not in `hosts`, so a refusal for it can only have come from
+the inspector reading the name.
+
+**A moved `[[network.allow]]` address** needed two stub origins with different
+bodies and one line in `/etc/hosts`. Which origin answered is the whole
+question, and one origin moved would make "the pin held" and "the rotation
+never took" the same reading.
+
+**`ca_delivery = "env"` against an embedded root store** did need something
+absent, and what was absent was an *image*, so it is a pull. **The obvious
+example is the wrong one**: Node looks like the canonical "ignores
+`SSL_CERT_FILE`" client, and `NODE_EXTRA_CA_CERTS` is one of the five variables
+workloadctl delivers — so Node trusts the CA and the row would pass having
+measured nothing. Go reads `SSL_CERT_FILE` too. A JVM reads none of the five;
+its anchors are `cacerts` inside the image.
+
+**The origins live in a network namespace behind a veth, and that is
+load-bearing.** The first version put them on a dummy link, which made every
+address *local* — and `workload-filter.nft` accepts a filtered uid's traffic
+unconditionally when `oif lo`, because loopback is the workload's control plane
+and not egress. A local origin is reached whether or not any element authorises
+it, so the rotation row would have passed its dial and proved nothing.
+
+**Two product defects came out of the first hardware pass**, both of them
+about legibility rather than enforcement, which is why every functional
+assertion around them was green:
+
+1. **No surface named a stale `allow` address.** The pinning worked in both
+   directions, and after a rotation `diagnose`, `doctor` and `validate` between
+   them named neither the stale address nor the entry that pinned it — while
+   `egress` had nothing at all, because the inspector is not in this path and
+   never sees the connection. The whole visible symptom was a dial that used to
+   work. `diagnose` now carries an `allow_drift` check, on both substrates.
+2. **The refused-handshake message named a VM-only remedy.** A client that
+   rejects the minted leaf was told "a guest provisioned before this workload
+   had a CA does not trust it and must be re-seeded" — right for a stale VM
+   seed, and actively misleading for a container whose trust store is baked
+   into the image, which has no seed to revisit and no CA route to repair. The
+   JDK arm hit exactly that: all five CA variables delivered and readable, and
+   the JVM refused the leaf anyway. The sentence now names both shapes and the
+   remedy each needs, `[[network.splice]]` included.
+
+Two rig bugs came out of the same pass, and both are the class this file keeps
+warning about. `fd00:ceg::` is not a valid address — `g` is not a hexadecimal
+digit — and the row reported it as "nothing could bind", three layers from the
+cause. And the rotation row passed for the wrong reason: `/etc/hosts` had been
+rewritten and the caches flushed, but the *container* was still being answered
+with the old address, so the probe reached the old origin and read as a pass.
+It was measuring a DNS cache and reporting it as the arm-time pin. Both are now
+preconditions the rig asserts before the row it guards.
+
+### What it still does not measure
+
+**A global-scope IPv6 destination.** The redirect map keys on `tcp dport`
+alone, so translation is scope-blind and the ULA result carries — but that is a
+reading of `workload-proxy.nft`, not a measurement, and it is the one claim
+here still worth a v6-capable host.
 
 ## uid_attribution_rig.py — which uid does a container's egress actually leave as?
 
@@ -888,7 +949,10 @@ catch one level up.
 
 ### What it deliberately does not measure
 
-**IPv6**, for the reason `container_egress_rig.py` gives above. **Whether the
+**IPv6** — `container_egress_rig.py` now covers the v6 redirect on a ULA
+fixture, but this rig measures the uid *selector*, which is family-blind
+(`meta skuid` reads neither address nor family), so there is nothing here a v6
+arm would add. **Whether the
 DNAT redirect would capture host traffic in host mode** — it cannot, because
 nothing arms a redirect for a host-mode workload; the rig measures the uid
 selector, which is the part the design depends on. **`userns = "host"`**, where

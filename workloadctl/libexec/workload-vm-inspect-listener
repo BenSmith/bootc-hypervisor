@@ -3289,10 +3289,40 @@ class Listener:
             self.counters.record_drop(DROP_RELAY_FAILED, host)
             self._connection_record(where, "terminate", host=host,
                                     decision="drop", reason=DROP_RELAY_FAILED)
-            self._log(f"drop {where} host={host} reason='the guest did not "
-                      f"complete the handshake: {exc}. A guest provisioned "
-                      f"before this workload had a CA does not trust it and "
-                      f"must be re-seeded'")
+            # NAMES BOTH SHAPES, because this sentence used to name one and
+            # was therefore wrong half the time. It said "a guest provisioned
+            # before this workload had a CA does not trust it and must be
+            # re-seeded" -- true for a VM instance whose seed predates the CA,
+            # and actively misleading for the other case, which has no seed to
+            # revisit and no CA route to repair. Measured on hardware
+            # 2026-09-06 against a JDK image: `ca_delivery = "env"` delivered
+            # all five variables, every one readable inside the container, and
+            # the JVM still refused the leaf -- because its anchors are
+            # `cacerts` INSIDE THE IMAGE and no environment variable adds to
+            # them. The operator was then told to re-seed a guest that does not
+            # exist. Anything with an embedded store is in this class: a JVM,
+            # anything built on rustls with webpki-roots, a statically linked
+            # client that never consults the system store.
+            #
+            # The listener cannot tell the two apart -- it sees a handshake
+            # that did not complete and nothing about how the client was built
+            # -- so it names both and the remedy each one needs, rather than
+            # guessing and being confidently wrong for one substrate.
+            self._log(f"drop {where} host={host} reason='the client did not "
+                      f"complete the handshake: {exc}. It did not trust the "
+                      f"leaf this workload minted, which has two shapes and "
+                      f"they need different remedies. (1) A client that COULD "
+                      f"be given the CA and was not: a VM instance seeded "
+                      f"before this workload had one, which cloud-init will "
+                      f"not revisit and which must be re-seeded; or a "
+                      f"container whose ca_delivery route is absent or wrong. "
+                      f"(2) A client that CANNOT be given it at all because "
+                      f"its trust store is embedded in the image and it reads "
+                      f"none of the CA environment variables -- a JVM, or "
+                      f"anything on rustls. For (2) there is no CA route to "
+                      f"fix: add {host} to [[network.splice]] "
+                      f"([[vm.network.splice]] for a VM) so the connection is "
+                      f"spliced rather than terminated, or change the image'")
             if upstream is not None:
                 upstream.sock.close()
             return

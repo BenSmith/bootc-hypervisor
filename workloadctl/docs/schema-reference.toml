@@ -1902,6 +1902,17 @@ ports = ["8080:80", "8443:443"]
 #      unreachability with nothing logged saying why. Re-arm (see APPLYING A
 #      CHANGE, below) after a destination moves.
 #
+#      `workloadctl diagnose <name>` reports this, and it is the only surface
+#      that does: the drop happens in nftables, so the inspector never sees
+#      the connection and `egress` has no record of it to show you. The check
+#      compares what each name resolves to NOW against what is armed, and
+#      names both addresses -- so the line tells you which way round the
+#      divergence went, which decides whether the remedy is a re-arm or a
+#      correction to the entry. It applies equally to
+#      [[vm.network.allow]]: a VM's synthesising resolver keeps an INSPECTED
+#      name current, and `allow` is the path that bypasses the inspector, so
+#      the pinning is the same on both substrates.
+#
 # THE IMAGE PULL IS THE WORKLOAD'S OWN TRAFFIC, and this catches people out on
 # the very first start. `podman run --pull=missing` runs in the workload
 # service's ExecStart, as the workload user, AFTER the redirect has been armed
