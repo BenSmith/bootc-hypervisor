@@ -514,7 +514,7 @@ def resolve_auto_gpu(name=None):
 
 
 def _head_unit(name, user_name, uid, slice_name, header_comment, description,
-                create_cmd, rm_cmd, uses_inspect=False):
+                create_cmd, rm_cmd, uses_inspect=False, uses_credentials=False):
     """Shared skeleton for the pod-create and bridge-network-create head units.
 
     Both are single-command oneshot services that run before any member
@@ -568,6 +568,18 @@ def _head_unit(name, user_name, uid, slice_name, header_comment, description,
         # member container exists.
         u.add("Requires", f"workload-{name}-inspect.socket")
         u.add("After", f"workload-{name}-inspect.socket")
+    if uses_credentials:
+        # THE BROKER'S OWN `Before=` DOES NOT START IT. Ordering is not a
+        # dependency: the instance was generated, ordered ahead of this unit,
+        # given its egress bound and its internal-set exemption, and then never
+        # pulled in by anything -- so it sat inactive and every brokered
+        # request 502'd while `systemctl status` on the workload was clean.
+        # This is the container twin of generate_vm_workload's
+        # prereqs.append, and it is Requires= for the same reason: a workload
+        # holding a placeholder cannot fail over to the provider directly --
+        # that is a 401, not a degradation.
+        u.add("Requires", f"workload-{name}-broker.service")
+        u.add("After", f"workload-{name}-broker.service")
 
     svc = unit.section("Service")
     svc.set("Type", "oneshot")
@@ -644,6 +656,7 @@ def generate_pod_service(workload, user_name, uid):
         create_cmd=f"/usr/bin/podman pod create {pod_args_str}",
         rm_cmd=f"/usr/bin/podman pod rm -f --ignore workload-{name}",
         uses_inspect=container_uses_inspect(workload),
+        uses_credentials=container_uses_credentials(workload),
     )
 
 
@@ -664,6 +677,7 @@ def generate_net_service(workload, user_name, uid):
         create_cmd=f"/usr/bin/podman network create {net_name}",
         rm_cmd=f"/usr/bin/podman network rm -f {net_name}",
         uses_inspect=container_uses_inspect(workload),
+        uses_credentials=container_uses_credentials(workload),
     )
 
 
@@ -1605,6 +1619,13 @@ def generate_system_service(workload, container, user_name, uid, mode="single"):
     if mode == "single" and container_uses_inspect(workload):
         u.add("Requires", f"workload-{name}-inspect.socket")
         u.add("After", f"workload-{name}-inspect.socket")
+    # And the broker instance, on the same terms and for the same reason its
+    # twin is on the head unit in pod/bridge mode: the `Before=` the generator
+    # gives the instance ORDERS it, and nothing else pulls it in. See
+    # _head_unit.
+    if mode == "single" and container_uses_credentials(workload):
+        u.add("Requires", f"workload-{name}-broker.service")
+        u.add("After", f"workload-{name}-broker.service")
 
     # container.systemd: "always", "true", "false", or unset
     systemd_mode = container.get("container", {}).get("systemd", None)

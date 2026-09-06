@@ -288,6 +288,13 @@ DENY_UNKNOWN_CALLER = "caller not registered with the broker"
 TRUST_DROPIN = "10-ceg-trust.conf"
 _dropins = []
 
+# NOT under FIXTURE_DIR, and this is the difference between a working arm and
+# a 502 that says SSLCertVerificationError. FIXTURE_DIR is a mkdtemp under
+# /tmp, and the broker unit is PrivateTmp=yes -- so a certificate written
+# there exists for the rig and does not exist for the process that has to
+# verify it. The failure names TLS, three layers from the cause.
+CERT_DIR = Path("/var/lib/ceg-rig")
+
 WORKLOAD_DIR = Path("/etc/workloads.d")
 RECORD_ROOT = Path("/var/log/workloadctl/egress")
 AUDIT_LOG = Path("/var/log/audit/audit.log")
@@ -2398,7 +2405,8 @@ def provider_cert():
     self-signed leaf without them fails on the upstream leg, which reads as a
     broker fault rather than as the rig's own certificate.
     """
-    cert, key = FIXTURE_DIR / "provider.crt", FIXTURE_DIR / "provider.key"
+    CERT_DIR.mkdir(parents=True, exist_ok=True)
+    cert, key = CERT_DIR / "provider.crt", CERT_DIR / "provider.key"
     p = run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
              "-keyout", str(key), "-out", str(cert), "-days", "1",
              "-subj", f"/CN={PROVIDER}",
@@ -2428,27 +2436,49 @@ def start_provider(cert, key):
     which credential arrived. Asserting on "the container got a 200" would pass
     even if the broker attached the wrong key, or none.
     """
+    log = CERT_DIR / "provider.log"
     argv = ["ip", "netns", "exec", NETNS,
             sys.executable, "-B",
             str(Path(__file__).parent / "stub_upstream.py"),
             str(PROVIDER_PORT), cert, key]
     env = dict(os.environ, STUB_BIND=PROVIDER_ADDR)
-    proc = subprocess.Popen(argv, stdout=subprocess.PIPE,
-                            stderr=subprocess.STDOUT, text=True, env=env)
+    # TO A FILE, NOT A PIPE NOBODY READS. The first version of this collected
+    # the stub's output into a PIPE and then returned a bare False, so the
+    # whole broker arm skipped with "never listened" and the traceback that
+    # said why was sitting unread in a file descriptor. A rig that cannot say
+    # why it skipped is a rig whose skip is indistinguishable from a product
+    # that is broken -- and this arm exists because a green suite already hid
+    # an inert brokered path twice.
+    handle = open(log, "w")
+    proc = subprocess.Popen(argv, stdout=handle, stderr=subprocess.STDOUT,
+                            env=env)
     _servers.append(proc)
     import socket as _socket
     deadline = time.time() + 15
+    last = ""
     while time.time() < deadline:
         if proc.poll() is not None:
-            return False
+            handle.close()
+            return f"exited rc={proc.returncode}: {log.read_text()[-400:]}"
         try:
             with _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM) as sk:
                 sk.settimeout(1)
                 sk.connect((PROVIDER_ADDR, PROVIDER_PORT))
-            return True
-        except OSError:
+            return ""
+        except OSError as exc:
+            last = str(exc)
             time.sleep(0.3)
-    return False
+    handle.flush()
+    # The namespace's own view, because "the connect failed" has two causes
+    # that need different fixes: nothing bound, or bound and unreachable from
+    # the host side of the veth.
+    inside_ns = run(["ip", "netns", "exec", NETNS, "ss", "-lntH"],
+                    check=False, timeout=30).stdout.strip()
+    addrs = run(["ip", "-n", NETNS, "-br", "addr"], check=False,
+                timeout=30).stdout.strip()
+    return (f"still not connectable after 15s ({last}); "
+            f"listeners in {NETNS}: {inside_ns!r}; addrs: {addrs!r}; "
+            f"stub log: {log.read_text()[-300:]!r}")
 
 
 def write_trust_dropins(cert):
@@ -2499,7 +2529,8 @@ def seal_credential():
     reaches which caller, not how the blob was sealed, and this must run on a
     host without a TPM.
     """
-    blob = FIXTURE_DIR / "cred.txt"
+    CERT_DIR.mkdir(parents=True, exist_ok=True)
+    blob = CERT_DIR / "cred.txt"
     blob.write_text(CRED_SECRET + "\n")
     blob.chmod(0o600)
     p = run(["workloadctl", "secret", "create",
@@ -2569,9 +2600,11 @@ def check_broker_invariants():
         skip("credential broker", "could not generate the provider certificate")
         return
     cert, key = pair
-    if not start_provider(cert, key):
-        skip("credential broker", f"the stub provider never listened on "
-                                  f"{PROVIDER_ADDR}:{PROVIDER_PORT}")
+    why = start_provider(cert, key)
+    if why:
+        skip("credential broker",
+             f"the stub provider never answered on "
+             f"{PROVIDER_ADDR}:{PROVIDER_PORT} -- {why}")
         return
     hosts_write([(PROVIDER_ADDR, PROVIDER)])
     if not host_resolves(PROVIDER, PROVIDER_ADDR):
@@ -2789,10 +2822,22 @@ def check_broker_invariants():
            f"IPAddressAllow={allow[:120]!r}")
 
     # --- the record ---------------------------------------------------------
-    rec = latest_for(CRED_WL, PROVIDER)
+    #
+    # THE BROKERED REQUEST'S ROW, NOT THE LATEST ROW FOR THE HOST. Two probes
+    # above went to this host and the second was refused by policy before any
+    # credential was chosen, so `latest_for` returns a row whose `credential`
+    # is correctly null -- and reading it as the brokered one reported the
+    # product missing a field it writes. The rig bug that looks exactly like
+    # the product bug, which the README names as the recurring one.
+    rec = None
+    for row in reversed(egress_records(CRED_WL)):
+        if row.get("host") == PROVIDER and row.get("path") == "/v1/models":
+            rec = row
+            break
     if rec is None:
         record(f"{CRED_WL} recorded the brokered request", False,
-               "no record for the provider")
+               f"no /v1/models row for {PROVIDER} in "
+               f"{[ (r.get('host'), r.get('path')) for r in egress_records(CRED_WL) ][-4:]}")
     else:
         record("the record names the credential that rode along",
                rec.get("credential") == CRED_NAME,
@@ -2805,6 +2850,20 @@ def check_broker_invariants():
         record("the record carries no credential MATERIAL",
                CRED_SECRET not in json.dumps(rec),
                "the record names WHICH credential, never which key")
+
+        # And the row for the request policy refused, which must NOT name a
+        # credential: nothing was chosen for it. Asserted because it is the row
+        # this section read by mistake, and a record that named a credential on
+        # a request that never got one would be a worse defect than the missing
+        # field it was mistaken for.
+        refused = None
+        for row in reversed(egress_records(CRED_WL)):
+            if row.get("host") == PROVIDER and row.get("path") == "/v9/nope":
+                refused = row
+                break
+        record("the refused request's row names no credential",
+               refused is not None and not refused.get("credential"),
+               f"row={ {k: refused.get(k) for k in ('path', 'decision', 'credential')} if refused else None}")
 
 
 def check_disable_cleanliness():
@@ -2970,6 +3029,7 @@ def cleanup():
     shutil.rmtree(FIXTURE_DIR, ignore_errors=True)
     remove_trust_dropins()
     unseal_credential()
+    shutil.rmtree(CERT_DIR, ignore_errors=True)
     for name in (FILTERED, OPEN, POD, BRIDGE, CRED_WL):
         cli("disable", name, "--purge", timeout=300)
         d = WORKLOAD_DIR / name
@@ -2982,35 +3042,48 @@ def cleanup():
 
 def main():
     keep = "--keep" in sys.argv
+    # `--only a,b` runs a subset. deploy() and cleanup() always run: every
+    # section reads state the deploy establishes, and a rig that left workloads
+    # behind on a partial run would poison the next full one -- preflight
+    # refuses a leftover on purpose.
+    only = set()
+    for a in sys.argv[1:]:
+        if a.startswith("--only="):
+            only = {x.strip() for x in a.split("=", 1)[1].split(",") if x.strip()}
     preflight()
     marker = audit_marker()
     deploy()
+    def section(fn, *args):
+        if only and fn.__name__.removeprefix("check_") not in only:
+            return
+        fn(*args)
+
     try:
-        check_rung_ladder()
-        check_both_planes()
-        check_redial_exemption()
-        check_denial()
-        check_internal()
-        check_reporting()
-        check_bridge_mode()
-        check_pod_mode()
-        check_cross_workload_gap()
+        section(check_rung_ladder)
+        section(check_both_planes)
+        section(check_redial_exemption)
+        section(check_denial)
+        section(check_internal)
+        section(check_reporting)
+        section(check_bridge_mode)
+        section(check_pod_mode)
+        section(check_cross_workload_gap)
         # The three rows that needed host fixtures rather than another host.
         # After the sections above, because both of the first two REWRITE the
         # filtered workload's config, and before disable-cleanliness, which
         # ends its life.
-        check_ipv6()
-        check_allow_rotation()
+        section(check_ipv6)
+        section(check_allow_rotation)
         # After the rotation, which also rewrites the filtered workload's
         # config, and before the JDK row, which is a different workload.
-        check_container_resolver()
-        check_embedded_root_store()
+        section(check_container_resolver)
+        section(check_embedded_root_store)
         # Last of the workload sections: it deploys a workload of its own, and
         # it rewrites /etc/hosts, so anything after it would be measuring this
         # section's fixtures rather than its own.
-        check_broker_invariants()
-        check_disable_cleanliness()
-        check_audit(marker)
+        section(check_broker_invariants)
+        section(check_disable_cleanliness)
+        section(check_audit, marker)
     finally:
         if keep:
             # The WORKLOADS are what --keep is for. The host fixtures are not:
@@ -3027,6 +3100,7 @@ def main():
             # stub that is no longer there, which is the honest end state.
             remove_trust_dropins()
             unseal_credential()
+            shutil.rmtree(CERT_DIR, ignore_errors=True)
             shutil.rmtree(FIXTURE_DIR, ignore_errors=True)
             say("\n--keep: workloads left in place; host fixtures torn down")
         else:

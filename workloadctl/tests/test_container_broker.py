@@ -284,6 +284,61 @@ class TestTheGeneratedUnit(unittest.TestCase):
     def test_a_declaring_single_mode_container_gets_the_unit(self):
         self.assertTrue(self._generate("capp", SINGLE).exists())
 
+    # --- something has to START it (found on hardware, not here) ---------
+    #
+    # The generator emitted the instance, ordered it ahead of the right unit,
+    # gave it its egress bound and its wl_internal_ok4 element -- and nothing
+    # pulled it in, so it sat inactive and every brokered request 502'd while
+    # the workload's own units all read active. `Before=` ORDERS a unit; it
+    # does not start one. Every row in this file passed with the defect in
+    # place because each of them reads the broker unit's own text, and the
+    # missing half was in a different unit entirely.
+
+    def _unit_text(self, name, extra, unit):
+        self._generate(name, extra)
+        return (Path(self.services_dir) / unit).read_text()
+
+    def test_single_mode_requires_the_broker_from_the_workload_service(self):
+        text = self._unit_text("capp", SINGLE, "workload-capp.service")
+        self.assertIn("Requires=workload-capp-broker.service", text)
+        self.assertIn("After=workload-capp-broker.service", text)
+
+    def test_pod_mode_requires_it_from_the_POD_unit(self):
+        # The head unit, for the reason it owns the egress arming: the
+        # umbrella is After= its members, so a Requires= there would start the
+        # broker after every container had already run.
+        text = self._unit_text("cpod", POD, "workload-cpod-pod.service")
+        self.assertIn("Requires=workload-cpod-broker.service", text)
+
+    def test_bridge_mode_requires_it_from_the_NET_unit(self):
+        text = self._unit_text("cbr", BRIDGE, "workload-cbr-net.service")
+        self.assertIn("Requires=workload-cbr-broker.service", text)
+
+    def test_the_umbrella_is_not_what_requires_it_in_pod_mode(self):
+        # The premise, pinned: if the umbrella ever stopped being After= its
+        # members, putting the dependency on the head unit would stop being a
+        # fix and this row is what would notice.
+        text = self._unit_text("cpod", POD, "workload-cpod.service")
+        self.assertIn("After=", text)
+        self.assertNotIn("Requires=workload-cpod-broker.service", text)
+
+    def test_a_workload_with_no_credential_requires_no_broker(self):
+        write_config(self.config_dir, "plain", """\
+            [workload]
+            name = "plain"
+
+            [container]
+            image = "docker.io/library/nginx:latest"
+
+            [network]
+            hosts = ["api.example.test"]
+            """)
+        result = run_generator(self.config_dir, self.services_dir,
+                               self.sysusers_dir)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        text = (Path(self.services_dir) / "workload-plain.service").read_text()
+        self.assertNotIn("broker", text)
+
     def test_a_container_declaring_none_gets_no_unit(self):
         write_config(self.config_dir, "plain", """\
             [workload]
