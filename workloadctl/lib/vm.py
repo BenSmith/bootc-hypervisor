@@ -21,8 +21,9 @@ import time
 from pathlib import Path
 from typing import NamedTuple
 
-from workload_lib import (UID_MAX, UID_MIN, parse_volume_spec,
-                          workload_root_dir)
+from workload_lib import (UID_MAX, UID_MIN, container_credential_entries,
+                          container_policy_entries, container_uses_inspect,
+                          parse_volume_spec, workload_root_dir)
 
 
 # --- VM constants ---
@@ -2348,6 +2349,37 @@ def vm_broker_hosts(config: dict) -> list[tuple[str, str]]:
     return [(e.host, e.credential) for e in vm_policy_entries(net) if e.credential]
 
 
+def container_broker_hosts(config: dict) -> list[tuple[str, str]]:
+    """vm_broker_hosts for the container substrate. Same contract, one table
+    up: a container workload's egress policy is workload-level ([network]),
+    not per-container, which is what makes one broker instance per workload
+    the right shape here too."""
+    net = config.get("network", {}) or {}
+    if not isinstance(net, dict):
+        return []
+    return [(e.host, e.credential)
+            for e in container_policy_entries(net) if e.credential]
+
+
+def container_uses_credentials(config: dict) -> bool:
+    """vm_uses_credentials for containers, and identical in both halves.
+
+    Inspection AND at least one declared credential -- the inspector is the
+    only thing that dials the broker on either substrate, so an instance for
+    an uninspected container would hold decrypted provider keys for a path
+    that does not exist.
+
+    Also the run-file `present=` (P2-4), so a workload that drops its last
+    credential has the unit unlinked rather than left behind.
+    """
+    if not container_uses_inspect(config):
+        return False
+    net = config.get("network", {}) or {}
+    if not isinstance(net, dict):
+        return False
+    return bool(container_credential_entries(net))
+
+
 def _toml_basic_string(value: str) -> str:
     """One TOML basic string. json.dumps is the same grammar for what we emit.
 
@@ -2362,7 +2394,35 @@ def _toml_basic_string(value: str) -> str:
 
 
 def render_vm_broker_config(config: dict, uid: int) -> str:
-    """The broker.toml for one workload's instance.
+    """The broker.toml for one VM workload's instance. See render_broker_config."""
+    net = (config.get("vm", {}) or {}).get("network", {}) or {}
+    return render_broker_config(
+        config["workload"]["name"], uid, vm_broker_hosts(config),
+        vm_credential_entries(net if isinstance(net, dict) else {}))
+
+
+def render_container_broker_config(config: dict, uid: int) -> str:
+    """The broker.toml for one container workload's instance.
+
+    A call site, not a second renderer (P2-1). ContainerCredential and
+    VmCredential are field-identical by construction, and both of the defects
+    the VM render was fixed for -- the per-entry duplicate table that TOML
+    refuses, and the dropped auth_header/auth_format that 401s a fully
+    authorised request -- would have been reproduced verbatim by a container
+    twin, which is why there is not one.
+    """
+    net = config.get("network", {}) or {}
+    return render_broker_config(
+        config["workload"]["name"], uid, container_broker_hosts(config),
+        container_credential_entries(net if isinstance(net, dict) else {}))
+
+
+def render_broker_config(name: str, uid: int, hosts, credentials) -> str:
+    """The broker.toml for one workload's instance, either substrate.
+
+    Takes the (host, credential-name) pairs and the declared credential blocks
+    rather than the config, so nothing here reads a [vm.] or [network.] key --
+    that is the whole of what makes it shared.
 
     A pure function of the workload TOML and the uid, which is the property D2
     chose /run for: there is nothing here to reconcile, so two of the three
@@ -2377,10 +2437,9 @@ def render_vm_broker_config(config: dict, uid: int) -> str:
     instances raced for the same socket, one workload's key to another's
     request. The broker refuses to start without the key for the same reason.
     """
-    name = config["workload"]["name"]
     lines = [
         f"# Generated for workload {name} by workload-vm-broker. DO NOT EDIT:",
-        "# this file is a pure function of the workload's [vm.network] tables and",
+        "# this file is a pure function of the workload's egress tables and",
         "# is rewritten from them at every start of the broker unit.",
         "",
         f"listen_address = {_toml_basic_string(vm_broker_listen_address(uid))}",
@@ -2399,7 +2458,7 @@ def render_vm_broker_config(config: dict, uid: int) -> str:
     # literal (a wildcard selecting a credential is a validation error) and two
     # entries for one host cannot name different credentials (also one).
     seen_hosts: set[str] = set()
-    for host, credential in vm_broker_hosts(config):
+    for host, credential in hosts:
         if host in seen_hosts:
             continue
         seen_hosts.add(host)
@@ -2415,7 +2474,7 @@ def render_vm_broker_config(config: dict, uid: int) -> str:
             f"upstream = {_toml_basic_string('https://' + host)}",
             f"credential = {_toml_basic_string(cred_id)}",
         ]
-        cred = _credential_named(config, credential)
+        cred = _credential_named(credentials, credential)
         if cred is not None and cred.placeholder is not None:
             lines.append(
                 f"placeholder = {_toml_basic_string(cred.placeholder)}")
@@ -2431,21 +2490,33 @@ def render_vm_broker_config(config: dict, uid: int) -> str:
     return "\n".join(lines) + "\n"
 
 
-def _credential_named(config: dict, credential: str) -> VmCredential | None:
+def _credential_named(credentials, credential: str):
     """The declared block a policy entry's `credential` selects, or None.
 
     Returns the whole block rather than one field: the render needs three of
     them now, and three lookups walking the same list is how one of them comes
     to be looked up under a name the other two do not use.
+
+    Takes the list, not a config, so it serves VmCredential and
+    ContainerCredential alike -- the two are field-identical.
     """
-    net = (config.get("vm", {}) or {}).get("network", {}) or {}
-    for cred in vm_credential_entries(net if isinstance(net, dict) else {}):
+    for cred in credentials:
         if cred.name == credential:
             return cred
     return None
 
 
 def vm_broker_upstream_addresses(config: dict) -> list[str]:
+    """vm_broker_hosts' addresses. See broker_upstream_addresses."""
+    return broker_upstream_addresses(vm_broker_hosts(config))
+
+
+def container_broker_upstream_addresses(config: dict) -> list[str]:
+    """container_broker_hosts' addresses. See broker_upstream_addresses."""
+    return broker_upstream_addresses(container_broker_hosts(config))
+
+
+def broker_upstream_addresses(hosts) -> list[str]:
     """Every address the credential-backed hosts resolve to, for IPAddressAllow=.
 
     Resolved HERE, at generation time, because IPAddressAllow= takes addresses
@@ -2463,7 +2534,7 @@ def vm_broker_upstream_addresses(config: dict) -> list[str]:
     IPAddressAllow= line is not a degraded bound, it is no bound at all.
     """
     seen: list[str] = []
-    for host, _credential in vm_broker_hosts(config):
+    for host, _credential in hosts:
         try:
             infos = socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)
         except OSError:

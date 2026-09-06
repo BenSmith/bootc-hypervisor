@@ -289,6 +289,46 @@ credential = "tok"
             '[container]\nimage = "x:latest"\n')
         self.assertEqual(self._checks(result), [])
 
+    CONTAINER_TOML = """
+[workload]
+name = "{name}"
+
+[container]
+image = "localhost/app:latest"
+
+[network]
+hosts = ["api.example.com"]
+ca_delivery = "env"
+
+[[network.credential]]
+name = "tok"
+placeholder = "sk-000000000000PLACEHOLDER"
+env = "API_TOKEN"
+
+[[network.policy]]
+host = "api.example.com"
+credential = "tok"
+"""
+
+    def test_a_container_declaring_material_is_checked_too(self):
+        """Same generator, same unit, same failure with nothing sealed -- and
+        it is a 502 per request rather than a start failure, so nothing else
+        on the host reports the material missing."""
+        checks = self._checks(self._validate("clitest-cbrokermissing",
+                                             self.CONTAINER_TOML))
+        self.assertEqual(len(checks), 1, checks)
+        self.assertFalse(checks[0]["passed"])
+        self.assertIn("broker/clitest-cbrokermissing/tok", checks[0]["fix"])
+
+    def test_a_containers_present_material_passes(self):
+        name = "clitest-cbrokerpresent"
+        path = self.credstore / "broker" / name / "tok"
+        path.parent.mkdir(parents=True)
+        path.write_bytes(b"sealed")
+        checks = self._checks(self._validate(name, self.CONTAINER_TOML))
+        self.assertEqual(len(checks), 1, checks)
+        self.assertTrue(checks[0]["passed"])
+
     def test_the_secret_check_stays_silent_about_broker_material(self):
         """The two checks must not both claim it: auto_detect_credentials
         cannot see a credential block, so a "credentials" row mentioning `tok`

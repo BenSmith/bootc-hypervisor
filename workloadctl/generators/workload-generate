@@ -72,7 +72,8 @@ try:
         virtiofs_tags, parse_volume_spec, systemd_escape_path,
         selinux_type_name, render_sysusers_config,
         RUN_SYSTEMD_SYSTEM, workload_run_files,
-        container_ca_delivery, container_ca_mount_path, container_uses_inspect,
+        container_ca_delivery, container_ca_mount_path,
+        container_credential_entries, container_uses_inspect,
     )
     from vm import (
         VM_MGMT_SSH_PORT, VM_REBOOT_EXIT_CODE,
@@ -89,6 +90,8 @@ try:
         vm_inspect_logs_directory,
         VM_BROKER_BIN, VM_BROKER_INSTANCE_PORT,
         vm_uses_credentials, vm_broker_config_path, vm_broker_credential,
+        container_broker_hosts, container_broker_upstream_addresses,
+        container_uses_credentials,
         vm_broker_hosts, vm_broker_listen_address, vm_broker_runtime_directory,
         vm_broker_upstream_addresses, vm_host_resolver_addresses,
         VM_CA_ENV_VARS, VM_CA_BUNDLE_PATH, vm_ca_cert_path,
@@ -1449,6 +1452,28 @@ def _container_egress_exec(svc, name: str) -> None:
             f"-+/usr/libexec/workloadctl/workload-container-filter down {dq(name)}")
 
 
+def _container_credential_env_args(workload) -> list:
+    """`--env <ENV>=<placeholder>` for each declared credential.
+
+    The container half of the fiction, and without it the brokered path does
+    not work at all: the container holds nothing in the variable its client
+    reads, so either the client refuses to send a request (failing INSIDE the
+    container, before a packet, which looks nothing like a policy failure) or
+    it sends one with no authorisation header for the broker's substitution to
+    replace -- and the provider answers 401 on a request every layer here
+    authorised. Same job as vm_credential_env() in the VM's cloud-init seed.
+
+    The placeholder is not a secret and is refused if it equals the real
+    material, so it is safe on a podman command line in a generated unit --
+    which is where the CA variables one function down already are.
+    """
+    net = workload.get("network", {}) or {}
+    if not container_uses_credentials(workload):
+        return []
+    return [f"--env {cred.env}={dq(cred.placeholder)}"
+            for cred in container_credential_entries(net)]
+
+
 def _container_ca_delivery_args(workload, name: str) -> list:
     """--volume / --env podman flags delivering this workload's egress CA
     into one container, per [network].ca_delivery (P1-10, G12-G15's
@@ -1674,6 +1699,7 @@ def generate_system_service(workload, container, user_name, uid, mode="single"):
     # per-container granularity would be a lie), and each container process
     # makes its own outbound requests with its own trust path.
     podman_args.extend(_container_ca_delivery_args(workload, name))
+    podman_args.extend(_container_credential_env_args(workload))
 
     credentials = auto_detect_credentials({
         "container": container.get("container", {}),
@@ -2561,8 +2587,48 @@ def generate_vm_resolve_service(config, user_name: str) -> str:
     return unit.render()
 
 
-def generate_vm_broker_service(config, uid: int) -> str:
-    """Generate the credential broker instance for one VM workload.
+def container_broker_before(config, mode: str) -> str:
+    """The unit a container workload's broker must be ordered ahead of (P2-3).
+
+    NOT the umbrella. In pod/bridge mode `workload-<name>.service` carries
+    `After=` its member services, so ordering the broker before it puts the
+    broker after every container has started: the first brokered request in
+    that window is refused with `credential broker unreachable` while every
+    unit reads healthy. The pod/net head unit is the one workload-level unit
+    ordered ahead of the members -- the same reasoning that moved the
+    inspector arming there (see _head_unit).
+
+    Single mode has no head unit, and needs none: `workload-<name>.service`
+    IS the container's own unit there, so Before= it is already ahead of
+    `podman run`. That asymmetry is exactly why the VM default reaches a host
+    unnoticed -- single mode, the shape most bundles use, is unaffected.
+    """
+    name = config["workload"]["name"]
+    if mode == "pod":
+        return f"workload-{name}-pod.service"
+    if mode == "bridge":
+        return f"workload-{name}-net.service"
+    return f"workload-{name}.service"
+
+
+def generate_vm_broker_service(config, uid: int, *, before: str = None,
+                               hosts=None, upstream=None) -> str:
+    """Generate the credential broker instance for one workload.
+
+    Substrate-neutral through three keyword parameters, on the same terms as
+    generate_vm_inspect_socket/_service (D6): nothing in the unit below is
+    VM-specific, so the container branch is a call site rather than a second
+    generator. `before` is the unit this one must be ordered ahead of,
+    `hosts` the (host, credential) pairs, `upstream` the addresses those
+    hosts resolve to. Omitted, all three take their VM values.
+
+    P2-3: `before` exists because the VM default is WRONG for a container in
+    pod/bridge mode. There the umbrella carries `After=` its member services,
+    so `Before=workload-<name>.service` orders the broker after every
+    container has already started -- the same hole the inspector arming was
+    moved off the umbrella for (see _head_unit). The container branch passes
+    the pod/net head unit, which is the one workload-level unit ordered ahead
+    of the members.
 
     Modelled on the host-wide agent-broker.service this replaces -- deleted in
     the same rung, so read it from git history if the derivation matters -- and
@@ -2589,6 +2655,12 @@ def generate_vm_broker_service(config, uid: int) -> str:
     which host.
     """
     name = config["workload"]["name"]
+    if before is None:
+        before = f"workload-{name}.service"
+    if hosts is None:
+        hosts = vm_broker_hosts(config)
+    if upstream is None:
+        upstream = vm_broker_upstream_addresses(config)
 
     unit = Unit()
     unit.comment(f"credential broker instance for {name}")
@@ -2605,7 +2677,7 @@ def generate_vm_broker_service(config, uid: int) -> str:
     # Before= orders the broker ahead of the VM, and the VM's own Requires=/
     # After= is what makes its start wait. A later reader who deletes one side
     # leaves the other direction's ordering rather than nothing.
-    u.set("Before", f"workload-{name}.service")
+    u.set("Before", before)
     # PartOf=, so the instance stops with the workload that owns it. Lifecycle
     # tied to the VM and not to `systemctl enable`: the shipped host-wide unit
     # was deliberately not enabled because a broker with no config is a restart
@@ -2639,7 +2711,7 @@ def generate_vm_broker_service(config, uid: int) -> str:
     # rather than that workload's key, and it is also the filename the broker
     # finds under $CREDENTIALS_DIRECTORY.
     seen_credentials = []
-    for _host, credential in vm_broker_hosts(config):
+    for _host, credential in hosts:
         if credential in seen_credentials:
             continue
         seen_credentials.append(credential)
@@ -2708,7 +2780,7 @@ def generate_vm_broker_service(config, uid: int) -> str:
     # Resolved at generation time, because systemd will not resolve a name in
     # this directive. Stale on a moved record like every other resolve-at-start
     # element in this design, and fixed by the same restart.
-    for addr in vm_broker_upstream_addresses(config):
+    for addr in upstream:
         svc.add("IPAddressAllow", addr)
     svc.add("IPAddressDeny", "any")
     svc.blank()
@@ -3431,6 +3503,25 @@ def main():
                     inspect_dests[0].write_text(
                         generate_vm_inspect_service(config, user_name))
                     log_msg("  Created egress inspector service")
+
+            # The credential broker instance (P2-2), on the same reuse terms:
+            # generate_vm_broker_service takes its substrate-specific values
+            # as parameters, so this is a call site and not a second
+            # generator. Gated on container_uses_credentials, which is also
+            # the run-file `present=` -- one predicate, so a workload that
+            # drops its last credential has the unit unlinked rather than
+            # left behind holding material nothing selects.
+            if container_uses_credentials(config):
+                broker_dests = paths.get(("unit", "broker"), [])
+                if broker_dests:
+                    broker_dests[0].write_text(
+                        generate_vm_broker_service(
+                            config, uid,
+                            before=container_broker_before(config, mode),
+                            hosts=container_broker_hosts(config),
+                            upstream=container_broker_upstream_addresses(
+                                config)))
+                    log_msg("  Created credential broker instance")
 
             # Main service: Requires+After setup service so User= is resolvable
             containers = normalize_containers(config)

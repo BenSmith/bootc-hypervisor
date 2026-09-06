@@ -92,22 +92,25 @@ Virtiofs volumes have their own design doc, `workloadctl/docs/vm-virtiofs.md` �
 
 ### The credential broker
 
-`libexec/agent-broker` holds a provider API key that a sandboxed coding-agent VM
-is never given, and attaches it to outbound requests the guest makes through it.
+`libexec/agent-broker` holds a provider API key that a sandboxed workload -- a
+coding-agent VM or a filtered container -- is never given, and attaches it to
+outbound requests that workload makes through it.
 It is a whole program shipped by the workloadctl RPM: stdlib, plus
 `lib/peer_identity.py` for caller identification, which it shares with the
 egress inspector's listener.
 Callers are identified by the uid owning the far end of the connection.
 
-**One instance per workload, and the guest is never told where it is.** A
-workload declaring `[[vm.network.credential]]` material gets
-`workload-<name>-broker.service` — written by the generator, `DynamicUser=yes`,
+**One instance per workload, and the workload is never told where it is.**
+One mechanism on both substrates: a VM declaring `[[vm.network.credential]]`
+and a container declaring `[[network.credential]]` get the same generated
+unit, the same `broker.toml` render and the same binary. A declaring workload
+gets `workload-<name>-broker.service` — written by the generator, `DynamicUser=yes`,
 bound to `vm_broker_listen_address(uid)` (`127.129.0.0` + the uid offset), with
 a `broker.toml` regenerated into `/run` at every start. Its only caller is that
-workload's own egress inspector, which recognises a host whose
-`[[vm.network.policy]]` entry names a `credential` and sends that request to the
-broker instead of to the origin. So a guest cannot name the broker, cannot
-choose to use it, and cannot be pointed at another workload's.
+workload's own egress inspector, which recognises a host whose policy entry
+names a `credential` and sends that request to the broker instead of to the
+origin. So a workload cannot name the broker, cannot choose to use it, and
+cannot be pointed at another workload's.
 
 `libexec/workload-vm-broker` is not the broker: it is the one-verb helper that
 writes an instance's `broker.toml` (`workload-vm-broker config <name>`), run as

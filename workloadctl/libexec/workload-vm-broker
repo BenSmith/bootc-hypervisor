@@ -1,6 +1,6 @@
 #!/usr/bin/python3
 """
-workload-vm-broker: write one workload's broker.toml.
+workload-vm-broker: write one workload's broker.toml (either substrate).
 
 Usage: workload-vm-broker config <name>
 
@@ -44,6 +44,7 @@ import sys
 sys.dont_write_bytecode = True
 
 from vm import (
+    container_uses_credentials, render_container_broker_config,
     render_vm_broker_config, vm_broker_config_path, vm_uses_credentials,
 )
 from workload_lib import workload_config_path
@@ -84,19 +85,27 @@ def write_config(name: str) -> int:
     """
     config = load_config(name)
     uid = pwd.getpwnam(f"_wl-{name}").pw_uid
-    if not vm_uses_credentials(config):
+    # One helper, both substrates. The unit directive is identical on either
+    # side and the config it writes is the same file at the same path, so the
+    # only thing that differs is which table the credentials are read from --
+    # a branch here rather than a second ExecStartPre binary to keep in step.
+    is_vm = isinstance(config.get("vm"), dict)
+    uses = vm_uses_credentials(config) if is_vm else container_uses_credentials(config)
+    render = render_vm_broker_config if is_vm else render_container_broker_config
+    block = "[[vm.network.credential]]" if is_vm else "[[network.credential]]"
+    if not uses:
         # The generator does not emit an instance for such a workload, so
         # reaching here means a unit outlived the config that produced it --
         # a hand-edited unit, or a TOML edited without a regeneration. Refused
         # rather than written empty: the broker exits on a config with no
         # sandboxes anyway, and this message names the cause.
-        print(f"  ERROR: {name} declares no [[vm.network.credential]] blocks "
+        print(f"  ERROR: {name} declares no {block} blocks "
               f"(or is not inspected), so it has no broker instance. This unit "
               f"is stale: `workloadctl reload {name}`", file=sys.stderr)
         return 1
     path = vm_broker_config_path(name)
     path.parent.mkdir(parents=True, exist_ok=True)
-    text = render_vm_broker_config(config, uid)
+    text = render(config, uid)
     # Written through a temporary and renamed, so a broker that is somehow
     # already reading cannot see a half-written table -- and 0600 before the
     # rename rather than after, so the file is never briefly wider than it ends

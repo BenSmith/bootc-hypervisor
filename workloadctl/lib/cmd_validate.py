@@ -14,6 +14,7 @@ import sys
 from typing import NoReturn
 
 from workload_lib import (
+    container_credential_entries,
     container_internal_entries,
     container_uses_inspect,
     CREDSTORE_DIR,
@@ -179,9 +180,17 @@ def validate_single(config: WorkloadConfig, manager: WorkloadManager, json_mode=
     # fact. Broker material is deliberately not carried by `backup`: its blast
     # radius is a live provider account, and stating that is better than
     # quietly widening it.
+    #
+    # Both substrates. A container declaring [[network.credential]] gets the
+    # same broker instance from the same generator, so it fails the same way
+    # with nothing sealed -- and the failure is a 502 per request, not a start
+    # failure, so nothing else on the host says the material is missing.
     vm_net = ((config.config.get("vm") or {}).get("network") or {})
+    container_net = config.config.get("network") or {}
     broker_creds = (vm_credential_entries(vm_net)
                     if isinstance(vm_net, dict) else [])
+    if not broker_creds and isinstance(container_net, dict):
+        broker_creds = container_credential_entries(container_net)
     if broker_creds:
         workload_name = config.config.get("workload", {}).get("name", config.name)
         try:

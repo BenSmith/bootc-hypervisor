@@ -890,7 +890,8 @@ def workload_run_files(config) -> list[WorkloadRunFile]:
     # would be circular.
     from workloadctl_core import WorkloadUserNotFound
     from vm import (  # same circularity: vm imports this module
-        vm_uses_credentials, vm_uses_inspect, vm_uses_resolve,
+        container_uses_credentials, vm_uses_credentials, vm_uses_inspect,
+        vm_uses_resolve,
     )
 
     run = RUN_SYSTEMD_SYSTEM
@@ -1006,9 +1007,7 @@ def workload_run_files(config) -> list[WorkloadRunFile]:
         # Container counterpart of the VM inspect-socket/service pair above
         # (P1-9). Superset semantics, same as -pod/-net: always listed so the
         # removable view unlinks stale units, emitted only when
-        # container_uses_inspect() fires. No container broker/resolve
-        # run-files yet -- the credential broker is Phase 2 (G16 notes the
-        # present= leak to watch for when it lands) and containers get no
+        # container_uses_inspect() fires. No resolve pair: containers get no
         # synthesising DNS responder at all (D7).
         container_inspects = container_uses_inspect(config.config)
         files.append(WorkloadRunFile(
@@ -1018,6 +1017,16 @@ def workload_run_files(config) -> list[WorkloadRunFile]:
         files.append(WorkloadRunFile(
             run / f"workload-{name}-inspect.service", "unit", "inspect",
             container_inspects,
+        ))
+        # The credential broker instance (P2-4), superset semantics again and
+        # for the reason G16 flagged: listed for every container so a workload
+        # that drops its last credential has the unit unlinked rather than
+        # left behind holding material nothing selects -- invisible to `drift`
+        # and `disable` otherwise. The `present=` is the same predicate the
+        # generator emits on, so the two cannot disagree.
+        files.append(WorkloadRunFile(
+            run / f"workload-{name}-broker.service", "unit", "broker",
+            container_uses_credentials(config.config),
         ))
 
     # Runtime-written env tree — never produced by the generator (emitted False),
@@ -1707,7 +1716,7 @@ def validate_container_network(net: dict, config: dict | None = None) -> list[st
                        if config is not None else net.get("mode") == "host")
     if on_host_network:
         named = [key for key in ("hosts", "policy", "allow", "internal",
-                                 "splice", "tls", "ca_delivery")
+                                 "splice", "tls", "ca_delivery", "credential")
                  if net.get(key)]
         if named:
             keys = ", ".join(f"[network].{k}" for k in named)

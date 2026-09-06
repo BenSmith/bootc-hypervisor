@@ -31,11 +31,11 @@ D7: no synthesising DNS responder for containers, so unlike
 workload-vm-inspect there is no vm_uses_resolve check and no resolve-status
 clearing here.
 
-No credential-broker exemption (S2's carve-out) either: the container-side
-broker is Phase 2 work (P2-1..P2-4), not yet built, so there is nothing for
-`vm_uses_credentials`'s container twin to gate here yet. When it lands, this
-is the file that needs the same `wl_internal_ok4/6` addition
-workload-vm-inspect's `up()` makes for the VM broker's own address.
+The credential-broker exemption (S2's carve-out) IS made here, gated on
+`container_uses_credentials` -- the same `wl_internal_ok4/6` addition
+workload-vm-inspect's `up()` makes for the VM broker's own address, and for
+the same reason: without it the inspector's dial to its own broker is dropped
+by the rule that stops the workload reaching the LAN.
 
 G18: inspection_applies() delegates to container_uses_inspect(), the single
 source of the predicate the generator's run-file list (P1-9) must agree
@@ -45,6 +45,7 @@ vm_uses_inspect() for the VM side.
 EXIT CODES: same convention as workload-vm-inspect. `up` fails loudly, `down`
 is tolerant.
 """
+import ipaddress
 import json
 import os
 import pwd
@@ -56,7 +57,8 @@ sys.dont_write_bytecode = True
 from vm import (
     NFT_BIN, NFT_PROXY_SKELETON, NFT_SKELETON,
     NFT_SET_INTERNAL_OK4, NFT_SET_INTERNAL_OK6,
-    ensure_advertised_interface, vm_inspect_element_commands,
+    container_uses_credentials, ensure_advertised_interface,
+    vm_broker_listen_address, vm_inspect_element_commands,
     vm_inspect_link_address_commands, vm_inspect_link_delete_commands,
     vm_inspect_policy_path, vm_inspect_status_path,
     vm_internal_ok_commands, vm_internal_ok_delete_commands,
@@ -199,9 +201,23 @@ def up(name: str) -> int:
             addresses.extend(container_internal_resolve(host))
         except ValueError as e:
             raise ValueError(internal_failure(name, host, e)) from None
-    # No credential broker for containers yet (see module docstring) --
-    # nothing to append to `addresses` for it, unlike workload-vm-inspect's
-    # `up()`, which appends vm_broker_listen_address(uid) here.
+    # THE BROKER'S OWN ADDRESS IS AN INTERNAL DESTINATION (P2-5), and without
+    # this element the brokered path cannot work at all -- the same defect the
+    # VM side was fixed for, one substrate over. `vm_broker_listen_address` is
+    # 127.129.x.y, inside 127.0.0.0/8 and therefore inside wl_internal4, and
+    # the drop keyed on this workload's cgroup sits ABOVE the `oif lo accept`,
+    # so the inspector's dial to its own broker is dropped by the rule that
+    # exists to stop the workload reaching the LAN.
+    #
+    # It presents as a broker that is down: the connect times out, the listener
+    # counts `credential broker unreachable`, and the container gets a 502
+    # naming a unit that is running perfectly.
+    #
+    # Armed only for a workload that HAS a broker, so one with no credentials
+    # gains no exemption; purged by uid with the rest, so dropping the last
+    # credential removes it.
+    if container_uses_credentials(config):
+        addresses.append(ipaddress.ip_address(vm_broker_listen_address(uid)))
     try:
         add_commands = vm_internal_ok_commands(uid, addresses, "add")
     except ValueError as e:

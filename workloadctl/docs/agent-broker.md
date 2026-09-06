@@ -318,8 +318,10 @@ should have been impossible to open.
 
 What the host must provide, and what a request actually traverses.
 
-**Nothing is advertised.** A workload declaring `[[vm.network.credential]]`
-material gets a `workload-<name>-broker.service` written by the boot generator:
+**Nothing is advertised.** A workload declaring credential material — a VM's
+`[[vm.network.credential]]` or a container's `[[network.credential]]`; one
+mechanism, described below in the VM's terms — gets a
+`workload-<name>-broker.service` written by the boot generator:
 `DynamicUser=yes`, bound to `vm_broker_listen_address(uid)` — `127.129.0.0` plus
 the workload's offset from `UID_MIN`, port 8081 — with a `broker.toml`
 regenerated into `/run` at every start by `workload-vm-broker config <name>`.
@@ -330,6 +332,19 @@ the nat redirect that sends every filtered guest's 80/443 to its inspector →
 inspector, which terminates TLS, applies `methods`/`paths`/host policy, and
 finds the matched policy entry names a `credential` → inspector dials the broker
 on that loopback address → broker attaches the real key → provider.
+
+**A container takes the same path with two substitutions**: the workload's own
+container-network stack in place of passt (the traffic is re-originated by a
+host process owned by the same workload uid either way, which is what makes the
+uid the selector on both), and `workload-container-inspect` in place of
+`workload-vm-inspect` for the nftables arming. Everything from the redirect
+onward — the inspector, the policy match, the dial to `127.129.x.y`, the broker
+— is the same code reading the same document. The one thing that is genuinely
+different is unit ordering: in pod and bridge mode the workload umbrella is
+`After=` its member containers, so the broker is ordered before the pod/net
+head unit rather than before the umbrella. Ordered before the umbrella it would
+start after every container already had, and the first brokered request in that
+window is refused while every unit reads healthy.
 
 The guest's leg is unchanged from any other inspected host. It asked for
 `api.anthropic.com` and it gets the provider's answer; the branch happens
@@ -613,8 +628,8 @@ is not a workload user and matches no sandbox.
 
 ## 11. What is not built
 
-- **No consumer.** No deployed workload declares credential material, and there
-  is no sandbox VM and no guest image. The feature still has zero users — which
+- **No consumer.** No deployed workload declares credential material, on either
+  substrate, and there is no sandbox VM and no guest image. The feature still has zero users — which
   is what made rung 6 free to delete the host-wide shape outright rather than
   migrate it. The two workloads the rig stands up are throwaways it creates and
   destroys.
