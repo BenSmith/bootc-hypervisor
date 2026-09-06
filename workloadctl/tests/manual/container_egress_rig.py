@@ -297,6 +297,13 @@ CERT_DIR = Path("/var/lib/ceg-rig")
 
 WORKLOAD_DIR = Path("/etc/workloads.d")
 RECORD_ROOT = Path("/var/log/workloadctl/egress")
+
+# The record's connection-id field, as the grouped view spells it. Restated
+# here for the reason every other constant in this file is: the rig runs from a
+# checkout against an INSTALLED workloadctl, and importing lib/ would measure
+# the checkout while every probe measures the install. A rename would fail the
+# pin in tests/test_cmd_egress.py first, which is where it belongs.
+LOG_ID_FIELD = "id"          # VM_INSPECT_LOG_ID_FIELD
 AUDIT_LOG = Path("/var/log/audit/audit.log")
 
 # The one already-documented, deliberately-ungranted denial (see
@@ -2885,6 +2892,356 @@ def check_broker_invariants():
                f"row={ {k: refused.get(k) for k in ('path', 'decision', 'credential')} if refused else None}")
 
 
+# --- the per-request record's readers (P3) -----------------------------------
+
+def _record_hosts(name):
+    """Every distinct `host` in one workload's record, as read by the CLI."""
+    return {r.get("host") for r in egress_records(name) if r.get("host")}
+
+
+def _egress_text(*args, timeout=120):
+    """`workloadctl egress ...` as (rc, combined text). The human renderer's
+    output is the thing under test in half these rows, so stdout and stderr
+    are joined -- a refusal on stderr and a report on stdout are one answer to
+    an operator and pinning the wrong stream is a row that measures nothing."""
+    p = cli("egress", *args, timeout=timeout)
+    return p.returncode, (p.stdout or "") + (p.stderr or "")
+
+
+def check_record_reader():
+    """P3-2: the reader's surfaces, none of which had ever run for a container.
+
+    Everything this rig read before this section came back through ONE
+    invocation -- `egress <name> --json -n 0`, as root, over the live file, on
+    the happy path. A thousand lines of reader, one path through it. The rows
+    below are the rest: the human renderers, the closed-set validation, the
+    time filters, the negative-count refusal, the non-root branch, and the
+    "no record at all" branch.
+
+    S11 GOVERNS EVERY ROW HERE. A reader that returned an empty list
+    unconditionally would answer `No records matched.`, `--since selected
+    nothing`, `--reason selected nothing` and `--host selected nothing`
+    identically and correctly-looking, and would score full marks on any set of
+    negative assertions. So every negative row below is paired with a positive
+    one over a record whose host, path and time THIS FUNCTION caused. That is
+    the reader-side shape of the defect the broker arm found, where three
+    refusals passed against a broker that was simply dead.
+    """
+    say("\n== the record reader ==")
+
+    # THE CONTROL. A request with a path nothing else in this rig makes, so
+    # every selection row below can be pinned to a record this function knows
+    # the contents of rather than to whatever the earlier sections left.
+    token = f"/p3-{int(time.time())}"
+    before = time.time()
+    fetch(FILTERED, f"http://{ALLOWED}{token}")
+    rec = latest_for(FILTERED, ALLOWED, path=token)
+    record("control: a request this section made is in the record",
+           bool(rec), json.dumps(rec)[:110] if rec else "no record")
+    if not rec:
+        # Without the control nothing below can be told from a dead reader, so
+        # the rest of the section is not scored as passes it did not earn.
+        record_gap("the reader rows", "skipped: the control record never arrived")
+        return
+
+    rc, out = _egress_text(FILTERED, "-n", "20")
+    record("the flat human view renders and names the host",
+           rc == 0 and ALLOWED in out, f"rc={rc} {out.strip()[:80]}")
+
+    rc, out = _egress_text(FILTERED, "-g", "-n", "20")
+    record("the grouped view renders and carries the connection id",
+           rc == 0 and f"{LOG_ID_FIELD}=" in out,
+           f"rc={rc} {out.strip()[:80]}")
+
+    # --host, positive then negative. fnmatch, so the literal name is a
+    # pattern that matches itself.
+    rc, out = _egress_text(FILTERED, "--host", ALLOWED, "-n", "20")
+    hit = rc == 0 and ALLOWED in out
+    rc2, out2 = _egress_text(FILTERED, "--host", "no-such-host.invalid")
+    record("--host selects, and a host with no records says so",
+           hit and rc2 == 0 and "No records matched." in out2,
+           f"hit={hit} miss={out2.strip()[:60]}")
+
+    # --since / --until. The positive is bounded by a time this function took
+    # BEFORE the request, so a reader that ignored --since entirely would pass
+    # it -- which is why the negative half runs too, with an --until in the
+    # past that must select nothing.
+    rc, out = _egress_text(FILTERED, "--since", "10m", "--host", ALLOWED)
+    since_ok = rc == 0 and ALLOWED in out
+    rc2, out2 = _egress_text(FILTERED, "--until", "2020-01-01T00:00")
+    record("--since selects a recent request, --until in the past selects none",
+           since_ok and rc2 == 0 and "No records matched." in out2,
+           f"since={since_ok} until={out2.strip()[:60]}")
+
+    # The closed reason vocabulary (lib/cmd_egress.py's REASONS validation).
+    # A reason value that matches nothing renders identically to a workload
+    # that never hit that refusal -- so an unknown one must be an ERROR naming
+    # the set, not an empty report.
+    drops = [r for r in egress_records(FILTERED)
+             if r.get("decision") == "drop" and r.get("reason")]
+    if drops:
+        reason = drops[-1]["reason"]
+        rc, out = _egress_text(FILTERED, "--reason", reason, "-n", "50")
+        pos = rc == 0 and "No records matched." not in out
+    else:
+        reason, pos = None, None
+    rc2, out2 = _egress_text(FILTERED, "--reason", "not allowed")
+    neg = rc2 == 2 and "not allowed" in out2
+    record("--reason selects a real reason and REFUSES an invented one",
+           pos is True and neg, f"reason={reason!r} pos={pos} rc={rc2} "
+           f"{out2.strip()[:70]}")
+
+    # `-n -1` is `selected[-1:]` if it is interpreted -- the newest record
+    # only, silently, where the flag promises a count. Refusal is the whole
+    # behaviour; a row asserting rc != 0 alone would pass on a crash.
+    rc, out = _egress_text(FILTERED, "-n", "-1")
+    record("-n -1 is refused as not a count, not silently reinterpreted",
+           rc == 2 and "not a count" in out, f"rc={rc} {out.strip()[:70]}")
+
+    # THE NON-ROOT BRANCH, which _record_dir_state exists entirely for. The
+    # sentence matters more than the status: this operator is the one least
+    # able to check, and the failure the guard was written for told them the
+    # record `does not exist` over a populated file.
+    other = workload_uid(OPEN)
+    if other is None:
+        record_gap("the non-root reader row", f"no uid for _wl-{OPEN}")
+    else:
+        p = run(["setpriv", f"--reuid={other}", f"--regid={other}",
+                 "--clear-groups", "workloadctl", "egress", FILTERED],
+                check=False, timeout=120)
+        out = (p.stdout or "") + (p.stderr or "")
+        record("a non-root operator is told it is unreadable, NOT that it is "
+               "absent",
+               p.returncode == 1 and "cannot read" in out
+               and "does not exist" not in out,
+               f"rc={p.returncode} {out.strip()[:80]}")
+
+    # THE ABSENT-RECORD BRANCH. Measured by moving the live file aside rather
+    # than by finding a workload that never made a request: the branch keys on
+    # the file's absence and on `generations()` finding nothing, and a rename
+    # to a name outside the generation pattern is exactly that state. Restored
+    # immediately -- the listener holds its own fd, so the move costs no
+    # record, and the following sections read this file again.
+    live = RECORD_ROOT / FILTERED / "requests.log"
+    aside = live.with_suffix(".log.setaside")
+    moved = False
+    try:
+        if live.exists():
+            live.rename(aside)
+            moved = True
+        rc, out = _egress_text(FILTERED)
+        record("with no record file, the reader says so and names the path",
+               moved and rc == 0 and "No request record" in out
+               and str(live) in out,
+               f"moved={moved} rc={rc} {out.strip()[:80]}")
+    finally:
+        if moved:
+            if live.exists():
+                live.unlink()
+            aside.rename(live)
+
+    # P3-7: the counters and the record are two halves of one decision, written
+    # by the same process at the same moment. They are never summed and never
+    # cross-checked anywhere in the product -- so a counter that stopped being
+    # written reads as zero and a record that stopped reads as silence, and
+    # each looks like a quiet workload. This is the one row that joins them.
+    if drops:
+        p = cli("doctor", FILTERED, "--json")
+        names = ""
+        try:
+            names = json.dumps(json.loads(p.stdout).get("egress", {})
+                               .get("drop_reasons", {}))
+        except (json.JSONDecodeError, AttributeError):
+            names = "unreadable"
+        record("a reason in the record also appears in doctor's drop_reasons",
+               reason in names, f"{reason!r} in {names[:80]}")
+    else:
+        record_gap("the counter/record join",
+                   "no drop record in this run to join on")
+
+
+def check_record_rotation():
+    """P3-3/S12: rotation is the only moment the record file is created by the
+    LISTENER rather than by systemd, so it is the only moment the owner, the
+    mode and the SELinux label come from a different actor.
+
+    All three can be wrong here and right everywhere else, and the write that
+    fails does not raise -- RequestLog warns once and then never again, by
+    design, because a line per failed request would put exactly the volume the
+    private sink exists to keep out of the journal back into it. So a broken
+    rotation is a record that silently stops, on a host where every unit is
+    active and every counter still moves.
+
+    PROBE THE WINDOW, NOT THE SETTLED STATE. The listener does not reopen in
+    the signal handler -- `reopen()` sets a flag and the next write acts on it,
+    because taking the lock on whichever thread the kernel picked deadlocks
+    against a thread already inside write(). So a row that asserts anything
+    about the new file immediately after logrotate is measuring the flag. A
+    request has to happen first.
+    """
+    say("\n== record rotation ==")
+    if shutil.which("logrotate") is None:
+        record_gap("rotation", "logrotate is not installed on this host")
+        return
+    conf = Path("/etc/logrotate.d/workloadctl-inspect")
+    if not conf.exists():
+        record_gap("rotation", f"{conf} is not installed (RPM not from spec?)")
+        return
+
+    live = RECORD_ROOT / FILTERED / "requests.log"
+    uid = workload_uid(FILTERED)
+    pre_token = f"/p3-pre-{int(time.time())}"
+    fetch(FILTERED, f"http://{ALLOWED}{pre_token}")
+    latest_for(FILTERED, ALLOWED, path=pre_token)
+    record("control: the record is non-empty before the rotation",
+           live.exists() and live.stat().st_size > 0,
+           f"{live} {live.stat().st_size if live.exists() else 'absent'}")
+    pre_label = run(["ls", "-Z", str(live)], check=False).stdout.split()[0]         if live.exists() else ""
+
+    p = run(["logrotate", "-f", str(conf)], check=False, timeout=120)
+    record("logrotate runs the snippet without error",
+           p.returncode == 0, f"rc={p.returncode} {(p.stderr or '').strip()[:70]}")
+    rotated = RECORD_ROOT / FILTERED / "requests.log.1"
+    record("the previous generation is left UNCOMPRESSED (delaycompress)",
+           rotated.exists(),
+           "present" if rotated.exists() else
+           f"missing; dir={sorted(x.name for x in (RECORD_ROOT / FILTERED).iterdir())}")
+
+    # The window: one request, then read what the listener made.
+    post_token = f"/p3-post-{int(time.time())}"
+    fetch(FILTERED, f"http://{ALLOWED}{post_token}")
+    rec = latest_for(FILTERED, ALLOWED, path=post_token, wait=15)
+    record("the listener writes again after the HUP",
+           bool(rec), json.dumps(rec)[:90] if rec else "no record after rotation")
+
+    st = live.stat() if live.exists() else None
+    record("the recreated file is owned by the workload uid at 0600",
+           st is not None and st.st_uid == uid and (st.st_mode & 0o777) == 0o600,
+           "absent" if st is None else
+           f"uid={st.st_uid} (want {uid}) mode={oct(st.st_mode & 0o777)}")
+    post_label = run(["ls", "-Z", str(live)], check=False).stdout.split()[0]         if live.exists() else ""
+    record("the recreated file carries the same SELinux label",
+           bool(pre_label) and pre_label == post_label,
+           f"{pre_label} -> {post_label}")
+
+    # THE ROW THIS SECTION EXISTS FOR. Reading only the live file would make
+    # "no records" the answer to anything before the last rotation, which is
+    # the whole window the record is kept for. Both tokens, one read.
+    paths = {r.get("path") for r in egress_records(FILTERED)}
+    record("`egress` reads ACROSS generations, not just the live file",
+           pre_token in paths and post_token in paths,
+           f"pre={pre_token in paths} post={post_token in paths} "
+           f"({len(paths)} distinct paths)")
+
+
+def _peer_addresses(addr, seconds=8.0):
+    """Every distinct PEER the inspector's own listening address is talking to,
+    sampled over a window. `src <addr>` selects the LISTENER's side of each
+    connection, so the Peer column is exactly what getpeername() returns to the
+    accept loop -- which is the near end this spike is about, and not the
+    upstream leg the record's `upstream` field already carries."""
+    seen = set()
+    deadline = time.time() + seconds
+    while time.time() < deadline:
+        p = run(["ss", "-tn", "state", "established", "src", addr],
+                check=False, timeout=10)
+        for line in (p.stdout or "").splitlines()[1:]:
+            f = line.split()
+            if len(f) >= 4:
+                seen.add(f[3].rsplit(":", 1)[0])
+        time.sleep(0.05)
+    return seen
+
+
+def check_client_attribution():
+    """P3-0, THE SPIKE. Measured, never scored: its output decides a design.
+
+    The question: can a container's record attribute a request to the
+    CONTAINER that made it, or only to the workload? A VM is one guest, so the
+    two sentences are the same one. A pod- or bridge-mode workload is N
+    containers under ONE _wl-<name> uid, and the record names the workload.
+
+    Pod mode cannot be discriminated even in principle -- one netns, one uid,
+    one identity -- so the only open half is whether ANY per-client address
+    survives re-origination and reaches the listener's accept(). That is not
+    derivable from the source: rootless podman re-originates container traffic
+    through pasta as host sockets owned by the workload uid, and whether the
+    container's own address survives that is a property of pasta, not of this
+    tree. Reason about it instead of measuring and you write a field that is
+    constant in every topology and reads as attribution (S13).
+
+    WHY THIS IS A GAP AND NOT AN ASSERTION. There is no correct answer to pin.
+    A single address here means "no attribution is available, write the
+    disclosure"; a per-container address means "a second measurement with two
+    members is now worth taking". Either way the disclosure in
+    lib/cmd_egress.py's docstring and docs/schema-reference.toml is owed, and
+    NOTHING is added to the record until the two-member reading exists.
+    """
+    say("\n== P3-0: what the listener sees as the near end ==")
+    uid = workload_uid(FILTERED)
+    if uid is None:
+        record_gap("P3-0", f"no uid for _wl-{FILTERED}")
+        return
+    addr = inspector_v4(uid)
+    # A BURST, sampled concurrently. One request is a window measured in
+    # milliseconds and `ss` would almost always miss it -- and an empty sample
+    # would read as "no per-client address" when it means "nothing was in
+    # flight", which is the wrong answer to the question by default.
+    burst = subprocess.Popen(
+        ["workloadctl", "exec", FILTERED, "--", "sh", "-c",
+         f"for i in 1 2 3 4 5 6 7 8 9 10; do "
+         f"wget -q -O /dev/null http://{ALLOWED}/ 2>/dev/null; done"],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    peers = _peer_addresses(addr)
+    try:
+        burst.wait(timeout=60)
+    except subprocess.TimeoutExpired:
+        burst.kill()
+    record_gap("P3-0: near-end addresses seen by the inspector",
+               f"listener {addr}: {sorted(peers) or 'NOTHING SAMPLED -- the '
+               'burst never overlapped a sample, so this reading is empty '
+               'rather than negative'}")
+
+
+def check_purge_frees_uid():
+    """P3-4: `disable --purge` removes the record tree, which is what frees the
+    uid for reallocation.
+
+    NOT TIDINESS. The directory is a systemd LogsDirectory= owned by the
+    workload uid. Left behind, the next workload given that uid -- which need
+    not be a re-enable of this one -- gets a directory owned by a user that no
+    longer exists, systemd refuses to set it up, and the inspect service fails
+    240/LOGS_DIRECTORY. That presents as the workload starting fine with its
+    redirect armed in front of a listener that is not running: it hangs on 80
+    and 443 and on nothing else, the error text belongs to whatever it was
+    dialling, and the one unit that explains it is a different unit's journal.
+    Measured on a VM host 2026-09-05; the code is in lib/cmd_disable.py and had
+    never executed for a container, because this rig ran bare `disable` and
+    left the purge to cleanup(), where nothing reads the result.
+
+    The pre-purge rows ARE the control: without them "the directory is gone"
+    is satisfied by a directory that was never there, which is precisely the
+    state a bug in the enable path would leave.
+    """
+    say("\n== purge frees the uid ==")
+    uid = workload_uid(FILTERED)
+    d = RECORD_ROOT / FILTERED
+    st = d.stat() if d.exists() else None
+    record("control: the record directory exists before the purge",
+           st is not None, str(d))
+    record("control: and is owned by the workload uid at 0700",
+           st is not None and st.st_uid == uid
+           and (st.st_mode & 0o777) == 0o700,
+           "absent" if st is None else
+           f"uid={st.st_uid} (want {uid}) mode={oct(st.st_mode & 0o777)}")
+
+    p = cli("disable", FILTERED, "--purge", timeout=300)
+    record("`disable --purge` succeeds", p.returncode == 0,
+           ((p.stdout or "") + (p.stderr or "")).strip()[-90:])
+    record("the record tree is gone, so the uid can be reissued",
+           not d.exists(), f"{d} {'still present' if d.exists() else 'removed'}")
+
+
 def check_disable_cleanliness():
     """`disable` must leave no inspect units and no element in EITHER table.
 
@@ -3105,6 +3462,11 @@ def main():
         section(check_denial)
         section(check_internal)
         section(check_reporting)
+        # The record's own readers, before anything rewrites the filtered
+        # workload's config or rotates its file out from under them.
+        section(check_record_reader)
+        section(check_record_rotation)
+        section(check_client_attribution)
         section(check_bridge_mode)
         section(check_pod_mode)
         section(check_cross_workload_gap)
@@ -3123,6 +3485,9 @@ def main():
         # section's fixtures rather than its own.
         section(check_broker_invariants)
         section(check_disable_cleanliness)
+        # After it, because it is the purge the section above deliberately
+        # does not do, and it ends this workload's life for good.
+        section(check_purge_frees_uid)
         section(check_audit, marker)
     finally:
         if keep:

@@ -793,10 +793,15 @@ The first rig here that needs **no KVM**. Everything the VM rigs prove about
 the egress path was proven on a guest; this asks the same questions of a
 container, where the traffic is re-originated by pasta as the workload's own
 uid rather than by passt on a guest's behalf. Needs root, podman and the
-installed RPM. Throwaway container workloads, all prefixed `ceg-`. **104/104 on a bare-metal
+installed RPM. Throwaway container workloads, all prefixed `ceg-`. **123/123 on a bare-metal
 Fedora 44 host under enforcing, 2026-09-06**, against an RPM built from the
 branch under review — up from 78/78 after two PR-shaped reviews added the pod,
-ordering and resolver sections below.
+ordering and resolver sections below, and from 104/104 after the credential
+broker arm.
+
+Use `--only=<section>,<section>` to iterate one arm. A full pass is ~40
+minutes, and three of the six defects below were found by re-running a single
+section in three.
 
 ```bash
 sudo python3 tests/manual/container_egress_rig.py
@@ -1024,6 +1029,64 @@ for the resolver **on port 53 specifically** — the element is
 (uid, address, port), and an entry written without the port arms nothing that
 matches, which is why `diagnose`'s message spells the TOML out rather than
 saying "add an allow entry".
+
+**The credential broker arm (P2) is 19 rows, and the last one is a real
+request.** A container holding only a placeholder makes a request that reaches
+the provider carrying the sealed key. The three refusal rows — another
+workload's uid, root, and the container being unable to name `127.129.x.y` at
+all — sit behind a control row proving the broker serves its OWN inspector,
+without which all three are satisfied by a broker that is dead. That is not
+hypothetical: on the first hardware run they were, because **nothing started
+the broker**. The unit was generated, ordered ahead of the right unit, given
+its `IPAddressAllow=` and its `wl_internal_ok4` element, and pulled in by
+nothing. `Before=` orders a unit; it does not start one. Forty-five unit rows
+passed with it in place, because each reads the broker unit's own text and the
+missing half lived in a different unit.
+
+**The record's readers (P3) are three arms, and every negative row has a
+positive one in front of it.** Everything this rig read before them came back
+through a single invocation — `egress <name> --json -n 0`, as root, over the
+live file — so a thousand lines of reader had one path through it. The rest is
+now scored: the flat and grouped renderers, `--host`, `--since`/`--until`, the
+closed `--reason` vocabulary (an unknown value must be an *error naming the
+set*, because an empty report is what a workload that never hit that refusal
+looks like), `-n -1` refused as not a count, the non-root branch reached with
+`setpriv`, and the no-record-file branch. **A reader that returned an empty
+list unconditionally would score full marks on any set of negative
+assertions** — it answers "no records", "nothing matched" and "nothing in that
+window" identically and plausibly. So each is paired with a row over a record
+whose host, path and time the section itself caused. Same shape as the dead
+broker, one surface over.
+
+**Rotation is the only moment the record file is created by the listener
+rather than by systemd**, so it is the only moment the owner, the mode and the
+SELinux label come from a different actor — and a write that fails there does
+not raise. `RequestLog` warns once and never again, by design, so a broken
+rotation is a record that silently stops on a host where every unit is active
+and every counter still moves. The arm forces a rotation, **makes a request
+before asserting anything about the new file** (the listener sets a flag in the
+handler and reopens on the next write, so an immediate assertion measures the
+flag), then checks owner, mode, label, and that `egress` reads *across* the two
+generations rather than only the live one.
+
+**`disable --purge` is asserted, not left to cleanup.** The rig ran bare
+`disable` and purged in teardown, where nothing reads the result — so the code
+that removes the record tree had never executed for a container. What it
+prevents is not tidiness: the next workload given that uid inherits a
+`LogsDirectory=` owned by a user that no longer exists, systemd refuses to set
+it up, and the inspector fails `240/LOGS_DIRECTORY` while the workload itself
+starts fine — hanging on 80 and 443 and nothing else, with the explanation in a
+different unit's journal. The pre-purge rows are the control: without them,
+"the directory is gone" is satisfied by one that was never created.
+
+**P3-0 is measured and deliberately not scored.** It asks what the listener
+sees as the *near* end of a container connection, because a pod- or
+bridge-mode workload is N containers under one uid and the record names the
+workload. There is no correct answer to pin: a single address means no
+attribution is available and the disclosure is the deliverable; a per-container
+address means a second reading with two members is worth taking. Nothing is
+added to the record until that reading exists — a field that is constant in
+every topology is worse than no field, because it reads as attribution.
 
 ### What it still does not measure
 
