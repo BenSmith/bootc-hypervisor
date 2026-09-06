@@ -265,7 +265,7 @@ PROVIDER = "ceg-provider.test"
 # a stub on the host's is simply unreachable from it -- and worse, a dial to
 # 127.0.0.1 from inside never leaves the container's netns, so it never meets
 # the host nftables that every row here is about.
-PROVIDER_ADDR = "10.99.98.20"
+PROVIDER_ADDR = "10.99.98.30"
 PROVIDER_PORT = 443     # not configurable: `upstream` is https://<host>
 
 # The broker's address family and port, spelled out rather than imported, for
@@ -939,11 +939,32 @@ def egress_records(name):
     return doc if isinstance(doc, list) else []
 
 
-def latest_for(name, host):
-    for rec in reversed(egress_records(name)):
-        if rec.get("host") == host:
+def latest_for(name, host, wait=6.0, path=None):
+    """The most recent record for `host`, WAITING briefly for it to appear.
+
+    The wait is the point. The listener writes a record after it has finished
+    with the connection, so a read fired the instant `fetch` returns can beat
+    the write -- and "no record" is then reported as the inspector failing to
+    account for a request it accounted for perfectly, a fifth of a second
+    later. It went unnoticed across three hardware passes and then failed two
+    rows of check_denial on the fourth, which is the worst way for a race to
+    present: rare enough to look like a real regression.
+
+    `wait=0` for the one caller that asserts a record is ABSENT -- there,
+    waiting would only make the run slower and the assertion is about a path
+    the inspector is not in at all.
+    """
+    deadline = time.time() + wait
+    while True:
+        for rec in reversed(egress_records(name)):
+            if rec.get("host") != host:
+                continue
+            if path is not None and rec.get("path") != path:
+                continue
             return rec
-    return None
+        if time.time() >= deadline:
+            return None
+        time.sleep(0.3)
 
 
 def audit_since(marker):
@@ -2035,7 +2056,7 @@ def check_allow_rotation():
     # checked explicitly rather than assumed, because "there is no record" is
     # itself the reason the operator has nowhere to look.
     record("the drop leaves NO egress record, so `egress` cannot surface it",
-           latest_for(FILTERED, ROT_HOST) is None,
+           latest_for(FILTERED, ROT_HOST, wait=0) is None,
            "confirmed: the inspector is not in this path")
 
     surfaces = {}
@@ -2232,6 +2253,12 @@ def check_embedded_root_store():
 
 
 DNS_ADDR = "10.99.98.20"     # a routable resolver, in the fixture namespace
+# NOT PROVIDER_ADDR, AND THAT COLLISION ALREADY HAPPENED. This section adds
+# its address on entry and DELETES it in its finally block, so a later section
+# sharing the number found the address gone and could not bind -- reported as
+# "the stub provider never listened", which reads as a broker fault. Every
+# address this file puts in the namespace is checked for uniqueness in
+# preflight; see NS_ADDRESSES.
 DNS_PORT = 53
 
 
@@ -2829,11 +2856,7 @@ def check_broker_invariants():
     # is correctly null -- and reading it as the brokered one reported the
     # product missing a field it writes. The rig bug that looks exactly like
     # the product bug, which the README names as the recurring one.
-    rec = None
-    for row in reversed(egress_records(CRED_WL)):
-        if row.get("host") == PROVIDER and row.get("path") == "/v1/models":
-            rec = row
-            break
+    rec = latest_for(CRED_WL, PROVIDER, path="/v1/models")
     if rec is None:
         record(f"{CRED_WL} recorded the brokered request", False,
                f"no /v1/models row for {PROVIDER} in "
@@ -2856,11 +2879,7 @@ def check_broker_invariants():
         # this section read by mistake, and a record that named a credential on
         # a request that never got one would be a worse defect than the missing
         # field it was mistaken for.
-        refused = None
-        for row in reversed(egress_records(CRED_WL)):
-            if row.get("host") == PROVIDER and row.get("path") == "/v9/nope":
-                refused = row
-                break
+        refused = latest_for(CRED_WL, PROVIDER, path="/v9/nope")
         record("the refused request's row names no credential",
                refused is not None and not refused.get("credential"),
                f"row={ {k: refused.get(k) for k in ('path', 'decision', 'credential')} if refused else None}")
@@ -2916,9 +2935,30 @@ def check_audit(marker):
 
 # --- driver ------------------------------------------------------------------
 
+# Every address this rig puts in the fixture namespace, so preflight can
+# refuse a duplicate. A section that adds an address on entry and removes it on
+# exit makes a shared number invisible until the two sections happen to run in
+# the same pass, in that order -- which is exactly how PROVIDER_ADDR and
+# DNS_ADDR collided, and the failure named TLS rather than addressing.
+def _ns_addresses():
+    return {
+        "ROT_A": ROT_A, "ROT_B": ROT_B, "V6_ADDR": V6_ADDR,
+        "PROVIDER_ADDR": PROVIDER_ADDR, "DNS_ADDR": DNS_ADDR,
+    }
+
+
 def preflight():
     if os.geteuid() != 0:
         sys.exit("run as root: this rig enables and disables real workloads")
+    seen = {}
+    for label, addr in _ns_addresses().items():
+        if addr in seen:
+            sys.exit(f"two rig fixtures share {addr}: {seen[addr]} and "
+                     f"{label}. Sections add and remove their own addresses, "
+                     f"so a shared one is only visible when both run in the "
+                     f"same pass -- and the loser reports 'nothing could "
+                     f"bind', which reads as a product fault.")
+        seen[addr] = label
     for tool in ("workloadctl", "podman", "nft", "getent"):
         if run(["which", tool], check=False).returncode != 0:
             sys.exit(f"missing {tool}")
