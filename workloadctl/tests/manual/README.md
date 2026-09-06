@@ -793,11 +793,12 @@ The first rig here that needs **no KVM**. Everything the VM rigs prove about
 the egress path was proven on a guest; this asks the same questions of a
 container, where the traffic is re-originated by pasta as the workload's own
 uid rather than by passt on a guest's behalf. Needs root, podman and the
-installed RPM. Throwaway container workloads, all prefixed `ceg-`. **123/123 on a bare-metal
+installed RPM. Throwaway container workloads, all prefixed `ceg-`. **144/144 on a bare-metal
 Fedora 44 host under enforcing, 2026-09-06**, against an RPM built from the
 branch under review — up from 78/78 after two PR-shaped reviews added the pod,
-ordering and resolver sections below, and from 104/104 after the credential
-broker arm.
+ordering and resolver sections below, from 104/104 after the credential
+broker arm, and from 123/123 after the record-reader, rotation and purge
+sections.
 
 Use `--only=<section>,<section>` to iterate one arm. A full pass is ~40
 minutes, and three of the six defects below were found by re-running a single
