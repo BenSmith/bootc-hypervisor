@@ -1619,10 +1619,9 @@ def _container_host_reason_entries(net: dict, key: str) -> list[ContainerHostRea
 # (lib/vm.py) where the two schemas share a rule. Diverges where the container
 # schema has no `egress` key (presence of a trigger is the whole statement)
 # and no bridge escape hatch. `mode = "host"` IS special-cased below:
-# P0-1 measured on hardware that a host-mode container's processes span the
-# workload's whole subuid window rather than its single uid, which is what
-# every selector in workload-filter.nft is keyed on. See the comment in
-# container_uses_inspect() for the measurements.
+# a host-mode container's processes span the workload's whole subuid window
+# rather than its single uid, which is what every selector in
+# workload-filter.nft is keyed on. See container_uses_inspect().
 
 _CONTAINER_HOST_RE = re.compile(r"^[A-Za-z0-9*?.\[\]!_-]+$")
 

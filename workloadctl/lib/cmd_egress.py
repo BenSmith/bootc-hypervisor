@@ -123,8 +123,8 @@ def parse_when(text: str) -> datetime.datetime:
         parsed = datetime.datetime.fromisoformat(raw.replace("Z", "+00:00"))
     except ValueError:
         raise EgressUsage(
-            f"{text!r} is not a time — use 2h, 30m ago, 2026-08-31, "
-            "2026-08-31T14:00, or an ISO timestamp") from None
+            f"{text!r} is not a time — use 2h, 30m ago, YYYY-MM-DD, "
+            "YYYY-MM-DDTHH:MM, or an ISO timestamp") from None
     if parsed.tzinfo is None:
         parsed = parsed.astimezone()
     return parsed.astimezone(datetime.UTC)
@@ -719,6 +719,6 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--status", action="append", metavar="STATUS",
                         help="403, or 4xx for the class. Repeatable")
     parser.add_argument("--since", metavar="TIME",
-                        help="2h, 30m ago, 2026-08-31T14:00 (naive is local)")
+                        help="2h, 30m ago, YYYY-MM-DDTHH:MM (naive is local)")
     parser.add_argument("--until", metavar="TIME", help="Same spellings")
     parser.add_argument("workload", metavar="WORKLOAD", help="Workload name")

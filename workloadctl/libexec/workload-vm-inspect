@@ -317,9 +317,8 @@ def up(name: str) -> int:
     #
     # It presents as a broker that is down: the connect times out, the listener
     # counts `credential broker unreachable`, and the guest gets a 502 telling
-    # an operator to go and look at a unit that is running perfectly. Found by
-    # tests/manual/broker_rig.py on real guests -- the unit tests could not see
-    # it, because no unit test sends a packet.
+    # an operator to go and look at a unit that is running perfectly. Not
+    # visible to a unit test, because no unit test sends a packet.
     #
     # Armed only for a workload that HAS a broker, so a workload with no
     # credentials gains no exemption; purged by uid with the rest, so dropping

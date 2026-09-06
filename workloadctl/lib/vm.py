@@ -1702,10 +1702,8 @@ VM_CA_ENV_VARS = (
 # What IS required of the host is a condition rather than a setting, and it is
 # the one that catches people: the host's own clocksource must be the TSC. KVM
 # answers the clock-pairing hypercall EOPNOTSUPP otherwise, so on a host running
-# hpet or acpi_pm the module refuses to load in every guest -- measured
-# 2026-08-26 on a development host with no tsc in available_clocksource at all,
-# where every piece of the seed below was correct and the device still never
-# appeared. Such a guest keeps its stock time configuration and is covered by
+# hpet or acpi_pm the module refuses to load in every guest, however correct
+# the seed below is: the device simply never appears. Such a guest keeps its stock time configuration and is covered by
 # lib/vm_clock's host-side check alone.
 #
 # THREE PIECES, AND THE LEAST OBVIOUS ONE IS LOAD-BEARING
@@ -1717,8 +1715,8 @@ VM_CA_ENV_VARS = (
 #     only selector that cannot be reordered;
 #   - `makestep 1 -1`, which is the piece that actually fixes the bug. Fedora's
 #     stock chrony.conf says `makestep 1.0 3`: step for the first three updates,
-#     slew forever after. Slewing is capped near 83 us/s, so the two-hour rewind
-#     measured in tests/manual/clock_rig.py would take months to walk off -- the
+#     slew forever after. Slewing is capped near 83 us/s, so a two-hour rewind
+#     would take months to walk off -- the
 #     guest would spend all of it inside the window where new leaves fail to
 #     validate. `-1` means "step whenever the offset exceeds a second, always",
 #     which is right here and would be wrong on a public NTP client, where an
@@ -1844,11 +1842,11 @@ VM_LEAF_SELINUX_TYPE = "wlinspect_leaf_t"
 # to reach it gets a re-provision SCHEDULED rather than discovered.
 VM_CA_VALIDITY_DAYS = 3650
 
-# notBefore is backdated an hour for clock skew. Measured 2026-08-26: guest
-# drift is ~10 ppm (about five minutes a year), so this covers roughly 1,200
+# notBefore is backdated an hour for clock skew. Guest drift is ~10 ppm
+# (about five minutes a year), so this covers roughly 1,200
 # years of it -- and exactly ONE HOUR of a vCPU pause, which a guest loses
 # permanently. The backdate is not what makes pauses survivable; the mint-time
-# clock check is. See tests/manual/clock_rig.py.
+# clock check is.
 VM_CA_BACKDATE_SECONDS = 3600
 
 # The window VM_CA_VALIDITY_DAYS' comment already promised: `diagnose` warns
@@ -1909,8 +1907,8 @@ def vm_ca_subject(name: str) -> str:
 def vm_ca_openssl_argv(name: str, key_path, cert_path, *, now: float) -> list[str]:
     """One `openssl req -x509` invocation that mints the CA.
 
-    THE THREE EXTENSIONS ARE NOT DECORATION. Measured 2026-08-16: Python 3.14's
-    ssl (OpenSSL 3.5) rejects a chain whose CA lacks a Subject Key Identifier
+    THE THREE EXTENSIONS ARE NOT DECORATION. Python 3.14's ssl (OpenSSL 3.5)
+    rejects a chain whose CA lacks a Subject Key Identifier
     with `certificate verify failed: Missing Authority Key Identifier`, and
     then -- once that is added -- with `CA cert does not include key usage
     extension`. curl, Go and Node accept the same CA without any of them, so a
@@ -2114,7 +2112,7 @@ def vm_leaf_openssl_argv(name: str, ca_key_path, ca_cert_path,
     THE SAN IS CRITICAL, AND THAT IS LOAD-BEARING. The subject is empty (there
     is no meaningful CN for a name the host does not own), and RFC 5280 says a
     certificate with an empty subject MUST mark subjectAltName critical.
-    Measured 2026-08-26: without the flag, Python's ssl rejects the chain with
+    Without the flag, Python's ssl rejects the chain with
     `Subject empty and Subject Alt Name extension not critical` -- a verify
     failure whose message names neither the SAN value nor the CA, so it reads
     like a trust problem and sends a reader to the anchor.
@@ -2616,8 +2614,8 @@ def vm_inspect_link_address_commands(uid: int) -> tuple[list[str], list[str]]:
     and the address is on a dummy link and therefore local, so neither add
     touches a route or a sysctl.
 
-    The v6 add carries `nodad`. A dummy link runs no DAD at all (measured
-    2026-08-19: 0/5 tentative, 5/5 immediate binds), so the flag changes
+    The v6 add carries `nodad`. A dummy link runs no DAD at all, so the flag
+    changes
     nothing today; it states the intent and stays correct if the address ever
     moves to a link type that does run DAD, where it would otherwise sit
     tentative through the router-solicitation window and the inspector's first
@@ -3212,7 +3210,7 @@ def vm_resolve_address(uid: int) -> str:
 
     There is no address-add helper to go with this, and writing one is the trap.
     The kernel treats all of 127/8 as local on `lo`, so binding 127.130.1.4
-    succeeds with nothing assigned (verified 2026-08-19): a `workload-vm-resolve
+    succeeds with nothing assigned: a `workload-vm-resolve
     up` twin adding a /32 would be a no-op, and worse, it would invent an
     address whose absence the inspector's fail-at-bind argument would then
     appear to depend on.

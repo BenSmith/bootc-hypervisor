@@ -284,11 +284,11 @@ add rule inet workload_filter output meta skuid . ip6 daddr @wl_inspect_self6 ct
 # `@wl_filtered` expressed it as "workloads already under policy" — a
 # strictly narrower set. Everything outside it walked through: an
 # `egress = "open"` VM, a container with no [network] table, and any
-# ordinary shell on the box, none of which is ever a member. Measured on
-# hardware 2026-09-05 on both substrates: an unfiltered workload reached a
-# filtered workload's listener on 8080 (a 400 from the listener's own
-# parser — proof of reach) and on 8443 (handshake then reset), and the
-# dials were WRITTEN INTO THE VICTIM'S EGRESS RECORDS, so a filtered
+# ordinary shell on the box, none of which is ever a member. Without this,
+# on both substrates, an unfiltered workload reaches a filtered workload's
+# listener on 8080 (a 400 from the listener's own parser — proof of reach)
+# and on 8443 (handshake then reset), and the dials are WRITTEN INTO THE
+# VICTIM'S EGRESS RECORDS, so a filtered
 # workload's audit trail was not an account of its own traffic. Reproduced
 # from the bare host as an ordinary user, which is what rules out anything
 # pasta- or substrate-specific: the exposure was "any local socket".

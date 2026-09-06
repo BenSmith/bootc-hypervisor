@@ -3294,10 +3294,10 @@ class Listener:
             # before this workload had a CA does not trust it and must be
             # re-seeded" -- true for a VM instance whose seed predates the CA,
             # and actively misleading for the other case, which has no seed to
-            # revisit and no CA route to repair. Measured on hardware
-            # 2026-09-06 against a JDK image: `ca_delivery = "env"` delivered
-            # all five variables, every one readable inside the container, and
-            # the JVM still refused the leaf -- because its anchors are
+            # revisit and no CA route to repair. A JVM image is the standing
+            # example: `ca_delivery = "env"` delivers all five variables, every
+            # one readable inside the container, and the JVM still refuses the
+            # leaf -- because its anchors are
             # `cacerts` INSIDE THE IMAGE and no environment variable adds to
             # them. The operator was then told to re-seed a guest that does not
             # exist. Anything with an embedded store is in this class: a JVM,
@@ -3950,9 +3950,8 @@ class Listener:
                 # and `dial` was never called. The credential was recorded as
                 # attached and was not: the request reached the provider
                 # carrying whatever the guest held, which for a real client is
-                # the placeholder. Found by tests/manual/broker_rig.py on real
-                # guests; every unit test passed, because none of them seeds the
-                # pool the way a terminated session does.
+                # the placeholder. No unit test sees it, because none seeds
+                # the pool the way a terminated session does.
                 key=BROKER_UPSTREAM_KEY + req.host if credential else req.host,
                 dial=self._dial_broker if credential
                 else (self._dial_upstream_tls if pinned_host is not None
@@ -4036,9 +4035,8 @@ class Listener:
                 # _upstream_tls_failure -- or resets the connection here, with
                 # nothing left to read the reason from. Which one happens is
                 # decided inside the peer's stack and is not ours to make
-                # deterministic; found by looping the unit suite 2026-08-27,
-                # where it presented as a flaky test rather than as a guest
-                # being told nothing.
+                # deterministic. It presents as a flaky test rather than as a
+                # guest being told nothing.
                 #
                 # The COUNTER stays `relay failed`. A bare reset is genuinely
                 # ambiguous -- an origin that crashed or closed an idle socket

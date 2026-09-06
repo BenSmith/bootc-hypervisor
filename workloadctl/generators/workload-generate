@@ -537,10 +537,9 @@ def _head_unit(name, user_name, uid, slice_name, header_comment, description,
     listener: it ran completely unfiltered, image pull included, and then
     became filtered mid-flight. Single mode was never affected (the arming is
     an ExecStartPre on the container's own unit, ahead of `podman run`). What
-    hid it in the topologies that WERE affected is that every rig row probed
-    steady state -- enable, recreate, sleep, probe -- and by then a late arming
-    and a correct one look identical. container_egress_rig.py's
-    check_head_unit_ordering now asserts the ordering itself.
+    hides it is a test that probes steady state -- enable, recreate, sleep,
+    probe -- because by then a late arming and a correct one look identical.
+    Assert the ordering itself.
 
     The head unit is the right owner because the ordering it needs already
     exists in both directions: members are `Requires=`/`After=`/`BindsTo=`
@@ -1001,7 +1000,7 @@ def _cgroup_args(container, name, mode):
     # Per-container cgroup limits via podman flags. Under option 1b (non-split
     # topology) payloads live in a transient libpod scope under the user manager;
     # podman flags write directly to the scope's cgroup files via OCI/crun, so they
-    # bind in all modes (single/bridge/pod) — spike-verified on the dev host 2026-06-11.
+    # bind in all modes (single/bridge/pod).
     # Workload-level limits (aggregate cap for the whole user manager) are in the
     # user@<uid>.service.d drop-in; these per-container flags add finer-grained OOM
     # scoping on top.
@@ -1514,7 +1513,7 @@ def _container_ca_delivery_args(workload, name: str) -> list:
     (that would tell the client to distrust the very install the operator
     asked for).
 
-    VERIFIED ON HARDWARE 2026-09-05, and it needed a policy grant. The source
+    This needs a policy grant. The source
     path is labelled by provision_vm_pki_dirs for the host-side inspector's own
     read access (comment there: "a directory the inspector creates for itself
     inherits svirt_image_t"), and a plain bind-mount with no `:Z`/`:z` was
@@ -1650,10 +1649,10 @@ def generate_system_service(workload, container, user_name, uid, mode="single"):
     # is not in the unit's cgroup at all). This is a property of the non-split
     # topology, NOT a fundamental rootless+linger limit: under --cgroups=split +
     # Delegate=yes (ADR 001 option 1) conmon lands in workload-<name>.service's own
-    # cgroup and Type=notify reaches active in 0s — proven on the dev host 2026-07-12 (ADR
-    # 001 addendum). Adopting it would revert the split tax 1b was chosen to shed,
-    # so exec stays the default. Readiness gating uses --health-cmd + the CLI's
-    # health-verified flow. See ADR 001 (item 8 + 2026-07-12 addendum) and llms.txt.
+    # cgroup and Type=notify reaches active in 0s. Adopting it would revert the
+    # split tax 1b was chosen to shed, so exec stays the default. Readiness
+    # gating uses --health-cmd + the CLI's health-verified flow. See ADR 001
+    # (item 8 and its addendum) and llms.txt.
     service_type = container.get("resources", {}).get("service_type", "exec")
     valid_types = ["simple", "exec", "forking", "oneshot", "dbus", "notify", "idle"]
     if service_type not in valid_types:
@@ -2275,10 +2274,10 @@ def _harden_vm_sidecar(svc, name: str, *, families: str, tasks_max: int,
     The directory is created by workload-<name>-setup.service, which both units
     Requires= and are ordered After=, so it exists by the time this applies.
 
-    `extra_rw` is how the inspector names its leaf caches, and MEASURED on a
-    KVM host 2026-08-26 is the only reason it exists: /var is inside "the whole
-    hierarchy". Without it every mint failed with EROFS on the cache directory,
-    the guest's connection was reset, and the journal said NOTHING -- the mint
+    `extra_rw` is how the inspector names its leaf caches, and /var being
+    inside "the whole hierarchy" is the only reason it exists. Without it every
+    mint fails with EROFS on the cache directory, the guest's connection is
+    reset, and the journal says NOTHING -- the mint
     raised an OSError from outside the minter's own try block and the
     per-connection handler swallows OSError by design. A warm cache hid it
     completely, so the failure was "the first request to any host fails and the
@@ -2485,9 +2484,8 @@ def generate_vm_resolve_socket(config, user_name: str, uid: int) -> str:
     coming from generate_vm_inspect_socket will look for.
 
     The kernel treats all of 127/8 as local on `lo`, so the responder's address
-    needs no assignment: binding 127.130.1.4 succeeds with nothing configured
-    (verified 2026-08-19). A `workload-vm-resolve up` twin adding a /32 would be
-    a no-op, and worse, it would invent an address whose absence the inspector's
+    needs no assignment: binding 127.130.1.4 succeeds with nothing
+    configured. A `workload-vm-resolve up` twin adding a /32 would be a no-op, and worse, it would invent an address whose absence the inspector's
     fail-at-bind argument would then appear to depend on. There is likewise no
     FreeBind= question to answer, and no teardown that would make the presence
     of an address mean a running process.

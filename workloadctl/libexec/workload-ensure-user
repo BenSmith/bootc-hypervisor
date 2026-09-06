@@ -1311,8 +1311,7 @@ def _render_default_user_data(name: str, guest_user: str, pubkey: str,
         # would leave the
         # old file behind on every existing guest, still exporting the retired
         # https_proxy, since cloud-config runs once at first boot. A guest that
-        # keeps that stale export dials an address where nothing listens -- which
-        # is the negative case tests/manual/inspect_rig.py proves on a live VM.
+        # keeps that stale export dials an address where nothing listens.
         lines.append("  - path: /etc/profile.d/99-workload-proxy.sh")
         lines.append("    permissions: '0644'")
         lines.append("    content: |")

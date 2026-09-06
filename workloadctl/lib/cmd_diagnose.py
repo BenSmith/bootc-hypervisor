@@ -247,10 +247,10 @@ def ca_trust_anchor_check(
     and the image's extraction is discarded. A *new* anchor file still lands;
     nothing extracts it.
 
-    Measured on a storage host 2026-07-30: a homelab root dated that morning
-    sat in source/anchors beside a bundle dated 2026-05-21 that did not contain
-    it, and every registry.local pull failed `unable to get local issuer
-    certificate` while the anchor was plainly present. The symptom points away
+    The shape it catches: a root in source/anchors sitting beside an older
+    extracted bundle that does not contain it, so every private-registry pull
+    fails `unable to get local issuer certificate` while the anchor is plainly
+    present. The symptom points away
     from the cause — the trust store looks correct — which is why this is a
     check and not a note.
 
@@ -453,9 +453,9 @@ def gpu_selinux_check(xserver: bool | None, blanket: bool | None,
     nothing. Reporting the boolean for a module-bearing workload names a path
     that does not apply to it, and would read as "allowed" on a host where
     the boolean is on but the bundle's own grant is missing — the exact
-    regression ShippedBundleGrantsTest exists to catch. Observed on a GPU hypervisor host
-    2026-07-29: vnc-sway (wl_vnc_sway.process) was reported as covered by the
-    boolean while its access in fact came from its own module.
+    regression ShippedBundleGrantsTest exists to catch: a workload gets reported
+    as covered by the boolean while its access in fact comes from its own
+    module.
     """
     if module:
         return (True, f"NVIDIA device access granted by the workload's own "
@@ -1351,9 +1351,8 @@ def allow_drift_check(config) -> tuple[str, bool, str] | None:
     the host.
 
     The disposition is right. Its legibility was not, and that is what this
-    check exists for. Measured on hardware 2026-09-06, with
-    container_egress_rig.py's rotation row: after the name behind a live
-    `allow` entry was pointed at a second origin, `diagnose`, `doctor` and
+    check exists for. When the name behind a live `allow` entry is pointed at
+    a second origin, `diagnose`, `doctor` and
     `validate` between them named neither the stale address nor the entry that
     pinned it; `egress` had no record at all, because the inspector is not in
     this path and never sees the connection; and the whole operator-visible
@@ -1723,8 +1722,7 @@ def _caller_identity_fragments(status) -> list[str]:
     a peer it cannot identify is admitted -- so every connection is served
     exactly as before and no functional surface changes. The counter is the
     only tell, and a counter nobody reads is worth no more than no counter:
-    broker_rig.py passed all 34 of its functional assertions with the check
-    fully inert, and only its audit.log assertion failed.
+    every functional assertion passes with the check fully inert.
     """
     unresolved = status.get("caller_unresolved")
     if not isinstance(unresolved, int) or not unresolved:
@@ -1876,11 +1874,9 @@ def vm_inspect_check(config, *, elements4=PROBE, elements6=PROBE,
     Observations are injectable (PROBE sentinel) so the verdict logic is
     testable without a live host.
     """
-    # G7 in the container egress-parity build spec: ROUTED (2026-09-05).
-    #
-    # This row was closed "VM-only for now" on the grounds that the surface
-    # below -- workload-<name>-inspect.socket and the shared nft proxy maps --
-    # did not exist for a container until P1-7..P1-9 landed. It does now: the
+    # Routed for both substrates. The surface below --
+    # workload-<name>-inspect.socket and the shared nft proxy maps -- exists
+    # for a container as well as a VM: the
     # generator emits the container's socket from the very same
     # generate_vm_inspect_socket(), the maps are the same two shared maps
     # keyed by the same uid, and the remedy is byte-for-byte the same unit

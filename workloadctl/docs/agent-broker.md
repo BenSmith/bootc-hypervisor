@@ -16,16 +16,13 @@ the broker — so it cannot choose to use one, cannot decline to, and cannot be
 pointed at another workload's. Earlier revisions of this design did hand the
 guest a base URL; §2 and §4 record why that was sound and §7 records why it is
 gone. The broker's own path involves no TLS interception and breaks no
-certificate pinning. (Since 2026-08-26 a *filtered* VM does carry a CA for a
-different reason — its egress inspector terminates TLS by default; see
+certificate pinning. (A *filtered* VM does carry a CA for a different
+reason — its egress inspector terminates TLS by default; see
 `adr/008-transparent-egress-inspection.md`. That is egress policy, not
 this. The broker's argument never rested on the guest being CA-free; it rests
 on the credential never entering the guest at all.)
 
-Extracted 2026-08-12 from the session record that produced the broker. That
-record is a narrative of one design session and covers two other subjects; it
-lives outside this repository and does not resolve from a clean checkout. **This
-file is authoritative for the current design.**
+**This file is authoritative for the current design.**
 
 ---
 
@@ -75,9 +72,8 @@ credential, re-encrypt — requires a CA in every guest, a full userspace networ
 stack, and it breaks certificate pinning. It has to work that way because it
 cannot assume the software inside cooperates.
 
-*Amended 2026-08-26:* a filtered VM now has all of that anyway, for egress
-policy. It does not change the conclusion, and the reason is worth stating
-plainly: the substitution is the expensive half. Reading a request to authorise
+A filtered VM has all of that anyway, for egress policy. It does not change
+the conclusion, and the reason is worth stating plainly: the substitution is the expensive half. Reading a request to authorise
 its host is bounded work; rewriting one to carry a credential means knowing the
 provider's auth scheme, keeping up with it, and holding the key on a path that
 parses guest-controlled bytes. The broker holds the key on a path that parses
@@ -113,10 +109,9 @@ destination. Everything else the agent reaches — git, package registries,
 whatever it decides to curl — still needs default-deny egress, or you have
 protected the API key while leaving every exfiltration path open. That companion
 work exists in workloadctl — per-VM default-deny keyed on the workload uid,
-plus a transparent per-workload egress inspector for hostname policy — and
-merged 2026-08-12. The inspector replaced the CONNECT proxy this paragraph
-originally named: a proxy only filters a guest that is configured to use it,
-and the redirect does not ask.
+plus a transparent per-workload egress inspector for hostname policy. An
+inspector rather than a CONNECT proxy: a proxy only filters a guest that is
+configured to use it, and the redirect does not ask.
 
 ---
 
@@ -366,8 +361,7 @@ Consequences worth knowing:
   the cgroup-keyed drop that stops the inspector reaching host-internal ranges
   sits *above* the rule accepting its loopback traffic. So `workload-vm-inspect`
   arms the broker's address in `wl_internal_ok4` for any workload that has one.
-  Without it the dial is dropped in silence and presents as a dead broker. This
-  was found on hardware, not in review.
+  Without it the dial is dropped in silence and presents as a dead broker.
 - **No `[[vm.network.allow]]` entry is needed** for the provider host on the
   brokered path, beyond the `[[vm.network.policy]]` entry that names the
   credential. The inspector never dials the origin for a brokered host at all.
@@ -435,10 +429,10 @@ So the key can be kept out of the coding tool. The tool holds nothing, cannot be
 tricked into supplying its own, and can reach only the one upstream the broker
 is configured for.
 
-The peer-uid mechanism was separately verified 2026-08-12: recovered against a
-live socket from the real kernel tables, and end to end through the request
-path, where two runs differing only in configuration produced a resolved caller
-and a refusal on the same connection. Both silent-failure modes have tests.
+The peer-uid mechanism is verified separately: recovered against a live socket
+from the real kernel tables, and end to end through the request path, where two
+runs differing only in configuration produce a resolved caller and a refusal on
+the same connection. Both silent-failure modes have tests.
 
 **The redirect's shape was measured, not assumed** — the rule was built in a
 network namespace and the socket tables read through it, before the host map
@@ -449,20 +443,15 @@ client row   local=192.0.2.1:58224  rem=192.0.2.1:8081   <- the address it diall
 server       getsockname()=127.0.0.1:8081                <- what the match used
 ```
 
-Comparing against `getsockname()` alone would have matched nothing and returned
-403 to every guest, while passing every loopback test for the reason given in
-§5. Verified again through the whole path afterwards: with a map element, a
-resolved caller and a 502 from the deliberately bogus upstream; with the element
-removed, connection refused.
+Comparing against `getsockname()` alone matches nothing and returns 403 to
+every guest, while passing every loopback test for the reason given in §5.
 
-One correction from building it. The startup guard first demanded the initial
-namespace's uid map, which was wrong in the direction that matters least but
-annoys most: a container can be namespaced and still map the whole workload
-range, and refusing there is a false alarm — the kind an operator learns to
-route around, taking the real check with it. The guard now resolves each
-configured sandbox's uid and asks whether *that* is mappable, which is both
-exact and actionable, and warns rather than refuses when it has nothing to
-check.
+The startup guard resolves each configured sandbox's uid and asks whether
+*that* is mappable, rather than demanding the initial namespace's uid map: a
+container can be namespaced and still map the whole workload range, so the
+broader check is a false alarm — the kind an operator learns to route around,
+taking the real check with it. It warns rather than refuses when it has
+nothing to check.
 
 ---
 
@@ -636,44 +625,8 @@ is not a workload user and matches no sandbox.
 - **Nothing runs the end-to-end check but a person.** The seam is proven (see
   below) by a rig needing root and two VMs of its own, so it is neither a PR
   gate nor part of the runtime rung. A regression in it surfaces when someone
-  next runs it by hand, not when it is introduced. This gap is why five defects
-  reached hardware at rung 6 having passed the whole unit suite.
+  next runs it by hand, not when it is introduced. Defects of this kind pass
+  the whole unit suite and reach hardware.
 
-Built 2026-08-12: peer-uid identification, per-sandbox credential and upstream
-profiles, the startup guard for the namespace failure, a test suite that asserts
-on recovered uids rather than on response codes, and the host-side uid-keyed
-redirect described in §7. Packaged 2026-08-13 into the workloadctl RPM, which
-answered the open question of where it lives: not a workload — being precisely
-what workloads are not trusted with — but shipped by the thing that manages
-them, on the host, in the image.
-
-**Superseded at rung 6.** What follows records a real run against the shape
-described above, and that shape is gone: the advertised literal, the redirect
-map and the single host-wide listener were deleted, and the rig with them (see
-`tests/manual/README.md`). It is kept because it is the evidence the design
-rested on and deleting it would leave the claims below looking unproven rather
-than re-scoped. Its replacement ran on 2026-09-02, 35/35 on a KVM host under
-enforcing, and closed the end-to-end claim for the new shape — after finding
-five defects that no unit test could see, two of which made the brokered path
-inert on a real guest. See `tests/manual/README.md`.
-
-Proven end to end 2026-08-14 on a KVM host, against the installed RPM rather
-than a checkout: `tests/manual/broker_rig.py`, 18/18. Four guests differing by
-one line of config each, so the claims come apart — two dialled the same
-advertised literal and were told apart by the uid owning the socket, each
-receiving its own credential; the guest without `broker = true` could not
-connect at all, holding no element of the redirect map; and forcing the proxy
-with `NO_PROXY` cleared reproduced the pre-fix 403, confirming the default path
-does not traverse the proxy. Before this, the path in §7 had only ever been
-proven a segment at a time — the redirect in a namespace, identity against live
-kernel tables, the broker against a real upstream — which is what let two
-defects live in the *combinations*: a client recording the address it dialled
-rather than the one the broker is bound to, and a guest with both a proxy and a
-broker sending its broker request through the proxy.
-
-The second of those two is now structurally impossible rather than fixed. The
-per-workload proxy was retired on 2026-08-25 (ADR 008): a filtered guest is no
-longer told to route anything, so there is nothing for a broker request to be
-routed *through*, and the `NO_PROXY` entry that held the two apart is gone with
-it. The rig assertion that forced the old path is kept above as the record of
-what it caught.
+The per-workload proxy was retired with ADR 008: a filtered guest is no longer
+told to route anything, so a broker request has nothing to be routed *through*.

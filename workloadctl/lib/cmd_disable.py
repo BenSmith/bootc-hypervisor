@@ -351,8 +351,8 @@ def cmd_disable(args, manager: WorkloadManager):
         # hangs on 80 and 443 and on nothing else, the failure text belongs to
         # whatever it was dialling ("TLS handshake timeout" against a registry),
         # and the one unit that says what happened is a different unit's
-        # journal. Measured on hardware 2026-09-05, where it stopped a filtered
-        # workload from pulling its own image and read as a network fault.
+        # journal. Left behind, it stops a filtered workload from pulling its
+        # own image and reads as a network fault.
         record_dir = vm_inspect_record_dir(config.name)
         if record_dir.exists():
             try:

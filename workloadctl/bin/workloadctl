@@ -512,10 +512,10 @@ def main():
     # one of the typed errors _run_cli maps, or by calling sys.exit directly --
     # but `egress` and `pcap` report theirs by RETURNING a code, and for as
     # long as that return value was dropped here they printed a correct
-    # diagnostic to stderr and exited 0. Measured on a KVM host 2026-08-31:
-    # `workloadctl egress <vm> --reason 'not allowed'` printed "'not allowed'
-    # is not a drop reason" and succeeded, so a script checking `$?` treats an
-    # unknown filter value as a report with nothing in it.
+    # diagnostic to stderr and exited 0. `workloadctl egress <vm> --reason
+    # 'not allowed'` would print "'not allowed' is not a drop reason" and
+    # succeed, so a script checking `$?` treats an unknown filter value as a
+    # report with nothing in it.
     #
     # A nonzero INT, rather than any truthy value, and not sys.exit(code or 0):
     # a handler that returns None -- which is nearly all of them -- keeps

@@ -581,9 +581,9 @@ name = "schema-reference"
 #
 # Everything above this point is a scalar and everything below it is a table,
 # so this document is in valid file order: reading it top-to-bottom and writing
-# as you go produces a file that parses the way it reads. That was NOT true
-# until 2026-08-25 -- .hosts and .tls were documented below here, so
-# the natural reading order built the broken file this note warns about.
+# as you go produces a file that parses the way it reads. Keep it that way:
+# documenting a scalar below the tables makes the natural reading order build
+# the broken file this note warns about.
 #
 # [[vm.network.allow]]
 # address = "192.168.0.10:22"
@@ -1926,7 +1926,7 @@ ports = ["8080:80", "8443:443"]
 # over a key that changes nothing. The refusal above is `single` and `pod`,
 # which do pass it to `podman run --network=` / `podman pod create --network=`.
 #
-# The reason was measured on hardware, not assumed. A host-mode container shares
+# The reason is measured, not assumed. A host-mode container shares
 # the host's network namespace outright, so the workload uid is the only thing
 # separating its traffic from the host's own. Two findings:
 #
@@ -2851,8 +2851,8 @@ ports = ["8080:80", "8443:443"]
 #                        so READY=1 is misattributed to the user manager and the
 #                        workload unit never sees it. No NotifyAccess tweak fixes
 #                        it. For readiness tracking use [container.health] +
-#                        `workloadctl health`/`update` instead. (Verified 2026-06-21;
-#                        see docs/adr/001-container-cgroup-placement.md.)
+#                        `workloadctl health`/`update` instead. See
+#                        docs/adr/001-container-cgroup-placement.md.
 #   "simple"           - Consider service started immediately after fork.
 #
 # Systemd directive: Type=

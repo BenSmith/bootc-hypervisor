@@ -590,10 +590,10 @@ class Minter:
         # cache directory the process cannot write raises OSError from the
         # TemporaryDirectory below -- which used to be OUTSIDE any handler here,
         # so it left as an OSError, and the inspector's per-connection handler
-        # swallows OSError by design. On a KVM host on 2026-08-26 that produced
-        # the worst failure shape this component has had: the guest's
-        # connection reset, no journal line, no counter, and a warm cache hiding
-        # it entirely -- the first request to a host failed and the second
+        # swallows OSError by design. Outside a handler it produces the worst
+        # failure shape this component has: the guest's connection reset, no
+        # journal line, no counter, and a warm cache hiding it entirely -- the
+        # first request to a host fails and the second
         # succeeded. MintFailed is logged, counted and named; an OSError
         # escaping this function is not.
         try:

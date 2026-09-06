@@ -8,9 +8,9 @@ of *precious state* lives in `/var`. So `bootc rollback` — which deletes nothi
 takes a workload's identity away while its state stays behind, and `cleanup`'s
 definition of an orphan ("state whose workload has no config at all") is then
 satisfied by state that is not orphaned, merely invisible from where you booted.
-Observed on a GPU hypervisor host 2026-07-28: two workloads present on the booted deployment
-and absent from the rollback target, with their `/var` trees owned by UIDs that
-would not resolve after a rollback.
+The shape: workloads present on the booted deployment and absent from the
+rollback target, with their `/var` trees owned by UIDs that would not resolve
+after a rollback.
 
 The fix is to make `/var` self-describing. `workload-ensure-user` stamps each
 workload root with the deployment that last provisioned it, and `cleanup` reads
@@ -71,8 +71,7 @@ def booted_deployment_id() -> str | None:
 
     Resolved from the kernel cmdline's `ostree=` value, which is a symlink into
     the deployment tree — `/ostree/boot.1/default/<BOOT-csum>/0` ->
-    `../../../deploy/default/deploy/<DEPLOY-csum>.0`. Verified on a deployed hypervisor host
-    2026-07-29.
+    `../../../deploy/default/deploy/<DEPLOY-csum>.0`.
 
     Three near-misses, each of which yields code that looks right:
 

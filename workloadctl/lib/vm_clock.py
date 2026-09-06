@@ -3,10 +3,9 @@ vm_clock — the guest's clock, read and repaired over the QEMU guest agent.
 
 WHY THIS MODULE EXISTS AT ALL, WHICH IS NOT OBVIOUS FROM ITS SIZE
 
-A vCPU pause is lost by the guest exactly and permanently. Measured twice on
-different hardware (tests/manual/clock_rig.py, 2026-08-26): a 120.035 s QMP
-`stop` moved the guest by 119.998 s, and three readings afterwards show it flat
-at -120.9 s. Nothing inside puts it back -- NTP is dead in a filtered guest by
+A vCPU pause is lost by the guest exactly and permanently: a 120.035 s QMP
+`stop` moves the guest by 119.998 s, and it stays flat at that offset
+afterwards. Nothing inside puts it back -- NTP is dead in a filtered guest by
 construction (chronyd stays `active` while `chronyc tracking` reports
 `Stratum 0` and a 1970 reference time), because this design closed the UDP path
 it needs.
@@ -24,7 +23,7 @@ THE REMEDY IS DEMAND-DRIVEN, NOT EVENT-DRIVEN, AND THAT IS THE DESIGN
 The obvious shape is a hook on each path that pauses vCPUs. It was drafted and
 rejected: `backup --consistency crash` is one such path, a host that suspends or
 hibernates is a second with no hook available (no `system-sleep` hook ships and
-none exists -- checked 2026-08-26), `workloadctl incant <vm> stop` is a third,
+none exists), `workloadctl incant <vm> stop` is a third,
 and the fourth arrives in five years with no hook and the same silent failure.
 Enumerating callers is a remedy that decays.
 

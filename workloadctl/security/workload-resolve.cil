@@ -37,11 +37,10 @@
 ;     every helper an entrypoint into this domain.
 ;   * the script is exec'd from init_t, and what the DOMAIN needs on the
 ;     interpreter is `execute map` on bin_t -- NOT execute_no_trans, and not
-;     the base_ro_file_type attribute. Both modules asserted otherwise until
-;     2026-08-25, by analogy with sshd_keygen_t; the analogy is wrong, because
-;     sshd-keygen does not transition and these do. Measured under a permissive
-;     harvest: base_ro_file_type is used for nothing here, and execute_no_trans
-;     is never checked. Reading the stdlib is unaffected -- `allow domain
+;     the base_ro_file_type attribute. The analogy with sshd_keygen_t is
+;     tempting and wrong: sshd-keygen does not transition and these do, so
+;     base_ro_file_type is used for nothing here and execute_no_trans is
+;     never checked. Reading the stdlib is unaffected -- `allow domain
 ;     base_ro_file_type:file { getattr ioctl lock open read }` in base policy
 ;     already covers it, and lib_t's execute/map likewise.
 ;
@@ -83,8 +82,7 @@
 (allow init_t wlresolve_t (udp_socket (bind create getattr getopt read setopt shutdown write)))
 
 ; `accept` IS ON THIS RULE AND NOT ONLY ON THE DOMAIN'S OWN, and the reason is
-; a systemd behaviour nothing about a socket unit suggests. Measured on an
-; enforcing host 2026-08-27, during inspect_rig's responder-restart check:
+; a systemd behaviour nothing about a socket unit suggests:
 ;
 ;   avc: denied { accept } comm="systemd" scontext=…init_t
 ;     tcontext=…wlresolve_t tclass=tcp_socket
@@ -113,9 +111,9 @@
 (allow wlresolve_t node_t (tcp_socket (node_bind)))
 
 ; The sockets as the domain sees them, plus accepted TCP connections, which
-; carry the same label. Trimmed to the measured set on 2026-08-25 -- bind,
-; ioctl, setopt and shutdown were carried on both classes and used by nothing,
-; because init_t binds these sockets and the domain only ever reads them.
+; carry the same label. Trimmed to the used set: bind, ioctl, setopt and
+; shutdown belong on neither class, because init_t binds these sockets and the
+; domain only ever reads them.
 ;
 ; `accept` IS KEPT THOUGH THE HARVEST SHOWED IT UNUSED, and the distinction is
 ; the whole reason a used-set is not a minimal set. The rig never triggers a

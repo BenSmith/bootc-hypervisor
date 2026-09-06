@@ -20,14 +20,12 @@
 ; sshd_keygen_exec_t, with both halves present — a type_transition on the
 ; script's own label and an entrypoint allow on it.
 ;
-; The analogy stops there, and this module got it wrong until 2026-08-25. It
-; claimed "what the domain needs from it is execute_no_trans", copied from
-; sshd_keygen_t. But execute_no_trans is only checked when an exec does NOT
-; cause a domain transition, and sshd-keygen's does not while ours does — the
-; type_transition two paragraphs down is the difference. Measured under a
-; permissive harvest, the domain uses `execute map` on bin_t and never
-; execute_no_trans, and the base_ro_file_type attribute it was granted on is
-; used for nothing at all. Reading the stdlib is unaffected: base policy's
+; The analogy stops there. It is tempting to copy sshd_keygen_t's
+; `execute_no_trans`, but that permission is only checked when an exec does
+; NOT cause a domain transition — sshd-keygen's does not, ours does, and the
+; type_transition two paragraphs down is the difference. This domain uses
+; `execute map` on bin_t and never execute_no_trans; a base_ro_file_type
+; attribute grant here would be used for nothing at all. Reading the stdlib is unaffected: base policy's
 ; `allow domain base_ro_file_type:file { getattr ioctl lock open read }` and
 ; lib_t's own execute/map already cover it.
 ;
@@ -92,15 +90,13 @@
 ; inherited socket before it needs anything else, where tinyproxy exited 70 at
 ; the first gate — but the accept path is still a gate behind a
 ; gate, so the last rules only appear once the earlier ones are granted.
-; tests/manual/inspect_rig.py is the run that exercises it.
 ;
 ; ONE RESIDUAL DENIAL IS DELIBERATELY NOT GRANTED
 ;
-; A green run with dontaudit disabled still logs it, and the run is green WITH
-; it denied — so granting it would widen the domain for nothing. The list was
-; four, then six after a permissive harvest on 2026-08-25 measured the full
-; used-set, and is one now: rung 3 gave the domain real reasons for the other
-; five, and a reason is what the entry always turned on.
+; A run with dontaudit disabled still logs it, and the run is green WITH it
+; denied — so granting it would widen the domain for nothing. An entry leaves
+; this list only when the domain acquires a real reason for it, never because
+; a harvest shows it merely being attempted.
 ;
 ;   getattr, ioctl(TCGETS) on init_t:unix_stream_socket   Python probing
 ;     whether its stdout is a tty. The answer is "no" either way.
@@ -171,8 +167,7 @@
 ; then uses those same sockets as `self`, which is the rule below.
 
 ; `accept` IS ON THIS RULE AND NOT ONLY ON THE DOMAIN'S OWN, and the reason is
-; a systemd behaviour nothing about a socket unit suggests. Measured on an
-; enforcing host 2026-08-27, during inspect_rig's responder-restart check:
+; a systemd behaviour nothing about a socket unit suggests:
 ;
 ;   avc: denied { accept } comm="systemd" scontext=…init_t
 ;     tcontext=…wlinspect_t tclass=tcp_socket
@@ -199,16 +194,14 @@
 (allow wlinspect_t http_port_t (tcp_socket (name_bind name_connect)))
 (allow wlinspect_t node_t (tcp_socket (node_bind)))
 
-; THE UPSTREAM DIAL, WHICH THREE GREEN RIG RUNS NEVER EXERCISED
+; THE UPSTREAM DIAL
 ;
 ; Everything above is the LISTEN side. The rules below are the other half --
-; the inspector opening its own connection to the allowlisted host -- and they
-; were absent from this module until 2026-08-25 because nothing had ever run
-; that path. The rig's every event was a drop: {"dropped": 5, "forwarded": 0,
-; "spliced": 0} on a 31/31 run. The plain arm's allowlist is empty by
-; construction, and the proxy arm's traffic is exempted by wl_inspect_cg before
-; the inspector sees it, so forward and splice were dead code under SELinux
-; while the suite reported green.
+; the inspector opening its own connection to the allowlisted host. It is easy
+; to leave this half unwritten: a test whose every event is a drop never
+; reaches it, and an arm whose traffic is exempted by wl_inspect_cg never
+; reaches the inspector at all, so forward and splice can be dead code under
+; SELinux while the suite reports green.
 ;
 ; The path is reached by a guest that IGNORES the proxy variables and dials an
 ; allowlisted host directly -- not a corner case but the adversarial case this
@@ -241,10 +234,9 @@
 ;           -> stub-resolv.conf               net_conf_t (file)
 ;
 ; Every dir in that chain needs `search` or the read fails at the traversal,
-; not at the file. The init_var_run_t entry was briefly filed as a harmless
-; residual denial on the strength of a permissive harvest showing it "used but
-; the run was green" -- wrong, because the run was green only on paths that
-; never resolved a hostname.
+; not at the file. init_var_run_t belongs here and is not a residual denial:
+; a harvest can show it "used, and the run green anyway" whenever no path in
+; that run actually resolved a hostname.
 ;
 ; `setopt` is here for a sharper reason: it does NOT appear in a permissive
 ; harvest of this path. It only showed up under enforcing, once the traversal
@@ -284,8 +276,7 @@
 ; ([[silent-selinux-denials-pass-functional-tests]] is the standing shape of
 ; that, and the block above is this module's own instance of it).
 ;
-; Read off a real host 2026-09-01 rather than assumed: tcp/8081 is
-; transproxy_port_t. http_cache_port_t is 8080, 8118, 8123 and 10001-10010;
+; Read off a real host rather than assumed: tcp/8081 is transproxy_port_t. http_cache_port_t is 8080, 8118, 8123 and 10001-10010;
 ; http_port_t is 80, 81, 443, 488, 8008, 8009, 8443 and 9000. 8081 is in
 ; neither, so this is a new type and not a reuse of one already granted.
 ;
@@ -322,9 +313,8 @@
 ; a peer it cannot name is admitted, because the row can leave the table before
 ; it is read and failing closed would drop the workload's own traffic under
 ; exactly the load that makes the table churn. So a denial here does not break
-; anything visible -- every functional assertion in broker_rig.py passed with
-; this missing, and only its audit.log assertion failed. That is the whole
-; reason that assertion exists.
+; anything visible: a functional test passes with this missing and only an
+; audit.log assertion catches it. That is what such an assertion is for.
 ;
 ; `/proc/net` is a symlink to `self/net`, so the lnk_file read is required
 ; before the file read is ever attempted; granting only the file leaves the
@@ -372,10 +362,8 @@
 ;                        rig, a working inspector, and no observability at all.
 ;
 ; `rename` is the one permission no sibling grant carries, and it is not
-; optional — asserted here from a reading of write_status() when this module
-; was written, and MEASURED on 2026-08-25 under a permissive harvest, which
-; recorded the file class as used: create getattr open read rename unlink
-; write. `unlink` is in that set for a reason worth keeping: os.replace over an
+; optional. write_status() uses the file class as: create getattr open read
+; rename unlink write. `unlink` is in that set for a reason worth keeping: os.replace over an
 ; existing target needs it on the destination, so it is load-bearing only from
 ; the SECOND status write onward. A harvest that ticks once misses it; the
 ; rig's STATUS_SETTLE against STATUS_INTERVAL is what makes it appear.
@@ -397,8 +385,8 @@
 ; chain itself -- and that gives the domain three things it never had: a
 ; private key to read, an `openssl` to run, and a trust store to consult.
 ;
-; MEASURED on a bare-metal Fedora 44 host, 2026-08-26, iterating under
-; ENFORCING rather than harvesting under permissive. A permissive run measures
+; Derive these by iterating under ENFORCING, not by harvesting under
+; permissive. A permissive run measures
 ; the branch that ran, and here an early denial changes which branch runs at
 ; all: the listener exits 1 at startup if it cannot read the CA, so a
 ; permissive harvest of the mint path is a harvest of a process that never
@@ -428,10 +416,9 @@
 (allow wlinspect_t wlinspect_ca_t (file (getattr map open read)))
 
 ; A container workload's own [network].ca_delivery = "env"/"mount" bind-mounts
-; this same certificate (never the key) into the container -- confirmed on
-; hardware 2026-09-05 to EACCES without this: `cat` on the mount got `avc:
-; denied { read } ... scontext=...container_t: tcontext=...wlinspect_ca_t:
-; tclass=file`. Read-only, and only the cert: a CA certificate is what a
+; this same certificate (never the key) into the container. Without this rule
+; the container gets EACCES reading it: `avc: denied { read } ...
+; scontext=...container_t: tcontext=...wlinspect_ca_t: tclass=file`. Read-only, and only the cert: a CA certificate is what a
 ; workload hands to any client it wants trusting it, so a container reading
 ; it host-wide is the CA doing its job, not a leak -- the private key stays
 ; 0600 with no grant here, which is the thing actually worth protecting.
@@ -457,13 +444,13 @@
 
 ; `create` and `rmdir` are the atomic landing, not an untidy extra: each mint
 ; stages into a TemporaryDirectory inside the cache so that os.replace is a
-; same-filesystem rename and a reader never finds half a PEM. Measured
-; 2026-08-26 -- without them every mint failed with EACCES on a name that
-; looks like a leaf but is a directory.
+; same-filesystem rename and a reader never finds half a PEM. Without them
+; every mint fails with EACCES on a name that looks like a leaf but is a
+; directory.
 (allow wlinspect_t wlinspect_leaf_t (dir (add_name create getattr open read remove_name rmdir search setattr write)))
 ; `setattr` is the chmod 0600 on the staged PEM -- the private key is in the
 ; same file as the certificate, so the mode is part of landing it, not a
-; nicety. Measured 2026-08-26, one denial after `create` on the dir.
+; nicety. It denies one step after `create` on the dir if missing.
 (allow wlinspect_t wlinspect_leaf_t (file (create getattr map open read rename setattr unlink write)))
 
 ; Traversal to reach them, and traversal is ALL of it: `search` on a directory
@@ -524,9 +511,8 @@
 ; never starts at all: "Failed at step NAMESPACE spawning /usr/sbin/nft:
 ; Permission denied", which names the ExecStartPre rather than the mount.
 ;
-; Measured 2026-08-26. It did not appear until a workload was enabled whose
-; caches were labelled BEFORE its first start, which is why a rig that had run
-; once already did not show it.
+; It only appears for a workload whose caches were labelled BEFORE its first
+; start, so a test that has already run once will not show it.
 (allow init_t wlinspect_leaf_t (dir (mounton)))
 
 ; THE PER-REQUEST RECORD'S SUBTREE. /var/log/workloadctl/egress/<name>/

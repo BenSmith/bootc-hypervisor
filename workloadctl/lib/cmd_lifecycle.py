@@ -142,8 +142,8 @@ def cmd_recreate(args, manager: WorkloadManager):
     # because EACCES is indistinguishable from ENOENT. It then exits with
     # "tls = 'inspect' terminates, which needs this workload's egress CA, and
     # <path> is not there" about a file that is right there, mode 0644, owned
-    # by the very user it runs as. Measured on hardware 2026-09-05: rung 3 was
-    # unreachable by `recreate` on a container under enforcing.
+    # by the very user it runs as. Without it, rung 3 is unreachable by
+    # `recreate` on a container under enforcing.
     apply_vm_fcontext(config, "enable")
 
     # RE-RUN THE SETUP UNIT, or a workload that GAINED something /var-side is
@@ -156,11 +156,10 @@ def cmd_recreate(args, manager: WorkloadManager):
     # config said the FIRST time the workload was enabled -- and the config is
     # exactly what `recreate` exists to change.
     #
-    # Measured on hardware 2026-09-05, on the transition this project tells
-    # operators to use: a container enabled with no [network] egress key and
-    # then given `hosts` came back with its redirect armed (the workload unit's
-    # own ExecStartPre does that) and its egress CA and PKI directories never
-    # created (setup's job). The inspect service then failed 226/NAMESPACE on a
+    # The transition this project tells operators to use: a container enabled
+    # with no [network] egress key and then given `hosts` comes back with its
+    # redirect armed (the workload unit's own ExecStartPre does that) and its
+    # egress CA and PKI directories never created (setup's job). The inspect service then failed 226/NAMESPACE on a
     # ReadWritePaths= that did not exist, and since the redirect was live and
     # nothing was listening, EVERY connection the container made to 80 or 443
     # hung -- with no error on the workload's own unit and no message anywhere

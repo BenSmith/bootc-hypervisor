@@ -1298,12 +1298,10 @@ check alone, which is one of the reasons it exists.
 
 #### What was measured
 
-Every claim above is measured rather than reasoned, by
-`tests/manual/clock_rig.py` on a real KVM host under enforcing SELinux. Two
-full runs, on hosts whose clocksource is the TSC: **19/19 on 2026-08-27**, and
-**19/19 again on 2026-09-02** against a later build. An earlier partial run on
-a host with no TSC available reached 8/9 — the `ptp_kvm` arm cannot execute
-there at all, which is itself the finding.
+Every claim above is measured rather than reasoned, on a real KVM host under
+enforcing SELinux whose clocksource is the TSC. On a host with no TSC
+available the `ptp_kvm` arm cannot execute at all, which is itself the
+finding.
 
 | | measured |
 |---|---|
