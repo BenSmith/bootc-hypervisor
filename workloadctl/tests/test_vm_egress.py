@@ -1501,7 +1501,7 @@ class TestInspectDiagnose(unittest.TestCase):
             if bridge:
                 cfg["vm"]["network"]["bridge"] = bridge
         return SimpleNamespace(name="vm1", uid=uid, vm_bridge=bridge,
-                               vm_network=net, config=cfg)
+                               vm_network=net, config=cfg, is_vm=is_vm)
 
     def _elem(self, uid, port):
         """One map element in the shape nft 1.1.6 actually renders."""
@@ -1615,6 +1615,7 @@ class TestInspectDiagnose(unittest.TestCase):
         # saying the redirect is missing would be noise blaming the wrong step.
         class NoUser:
             name = "vm1"
+            is_vm = True
             vm_bridge = None
             vm_network = {"egress": "filtered"}
             config = {"vm": {"network": {"egress": "filtered"}}}
@@ -1684,7 +1685,7 @@ class TestResolveDiagnose(unittest.TestCase):
             net["bridge"] = bridge
         cfg = {"vm": {"network": dict(net)}} if is_vm else {"container": {}}
         return SimpleNamespace(name="vm1", uid=uid, vm_bridge=bridge,
-                               vm_network=net, config=cfg,
+                               vm_network=net, config=cfg, is_vm=is_vm,
                                service_name="workload-vm1.service")
 
     def _run(self, config=None, **kw):
@@ -2151,7 +2152,7 @@ class TestSelfDialCounterIsReported(unittest.TestCase):
         cfg = SimpleNamespace(
             name="vm1", uid=10001, vm_bridge=None,
             vm_network={"egress": "filtered"},
-            config={"vm": {"network": {"egress": "filtered"}}})
+            config={"vm": {"network": {"egress": "filtered"}}}, is_vm=True)
         elems = [{"concat": [10001, 80]}, {"concat": [10001, 443]}]
         return self.mod.vm_inspect_check(
             cfg, elements4=elems, elements6=elems, socket_active=True,

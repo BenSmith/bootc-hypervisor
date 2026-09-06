@@ -19,6 +19,8 @@ import sys
 import time
 
 from workload_lib import (
+    container_effective_tls_mode,
+    container_uses_inspect,
     derived_subid_range,
     expand_volume_path,
     HOST_USERNS_OPT_IN,
@@ -1526,6 +1528,20 @@ def _not_http_fragments(status) -> list[str]:
     return out
 
 
+def _uses_inspect(config) -> bool:
+    """Is this workload's egress redirected into an inspector, either substrate?
+
+    D2 makes `Substrate.uses_inspect()` the primitive, but the checks here are
+    pure functions of a config and take no manager, and get_substrate() needs
+    one. This dispatches on `config.is_vm` -- which is the ONLY thing
+    get_substrate() itself dispatches on -- so the two cannot disagree, and
+    the alternative (threading a manager through every check and every test
+    that calls one directly) would buy nothing.
+    """
+    return (vm_uses_inspect(config.config) if config.is_vm
+            else container_uses_inspect(config.config))
+
+
 def vm_inspect_check(config, *, elements4=PROBE, elements6=PROBE,
                      socket_active=PROBE, v6_route=PROBE, self_dials=PROBE,
                      status=PROBE, filter_sets=PROBE, disk_digest=PROBE,
@@ -1555,21 +1571,37 @@ def vm_inspect_check(config, *, elements4=PROBE, elements6=PROBE,
     Observations are injectable (PROBE sentinel) so the verdict logic is
     testable without a live host.
     """
-    # G7 in the container egress-parity build spec: VM-only for now, not
-    # just the predicate. Everything below checks a VM-shaped surface --
-    # workload-<name>-inspect.socket and the shared nft proxy maps -- that
-    # doesn't exist for a container until the generator/helper wiring lands
-    # (P1-7..P1-9). Routing the gate alone would make this run for an
-    # inspected container and report "nft proxy table absent, traffic
-    # reaching directly", which is true today but for the wrong reason
-    # (nothing built yet, not something broken) and would need its own
-    # container-shaped checks and prose to be worth showing.
-    if not vm_uses_inspect(config.config):
+    # G7 in the container egress-parity build spec: ROUTED (2026-09-05).
+    #
+    # This row was closed "VM-only for now" on the grounds that the surface
+    # below -- workload-<name>-inspect.socket and the shared nft proxy maps --
+    # did not exist for a container until P1-7..P1-9 landed. It does now: the
+    # generator emits the container's socket from the very same
+    # generate_vm_inspect_socket(), the maps are the same two shared maps
+    # keyed by the same uid, and the remedy is byte-for-byte the same unit
+    # name. A justification that expires is worse than none, because nothing
+    # re-reads it -- and the cost of leaving it stood is in the §7 table: a
+    # container whose inspect socket is down gets NO line here, and its
+    # symptom (DNS and everything else fine, HTTP and HTTPS dead) reads as a
+    # broken workload rather than a broken host.
+    if not _uses_inspect(config):
         return None
     try:
         uid = config.uid
     except Exception:
         return None                      # no user yet; check 1 reports it
+
+    # Substrate-aware nouns (G7). Every check below is the same check on both
+    # substrates -- same two shared maps, same accept sets, same socket unit,
+    # same remedy -- so only the noun differs, and it has to: a container
+    # operator told to go look at "this guest" is being sent after a VM.
+    noun = "VM" if config.is_vm else "container"
+    inside = "guest" if config.is_vm else "container"
+    section = "vm.network" if config.is_vm else "network"
+    net = (config.config.get("vm", {}).get("network", {}) if config.is_vm
+           else config.config.get("network", {}))
+    if not isinstance(net, dict):
+        net = {}
 
     unit = f"workload-{config.name}-inspect.socket"
     restart = f"systemctl restart {unit}"
@@ -1581,9 +1613,9 @@ def vm_inspect_check(config, *, elements4=PROBE, elements6=PROBE,
 
     if elements4 is None or elements6 is None:
         return ("vm_inspect", False,
-                f"egress inspection is on for this VM but the "
+                f"egress inspection is on for this {noun} but the "
                 f"{NFT_PROXY_TABLE} table is absent, so nothing redirects this "
-                f"guest's traffic to its inspector — it is reaching the "
+                f"{inside}'s traffic to its inspector — it is reaching the "
                 f"internet directly. Rebuilt on the next start: {restart}")
 
     armed4 = str(uid) in {_map_key_uid(e) for e in elements4}
@@ -1591,11 +1623,11 @@ def vm_inspect_check(config, *, elements4=PROBE, elements6=PROBE,
 
     if not armed4 and not armed6:
         return ("vm_inspect", False,
-                f"egress inspection is on for this VM but uid {uid} is in "
+                f"egress inspection is on for this {noun} but uid {uid} is in "
                 f"neither {NFT_MAP_INSPECT4} nor {NFT_MAP_INSPECT6}, so its "
                 f"traffic to ports {VM_INSPECT_ORIG_CLEARTEXT}/{VM_INSPECT_ORIG_TLS} "
                 f"is not redirected — this "
-                f"guest is reaching the internet uninspected while every other "
+                f"{inside} is reaching the internet uninspected while every other "
                 f"signal reads correct. Re-arm it: {restart}")
 
     if armed4 != armed6:
@@ -1606,7 +1638,7 @@ def vm_inspect_check(config, *, elements4=PROBE, elements6=PROBE,
                             else (NFT_MAP_INSPECT4, NFT_MAP_INSPECT6))
         family = "IPv6" if armed4 else "IPv4"
         return ("vm_inspect", False,
-                f"uid {uid} is in {present} but not {missing}, so this guest's "
+                f"uid {uid} is in {present} but not {missing}, so this {inside}'s "
                 f"{family} egress is NOT inspected while its other family is. "
                 f"A probe on the armed family passes and shows nothing wrong. "
                 f"Re-arm both: {restart}")
@@ -1631,7 +1663,7 @@ def vm_inspect_check(config, *, elements4=PROBE, elements6=PROBE,
                 f"uid {uid} is redirected to the inspector but is missing from "
                 f"{' and '.join(missing_accept)}, so the redirected connection "
                 f"is rewritten to the listener and then DROPPED by the default "
-                f"deny — inside the guest this looks exactly like the "
+                f"deny — inside the {inside} this looks exactly like the "
                 f"inspector being down, and the socket is fine. Re-arm both "
                 f"tables: {restart}")
 
@@ -1646,7 +1678,7 @@ def vm_inspect_check(config, *, elements4=PROBE, elements6=PROBE,
     if not socket_active:
         return ("vm_inspect", False,
                 f"uid {uid} is redirected to the inspector, but {unit} is not "
-                f"listening — this guest's HTTP and HTTPS are being sent to a "
+                f"listening — this {inside}'s HTTP and HTTPS are being sent to a "
                 f"host address where nothing accepts, while its DNS and SSH "
                 f"keep working. Start it: {restart}")
 
@@ -1691,8 +1723,9 @@ def vm_inspect_check(config, *, elements4=PROBE, elements6=PROBE,
                     f"{vm_inspect_digest_short(disk_digest)}) — the lists in "
                     f"force are not the lists in the file, in one direction or "
                     f"the other. Restarting the socket does NOT fix this: the "
-                    f"listener stops with the VM, not with the socket. Restart "
-                    f"the VM: systemctl restart workload-{config.name}.service")
+                    f"listener stops with the {noun}, not with the socket. "
+                    f"Restart the {noun}: "
+                    f"systemctl restart workload-{config.name}.service")
 
     # THE CA THE LISTENER MINTS WITH vs. THE ONE ON DISK -- rung 5 T7, and the
     # same memory-vs-disk shape as the policy comparison above.
@@ -1716,11 +1749,11 @@ def vm_inspect_check(config, *, elements4=PROBE, elements6=PROBE,
                     f"than the one on disk (minting with "
                     f"{_short_fingerprint(running_ca)}, on disk "
                     f"{_short_fingerprint(disk_ca)}) — every certificate this "
-                    f"guest is being "
+                    f"{inside} is being "
                     f"handed chains to an anchor it does not trust, so its "
-                    f"HTTPS is failing validation inside the guest while every "
-                    f"line here passes. The state tree was restored under a "
-                    f"running listener; restart the VM: "
+                    f"HTTPS is failing validation inside the {inside} while "
+                    f"every line here passes. The state tree was restored "
+                    f"under a running listener; restart the {noun}: "
                     f"systemctl restart workload-{config.name}.service")
 
     addr = vm_inspect_address(uid)
@@ -1735,7 +1768,8 @@ def vm_inspect_check(config, *, elements4=PROBE, elements6=PROBE,
         # otherwise read as the v6 redirect being broken -- it cost a debugging
         # session on the rig that way.
         tail = ("; note this host has no IPv6 default route, so the v6 "
-                "redirect will log nothing — the guest's v6 connections fail "
+                f"redirect will log nothing — the {inside}'s v6 connections "
+                "fail "
                 "at the routing lookup, before nftables sees them")
 
     # The wrong-port self-dial counter, per workload and armed per workload,
@@ -1763,7 +1797,7 @@ def vm_inspect_check(config, *, elements4=PROBE, elements6=PROBE,
                     if filter_sets.get(name) is False]
     if missing_self:
         tail += (f"; uid {uid} is missing from "
-                 f"{' and '.join(missing_self)}, so this guest's wrong-port "
+                 f"{' and '.join(missing_self)}, so this {inside}'s wrong-port "
                  f"self-dials are still dropped but are not counted against it "
                  f"— the figure below reads 0 whether or not any happened. "
                  f"Re-arm: {restart}")
@@ -1777,7 +1811,7 @@ def vm_inspect_check(config, *, elements4=PROBE, elements6=PROBE,
     missing_guard = [name for name in INSPECT_GUARD_SETS
                      if filter_sets.get(name) is False]
     if missing_guard:
-        tail += (f"; this guest's inspector address is missing from "
+        tail += (f"; this {inside}'s inspector address is missing from "
                  f"{' and '.join(missing_guard)}, so any other local uid can "
                  f"reach its listener and its dials land in this workload's "
                  f"egress records. Re-arm: {restart}")
@@ -1785,9 +1819,9 @@ def vm_inspect_check(config, *, elements4=PROBE, elements6=PROBE,
     if self_dials is PROBE:
         self_dials = _inspect_self_counter(uid)
     if self_dials and self_dials[0]:
-        tail += (f"; {self_dials[0]} packet(s) dropped dialling this guest's "
-                 f"own listener on a port nothing serves — if the guest "
-                 f"expects a service there, it needs a [vm.network].allow "
+        tail += (f"; {self_dials[0]} packet(s) dropped dialling this {inside}'s "
+                 f"own listener on a port nothing serves — if the {inside} "
+                 f"expects a service there, it needs a [{section}].allow "
                  f"entry for the real address, not the listener's")
 
     # The two figures rung 4's policy work landed (the name-to-Host binding
@@ -1831,8 +1865,17 @@ def vm_inspect_check(config, *, elements4=PROBE, elements6=PROBE,
     # the plaintext, `splice` checks one name per connection and holds nothing.
     # An operator reading "inspected" and getting the other one is the whole
     # reason this word is here.
-    tls_mode = config.config.get("vm", {}).get("network", {}).get(
-        "tls", VM_TLS_DEFAULT)
+    # The two substrates DEFAULT DIFFERENTLY, which is why this cannot be one
+    # `net.get("tls", ...)`. A VM with no `tls` key inspects (VM_TLS_DEFAULT);
+    # a container with no `tls` key splices unless it has policy entries, per
+    # container_effective_tls_mode(). Reading the key directly with the VM
+    # default would tell a container operator their plaintext is being held
+    # when it is not -- the exact misreport G5 and G8 stayed VM-only to avoid,
+    # and the reason this line calls the container helper instead.
+    if config.is_vm:
+        tls_mode = net.get("tls", VM_TLS_DEFAULT)
+    else:
+        tls_mode = container_effective_tls_mode(net)
     posture = "terminating" if tls_mode == "inspect" else "splicing"
     return ("vm_inspect", True,
             f"egress inspected on both families: uid {uid} redirected to "
@@ -2950,11 +2993,31 @@ def collect_diagnose_checks(config, manager: WorkloadManager):
         confinement_result = vm_confinement_check(config)
         if confinement_result:
             _check(*confinement_result)
-        inspect_result = vm_inspect_check(config)
-        if inspect_result:
-            _check(*inspect_result)
+
+    # G7: NOT gated on is_vm, and this hoist is the whole of the routing --
+    # the substrate-aware wording inside vm_inspect_check() is inert without
+    # it. The check's own `if not _uses_inspect(config)` early return is the
+    # only gate it needs now that a container gets the same
+    # workload-<name>-inspect.socket from the same generate_vm_inspect_socket()
+    # and the same two uid-keyed nft maps.
+    #
+    # Placed BETWEEN the two is_vm blocks rather than beside capture_check
+    # below, because a VM's lines have to keep meeting an operator in the
+    # order the guest meets the machinery: network, egress, confinement,
+    # inspector, resolver. Reading the resolver's verdict before the
+    # inspector's sends someone after a DNS answer when what failed was the
+    # redirect that answer points into.
+    inspect_result = vm_inspect_check(config)
+    if inspect_result:
+        _check(*inspect_result)
+
+    if config.is_vm:
         # After the inspector's line, because that is the order the guest
         # meets them in: it resolves a name, then dials what it was told.
+        #
+        # VM-only, and stays that way: D7 gives containers no per-workload DNS
+        # responder, so there is no synthesising resolver here for this to
+        # report on.
         resolve_result = vm_resolve_check(config)
         if resolve_result:
             _check(*resolve_result)

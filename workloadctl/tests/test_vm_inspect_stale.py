@@ -145,7 +145,7 @@ class TestTheStaleChecks(unittest.TestCase):
         cfg = SimpleNamespace(
             name="vm1", uid=UID, vm_bridge=None,
             vm_network={"egress": "filtered"},
-            config={"vm": {"network": {"egress": "filtered"}}})
+            config={"vm": {"network": {"egress": "filtered"}}}, is_vm=True)
         elems = [{"concat": [UID, 80]}, {"concat": [UID, 443]}]
         kw = {}
         if disk_digest is not None:
@@ -331,7 +331,7 @@ class TestTheStatusReadIsDefensiveEverywhere(unittest.TestCase):
         cfg = SimpleNamespace(
             name="vm1", uid=UID, vm_bridge=None,
             vm_network={"egress": "filtered"},
-            config={"vm": {"network": {"egress": "filtered"}}})
+            config={"vm": {"network": {"egress": "filtered"}}}, is_vm=True)
         elems = [{"concat": [UID, 80]}, {"concat": [UID, 443]}]
         for status in self.HOSTILE:
             cmd_diagnose.vm_inspect_check(
@@ -387,7 +387,7 @@ class TestTheDiskReadsAreDefensiveToo(unittest.TestCase):
         cfg = SimpleNamespace(
             name="vm1", uid=UID, vm_bridge=None,
             vm_network=dict(NET),
-            config={"vm": {"network": dict(NET)}})
+            config={"vm": {"network": dict(NET)}}, is_vm=True)
         elems = [{"concat": [UID, 80]}, {"concat": [UID, 443]}]
         with mock.patch.object(cmd_diagnose, "workload_state_dir",
                                return_value=self.dir), \

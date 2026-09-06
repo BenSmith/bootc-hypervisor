@@ -93,7 +93,7 @@ class TestTheVerdicts(unittest.TestCase):
         cfg = SimpleNamespace(
             name="vm1", uid=UID, vm_bridge=None,
             vm_network={"egress": "filtered"},
-            config={"vm": {"network": {"egress": "filtered"}}})
+            config={"vm": {"network": {"egress": "filtered"}}}, is_vm=True)
         elems = [{"concat": [UID, 80]}, {"concat": [UID, 443]}]
         return cmd_diagnose.vm_inspect_check(
             cfg, elements4=elems, elements6=elems, socket_active=True,

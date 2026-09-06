@@ -59,6 +59,17 @@ name = "app"
 image = "localhost/app:latest"
 """
 
+FILTERED_CONTAINER_TOML = """\
+[workload]
+name = "app2"
+
+[container]
+image = "localhost/app:latest"
+
+[network]
+hosts = ["example.invalid"]
+"""
+
 
 class InspectCheckIsWiredTests(unittest.TestCase):
     def setUp(self):
@@ -66,7 +77,8 @@ class InspectCheckIsWiredTests(unittest.TestCase):
         self.enterContext(
             mock.patch.object(workload_lib, "WORKLOAD_CONFIG_DIR", self.tmp))
         for name, toml in (("vm1", VM_TOML), ("vm2", BRIDGED_TOML),
-                           ("app", CONTAINER_TOML)):
+                           ("app", CONTAINER_TOML),
+                           ("app2", FILTERED_CONTAINER_TOML)):
             (self.tmp / name).mkdir()
             (self.tmp / name / "workload.toml").write_text(toml)
 
@@ -108,5 +120,36 @@ class InspectCheckIsWiredTests(unittest.TestCase):
         # on and the line would be meaningless rather than merely unhelpful.
         self.assertNotIn("vm_inspect", self._names("vm2"))
 
-    def test_a_container_gets_no_inspector_line(self):
+    def test_an_unfiltered_container_gets_no_inspector_line(self):
+        # No [network] trigger, so nothing redirects it and there is nothing
+        # to report. This used to hold for EVERY container; the test below is
+        # what makes the distinction load-bearing.
         self.assertNotIn("vm_inspect", self._names("app"))
+
+    def test_a_filtered_container_gets_an_inspector_line(self):
+        """G7's routing, asserted where it can actually go wrong.
+
+        vm_inspect_check() became substrate-aware in one commit and was
+        hoisted out of `if config.is_vm:` in the same one. Either half alone
+        is inert and the whole suite stays green: the check's substrate
+        wording is unreachable behind the gate, and the hoist reports nothing
+        while the predicate still asks vm_uses_inspect(). Only calling the
+        battery on a filtered CONTAINER config sees it.
+        """
+        self.assertIn("vm_inspect", self._names("app2"))
+
+    def test_the_vm_check_order_survives_the_hoist(self):
+        # The inspector's line has to reach an operator between confinement
+        # and the resolver, because that is the order a guest meets the
+        # machinery: it resolves a name, then dials what it was told. Hoisting
+        # the call out of the is_vm block is exactly the edit that could
+        # reorder them, and no other test would notice.
+        checks, _ = cmd_diagnose.collect_diagnose_checks(
+            WorkloadConfig("vm1"), self.manager)
+        order = [c["check"] for c in checks]
+        for earlier, later in (("vm_network", "vm_egress"),
+                               ("vm_egress", "vm_inspect"),
+                               ("vm_inspect", "vm_resolve")):
+            if earlier in order and later in order:
+                self.assertLess(order.index(earlier), order.index(later),
+                                f"{earlier} must precede {later}")
