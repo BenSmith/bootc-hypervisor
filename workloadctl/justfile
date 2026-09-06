@@ -1,26 +1,46 @@
 #!/usr/bin/env just --justfile
 
+# No .pyc, ever, for this project's own runs. Test recipes pass `python3 -B`;
+# this export exists for the SUBPROCESSES, which -B does not reach --
+# sys.dont_write_bytecode is per-interpreter and is not inherited, while
+# tests/__init__.py's script_env() builds a child environment with
+# os.environ.copy(), so an exported var propagates to every entrypoint the
+# suite launches. Those children are the ones that import lib/, which is the
+# cache that actually caused trouble.
+#
+# WHY AT ALL: CPython compares source and bytecode mtimes at ONE-SECOND
+# granularity, so a file rewritten twice inside the same second keeps executing
+# the first version's bytecode. That is not a corner case here -- it is the
+# exact shape of mutation-testing a gate (perturb, run, restore, run), which
+# this project does deliberately and often. The half that lies is the RESTORE:
+# a perturbation has new content and gets fresh bytecode, while the revert can
+# silently not take, so the reassuring reading is the unreliable one and the
+# breakage surfaces later as a fresh failure in a test that just passed.
+# Cost: nothing measurable. lib/ is stdlib-only and import time is noise beside
+# the subprocess work the suite actually does.
+export PYTHONDONTWRITEBYTECODE := "1"
+
 # Run CLI-surface acceptance harness (all verbs, both substrates)
 test-cli target:
-  pytest tests/cli_surface/ --target={{target}} -v
+  python3 -B -m pytest tests/cli_surface/ --target={{target}} -v
 
 # CLI surface — container substrate only (no VM boot; much faster)
 test-cli-containers target:
-  pytest tests/cli_surface/ --target={{target}} -m "not vm and not slow" -v
+  python3 -B -m pytest tests/cli_surface/ --target={{target}} -m "not vm and not slow" -v
 
 # CLI surface — VM substrate only (requires /dev/kvm on target)
 test-cli-vm target:
-  pytest tests/cli_surface/ --target={{target}} -m vm -v
+  python3 -B -m pytest tests/cli_surface/ --target={{target}} -m vm -v
 
 # CLI surface — deploy current tree to target first, then run all tests
 test-cli-deploy target:
-  pytest tests/cli_surface/ --target={{target}} --deploy -v
+  python3 -B -m pytest tests/cli_surface/ --target={{target}} --deploy -v
 
 # Runtime rung — boot a harness-owned VM and run the `runtime`-marked checks.
 # WLRT_MODE=dev (default): cached Fedora Cloud image + local RPM. WLRT_MODE=gate:
 # the real bootc image + swtpm (B1b). Skips cleanly without /dev/kvm + QEMU.
 test-runtime:
-  pytest tests/cli_surface/ -m runtime --target=vm:${WLRT_MODE:-dev} -v
+  python3 -B -m pytest tests/cli_surface/ -m runtime --target=vm:${WLRT_MODE:-dev} -v
 
 # Kill any harness VM left behind by a cancelled run and drop its scratch dir.
 # A killed run never reaches its own cleanup, so its QEMU keeps running and keeps
@@ -60,15 +80,15 @@ test-all-runtime-remote host target="local":
 # -t . makes the repo root the top-level dir, so modules import as `tests.<name>`
 # and tests/__init__.py runs first -- that is what puts lib/ on sys.path.
 test:
-  python3 -m unittest discover -t . -s tests -p 'test_*.py' -v
+  python3 -B -m unittest discover -t . -s tests -p 'test_*.py' -v
 
 # Run unit tests only (no integration)
 test-unit:
-  python3 -m unittest tests.test_workload_lib tests.test_generator tests.test_write_env tests.test_metrics tests.test_stdlib_only -v
+  python3 -B -m unittest tests.test_workload_lib tests.test_generator tests.test_write_env tests.test_metrics tests.test_stdlib_only -v
 
 # Run integration tests
 test-integration:
-  python3 -m unittest tests.test_integration -v
+  python3 -B -m unittest tests.test_integration -v
 
 # Render every shipped bundle's units into DIR, for diffing across a refactor.
 # Nothing is committed: take a baseline before the change, another after, and
