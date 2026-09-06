@@ -3222,7 +3222,23 @@ class TestGeneratorContainerEgress(unittest.TestCase):
         inspect_service = self.read("workload-web-inspect.service")
         self.assertIn("workload-vm-inspect-listener", inspect_service)
 
-    def test_pod_mode_arms_filter_on_umbrella_not_members(self):
+    def test_pod_mode_arms_the_filter_before_any_member_starts(self):
+        """The arming must precede the containers, not merely exist.
+
+        It used to live on the umbrella, which reads as the right owner --
+        [network] is workload-level and the umbrella is what "this workload is
+        up" means. But the umbrella carries `After=` the member services, so
+        systemd ran the arming AFTER every container was already running: the
+        workload had no element in wl_filtered, no DNAT and no listener for the
+        whole of member startup, image pull included, and then became filtered
+        mid-flight. Single mode was never affected and every rig workload is
+        single-mode, so nothing measured it.
+
+        Asserted as ORDERING, not as "which file contains the string": the
+        pod/net head unit is the right owner only because members are
+        Requires=/After= it, and a future refactor that moved the hook to
+        another unit ordered after the members would pass a containment check.
+        """
         write_config(self.config_dir, "stack", """\
             [workload]
             name = "stack"
@@ -3243,10 +3259,22 @@ class TestGeneratorContainerEgress(unittest.TestCase):
             """)
         result = self.run_gen()
         self.assertEqual(result.returncode, 0, result.stderr)
+        head = self.read("workload-stack-pod.service")
+        self.assertIn('workload-container-filter up "stack"', head)
+        self.assertIn('workload-container-filter down "stack"', head)
+        # Not on the umbrella, which is ordered after the members.
         umbrella = self.read("workload-stack.service")
-        self.assertIn('workload-container-filter up "stack"', umbrella)
+        self.assertNotIn("workload-container-filter", umbrella)
         member = self.read("workload-stack-web.service")
         self.assertNotIn("workload-container-filter", member)
+        # The ordering that makes the head unit the right owner: every member
+        # is After= it, so the arming is complete before the first container.
+        self.assertIn("After=workload-stack-pod.service", member)
+        self.assertIn("Requires=workload-stack-pod.service", member)
+        # And the listener is up before the head unit finishes, so nothing is
+        # redirected into a socket with nobody behind it.
+        self.assertIn("After=workload-stack-inspect.socket", head)
+        self.assertIn("Requires=workload-stack-inspect.socket", head)
         self.assertTrue(
             (Path(self.services_dir) / "workload-stack-inspect.socket").exists())
 
@@ -3391,21 +3419,21 @@ class TestGeneratorContainerEgress(unittest.TestCase):
         self.assertTrue(
             (Path(self.services_dir) / "workload-plainhost.service").exists())
 
-    def test_bridge_mode_arms_the_filter_on_the_umbrella(self):
-        """P1-14. Bridge mode gives every container its OWN netns, unlike pod
-        mode where they share one -- so it is not obvious that the umbrella is
-        still the right place to arm the filter, and today it is where the
-        arming goes.
+    def test_bridge_mode_arms_the_filter_before_any_member_starts(self):
+        """P1-14, and the same ordering property as the pod-mode test above.
 
-        That is defensible under pasta (every container's traffic is
-        re-originated as the ONE workload uid either way, so a uid-keyed rule
-        does not care which netns it came from), but it has not been confirmed
-        on hardware for bridge mode specifically.
+        Bridge mode gives every container its OWN netns, unlike pod mode where
+        they share one -- so it is not obvious that one workload-level unit is
+        still the right place to arm the filter. It is, under pasta: every
+        container's traffic is re-originated as the ONE workload uid either
+        way, so a uid-keyed rule does not care which netns produced it. What
+        the netns split does not change is that the arming has to happen
+        first, and the network-create head unit is the unit every member is
+        ordered after.
 
-        Pins current emission rather than asserting it is right: P1-9's
-        bridge-mode DNAT question is still open, and the point of the pin is
-        that answering it shows up here as a diff instead of as a silent
-        change of which unit carries the hook."""
+        The bridge-mode DNAT question in P1-9 is still open; if answering it
+        moves the hook, this fails as a diff rather than as a silent change of
+        which unit carries it."""
         write_config(self.config_dir, "br", """\
             [workload]
             name = "br"
@@ -3423,15 +3451,20 @@ class TestGeneratorContainerEgress(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertTrue(
             (Path(self.services_dir) / "workload-br-inspect.socket").exists())
+        head = self.read("workload-br-net.service")
         umbrella = self.read("workload-br.service")
         member = self.read("workload-br-web.service")
-        armed = [n for n, t in (("umbrella", umbrella), ("member", member))
+        armed = [n for n, t in (("head", head), ("umbrella", umbrella),
+                                ("member", member))
                  if "workload-container-filter" in t]
         self.assertEqual(
-            armed, ["umbrella"],
-            "bridge mode arms the umbrella, same as pod mode; if that changes, "
-            "the DNAT question in P1-9 has been answered and this pin is what "
-            "should carry the new answer")
+            armed, ["head"],
+            "bridge mode arms the network-create head unit, same as pod mode "
+            "arms the pod-create one; if that changes, the DNAT question in "
+            "P1-9 has been answered and this pin is what should carry the new "
+            "answer")
+        self.assertIn("After=workload-br-net.service", member)
+        self.assertIn("After=workload-br-inspect.socket", head)
 
 
 if __name__ == "__main__":

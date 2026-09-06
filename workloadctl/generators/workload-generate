@@ -511,7 +511,7 @@ def resolve_auto_gpu(name=None):
 
 
 def _head_unit(name, user_name, uid, slice_name, header_comment, description,
-                create_cmd, rm_cmd):
+                create_cmd, rm_cmd, uses_inspect=False):
     """Shared skeleton for the pod-create and bridge-network-create head units.
 
     Both are single-command oneshot services that run before any member
@@ -521,6 +521,25 @@ def _head_unit(name, user_name, uid, slice_name, header_comment, description,
     consistent for every member container -- see the fresh-pause comment
     in generate_system_service). They differ only in the file header, the
     [Unit] Description=, and the podman create/rm commands.
+
+    'uses_inspect' arms the egress element-lifecycle helper (P1-7) HERE, on
+    the one unit that pod/bridge mode orders *before* every member container.
+
+    IT USED TO LIVE ON THE UMBRELLA AND THAT WAS A HOLE. `[network]` is
+    workload-level (one uid, D1) and the umbrella is the unit that represents
+    "this uid's workload is up", so it looked like the right owner -- but the
+    umbrella carries `After=` the member services, so systemd starts every
+    container FIRST and only then runs the arming. For the whole of member
+    startup the workload had no element in `wl_filtered`, no DNAT, and no
+    listener: it ran completely unfiltered, image pull included, and then
+    became filtered mid-flight. Single mode was never affected (the arming is
+    an ExecStartPre on the container's own unit, ahead of `podman run`), which
+    is exactly why nothing caught it -- every rig workload is single-mode.
+
+    The head unit is the right owner because the ordering it needs already
+    exists in both directions: members are `Requires=`/`After=`/`BindsTo=`
+    this unit, so arming precedes the first container and the teardown in
+    ExecStopPost runs only after the last one has stopped.
     """
     home_dir = str(workload_state_dir(name))
 
@@ -536,6 +555,13 @@ def _head_unit(name, user_name, uid, slice_name, header_comment, description,
     # tears this down too -- otherwise this oneshot lingers active(exited)
     # and a later re-enable never re-runs the create command.
     u.set("PartOf", f"workload-{name}.service")
+    if uses_inspect:
+        # Requires=, not Wants=: without the socket started there is nothing
+        # listening on the addresses the DNAT sends 80/443 to, and every
+        # redirected connection hangs. After=, so it is up before the first
+        # member container exists.
+        u.add("Requires", f"workload-{name}-inspect.socket")
+        u.add("After", f"workload-{name}-inspect.socket")
 
     svc = unit.section("Service")
     svc.set("Type", "oneshot")
@@ -550,6 +576,11 @@ def _head_unit(name, user_name, uid, slice_name, header_comment, description,
              f"-/usr/bin/rm -f /run/user/{uid}/libpod/tmp/pause.pid"
              f" /run/user/{uid}/libpod/tmp/ns_handles")
     svc.add("ExecStartPre", f"-{rm_cmd}")
+    if uses_inspect:
+        # After the podman ExecStartPre lines above and before ExecStart, so
+        # the elements are armed before the pod/network the members join even
+        # exists. The `+` prefix runs it as root regardless of User= above.
+        _container_egress_exec(svc, name)
     svc.set("ExecStart", create_cmd)
     svc.set("ExecStop", rm_cmd)
     svc.set("StandardOutput", "journal")
@@ -606,6 +637,7 @@ def generate_pod_service(workload, user_name, uid):
         description=f"{name} pod",
         create_cmd=f"/usr/bin/podman pod create {pod_args_str}",
         rm_cmd=f"/usr/bin/podman pod rm -f --ignore workload-{name}",
+        uses_inspect=container_uses_inspect(workload),
     )
 
 
@@ -625,11 +657,11 @@ def generate_net_service(workload, user_name, uid):
         description=f"{name} bridge network",
         create_cmd=f"/usr/bin/podman network create {net_name}",
         rm_cmd=f"/usr/bin/podman network rm -f {net_name}",
+        uses_inspect=container_uses_inspect(workload),
     )
 
 
-def generate_umbrella_service(workload_name, container_names, slice_name, mode,
-                              uses_inspect=False):
+def generate_umbrella_service(workload_name, container_names, slice_name, mode):
     """Generate the workload-{name}.service umbrella oneshot.
 
     'mode' is "pod" or "bridge". Determines whether the umbrella requires
@@ -642,11 +674,12 @@ def generate_umbrella_service(workload_name, container_names, slice_name, mode,
     bad container takes the whole workload down — a deliberate choice; users
     who want one-container-failure-tolerance can split into separate workloads.
 
-    'uses_inspect' arms the egress element-lifecycle helper (P1-7) on THIS
-    unit rather than on any one member container: [network] is workload-level
-    (one uid, D1), and the umbrella is the one unit that represents "this
-    uid's workload is up" in pod/bridge mode, exactly as generate_system_service
-    owns it directly in single mode.
+    THE EGRESS ARMING IS NOT HERE, and the reason is this unit's own After=.
+    It carries `After=` the member services so its active state reflects
+    theirs, which means anything it runs at start runs AFTER every container
+    is already up. P1-7 originally put the arming here and that left a
+    pod/bridge workload unfiltered for the whole of member startup. It lives
+    on the pod/net head unit instead -- see _head_unit's docstring.
     """
     helper = "pod" if mode == "pod" else "net"
     sub_services = " ".join(
@@ -665,20 +698,11 @@ def generate_umbrella_service(workload_name, container_names, slice_name, mode,
           f"workload-{workload_name}-setup.service workload-{workload_name}-{helper}.service")
     u.add("Requires", sub_services)
     u.add("After", sub_services)
-    if uses_inspect:
-        # Same reasoning as generate_system_service's single-mode branch:
-        # without Requires=/After= the inspect socket is never started, so
-        # port-80/443 traffic that should be redirected into the inspector
-        # just hangs.
-        u.add("Requires", f"workload-{workload_name}-inspect.socket")
-        u.add("After", f"workload-{workload_name}-inspect.socket")
 
     svc = unit.section("Service")
     svc.set("Type", "oneshot")
     svc.set("RemainAfterExit", "yes")
     svc.set("Slice", slice_name)
-    if uses_inspect:
-        _container_egress_exec(svc, workload_name)
     svc.set("ExecStart", "/bin/true")
 
     inst = unit.section("Install")
@@ -1448,14 +1472,18 @@ def _container_ca_delivery_args(workload, name: str) -> list:
     (that would tell the client to distrust the very install the operator
     asked for).
 
-    UNVERIFIED ON HARDWARE: the source path is labelled by
-    provision_vm_pki_dirs for the host-side inspector's own read access
-    (comment there: "a directory the inspector creates for itself inherits
-    svirt_image_t"). Whether a plain bind-mount (no `:Z`/`:z`) is readable
-    from inside a rootless podman container without also relabelling -- and
-    relabelling would risk breaking the inspector's own access to the same
-    path -- has not been confirmed against a real container. See the
-    build spec's P1-16 rig for what a hardware pass here needs to check.
+    VERIFIED ON HARDWARE 2026-09-05, and it needed a policy grant. The source
+    path is labelled by provision_vm_pki_dirs for the host-side inspector's own
+    read access (comment there: "a directory the inspector creates for itself
+    inherits svirt_image_t"), and a plain bind-mount with no `:Z`/`:z` was
+    EACCES from inside the container: `avc: denied { read } ...
+    tcontext=...wlinspect_ca_t`. Relabelling the source is the wrong fix -- it
+    would break the inspector's own access to the same path -- so the grant
+    went the other way, in security/workload-inspect.cil, to the
+    container_domain attribute rather than to container_t (a workload with
+    [security] selinux_policy runs as its own udica-derived type and is not
+    container_t; see that file for the whole argument). No `:Z` here on
+    purpose: the label is deliberate and shared.
     """
     net = workload.get("network", {}) or {}
     if not container_uses_inspect(workload):
@@ -1544,7 +1572,8 @@ def generate_system_service(workload, container, user_name, uid, mode="single"):
     # inspector just hangs -- the workload looks healthy while nothing on
     # those ports is reachable. Single mode only: this unit IS the
     # workload-level service here (see the P1-7 gate below); pod/bridge mode
-    # gets the same wiring on the umbrella instead.
+    # gets the same wiring on the pod/net head unit instead, which is the one
+    # unit ordered ahead of every member container (see _head_unit).
     if mode == "single" and container_uses_inspect(workload):
         u.add("Requires", f"workload-{name}-inspect.socket")
         u.add("After", f"workload-{name}-inspect.socket")
@@ -1694,7 +1723,9 @@ def generate_system_service(workload, container, user_name, uid, mode="single"):
 
     # Egress element-lifecycle arming (P1-7): single mode only -- this unit
     # IS the workload-level service here (it gets the wants symlink below),
-    # exactly the way generate_umbrella_service owns it for pod/bridge.
+    # and its ExecStartPre runs ahead of the `podman run` in ExecStart. In
+    # pod/bridge mode the pod/net head unit owns it, for the same "before the
+    # first container" reason.
     # Gated on the config, not inside _container_egress_exec, for R10 (see
     # that function's docstring).
     if mode == "single" and container_uses_inspect(workload):
@@ -3435,8 +3466,7 @@ def main():
                 # Umbrella
                 slice_name = config.get("resources", {}).get("slice", "workloads.slice")
                 umbrella = generate_umbrella_service(
-                    name, [c["name"] for c in containers], slice_name, mode=mode,
-                    uses_inspect=container_uses_inspect(config)
+                    name, [c["name"] for c in containers], slice_name, mode=mode
                 )
                 paths[("unit", "main")][0].write_text(umbrella)
                 log_msg(f"  Created {mode}-mode units for {name} ({len(containers)} containers)")
