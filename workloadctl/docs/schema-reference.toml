@@ -1849,14 +1849,67 @@ ports = ["8080:80", "8443:443"]
 # for the [vm.network] one. A VM could default to egress = "filtered" because
 # none were deployed when that work started; container workloads were already
 # running in the field, so nothing here may change a workload that did not ask
-# for it. Presence of a trigger IS the statement. Correspondingly, THERE IS NO
-# DEFAULT-DENY for containers: an untriggered container is not in `wl_filtered`
-# and no drop rule applies to it.
+# for it. Presence of a trigger IS the statement, and an UNTRIGGERED container
+# is not in `wl_filtered` at all -- no drop rule applies to it, and no key here
+# can turn one on without also turning the inspector on.
+#
+# BUT ONCE YOU DO TRIGGER IT, THE DEFAULT DENY IS THE WHOLE POINT, and this is
+# the single most surprising thing in this section. Filtering is not "80 and
+# 443 are policed and everything else is as it was". A triggered workload's uid
+# goes into `wl_filtered`, and the last rule of the output chain is
+# `meta skuid @wl_filtered counter drop`. What survives it, and nothing else:
+#
+#   - ports 80 and 443, which are redirected into this workload's inspector and
+#     governed by .hosts / [[network.policy]];
+#   - every [[network.allow]] entry, matched on uid + address + port;
+#   - traffic leaving on loopback (`oif lo`);
+#   - reply-direction packets of a connection already accepted.
+#
+# EVERYTHING ELSE THIS WORKLOAD SENDS IS DROPPED. A database on 5432, an SMTP
+# relay, an NTP peer, a git remote over SSH, a metrics push on 9090: each needs
+# its own [[network.allow]] entry or it stops working the moment you add a
+# single `hosts` line. The drop is counted on a host-wide counter that names
+# neither the workload nor the destination, so the symptom is a timeout with
+# nothing anywhere saying it was a policy decision.
+#
+# DNS IS THE CASE THAT DEPENDS ON YOUR HOST, and it is worth checking before you
+# trigger anything. The container resolves through whatever
+# /etc/resolv.conf names, and the query leaves as a host socket owned by the
+# workload uid:
+#
+#   - nameserver on loopback (127.0.0.53, i.e. systemd-resolved, or 127.0.0.1):
+#     accepted by the `oif lo` rule above. Nothing to do.
+#   - nameserver on the LAN (a router, a homelab resolver, 8.8.8.8): NOT on
+#     loopback, not port 80 or 443, so it meets the default deny and the
+#     container loses name resolution entirely -- which looks like every
+#     destination being down at once, not like a firewall.
+#
+# The remedy for the second case is an ordinary allow entry, since the allowlist
+# rules match `th dport` and are therefore not TCP-only:
+#
+#   [[network.allow]]
+#   address = "192.168.0.1"
+#   port    = 53
+#   reason  = "the host resolver; a filtered uid cannot reach it otherwise"
+#
+# `workloadctl doctor` and `workloadctl diagnose` report the effective mode and
+# the armed elements, but neither can tell you which destinations a workload was
+# ABOUT to need. Enumerate them from the workload, not from the failures.
 #
 # mode = "host" CANNOT BE COMBINED WITH ANY OF THIS, and saying otherwise is a
 # validation error -- the workload will not enable, and will not generate units
 # if the config predates the rule. It fails closed: a workload that asked for an
 # egress policy stops running rather than running unfiltered.
+#
+# EXCEPT IN BRIDGE MODE, where the key is accepted because it is never read.
+# `workload.mode = "bridge"` gives every container its own netns on the
+# auto-created workload-<name>-net and passes [network].mode to podman nowhere
+# at all -- the same reason the generator warns that workload-level
+# [network].ports is ignored there. So a bridge-mode workload carrying a
+# leftover mode = "host" is NOT on the host network, uid attribution holds
+# exactly as it does under pasta, and refusing it would be refusing a workload
+# over a key that changes nothing. The refusal above is `single` and `pod`,
+# which do pass it to `podman run --network=` / `podman pod create --network=`.
 #
 # The reason was measured on hardware, not assumed. A host-mode container shares
 # the host's network namespace outright, so the workload uid is the only thing
@@ -1876,31 +1929,39 @@ ports = ["8080:80", "8443:443"]
 # as the keep-id uid -- an image detail, not a policy decision. Refusing beats
 # filtering an arbitrary subset while reporting the workload as filtered.
 #
-# This is specific to host mode. Under pasta and bridge mode the container's
-# traffic is re-originated by a host process owned by the workload uid, so all
-# in-container uids attribute correctly and the single-uid selectors are exact.
+# This is specific to host mode ACTUALLY TAKING EFFECT. Under pasta -- and under
+# bridge mode, which is why the key is inert there -- the container's traffic is
+# re-originated by a host process owned by the workload uid, so all in-container
+# uids attribute correctly and the single-uid selectors are exact.
 #
 # TWO THINGS FILTERING HERE DOES NOT DO, both of which it DOES do for a VM.
 # They are consequences of one decision: a container resolves names through the
 # host's (or podman's) resolver, and there is no per-workload DNS responder in
 # front of it the way passt gives a VM one.
 #
-#   1. FILTERING DOES NOT CONSTRAIN DNS. A hostname allowlist here is an
-#      access control on HTTP and HTTPS destinations. It is NOT an
-#      exfiltration control, because the container can still emit arbitrary
-#      DNS queries and read arbitrary answers, and that channel carries data
-#      in both directions. For a filtered VM the synthesising responder makes
-#      DNS tunnelling ABSENT rather than filtered; here it is simply open. If
-#      that matters for a workload, the remedy is at the host resolver, not
-#      in this file.
+#   1. FILTERING DOES NOT CONSTRAIN THE CONTENT OF DNS. A hostname allowlist
+#      here is an access control on HTTP and HTTPS destinations. It is NOT an
+#      exfiltration control: wherever the container CAN reach a resolver, it
+#      can emit arbitrary queries and read arbitrary answers, and that channel
+#      carries data in both directions. For a filtered VM the synthesising
+#      responder makes DNS tunnelling ABSENT rather than filtered; there is no
+#      such responder here, so nothing inspects a query. If that matters for a
+#      workload, the remedy is at the host resolver, not in this file.
+#
+#      WHETHER IT CAN REACH ONE AT ALL is a separate question, and the answer
+#      depends on your host -- see the default-deny section above. A loopback
+#      stub resolver is accepted by the `oif lo` rule; a resolver on the LAN
+#      needs an [[network.allow]] entry on port 53 or the workload has no name
+#      resolution. Do not read "DNS is not constrained" as "DNS keeps working".
 #   2. AN [[network.allow]] ENTRY WRITTEN BY NAME IS PINNED TO ITS ARM-TIME
 #      RESOLUTION. The name is resolved once, when the rules are armed, and
 #      the resulting addresses are what the kernel matches. If the name later
 #      answers with a different address, the entry stops covering the
-#      destination and the connection is dropped -- and because there is no
-#      default-deny to fail against loudly, the symptom is an intermittent
-#      unreachability with nothing logged saying why. Re-arm (see APPLYING A
-#      CHANGE, below) after a destination moves.
+#      destination and the connection falls through to the default deny -- onto
+#      a counter shared with every other filtered workload on the host, which
+#      names neither this workload nor the entry. The symptom is an
+#      intermittent unreachability with nothing logged saying why. Re-arm (see
+#      APPLYING A CHANGE, below) after a destination moves.
 #
 #      `workloadctl diagnose <name>` reports this, and it is the only surface
 #      that does: the drop happens in nftables, so the inspector never sees

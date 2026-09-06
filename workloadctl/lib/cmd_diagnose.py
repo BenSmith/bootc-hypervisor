@@ -1189,6 +1189,154 @@ def vm_egress_check(config) -> tuple[str, bool, str] | None:
             f"entr{'y' if len(allowed) == 1 else 'ies'}{tail}")
 
 
+RESOLV_CONF = Path("/etc/resolv.conf")
+
+
+def host_nameservers(path=RESOLV_CONF) -> list | None:
+    """Every `nameserver` address in the host's resolv.conf, or None if unread.
+
+    None and [] are different answers and the caller must not collapse them:
+    unreadable means "no opinion", an empty list means "this host names no
+    resolver at all", and only one of those is a finding about the workload.
+    """
+    import ipaddress
+    try:
+        text = path.read_text()
+    except OSError:
+        return None
+    found = []
+    for line in text.splitlines():
+        line = line.split("#", 1)[0].split(";", 1)[0].strip()
+        parts = line.split()
+        if len(parts) < 2 or parts[0] != "nameserver":
+            continue
+        # A v6 nameserver may carry a scope id (fe80::1%eth0); the address is
+        # what the filter matches on, and the zone qualifies it for a sender.
+        try:
+            found.append(ipaddress.ip_address(parts[1].split("%", 1)[0]))
+        except ValueError:
+            continue
+    return found
+
+
+def container_resolver_check(config, *, nameservers=PROBE, armed=PROBE
+                             ) -> tuple[str, bool, str] | None:
+    """Can this filtered container still reach the host's resolver?
+
+    THE ONE WAY A [network] TRIGGER BREAKS A WORKLOAD THAT HAS NOTHING TO DO
+    WITH WHAT THE TRIGGER SAYS. Adding `hosts`, `allow` or `policy` puts the
+    workload's uid in `wl_filtered`, and the last rule in
+    nftables/workload-filter.nft's output chain drops everything from a
+    `wl_filtered` uid that no earlier rule accepted. Port 53 is not one of the
+    exceptions. What a filtered container gets is: the 80/443 redirect, the
+    reply direction of an accepted connection, its own `[[network.allow]]`
+    elements, and `oif lo`. The port-53 accept in that file is scoped to
+    `wl_egress_cg` -- the INSPECTOR's own cgroup -- which a container is never
+    in, so it does not cover this.
+
+    So whether DNS survives is a property of THE HOST, not of the workload:
+
+      - resolv.conf names a loopback stub (127.0.0.53, systemd-resolved):
+        pasta re-originates the query to loopback, `oif lo` accepts it, and
+        nothing breaks. This is the configuration every hardware run of the
+        container egress rig has used, which is exactly why the break has
+        never been observed.
+      - resolv.conf names a LAN resolver (a router, a homelab DNS box, the
+        plain NetworkManager default): the re-originated query is a workload-
+        uid socket to a routable address on port 53, no rule accepts it, and
+        it is dropped. The container resolves NOTHING -- including the very
+        hostnames its `[network].hosts` allowlist names.
+
+    The symptom carries no route to this cause. Every unit is active, the
+    inspector is listening, `diagnose` passes everything else, and the failure
+    surfaces inside the container as name resolution failing for everything at
+    once. Hence this line: it is the only thing on the host that knows both
+    halves.
+
+    CONTAINERS ONLY. A filtered VM has a per-workload synthesising responder
+    (D7 gives containers none), reached at a management address the guest is
+    handed, so its resolver path does not go through this rule at all.
+
+    A FAILURE, not a warning, and the remedy is a real one: an
+    `[[network.allow]]` entry for the resolver on port 53 arms exactly the
+    element the drop is missing.
+    """
+    import ipaddress
+    if config.is_vm or not container_uses_inspect(config.config):
+        return None
+    try:
+        uid = config.uid
+    except Exception:
+        return None                      # no user yet; check 1 reports it
+
+    if nameservers is PROBE:
+        nameservers = host_nameservers()
+    if nameservers is None:
+        return None                      # could not read; assert nothing
+    if not nameservers:
+        return None                      # no resolver configured is not ours
+
+    if armed is PROBE:
+        armed = set()
+        for set_name in (NFT_SET_ALLOW4, NFT_SET_ALLOW6):
+            payload = _nft_json("list", "set", *NFT_TABLE.split(), set_name)
+            if payload is None:
+                continue
+            for elem in vm_owned_elements(uid, nft_set_elements(payload)):
+                parts = [part.strip() for part in elem.split(" . ")]
+                if len(parts) == 3:
+                    armed.add((parts[1], parts[2]))
+
+    # "domain" as well as "53": nft renders a `th dport` element numerically
+    # today, but a set listed back through a service-name-aware path would
+    # read the other way, and treating that as unarmed would be a false alarm
+    # about a resolver that works.
+    def reachable(addr):
+        if addr.is_loopback:
+            return True                  # `oif lo`, accepted before the drop
+        return ((str(addr), "53") in armed
+                or (str(addr), "domain") in armed)
+
+    blocked = [a for a in nameservers if not reachable(a)]
+    if not blocked:
+        return ("container_resolver", True,
+                f"every resolver in {RESOLV_CONF} is reachable from this "
+                f"filtered workload "
+                f"({', '.join(str(a) for a in nameservers)})")
+
+    listed = ", ".join(str(a) for a in blocked)
+    remedy = (f"add each one to [network].allow:\n"
+              f"    [[network.allow]]\n"
+              f"    address = \"{blocked[0]}\"\n"
+              f"    port    = 53\n"
+              f"    reason  = \"the host resolver; a filtered uid cannot "
+              f"reach it otherwise\"\n"
+              f"  then: systemctl restart workload-{config.name}.service")
+
+    if len(blocked) == len(nameservers):
+        return ("container_resolver", False,
+                f"this workload is filtered (uid {uid} is in "
+                f"{NFT_SET_FILTERED}) and EVERY resolver in {RESOLV_CONF} is "
+                f"outside what that permits: {listed}. Port 53 is not one of "
+                f"the exceptions to the default deny — a filtered uid gets "
+                f"the 80/443 redirect, its own allow elements, replies, and "
+                f"`oif lo`, and nothing else — so this container resolves "
+                f"NOTHING, including the hostnames its own [network] "
+                f"allowlist names. Inside it this reads as total DNS failure "
+                f"with every unit here healthy. Fix: {remedy}")
+
+    working = ", ".join(str(a) for a in nameservers if a not in blocked)
+    return ("container_resolver", False,
+            f"this workload is filtered (uid {uid} is in {NFT_SET_FILTERED}) "
+            f"and {len(blocked)} of {len(nameservers)} resolvers in "
+            f"{RESOLV_CONF} are dropped by the default deny: {listed}. "
+            f"Resolution still works while {working} answers, so this is not "
+            f"broken yet — but every fallback to the others is dropped "
+            f"silently, and a resolver outage that the host would ride out "
+            f"becomes total DNS failure for this workload alone. Fix: "
+            f"{remedy}")
+
+
 def allow_drift_check(config) -> tuple[str, bool, str] | None:
     """Does every NAMED `allow` entry still resolve to what was armed for it?
 
@@ -1299,6 +1447,17 @@ def allow_drift_check(config) -> tuple[str, bool, str] | None:
         # workload as clean. Caught by the unit test that arms the same address
         # on a DIFFERENT port; nothing on hardware would have shown it, because
         # the symptom is identical to drift.
+        #
+        # `armed` is pooled across the uid's whole set, so `pinned` holds every
+        # address armed on this PORT, not only the ones this entry put there.
+        # Two entries sharing a port therefore cover for each other in one
+        # direction: if entry B drifts onto exactly the address entry A is
+        # armed as, the intersection is non-empty and B reads clean. That is a
+        # real hole and a deliberately unclosed one -- closing it means
+        # recording which element came from which entry, which nftables does
+        # not carry and this check cannot reconstruct. It costs a false
+        # negative only when the drifted answer lands on a sibling entry's
+        # address, in which case the dial also still works.
         if not pinned:
             drifted.append(f"{host}:{port} has no element armed for it at all")
         elif not (pinned & current):
@@ -3167,6 +3326,15 @@ def collect_diagnose_checks(config, manager: WorkloadManager):
         resolve_result = vm_resolve_check(config)
         if resolve_result:
             _check(*resolve_result)
+
+    # The container's half of the resolver question, in the slot a VM's
+    # vm_resolve_check occupies just above and for the same ordering reason:
+    # the workload resolves a name before it dials anything, so a reader who
+    # meets the dial's verdict first is sent after the wrong thing. The check
+    # returns None for a VM, which has a responder of its own.
+    resolver_result = container_resolver_check(config)
+    if resolver_result:
+        _check(*resolver_result)
 
     # Not gated on is_vm either, and for the same reason G7 is not: the
     # pinning it reports is a property of the nft element, which both
