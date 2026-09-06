@@ -339,24 +339,47 @@ class TestBoundary(unittest.TestCase):
 
     def test_a_container_may_read_but_not_write_its_own_ca(self):
         """[network].ca_delivery = "env"/"mount" bind-mounts this same
-        certificate into container_t -- confirmed on hardware 2026-09-05 to
+        certificate into the container -- confirmed on hardware 2026-09-05 to
         EACCES without an explicit grant, since wlinspect_t's own read is a
         different domain. Read-only, and the cert only: the private key gets
         no grant here, matching the inspector's own boundary above.
         """
         self.assertTrue(
             {"read", "open"}
-            <= self._perms("wlinspect_ca_t", "file", subject="container_t"))
+            <= self._perms("wlinspect_ca_t", "file", subject="container_domain"))
         self.assertEqual(
-            self._perms("wlinspect_ca_t", "file", subject="container_t")
+            self._perms("wlinspect_ca_t", "file", subject="container_domain")
             & {"write", "create", "unlink", "rename"},
             set())
         self.assertEqual(
-            self._perms("wlinspect_leaf_t", "file", subject="container_t"),
+            self._perms("wlinspect_leaf_t", "file", subject="container_domain"),
             set())
         self.assertEqual(
-            self._perms("wlinspect_leaf_t", "dir", subject="container_t"),
+            self._perms("wlinspect_leaf_t", "dir", subject="container_domain"),
             set())
+
+    def test_the_ca_grant_names_the_attribute_and_not_container_t(self):
+        """The grant has to reach a workload with its own SELinux policy.
+
+        `[security] selinux_policy` makes a workload run as its own
+        udica-derived `wl_<name>.process`, not as container_t, and
+        `(blockinherit container)` copies the container block's RULES -- not
+        the attribute memberships the base policy assigns to container_t
+        elsewhere. workloads/sunshine-streaming/policy.cil says exactly this,
+        having been bitten by it over syslog_client_type. So a container_t-only
+        grant reproduces the very EACCES it was added to fix, on every workload
+        that ships a policy, as a certificate error inside the container with
+        the AVC in the one file nobody reads.
+
+        container_domain is what both shapes share: container_t is a member,
+        and udica's base_container.cil `(block container ...)` carries
+        `(typeattributeset container_domain (process))`, which blockinherit
+        copies into each workload block.
+        """
+        self.assertEqual(
+            self._perms("wlinspect_ca_t", "file", subject="container_t"), set(),
+            "granting container_t directly leaves every selinux_policy "
+            "workload denied; grant container_domain instead")
 
     def test_the_leaf_caches_are_writable(self):
         """Minting into them is the job, and the eviction is unlink+replace."""
