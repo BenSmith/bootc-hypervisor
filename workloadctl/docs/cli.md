@@ -18,7 +18,7 @@
 | [`drift`](#drift) | Diff running systemd units against what would be generated from current TOMLs |
 | [`duplicate`](#duplicate-alias-clone) / `clone` | Copy a live workload's TOML under a new name |
 | [`edit`](#edit) | Edit the workload TOML, or copy-on-write override a bundle control file |
-| [`egress`](#egress) | Read a filtered VM's per-request egress record — what the guest actually sent |
+| [`egress`](#egress) | Read a filtered workload's per-request egress record — what it actually sent |
 | [`enable`](#enable) | Create user, transfer image, start service (idempotent) |
 | [`exec`](#exec) | Run a command inside a container or VM (via SSH) |
 | [`health`](#health) | Show container health check status |
@@ -961,7 +961,7 @@ Exit 0 when healthy, 1 when any problem was found, 1 with a one-line reason if t
 
 A journal tail is attached only to units that have a problem, so a healthy report stays short. `NRestarts > 0` counts as a problem even when the unit is active: that is the silent restart-loop class which `is-active` alone hides.
 
-For a VM with `egress = "filtered"` the report gains an **Egress (inspected)** section carrying the inspector's counters — connections by disposition, drop reasons, the minter's figures, the resolver's. Those figures are **evidence, never a verdict**: they add nothing to the problem count, because a guest being denied is the filter working. The inspector's actual faults — a listener enforcing a different policy than the one on disk, a CA mismatch, a missing nft element — arrive through the setup checks like everything else.
+For any filtered workload — a VM with `egress = "filtered"`, or a container with a `[network]` trigger — the report gains an **Egress (inspected)** section carrying the inspector's counters: connections by disposition, drop reasons, the minter's figures, and for a VM the resolver's. Those figures are **evidence, never a verdict**: they add nothing to the problem count, because a workload being denied is the filter working. The inspector's actual faults — a listener enforcing a different policy than the one on disk, a CA mismatch, a missing nft element — arrive through the setup checks like everything else.
 
 [↑ top](#workloadctl-command-reference)
 
@@ -1019,7 +1019,9 @@ Useful after editing a TOML without running `recreate`, or to verify that the ru
 
 ## Egress Inspection
 
-For VM workloads with `[vm.network].egress = "filtered"`. The pair answers the operator's two questions about one filter: `rules` is what the guest *may* do, `egress` is what it *did*. Both are read-only. See [the walkthrough](vm-egress-walkthrough.md) for how the filter is built.
+The pair answers the operator's two questions about one filter: `rules` is what the workload *may* do, `egress` is what it *did*. Both are read-only. See [the walkthrough](vm-egress-walkthrough.md) for how the filter is built.
+
+`egress` reads the record for **either substrate** — a VM with `[vm.network].egress = "filtered"` or a container with a `[network]` trigger — because the inspector is the same binary and the record path is keyed by workload name alone. `rules` is **VM-only for now**: its renderer reads `[vm.network]` and defaults `tls` the VM way. Asked about an inspected container it says so and names the policy document that does exist on disk, rather than claiming the workload has no filter.
 
 ### `rules`
 
@@ -1047,7 +1049,7 @@ The report names which document it read: `/run/workload-vm/<name>/inspect.json` 
 
 ### `egress`
 
-Read the per-request record the inspector writes for a filtered VM: one line per request with its host, method, path, status, upstream address actually dialled, timing, and connection id. The record is private to the host — it is not in the journal, and the guest cannot read it.
+Read the per-request record the inspector writes for a filtered workload, VM or container: one line per request with its host, method, path, status, upstream address actually dialled, timing, and connection id. The record is private to the host — it is not in the journal, and the workload cannot read it.
 
 ```
 sudo workloadctl egress [-n N] [-g] [--json] [--id ID] [--decision forward|drop]
@@ -1073,6 +1075,8 @@ sudo workloadctl egress [-n N] [-g] [--json] [--id ID] [--decision forward|drop]
 **Allows are recorded as well as drops.** "What did this agent send" is not answerable from denials alone, and a denied path is evidence too. The journal keeps the decision, the host and the remedy sentence for an operator watching in real time; the record keeps the per-request detail.
 
 Bodies are never recorded, and records are redacted at construction rather than at rendering — a record redacted on the way to the screen is one `--verbose` away from being the thing it was written not to be.
+
+**The record is per workload, not per container.** For a `single`-mode container or a VM that is the same statement. For a `pod`- or `bridge`-mode workload it is not: every container in it runs under the one `_wl-<name>` uid and shares one netns or one network, so the inspector has no identity to tell them apart with. A line says *this workload* asked for that. `host`, `path` and the connection id usually separate the members in practice; when the distinction has to be structural, give the sandboxed container its own workload, which gives it its own uid, policy, record and broker instance.
 
 [↑ top](#workloadctl-command-reference)
 

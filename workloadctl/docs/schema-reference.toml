@@ -1845,6 +1845,21 @@ ports = ["8080:80", "8443:443"]
 # the EFFECTIVE mode; the file may not mention .tls at all while a proxy is
 # terminating every connection.
 #
+# THE PER-REQUEST RECORD IS PER WORKLOAD, NOT PER CONTAINER. Everything the
+# inspector decides is written to /var/log/workloadctl/egress/<name>/requests.log
+# (root and _wl-<name> only) and read back with `workloadctl egress <name>`. In
+# `single` mode that file is unambiguous. In `pod` and `bridge` mode it is not:
+# every container in the workload runs under the one _wl-<name> uid and shares
+# one netns or one network, so the inspector has nothing to tell them apart
+# with -- the uid IS the workload. A line says "this workload asked for that",
+# and reading it as naming one container will point at the wrong one.
+#
+# In practice `host`, `path` and the connection id usually separate the members
+# anyway. When the distinction has to be structural -- one member sandboxed,
+# another trusted -- split the sandboxed container into its own workload. It
+# then has its own uid, its own policy, its own record, and its own broker
+# instance, which is the same reason the broker is one-per-workload.
+#
 # THERE IS NO `egress` KEY HERE, and its absence is deliberate -- do not look
 # for the [vm.network] one. A VM could default to egress = "filtered" because
 # none were deployed when that work started; container workloads were already

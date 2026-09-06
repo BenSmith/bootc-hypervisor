@@ -205,13 +205,13 @@ def main():
     # not prose. The flags live in cmd_egress so the closed vocabularies stay
     # beside the code that validates against them.
     egress_parser = subparsers.add_parser(
-        "egress", help="Read a filtered VM's per-request egress record")
+        "egress", help="Read a filtered workload's per-request egress record")
     egress_parser.set_defaults(func=cmd_egress)
     egress_arguments(egress_parser)
 
     # rules — the effective-rules report over the same workload's policy
     # document. Registered beside `egress` because the pair is the operator's
-    # two questions about one filter: `egress` is what the guest DID, `rules` is
+    # two questions about one filter: `egress` is what the workload DID, `rules` is
     # what it is allowed to do. Also a read verb, so the same --json/no --quiet
     # shape, and its arguments live in cmd_rules for the same reason egress's
     # live in cmd_egress.

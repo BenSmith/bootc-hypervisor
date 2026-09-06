@@ -6,6 +6,28 @@ Rung 5 T2. The record itself is T1's: one JSON object per line in
 directory, written by `libexec/workload-vm-inspect-listener`. This is the only
 reader of it.
 
+BOTH SUBSTRATES, one tree. The listener is the same binary for a filtered
+container as for a filtered VM, and the record path is keyed by workload name
+and nothing else, so everything below is substrate-blind by construction --
+which is why the only VM-shaped thing left in this module is the refusal above,
+where the two trigger spellings genuinely differ.
+
+THE RECORD IS PER WORKLOAD, NOT PER CONTAINER, and for a `pod`- or
+`bridge`-mode workload that is a real limit rather than a wording choice. Every
+container in such a workload runs under the one `_wl-<name>` uid and shares one
+netns (`pod`) or one network (`bridge`), so the listener has no identity to
+tell them apart with -- the uid IS the workload. A line here therefore says
+"this workload asked for that", and a reader who takes it as naming a
+particular container will attribute a request to the wrong one.
+
+What an operator has instead: `host`, `path` and the connection `id` usually
+separate the members in practice, since two containers in one pod rarely dial
+the same host for the same path. When the distinction has to be structural --
+one member is sandboxed and another is trusted -- the answer is to make the
+sandboxed one its own workload, which gives it its own uid, its own policy and
+its own record. That is the same reasoning the broker uses for its
+one-instance-per-workload rule.
+
 A TOP-LEVEL VERB, not a subcommand of `inspect`. There is no `workloadctl
 inspect` to hang one on — `lib/cmd_inspect.py` is the module behind `list` and
 `status`, named for podman-style introspection and predating egress filtering
@@ -132,7 +154,7 @@ def resolve_reason(value: str) -> str:
     an operator cannot use. A unique case-insensitive substring resolves to the
     reason it names, and anything matching zero or more than one is an error
     listing the candidates — which is the property that matters. A filter value
-    matching nothing renders identically to a guest that never hit that
+    matching nothing renders identically to a workload that never hit that
     refusal, so `--reason "not allowed"` would print an empty report and an
     operator would conclude the denial never happened.
 
@@ -276,7 +298,7 @@ def read_records(path: Path, *, since=None, until=None):
     `os.write` under a lock, so a partial line means the host lost power
     mid-write or something outside this project truncated the file. A reader
     that raised on it would make the whole retained history unreadable over one
-    bad line; a reader that skipped it silently would under-report the guest,
+    bad line; a reader that skipped it silently would under-report the workload,
     which is worse than either. So it is counted and the count is printed.
     """
     records = []
@@ -404,7 +426,7 @@ def group_by_connection(records):
 
     A RECORD WITH NO ID IS ITS OWN GROUP. Grouping is by connection, and a
     record that names no connection belongs to none -- keying them all on None
-    would collapse unrelated records from unrelated guests' connections into
+    would collapse unrelated records from unrelated workloads' connections into
     one block under `id=-`, which reads as a single connection that did all of
     it. Only a writer bug produces one, and a writer bug is when this is read.
     """
@@ -528,14 +550,14 @@ def _record_dir_state(directory: Path) -> str:
     False, so for the case this whole guard exists for -- a non-root operator,
     where `egress/` is 0700 and not searchable -- it reported the directory as
     absent, the readability branch never ran, and the operator was told the
-    record `does not exist`. That is a false statement about the guest's
+    record `does not exist`. That is a false statement about the workload's
     history offered to the person least able to check it, and the sentence
     written for them was unreachable in exactly their case.
 
     os.stat raises the two apart: EACCES anywhere along the path is
-    PermissionError, a genuinely absent directory is FileNotFoundError. A VM
-    that has simply never run still reads `missing` and still gets the quiet
-    answer.
+    PermissionError, a genuinely absent directory is FileNotFoundError. A
+    workload that has simply never run still reads `missing` and still gets
+    the quiet answer.
     """
     try:
         os.stat(directory)
@@ -624,7 +646,7 @@ def cmd_egress(args, manager):
         # as it does to the printed views, so without these two keys a machine
         # reader asking for a busy workload's history receives fifty records
         # and nothing at all saying there were four thousand — and concludes
-        # the guest made fifty requests. The grouped view says so in a
+        # the workload made fifty requests. The grouped view says so in a
         # sentence; this is the same disclosure in the shape a program reads.
         # Stated rather than inferable: `len(records) == limit` is a coincidence
         # a reader should not have to gamble on.
@@ -640,7 +662,7 @@ def cmd_egress(args, manager):
 
     # `read` IS NOT `exists`. It is the generations this call actually opened,
     # and _skip_generation prunes on `--since`/`--until` before any of them are
-    # — so keying the absence sentence on it told an operator whose guest went
+    # — so keying the absence sentence on it told an operator whose workload went
     # quiet three days ago that the record `does not exist`, over a populated
     # file they could have read with `cat`. The existence question is answered
     # by the generation list itself, evaluated only once `read` is already

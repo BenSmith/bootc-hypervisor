@@ -137,5 +137,38 @@ class AnchorTest(unittest.TestCase):
                          f"command-table links with no matching heading: {broken}")
 
 
+class TestSubstrateClaimsInHelp(unittest.TestCase):
+    """A verb that serves both substrates must not advertise one of them.
+
+    THIS IS THE G7 CLASS, and it is the one kind of doc defect that MISREPORTS
+    rather than merely reading oddly. `egress` reads the per-request record for
+    a filtered container exactly as it does for a VM -- same listener binary,
+    same record path, which is keyed by workload name and nothing else -- but
+    its one-line help said "Read a filtered VM's per-request egress record".
+    An operator running `workloadctl --help` on a container host was told the
+    verb was not for them, about the only command that answers what their
+    sandboxed workload actually sent.
+
+    Pinned on the HELP LINE, not on prose: it is the sentence argparse puts in
+    front of every operator, it is derived from the source rather than
+    restated, and it is what a later substrate-widening would forget. `rules`
+    is deliberately not checked -- it IS VM-only, by decision (G5), and its
+    help is correct in saying so.
+    """
+
+    def test_the_egress_help_line_does_not_claim_vm_only(self):
+        out = subprocess.run(
+            ["python3", str(REPO / "bin" / "workloadctl"), "--help"],
+            capture_output=True, text=True, env=script_env(),
+            timeout=60).stdout
+        line = next((l for l in out.splitlines()
+                     if l.strip().startswith("egress")), None)
+        self.assertIsNotNone(line, "no `egress` line in the top-level help")
+        self.assertNotIn(
+            "VM", line,
+            "`egress` reads a container's record too -- its help line must not "
+            f"scope it to VMs: {line.strip()!r}")
+
+
 if __name__ == "__main__":
     unittest.main()
