@@ -28,7 +28,16 @@ WORKLOAD_USER_PREFIX = "_wl-"
 PROC_NET_TCP = ("/proc/net/tcp", "/proc/net/tcp6")
 
 # Recovers what a connection was aimed at before the host translated it.
+# Two of them, one per family, and they are NOT interchangeable: the v4 option
+# lives under SOL_IP and returns a sockaddr_in, the v6 one under SOL_IPV6 and
+# returns a sockaddr_in6. Asking for the v4 one on a v6 socket does not fall
+# back, it fails -- which is how the v6 half of this lookup was silently inert.
 SO_ORIGINAL_DST = 80
+IPV6_ORIGINAL_DST = 80
+# Asked for as socket.IPPROTO_IPV6, never socket.SOL_IPV6: Python defines no
+# such name, so writing it raises AttributeError -- which, swallowed by the
+# tolerant except around the lookup, would leave the v6 branch inert in exactly
+# the way it was written to fix. Caught by a test, not by reading it.
 
 
 def _norm(addr):
@@ -66,6 +75,27 @@ def local_endpoints(sock):
         raw = sock.getsockopt(socket.SOL_IP, SO_ORIGINAL_DST, 16)
         port, packed = struct.unpack("!2xH4s8x", raw)
         endpoints.append((socket.inet_ntoa(packed), port))
+    except (OSError, struct.error):
+        pass  # no conntrack entry, or this is a v6 socket: try v6 below
+    # BOTH FAMILIES, and the v6 half is not symmetry for its own sake. The
+    # redirect that puts traffic here has a v6 rule of its own (`dnat ip6 to
+    # ... map @wl_inspect6`), so a v6 dial arrives translated exactly as a v4
+    # one does -- but SO_ORIGINAL_DST under SOL_IP raises on that socket, which
+    # left this list holding only getsockname(). The peer's row in
+    # /proc/net/tcp6 records the address it DIALLED, so nothing matched, the
+    # lookup returned None, and the caller was admitted and counted as
+    # unresolved. The nft guard still covered it, so the only symptom was a
+    # counter climbing: a hardening layer degrading to inert with nothing
+    # saying so, which is the shape this whole module exists to refuse.
+    #
+    # sockaddr_in6 is 28 bytes -- family, port, flowinfo, 16-byte address,
+    # scope id -- and the scope id is dropped deliberately: it qualifies a
+    # link-local address for a sender, and both sides of the comparison here
+    # come from /proc, which records none.
+    try:
+        raw = sock.getsockopt(socket.IPPROTO_IPV6, IPV6_ORIGINAL_DST, 28)
+        port, packed = struct.unpack("!2xH4x16s4x", raw)
+        endpoints.append((socket.inet_ntop(socket.AF_INET6, packed), port))
     except (OSError, struct.error):
         pass  # no conntrack entry: nothing translated this
     return endpoints

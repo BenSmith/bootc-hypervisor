@@ -30,13 +30,11 @@ import dataclasses
 import difflib
 import http.client
 import http.server
-import ipaddress
 import os
 import pwd
 import socket
 import socketserver
 import ssl
-import struct
 import sys
 import threading
 import time
@@ -130,8 +128,15 @@ def log(event, **fields):
 # than SO_PEERCRED, and for keying on the uid rather than the address, lives
 # there.
 
+# Re-exported, not merely imported: WORKLOAD_USER_PREFIX is the only name this
+# program's own code reads. The rest are here because tests/test_broker_identity.py
+# reaches them through this module (broker._proc_addr, broker.peer_uid_from,
+# broker.SO_ORIGINAL_DST) -- the identity logic was written and paid for here, and
+# moving the tests as well as the code would have made the extraction a rewrite.
+# ipaddress and struct are no longer imported at all: every use of them left with
+# _norm/_proc_addr/local_endpoints.
 from peer_identity import (  # noqa: E402
-    PROC_NET_TCP, SO_ORIGINAL_DST, WORKLOAD_USER_PREFIX, _norm, _proc_addr,
+    SO_ORIGINAL_DST, WORKLOAD_USER_PREFIX, _norm, _proc_addr,
     local_endpoints, peer_uid, peer_uid_from, workload_name,
 )
 

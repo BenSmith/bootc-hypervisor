@@ -8,6 +8,7 @@ on a refusal.
 
 import ipaddress
 import socket
+import struct
 import threading
 import unittest
 from unittest import mock
@@ -133,6 +134,94 @@ class TestPeerUidThroughRedirect(unittest.TestCase):
         direct = [proc_row("0100007F:AFC8", "0100007F:1F91", uid=10001, inode=2)]
         self.assertEqual(
             broker.peer_uid_from(direct, both, ("127.0.0.1", 45000)), 10001)
+
+
+class TestLocalEndpointsV6(unittest.TestCase):
+    """The v6 half of the original-destination recovery.
+
+    The redirect has a v6 rule of its own, so a v6 dial arrives translated
+    exactly as a v4 one does. SO_ORIGINAL_DST under SOL_IP does not serve it --
+    it raises on a v6 socket -- so without a SOL_IPV6 lookup the endpoint list
+    holds only getsockname(), the peer's /proc/net/tcp6 row records the address
+    it DIALLED, nothing matches, and the caller is admitted as unresolved. The
+    failure is a counter climbing and nothing else, which is why it needs a
+    test that fails when the branch is deleted rather than one that watches a
+    real connection succeed.
+    """
+
+    def _sockaddr_in6(self, addr, port):
+        return struct.pack("!HH4x16s4x", socket.AF_INET6, port,
+                           socket.inet_pton(socket.AF_INET6, addr))
+
+    def test_the_original_v6_destination_is_offered(self):
+        sock = mock.Mock()
+        sock.getsockname.return_value = ("2001:2::a", 8443, 0, 0)
+
+        def getsockopt(level, opt, size):
+            if level == socket.IPPROTO_IPV6:
+                return self._sockaddr_in6("2606:4700::1111", 443)
+            raise OSError("not an IPv4 socket")
+
+        sock.getsockopt.side_effect = getsockopt
+        self.assertEqual(
+            broker.local_endpoints(sock),
+            [("2001:2::a", 8443), ("2606:4700::1111", 443)])
+
+    def test_a_v4_socket_is_unaffected(self):
+        # Both options are asked for now; the v6 one must not disturb the
+        # answer a v4 connection already produced.
+        sock = mock.Mock()
+        sock.getsockname.return_value = ("198.18.0.1", 8443)
+
+        def getsockopt(level, opt, size):
+            if level == socket.SOL_IP:
+                return struct.pack("!HH4s8x", socket.AF_INET, 443,
+                                   socket.inet_aton("93.184.216.34"))
+            raise OSError("not an IPv6 socket")
+
+        sock.getsockopt.side_effect = getsockopt
+        self.assertEqual(
+            broker.local_endpoints(sock),
+            [("198.18.0.1", 8443), ("93.184.216.34", 443)])
+
+    def test_neither_option_answering_is_not_an_error(self):
+        # An untranslated connection -- local testing, or a direct dial -- has
+        # no conntrack entry in either family. It must still offer its own
+        # bound address rather than raise.
+        sock = mock.Mock()
+        sock.getsockname.return_value = ("127.0.0.1", 8081)
+        sock.getsockopt.side_effect = OSError("no conntrack entry")
+        self.assertEqual(broker.local_endpoints(sock), [("127.0.0.1", 8081)])
+
+
+class TestPeerUidLiveV6(unittest.TestCase):
+    """Against the real kernel over IPv6, which reads /proc/net/tcp6."""
+
+    def test_recovers_the_uid_of_a_real_v6_connection(self):
+        import os
+
+        if not socket.has_ipv6:
+            self.skipTest("no IPv6 support in this interpreter")
+        srv = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+        self.addCleanup(srv.close)
+        try:
+            srv.bind(("::1", 0))
+        except OSError as e:
+            self.skipTest(f"no loopback IPv6 on this host: {e}")
+        srv.listen(1)
+
+        held = []
+        threading.Thread(
+            target=lambda: held.append(
+                socket.create_connection(srv.getsockname()[:2])),
+            daemon=True).start()
+        conn, peer = srv.accept()
+        self.addCleanup(conn.close)
+
+        found = broker.peer_uid(broker.local_endpoints(conn), peer[:2])
+        self.assertEqual(found, os.getuid())
+        for sock in held:
+            sock.close()
 
 
 class TestPeerUidLive(unittest.TestCase):
