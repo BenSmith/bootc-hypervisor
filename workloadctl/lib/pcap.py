@@ -94,22 +94,18 @@ QEMU_MAXLEN_UNLIMITED = 65536
 LOSS_NOTE = ("nflog can drop under load and does not report it; the rule "
              "counters are summed and compared against the file on stop")
 
-# G10. What the host vantage means for an INSPECTED workload, on either
-# substrate -- ONE string, deliberately, because the mechanism is one
-# mechanism. The capture chain renders at `filter output priority filter - 10`
-# and the redirect is a nat `output` hook at dstnat (-100), so for locally
-# originated traffic the DNAT has always already happened by the time the
-# capture sees the packet. That is true of a guest's flow re-originated by
-# passt and of a container's re-originated by pasta alike: both leave as host
-# sockets owned by the workload uid, and both are redirected before the log
-# rule runs.
+# What the host vantage means for an INSPECTED workload, on either substrate.
+# The capture chain renders at `filter output priority filter - 10` and the
+# redirect is a nat `output` hook at dstnat (-100), so for locally originated
+# traffic the DNAT has already happened by the time the capture sees the
+# packet -- true of a guest's flow re-originated by passt and a container's by
+# pasta alike, since both leave as host sockets owned by the workload uid.
 #
-# It is worded once because two copies would drift, and this is the ONE PLACE
-# an operator is told what the vantage means. Nothing else fails when it is
-# wrong -- the capture still runs, the file still fills, every packet in it is
-# real -- so a wrong sentence here is not caught by anything downstream. It
-# stood wrong for containers from the moment they gained an inspector, which
-# is the whole of bug G10.
+# ONE string for both substrates: the mechanism is one mechanism, and two
+# copies drift. Keep it accurate rather than convenient -- this is the only
+# place an operator is told what the vantage means, and nothing downstream
+# fails when it is wrong. The capture still runs and every packet in it is
+# real; it is simply misread.
 INSPECTED_HOST_VANTAGE = (
     "this workload's HTTP and HTTPS as REDIRECTED, not as it leaves this "
     "machine: the capture hook runs after dstnat, so every 80/443 flow "
@@ -201,12 +197,11 @@ def pcap_vantages(config) -> list[Vantage]:
                     "unavailable: [network] mode = \"none\" — the namespace "
                     "exists but holds only a loopback"),
         ]
-    # G10, routed. `mode = "host"` and `mode = "none"` are handled above and
-    # neither can be inspected -- host mode is refused the combination outright
-    # (container_uses_inspect returns False for it), and a workload that
-    # originates no host sockets has no host vantage to describe -- so this,
-    # the pasta default, is the only container branch where the distinction
-    # exists.
+    # `mode = "host"` and `mode = "none"` are handled above and neither can be
+    # inspected -- host mode is refused the combination outright, and a
+    # workload originating no host sockets has no host vantage to describe --
+    # so the pasta default is the only container branch where inspection
+    # changes what the vantage shows.
     inspected = container_uses_inspect(config.config)
     return [
         Vantage(VANTAGE_HOST, True,

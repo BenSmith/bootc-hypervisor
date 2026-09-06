@@ -191,25 +191,15 @@ def _rendered_policy(name: str) -> str:
         # silently omitting the workload would make "No drift detected" a false
         # all-clear for the one workload most likely to have drifted.
         raise RuntimeError(f"could not read {path}: {e}") from None
-    # G8, routed. Each substrate renders through ITS OWN renderer, and the
-    # split is the whole of the fix: container_inspect_policy_text() computes
-    # `tls` from the three-rung ladder (no [[network.policy]] means "splice"),
-    # where vm_inspect_policy_text() defaults it to VM_TLS_DEFAULT. Rendering a
-    # container through the VM renderer would report an effective TLS mode the
-    # workload does not have -- and because drift is a byte comparison, it
-    # would report that as drift on every inspected container, forever.
+    # Each substrate renders through its own renderer. A container's `tls` is
+    # computed from the three-rung ladder (no [[network.policy]] means
+    # "splice"); the VM renderer defaults it to VM_TLS_DEFAULT. Since drift is
+    # a byte comparison, rendering a container through the VM one would report
+    # every inspected container as drifted, permanently.
     #
-    # This returned None until the renderer was wired, and None was NOT "".
-    # The two are different answers and collapsing them was a live misreport:
-    # "" means "nothing should be rendered here", which is what makes a
-    # leftover document from a workload that STOPPED being inspected show up
-    # as drift -- and an inspected container writes exactly the same document
-    # to exactly the same path, so it was compared against "" and reported as
-    # a whole file removed. Every inspected container read as permanently
-    # drifted, with a remedy (restart) that could not fix it, and `doctor`
-    # carried the same diff. Measured on hardware 2026-09-05. The None branch
-    # is gone because no substrate lacks a renderer now; the caller's skip
-    # stays, since a third substrate would reach it before it reached a test.
+    # Not "" for a container, either: "" is the orphan answer above, and an
+    # inspected container writes the same document to the same path as a VM,
+    # so it would read as a whole file removed.
     if container_uses_inspect(config):
         return container_inspect_policy_text(config.get("network", {}) or {})
     if not vm_uses_inspect(config):

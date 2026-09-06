@@ -159,14 +159,11 @@ def load_document(name: str, config) -> tuple:
     try:
         text = path.read_text()
     except FileNotFoundError:
-        # G5: the "config" origin renders from the TOML, so it has to render
-        # through the SUBSTRATE'S OWN renderer. container_inspect_policy()
-        # computes `tls` from the three-rung ladder -- no [[network.policy]]
-        # means "splice" -- where vm_inspect_policy() defaults it to
-        # VM_TLS_DEFAULT ("inspect"). Rendering a container through the VM one
-        # would report an effective TLS mode the workload does not have, on the
-        # one origin whose whole purpose is to describe a workload that has not
-        # started and so has nothing on disk to contradict it.
+        # The "config" origin renders from the TOML, so it renders through the
+        # substrate's own renderer: a container's `tls` comes from the
+        # three-rung ladder (no [[network.policy]] means "splice"), where the
+        # VM default is "inspect". This origin describes a workload that has
+        # not started, so nothing on disk contradicts a wrong answer here.
         if container_uses_inspect(config.config):
             net = config.config.get("network") or {}
             return container_inspect_policy(net), "config", None
@@ -442,14 +439,9 @@ def cmd_rules(args, manager):
     workload = str(args.workload)
     config = load_config_or_exit(workload, json_mode=json_mode)
 
-    # G5, routed: both substrates reach the reader, each rendering through its
-    # own renderer (see load_document). The refusal that stood here told an
-    # inspected container's operator that `rules` could not render their
-    # document yet and named the path so they could cat it; it is gone because
-    # the renderer exists. What must NOT come back is routing the gate alone:
-    # the document a container gets is not the document the VM renderer would
-    # produce for it, and reporting a wrong effective `tls` is worse than the
-    # refusal was.
+    # Both substrates reach the reader, each rendering through its own
+    # renderer (see load_document). Routing this gate without that split
+    # reports an effective `tls` the workload does not have.
     if not (vm_uses_inspect(config.config)
             or container_uses_inspect(config.config)):
         cli_log.error(
