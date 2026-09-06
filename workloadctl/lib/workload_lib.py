@@ -1496,6 +1496,34 @@ def container_allow_entries(net: dict) -> list[ContainerAllowEntry]:
     return entries
 
 
+def container_runs_on_host_network(config: dict) -> bool:
+    """Whether this workload's containers really share the host netns.
+
+    `[network].mode` is workload-level but it is NOT honoured in every
+    topology. `single` passes it to `podman run --network=` and `pod` passes it
+    to `podman pod create --network=`, so `mode = "host"` means host networking
+    in both. `bridge` mode ignores it outright -- every member joins
+    `workload-<name>-net` instead (see _network_args in the generator, which
+    warns that workload-level [network].ports is ignored there for the same
+    reason).
+
+    So a bridge-mode workload carrying a leftover `mode = "host"` is not on the
+    host network, its traffic IS re-originated by a pasta-equivalent host
+    process owned by the workload uid, and uid attribution holds exactly as
+    container_uses_inspect() describes for pasta. Refusing it would be refusing
+    a workload for a key the generator never reads.
+    """
+    net = config.get("network", {})
+    if not isinstance(net, dict) or net.get("mode") != "host":
+        return False
+    try:
+        return infer_workload_mode(config) != "bridge"
+    except ValueError:
+        # An invalid workload.mode is somebody else's error to report; assume
+        # the key is honoured rather than quietly waving the workload through.
+        return True
+
+
 def container_uses_inspect(config: dict) -> bool:
     """Whether this workload's egress is redirected into an inspector.
 
@@ -1509,7 +1537,7 @@ def container_uses_inspect(config: dict) -> bool:
     net = config.get("network", {})
     if not isinstance(net, dict):
         return False
-    if net.get("mode") == "host":
+    if container_runs_on_host_network(config):
         # Host mode is never inspected, and validate_container_network()
         # rejects the combination outright -- this is the belt to that
         # braces, for a config already on disk when the rule landed.
@@ -1530,7 +1558,9 @@ def container_uses_inspect(config: dict) -> bool:
         # run as the keep-id uid -- an image detail, not a policy decision.
         # Pasta and bridge mode are unaffected: their traffic is re-originated
         # by a host process owned by the workload uid, and all three arms
-        # measured `exact-uid` there.
+        # measured `exact-uid` there. Bridge mode is unaffected even when the
+        # key IS written, because bridge mode never reads it -- which is what
+        # container_runs_on_host_network() is for.
         return False
     # Any one of the three opt-in triggers, not policy alone: `hosts` and
     # `allow` are each triggers on their own (a hosts-only workload gets a
@@ -1643,12 +1673,20 @@ def container_effective_tls_mode(net: dict) -> str:
     return "inspect" if container_policy_entries(net) else "splice"
 
 
-def validate_container_network(net: dict) -> list[str]:
+def validate_container_network(net: dict, config: dict | None = None) -> list[str]:
     """Validate [network] on a container workload. Returns a list of error
     strings. Implements every numbered rule in the container egress-parity
     build spec's validation section except V13 (reserved for a deferred
     [[network.http2]] array), plus the mode="host" delta (§6 delta 2),
-    settled by the P0-1 hardware spike -- see the module note above."""
+    settled by the P0-1 hardware spike -- see the module note above.
+
+    `config` is the whole parsed TOML, and it is optional only so that the
+    hundreds of tests exercising one [network] table need not build one. It is
+    what decides whether `mode = "host"` is honoured at all: in bridge mode it
+    is not, and refusing there would refuse a workload for a key the generator
+    never reads. Passed by the one production caller
+    (validation.validate_workload_config); absent means "assume it is
+    honoured", which is the conservative reading."""
     # Lazy import: vm.py imports this module, so a top-level import here
     # would be circular (same pattern as workload_run_files() above).
     from vm import (
@@ -1665,7 +1703,9 @@ def validate_container_network(net: dict) -> list[str]:
     # egress policy, and under host mode none of them can be honoured. Naming
     # the keys the workload actually set keeps the message actionable when a
     # bundle sets several.
-    if net.get("mode") == "host":
+    on_host_network = (container_runs_on_host_network(config)
+                       if config is not None else net.get("mode") == "host")
+    if on_host_network:
         named = [key for key in ("hosts", "policy", "allow", "internal",
                                  "splice", "tls", "ca_delivery")
                  if net.get(key)]
@@ -2152,9 +2192,18 @@ def container_allow_resolve(entry: ContainerAllowEntry) -> list:
     separate `address`/`host` fields. An address entry is returned as-is; a
     host entry is resolved here, once, at arm time. Not tolerant: an
     unresolvable name must arm nothing, and arming nothing silently is worse
-    than failing loudly -- the workload would otherwise hang against the
-    default-deny... except containers have none (R3), so here it would simply
-    reach nothing on that destination with no message saying why.
+    than failing loudly -- the workload then meets the default deny on that
+    destination and hangs, with the drop landing on a host-wide counter that
+    names neither it nor the entry.
+
+    R3's "no default-deny for containers" is about the UNTRIGGERED case, and
+    reading it as "a container is never default-denied" is a mistake this
+    docstring used to make. A workload with any trigger is placed in
+    `wl_filtered` by container_filter_elements() below, and
+    nftables/workload-filter.nft's last output rule drops everything from a
+    `wl_filtered` uid that no earlier rule accepted. What R3 rules out is an
+    `egress` key that could default-deny a workload WITHOUT giving it an
+    inspector; it does not exempt a triggered one from the drop.
     """
     import ipaddress
     import socket

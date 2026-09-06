@@ -213,7 +213,10 @@ def validate_workload_config(config: dict) -> list[str]:
     # above (vm.py:4934) -- the container schema's own hard-error checks
     # (V1-V18 in the container egress-parity build spec), not yet run
     # anywhere until this call.
-    errors.extend(validate_container_network(config.get("network", {})))
+    # `config` as well as the table: whether `mode = "host"` is honoured is a
+    # topology question (bridge mode ignores the key), and the table alone
+    # cannot answer it. See container_runs_on_host_network().
+    errors.extend(validate_container_network(config.get("network", {}), config))
 
     # Keep the shape (is_multi = "containers" in config) and the topology
     # (mode) in lockstep so `is_multi <=> mode != "single"` holds. The generator

@@ -33,6 +33,7 @@ from workload_lib import (
     ContainerAllowEntry, container_allow_entries,
     ContainerHostReasonEntry, container_internal_entries, container_splice_entries,
     container_effective_tls_mode, validate_container_network,
+    container_runs_on_host_network, container_uses_inspect,
     container_allow_resolve, container_allow_resolved,
     container_filter_elements, container_filter_commands,
     container_internal_resolve, container_inspect_policy,
@@ -2358,6 +2359,49 @@ class TestValidateContainerNetwork(unittest.TestCase):
             if mode is not None:
                 net["mode"] = mode
             self.assertEqual(validate_container_network(net), [], mode)
+
+    def test_bridge_topology_never_reads_network_mode_so_host_is_inert(self):
+        """`mode = "host"` in a BRIDGE-mode workload is a key nobody reads.
+
+        The refusal exists because a host-netns container's processes span the
+        workload's whole subuid window rather than its single uid (P0-1). That
+        is a statement about `podman run --network=host` / `podman pod create
+        --network=host`, and bridge mode issues neither -- every member joins
+        `workload-<name>-net` instead, exactly as workload-level
+        [network].ports is ignored there. Refusing was refusing a workload for
+        a key the generator never reads, and it fails closed, so the workload
+        did not run at all.
+        """
+        config = {
+            "workload": {"name": "br", "mode": "bridge"},
+            "network": {"mode": "host", "hosts": ["*.pypi.org"]},
+            "containers": [{"name": "web", "container": {"image": "i"}}],
+        }
+        self.assertFalse(container_runs_on_host_network(config))
+        self.assertEqual(validate_container_network(config["network"], config), [])
+        self.assertTrue(container_uses_inspect(config))
+
+    def test_pod_and_single_topologies_do_read_it_and_are_still_refused(self):
+        """The other half: both pass the key straight to podman, so the
+        measurement that produced the refusal applies to them unchanged."""
+        for mode, extra in (("pod", {"containers": [
+                                {"name": "web", "container": {"image": "i"}}]}),
+                            ("single", {"container": {"image": "i"}})):
+            config = {"workload": {"name": "w", "mode": mode},
+                      "network": {"mode": "host", "hosts": ["*.pypi.org"]},
+                      **extra}
+            self.assertTrue(container_runs_on_host_network(config), mode)
+            errors = validate_container_network(config["network"], config)
+            self.assertTrue(any('mode = "host"' in e for e in errors),
+                            (mode, errors))
+            self.assertFalse(container_uses_inspect(config), mode)
+
+    def test_without_a_config_the_key_is_assumed_honoured(self):
+        """The table alone cannot answer a topology question, and the safe
+        reading of "I do not know the topology" is the refusing one."""
+        self.assertEqual(
+            len(validate_container_network(
+                {"mode": "host", "hosts": ["*.pypi.org"]})), 1)
 
     def test_v3_overlapping_entries_must_both_state_methods_and_paths(self):
         net = {
