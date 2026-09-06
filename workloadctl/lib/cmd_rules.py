@@ -50,7 +50,8 @@ from pathlib import Path
 
 import cli_log
 from cmd_validate import load_config_or_exit
-from workload_lib import container_uses_inspect
+from workload_lib import (container_inspect_policy,
+                          container_uses_inspect)
 from vm import (
     VM_TLS_DEFAULT,
     VM_TLS_MODES,
@@ -143,10 +144,12 @@ def load_document(name: str, config) -> tuple:
         `workload-vm-inspect up` at the last listener start. This is what the
         listener was GIVEN. It is the truthful answer for a running workload,
         and it is the one that can differ from the TOML.
-      * "config" -- rendered here from `[vm.network]` via the one renderer,
-        for a workload that has not started this boot. A stopped VM has no
-        document, and that is its ordinary state, not a fault -- `drift` makes
-        the same distinction and for the same reason.
+      * "config" -- rendered here from the TOML for a workload that has not
+        started this boot, through that substrate's own renderer:
+        `[vm.network]` via vm_inspect_policy, `[network]` via
+        container_inspect_policy. A stopped workload has no document on
+        either substrate, and that is its ordinary state, not a fault --
+        `drift` makes the same distinction and for the same reason.
 
     Neither is "what the listener is enforcing right now". A listener started
     before an edit holds the previous document in memory with both files
@@ -156,6 +159,17 @@ def load_document(name: str, config) -> tuple:
     try:
         text = path.read_text()
     except FileNotFoundError:
+        # G5: the "config" origin renders from the TOML, so it has to render
+        # through the SUBSTRATE'S OWN renderer. container_inspect_policy()
+        # computes `tls` from the three-rung ladder -- no [[network.policy]]
+        # means "splice" -- where vm_inspect_policy() defaults it to
+        # VM_TLS_DEFAULT ("inspect"). Rendering a container through the VM one
+        # would report an effective TLS mode the workload does not have, on the
+        # one origin whose whole purpose is to describe a workload that has not
+        # started and so has nothing on disk to contradict it.
+        if container_uses_inspect(config.config):
+            net = config.config.get("network") or {}
+            return container_inspect_policy(net), "config", None
         net = (config.config.get("vm") or {}).get("network") or {}
         return vm_inspect_policy(net), "config", None
     except PermissionError:
@@ -428,35 +442,16 @@ def cmd_rules(args, manager):
     workload = str(args.workload)
     config = load_config_or_exit(workload, json_mode=json_mode)
 
-    # G5 in the container egress-parity build spec: VM-only for now, not just
-    # the predicate. load_document()/vm_inspect_policy() render off
-    # [vm.network] and default `tls` to VM_TLS_DEFAULT, which is wrong for a
-    # container (no policy => "splice", not "inspect" -- §3). Routing the
-    # gate alone would report a wrong effective tls for an inspected
-    # container. Revisit once the container document renderer exists
-    # (Phase 3).
-    #
-    # AN INSPECTED CONTAINER IS ITS OWN CASE and must not fall into the
-    # not-inspected message, which would be false in both halves: it HAS a
-    # [network] trigger, and workload-container-inspect's write_policy() has
-    # already written a real document to the path named below. Telling that
-    # operator "no inspected egress" and then offering the trigger they
-    # already set as the remedy is a wrong answer, not a missing feature --
-    # the same shape cmd_drift._rendered_policy refuses by returning None
-    # rather than "". Say what is actually true: the document exists, this
-    # renderer cannot read it yet, and here is where it is.
-    if not vm_uses_inspect(config.config):
-        if container_uses_inspect(config.config):
-            cli_log.error(
-                f"{workload} IS inspected, but `rules` cannot render a "
-                f"container's policy document yet -- the renderer reads "
-                f"[vm.network] and defaults tls to "
-                f"\"{VM_TLS_DEFAULT}\", which is the wrong default for a "
-                f"container (no [[network.policy]] means \"splice\"), so "
-                f"routing it here would report an effective TLS mode this "
-                f"workload does not have. The live document is on disk: "
-                f"{vm_inspect_policy_path(workload)}")
-            return 1
+    # G5, routed: both substrates reach the reader, each rendering through its
+    # own renderer (see load_document). The refusal that stood here told an
+    # inspected container's operator that `rules` could not render their
+    # document yet and named the path so they could cat it; it is gone because
+    # the renderer exists. What must NOT come back is routing the gate alone:
+    # the document a container gets is not the document the VM renderer would
+    # produce for it, and reporting a wrong effective `tls` is worse than the
+    # refusal was.
+    if not (vm_uses_inspect(config.config)
+            or container_uses_inspect(config.config)):
         cli_log.error(
             f"{workload} has no inspected egress, so there is no policy "
             "document. Egress filtering is a [network] trigger on a "

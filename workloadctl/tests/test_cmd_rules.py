@@ -345,16 +345,13 @@ class CommandTest(unittest.TestCase):
         code, _ = self._run(self._args(), uses_inspect=False)
         self.assertEqual(code, 1)
 
-    def test_an_inspected_container_is_refused_with_its_OWN_message(self):
-        """Not the unfiltered one, which would be false in both halves.
+    def test_an_inspected_container_is_rendered_not_refused(self):
+        """G5 routed. It used to be told `rules` had no renderer for it.
 
-        `rules` renders off [vm.network] and defaults tls to the VM default,
-        so it stays VM-gated -- but an inspected container HAS a [network]
-        trigger and workload-container-inspect has already written a real
-        document to disk. The not-inspected text tells that operator they have
-        no inspected egress and then offers, as the remedy, the trigger they
-        already set. Saying "not implemented, and here is the file" is the
-        only accurate answer this verb can give today.
+        The refusal was accurate while it stood -- the container HAS a
+        [network] trigger and a real document on disk, so the plain
+        not-inspected text would have been false in both halves -- but the
+        renderer exists now and the honest answer is the document.
         """
         buf = io.StringIO()
         cfg = mock.Mock()
@@ -363,13 +360,32 @@ class CommandTest(unittest.TestCase):
         with mock.patch.object(cmd_rules, "load_config_or_exit",
                                return_value=cfg), \
              mock.patch.object(cmd_rules, "vm_inspect_policy_path",
-                               return_value="/run/wl/capp/inspect.json"), \
-             redirect_stderr(buf):
+                               return_value="/nonexistent/inspect.json"), \
+             redirect_stdout(buf):
             code = cmd_rules.cmd_rules(self._args(), mock.Mock())
         text = buf.getvalue()
-        self.assertEqual(code, 1)
-        self.assertIn("/run/wl/capp/inspect.json", text)
+        self.assertEqual(code, 0)
+        self.assertIn("a.example.com", text)
         self.assertNotIn("has no inspected egress", text)
+
+    def test_a_container_renders_through_the_CONTAINER_renderer(self):
+        """The reason the gate could not be routed on its own.
+
+        A hosts-only container is "splice" by the three-rung ladder; the VM
+        renderer would default the same TOML to "inspect". Both produce a
+        document and both look right, so nothing but this assertion tells
+        them apart -- and the wrong one claims every admitted connection is
+        terminated and read on a workload where none of them is.
+        """
+        cfg = mock.Mock()
+        cfg.config = {"container": {"image": "localhost/app:latest"},
+                      "network": {"hosts": ["a.example.com"]}}
+        with mock.patch.object(cmd_rules, "vm_inspect_policy_path",
+                               return_value="/nonexistent/inspect.json"):
+            doc, origin, path = cmd_rules.load_document("wl", cfg)
+        self.assertEqual(origin, "config")
+        self.assertEqual(doc["tls"], "splice")
+        self.assertEqual(doc["hosts"], ["a.example.com"])
 
     def test_the_query_form_runs_when_a_host_is_given(self):
         code, out = self._run(self._args(host="a.example.com"))

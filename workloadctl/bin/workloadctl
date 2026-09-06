@@ -216,7 +216,7 @@ def main():
     # shape, and its arguments live in cmd_rules for the same reason egress's
     # live in cmd_egress.
     rules_parser = subparsers.add_parser(
-        "rules", help="Report a filtered VM's effective egress rules")
+        "rules", help="Report a filtered workload's effective egress rules")
     rules_parser.set_defaults(func=cmd_rules)
     rules_arguments(rules_parser)
 

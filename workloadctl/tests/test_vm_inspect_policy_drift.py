@@ -31,6 +31,7 @@ from unittest import mock
 
 import cmd_drift  # noqa: E402
 from vm import vm_inspect_policy, vm_inspect_policy_text  # noqa: E402
+from workload_lib import container_inspect_policy_text  # noqa: E402
 
 from tests import load_script
 
@@ -162,28 +163,52 @@ class TestWhatCountsAsDrift(_PolicyDriftCase):
         self._config("demo")
         self.assertEqual(cmd_drift.collect_policy_drift(), [])
 
-    def test_an_inspected_container_is_skipped_not_reported_as_an_orphan(self):
-        """FOUND ON HARDWARE 2026-09-05.
+    def test_an_inspected_container_is_COMPARED_not_skipped(self):
+        """G8 routed: the container renderer is what it is compared against.
 
-        A container writes the SAME policy document to the SAME path as a VM,
-        but G8 left the renderer VM-only pending the container document
-        renderer -- so `_rendered_policy` returned "", the orphan answer, and
-        every inspected container was reported as a whole file REMOVED. It read
-        as permanent drift on a workload that had nothing wrong with it, with a
-        remedy (restart) that could not clear it, and `doctor` carried the same
-        diff.
+        History, because both wrong answers shipped. First `_rendered_policy`
+        returned "" -- the orphan answer -- and every inspected container read
+        as a whole file REMOVED: permanent drift on a healthy workload, with a
+        remedy (restart) that could not clear it, and `doctor` carrying the
+        same diff. FOUND ON HARDWARE 2026-09-05. Then it returned None, which
+        is "no renderer for this substrate", and the caller skipped -- honest,
+        but it meant no container's document was ever checked.
 
-        The two answers are different and collapsing them is what broke: "" is
-        "nothing should be rendered here", which is exactly what makes a
-        document left by a workload that STOPPED being inspected show up. None
-        is "this substrate has no renderer yet", and there is no comparison to
-        make. The row below pins that an UNinspected container still reports as
-        an orphan, so this is a skip and not a blanket exemption for
-        containers.
+        Now it renders. A document matching the TOML is not drift.
         """
         self._config("cwl", _CONTAINER_INSPECTED)
-        self._document("cwl", '{"hosts": ["example.com"]}\n')
+        self._document("cwl", container_inspect_policy_text(
+            {"hosts": ["api.example.com"]}))
         self.assertEqual(cmd_drift.collect_policy_drift(), [])
+
+    def test_an_inspected_containers_STALE_document_is_reported(self):
+        """What the skip was costing. This is the case the whole comparison
+        exists for, and it was unreachable for containers for as long as the
+        renderer was VM-only -- an edited allowlist that never reached the
+        listener looked exactly like a healthy workload."""
+        self._config("cwl", _CONTAINER_INSPECTED)
+        self._document("cwl", container_inspect_policy_text(
+            {"hosts": ["stale.example.com"]}))
+        diffs = cmd_drift.collect_policy_drift()
+        self.assertEqual([f for f, _, _ in diffs], ["cwl/inspect.json"])
+        self.assertIn("stale.example.com", diffs[0][1])
+        self.assertIn("api.example.com", diffs[0][2])
+
+    def test_a_container_is_compared_against_the_CONTAINER_renderer(self):
+        """The reason routing the predicate alone was refused.
+
+        A hosts-only container is "splice" by the three-rung ladder and the VM
+        renderer would default the same TOML to "inspect". Comparing a
+        container's document against the VM render would report drift on every
+        inspected container on the fleet -- forever, and unclearable -- which
+        is how a drift signal stops being read.
+        """
+        self._config("cwl", _CONTAINER_INSPECTED)
+        self._document("cwl", container_inspect_policy_text(
+            {"hosts": ["api.example.com"]}))
+        self.assertEqual(cmd_drift.collect_policy_drift(), [])
+        self.assertIn('"tls": "splice"', container_inspect_policy_text(
+            {"hosts": ["api.example.com"]}))
 
     def test_an_uninspected_containers_leftover_document_is_still_an_orphan(self):
         """The other side of the skip above. A container that has no [network]
