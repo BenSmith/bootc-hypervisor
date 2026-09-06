@@ -9,10 +9,18 @@ identity claim, visible from the far side.
 """
 import http.server
 import json
+import os
 import ssl
 import sys
 
 PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 19999
+# The address to bind. Loopback by default, which is what broker_rig
+# wants: its broker dials the stub from the same host. A CONTAINER
+# cannot be served that way -- inside the container 127.0.0.1 is the
+# container's own loopback, so a stub on the host's is unreachable and
+# the packet never meets the host nftables the row is about. The
+# container rig therefore binds a routable address in its namespace.
+BIND = os.environ.get("STUB_BIND", "127.0.0.1")
 # TLS, because the broker refuses a plaintext upstream and is right to: that
 # leg is the one carrying the real credential. Serving it here means the rig
 # exercises the actual verified-TLS path instead of a bypass of it.
@@ -42,10 +50,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
-    srv = http.server.ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
+    srv = http.server.ThreadingHTTPServer((BIND, PORT), Handler)
     if CERT:
         ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         ctx.load_cert_chain(CERT, KEY)
         srv.socket = ctx.wrap_socket(srv.socket, server_side=True)
-    print(f"stub upstream on 127.0.0.1:{PORT} tls={bool(CERT)}", flush=True)
+    print(f"stub upstream on {BIND}:{PORT} tls={bool(CERT)}", flush=True)
     srv.serve_forever()
