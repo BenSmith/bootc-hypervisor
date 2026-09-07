@@ -30,7 +30,7 @@ from vm import (
     UID_MAX, UID_MIN, VM_MGMT_NETWORK, VM_SIDECAR_SLICE, VM_RESOLVE_ADDR_BASE,
     VM_RESOLVE_LISTENER_BIN, VM_RESOLVE_POLICY_FILE, VM_RESOLVE_PORT,
     VM_RESOLVE_TTL, vm_allow_resolved, vm_filter_elements, vm_inspect_address,
-    vm_management_address, vm_reserved_plane, vm_resolve_address,
+    vm_management_address, vm_reserved_range, vm_resolve_address,
     vm_resolve_policy, vm_resolve_policy_path, vm_uses_resolve,
 )
 
@@ -164,10 +164,10 @@ class TestAddress(unittest.TestCase):
                 vm_resolve_address(uid)
 
     def test_the_whole_range_stays_inside_the_management_reservation(self):
-        """Why there is no new ReservedPlane for the responder.
+        """Why there is no new ReservedRange for the responder.
 
         The management /9 was cut wide on purpose -- its own comment says the
-        planes hung on loopback after it would inherit the reservation. If this
+        ranges hung on loopback after it would inherit the reservation. If this
         ever stopped holding, `ports` could bind a guest port on another
         workload's nameserver and start order would decide which one answered,
         with nothing logged either way.
@@ -180,12 +180,12 @@ class TestAddress(unittest.TestCase):
         """The reservation, exercised through the check `ports` actually uses
         rather than asserted about the network object."""
         self.assertIsNotNone(
-            vm_reserved_plane(vm_resolve_address(UID), VM_RESOLVE_PORT))
+            vm_reserved_range(vm_resolve_address(UID), VM_RESOLVE_PORT))
 
     def test_it_does_not_collide_with_the_management_address(self):
         """Same arithmetic, different base. A shared base would put the
         responder on the management address at a different port, which is a
-        second service inside a plane documented as never configurable."""
+        second service inside a range documented as never configurable."""
         for uid in (UID_MIN, UID, UID_MAX):
             self.assertNotEqual(vm_resolve_address(uid),
                                 vm_management_address(uid))

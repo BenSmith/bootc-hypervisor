@@ -13,7 +13,7 @@ mechanism. The gates that survive it are elsewhere and are deliberately not
 re-created here: `[vm.network].broker` is now a hard error, asserted in
 tests/test_vm_egress.py with the other retired-key refusals; the reservation
 that entry needed is inherited from 127.128.0.0/9 and asserted by
-TestReservedPlanes; and the sweep the generator ran on every VM's stop is gone
+TestReservedRanges; and the sweep the generator ran on every VM's stop is gone
 with the map, asserted below by its absence.
 """
 

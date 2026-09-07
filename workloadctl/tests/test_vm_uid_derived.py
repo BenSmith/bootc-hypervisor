@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""The uid planes: one derivation, and a reservation that cannot lag it.
+"""The uid rows: one derivation, and a reservation that cannot lag it.
 
 WHY THIS EXISTS
 
@@ -8,25 +8,25 @@ address in both families, an nflog group -- is the same three lines:
 bounds-check the uid, add its offset into the workload range to a base. Five
 copies of that is five places for one of them to be subtly different, and the
 copy that matters most is the bounds check: an unchecked offset does not fail,
-it produces a plausible value on a plane that is not this workload's.
+it produces a plausible value on a row that is not this workload's.
 
 The reservation is the half that has actually gone wrong. `[vm.network].ports`
-may name any bind address, and a plane no reservation covers is not checked at
+may name any bind address, and a row no reservation covers is not checked at
 all -- which is how `ports = ["198.18.1.4:8443:22"]` once validated and
 2001:2::/48 was not checked at all by construction. Either gap produces a
 cross-workload denial of service on a security control, or one workload
 receiving another's intercepted traffic, with nothing logged for either.
 
-So VM_RESERVED_PLANES is DERIVED from VM_UID_PLANES rather than written beside
+So VM_RESERVED_RANGES is DERIVED from VM_UID_DERIVED rather than written beside
 it, and these are the properties that derivation is supposed to buy:
 
-  * every plane that is an address names a reservation;
-  * every plane's WHOLE allocated range is inside it, not just its base;
-  * no two planes overlap;
-  * no plane straddles a family;
-  * and no UidPlane exists in the module that the table forgot.
+  * every row that is an address names a reservation;
+  * every row's WHOLE allocated range is inside it, not just its base;
+  * no two rows overlap;
+  * no row straddles a family;
+  * and no UidDerived exists in the module that the table forgot.
 
-Parametrised over the table, so a plane added tomorrow is checked by every row
+Parametrised over the table, so a row added tomorrow is checked by every
 here without anyone remembering to add one.
 
 WHAT IT DOES NOT DO
@@ -40,23 +40,23 @@ import ipaddress
 import unittest
 
 import vm
-from vm import UID_MAX, UID_MIN, UidPlane, VM_RESERVED_PLANES, VM_UID_PLANES
+from vm import UID_MAX, UID_MIN, UidDerived, VM_RESERVED_RANGES, VM_UID_DERIVED
 
 SPAN = UID_MAX - UID_MIN
 
 
-def _addresses(plane):
-    """(reservation, first, last) per family this plane allocates in."""
+def _addresses(row):
+    """(reservation, first, last) per family this row allocates in."""
     out = []
-    if plane.reservation is not None:
-        out.append((plane.reservation,
-                    ipaddress.ip_address(plane.base),
-                    ipaddress.ip_address(plane.base + SPAN)))
-    if plane.reservation6 is not None:
-        prefix = int(plane.reservation6.network.network_address)
-        out.append((plane.reservation6,
-                    ipaddress.ip_address(prefix | plane.base),
-                    ipaddress.ip_address(prefix | (plane.base + SPAN))))
+    if row.reservation is not None:
+        out.append((row.reservation,
+                    ipaddress.ip_address(row.base),
+                    ipaddress.ip_address(row.base + SPAN)))
+    if row.reservation6 is not None:
+        prefix = int(row.reservation6.network.network_address)
+        out.append((row.reservation6,
+                    ipaddress.ip_address(prefix | row.base),
+                    ipaddress.ip_address(prefix | (row.base + SPAN))))
     return out
 
 
@@ -65,32 +65,32 @@ class TestTheTableIsComplete(unittest.TestCase):
     def test_the_table_was_found(self):
         """Guards the guard: an empty table passes every parametrised row
         below without running a single assertion."""
-        self.assertGreaterEqual(len(VM_UID_PLANES), 5, VM_UID_PLANES)
+        self.assertGreaterEqual(len(VM_UID_DERIVED), 5, VM_UID_DERIVED)
 
-    def test_no_plane_is_defined_and_left_out(self):
+    def test_no_row_is_defined_and_left_out(self):
         """The rows sit beside the constants they derive from, so the tuple is
-        assembled by hand and a plane can be written and never joined to it.
-        A plane outside the table derives fine and is reserved by nothing.
+        assembled by hand and a row can be written and never joined to it.
+        A row outside the table derives fine and is reserved by nothing.
         """
-        defined = {v for v in vars(vm).values() if isinstance(v, UidPlane)}
-        self.assertEqual(defined, set(VM_UID_PLANES),
-                         "UidPlane(s) defined in lib/vm.py but absent from "
-                         "VM_UID_PLANES: "
-                         f"{sorted(p.noun for p in defined - set(VM_UID_PLANES))}")
+        defined = {v for v in vars(vm).values() if isinstance(v, UidDerived)}
+        self.assertEqual(defined, set(VM_UID_DERIVED),
+                         "UidDerived(s) defined in lib/vm.py but absent from "
+                         "VM_UID_DERIVED: "
+                         f"{sorted(p.noun for p in defined - set(VM_UID_DERIVED))}")
 
-    def test_every_plane_has_a_distinct_noun(self):
-        """The noun is the whole of the out-of-range message, so two planes
-        sharing one make the error name the wrong plane."""
-        nouns = [p.noun for p in VM_UID_PLANES]
+    def test_every_row_has_a_distinct_noun(self):
+        """The noun is the whole of the out-of-range message, so two rows
+        sharing one make the error name the wrong row."""
+        nouns = [p.noun for p in VM_UID_DERIVED]
         self.assertEqual(sorted(nouns), sorted(set(nouns)))
 
 
-class TestEveryPlaneIsReserved(unittest.TestCase):
+class TestEveryAddressIsReserved(unittest.TestCase):
 
-    def test_every_address_plane_names_a_reservation(self):
-        """The nflog group is the one plane that legitimately names none -- a
+    def test_every_address_row_names_a_reservation(self):
+        """The nflog group is the one row that legitimately names none -- a
         group is not an address, so there is nothing `ports` could bind."""
-        unreserved = [p.noun for p in VM_UID_PLANES
+        unreserved = [p.noun for p in VM_UID_DERIVED
                       if p.reservation is None and p.reservation6 is None]
         self.assertEqual(unreserved, ["nflog group"], unreserved)
 
@@ -98,66 +98,66 @@ class TestEveryPlaneIsReserved(unittest.TestCase):
         """Not just the base. A reservation that covers the first workload and
         not the 42,949th is a guard that passes on every host with few
         workloads and fails on the one that has many."""
-        for plane in VM_UID_PLANES:
-            for reservation, first, last in _addresses(plane):
-                with self.subTest(plane=plane.noun, family=first.version):
+        for row in VM_UID_DERIVED:
+            for reservation, first, last in _addresses(row):
+                with self.subTest(row=row.noun, family=first.version):
                     self.assertIn(first, reservation.network)
                     self.assertIn(last, reservation.network)
 
-    def test_no_two_planes_overlap(self):
-        """Two planes sharing an address is one workload's broker answering
+    def test_no_two_rows_overlap(self):
+        """Two rows sharing an address is one workload's broker answering
         where another workload's sshd belongs, decided by start order."""
         seen = []
-        for plane in VM_UID_PLANES:
-            for _, first, last in _addresses(plane):
+        for row in VM_UID_DERIVED:
+            for _, first, last in _addresses(row):
                 for other_noun, other_first, other_last in seen:
                     if first.version != other_first.version:
                         continue
-                    with self.subTest(a=plane.noun, b=other_noun):
+                    with self.subTest(a=row.noun, b=other_noun):
                         self.assertTrue(
                             last < other_first or first > other_last,
-                            f"{plane.noun} ({first}-{last}) overlaps "
+                            f"{row.noun} ({first}-{last}) overlaps "
                             f"{other_noun} ({other_first}-{other_last})")
-                seen.append((plane.noun, first, last))
+                seen.append((row.noun, first, last))
 
-    def test_no_plane_straddles_a_family(self):
-        for plane in VM_UID_PLANES:
-            if plane.reservation is not None:
-                self.assertEqual(plane.reservation.network.version, 4,
-                                 plane.noun)
-            if plane.reservation6 is not None:
-                self.assertEqual(plane.reservation6.network.version, 6,
-                                 plane.noun)
+    def test_no_row_straddles_a_family(self):
+        for row in VM_UID_DERIVED:
+            if row.reservation is not None:
+                self.assertEqual(row.reservation.network.version, 4,
+                                 row.noun)
+            if row.reservation6 is not None:
+                self.assertEqual(row.reservation6.network.version, 6,
+                                 row.noun)
 
-    def test_a_plane_in_both_families_carries_the_same_number(self):
+    def test_a_row_in_both_families_carries_the_same_number(self):
         """The v6 address is the v4 OR-ed into the prefix, which is what makes
         an address in a log or an .nft element say which workload it is."""
-        for plane in VM_UID_PLANES:
-            if plane.reservation6 is None:
+        for row in VM_UID_DERIVED:
+            if row.reservation6 is None:
                 continue
-            v4, v6 = (a for _, a, _ in _addresses(plane))
-            self.assertEqual(int(v6) & 0xFFFFFFFF, int(v4), plane.noun)
+            v4, v6 = (a for _, a, _ in _addresses(row))
+            self.assertEqual(int(v6) & 0xFFFFFFFF, int(v4), row.noun)
 
 
 class TestTheReservedListIsDerived(unittest.TestCase):
 
-    def test_it_holds_every_reservation_the_planes_name(self):
-        named = {r for p in VM_UID_PLANES
+    def test_it_holds_every_reservation_the_rows_name(self):
+        named = {r for p in VM_UID_DERIVED
                  for r in (p.reservation, p.reservation6) if r}
-        self.assertEqual({p.network for p in VM_RESERVED_PLANES},
+        self.assertEqual({p.network for p in VM_RESERVED_RANGES},
                          {r.network for r in named})
 
     def test_a_shared_reservation_appears_once(self):
-        """Three planes hang off the /9. The management addresses state it;
+        """Three rows hang off the /9. The management addresses state it;
         the broker and the responder inherit it."""
-        networks = [p.network for p in VM_RESERVED_PLANES]
+        networks = [p.network for p in VM_RESERVED_RANGES]
         self.assertEqual(len(networks), len(set(networks)), networks)
 
     def test_both_families_are_present(self):
-        versions = {p.network.version for p in VM_RESERVED_PLANES}
+        versions = {p.network.version for p in VM_RESERVED_RANGES}
         self.assertEqual(versions, {4, 6})
 
-    def test_the_loopback_planes_are_covered_without_entries_of_their_own(self):
+    def test_the_loopback_rows_are_covered_without_entries_of_their_own(self):
         """The property the /9 exists for, asserted through the lookup rather
         than the list: "the entry is gone" and "the reservation is gone" are
         the two things a list-reading test cannot tell apart.
@@ -168,7 +168,7 @@ class TestTheReservedListIsDerived(unittest.TestCase):
                             vm.vm_management_address(uid)):
                 with self.subTest(address=address):
                     self.assertEqual(
-                        vm.vm_reserved_plane(address, 8080).network,
+                        vm.vm_reserved_range(address, 8080).network,
                         vm.VM_MGMT_NETWORK)
 
 
@@ -182,48 +182,48 @@ class TestTheDerivation(unittest.TestCase):
     }
 
     def test_each_function_agrees_with_its_row(self):
-        by_noun = {p.noun: p for p in VM_UID_PLANES}
+        by_noun = {p.noun: p for p in VM_UID_DERIVED}
         for noun, function in self.FUNCTIONS.items():
-            plane = by_noun[noun]
+            row = by_noun[noun]
             for uid in (UID_MIN, UID_MIN + 3, UID_MAX):
                 with self.subTest(noun=noun, uid=uid):
-                    expected = plane.base + (uid - UID_MIN)
+                    expected = row.base + (uid - UID_MIN)
                     got = function(uid)
                     if isinstance(got, str):
                         got = int(ipaddress.ip_address(got))
                     self.assertEqual(got, expected)
 
     def test_the_inspector_row_drives_both_families(self):
-        plane = {p.noun: p for p in VM_UID_PLANES}["inspector address"]
+        row = {p.noun: p for p in VM_UID_DERIVED}["inspector address"]
         for uid in (UID_MIN, UID_MIN + 3, UID_MAX):
             address = vm.vm_inspect_address(uid)
             self.assertEqual(int(ipaddress.ip_address(address.v4)),
-                             plane.base + (uid - UID_MIN))
+                             row.base + (uid - UID_MIN))
             self.assertEqual(int(ipaddress.ip_address(address.v6))
                              & 0xFFFFFFFF,
-                             plane.base + (uid - UID_MIN))
+                             row.base + (uid - UID_MIN))
 
-    def test_every_plane_refuses_a_uid_outside_the_range(self):
-        """One raise for five planes, so this is the only place it is checked
+    def test_every_row_refuses_a_uid_outside_the_range(self):
+        """One raise for five rows, so this is the only place it is checked
         -- and an unchecked offset does not fail, it lands the caller on a
-        plane belonging to nobody."""
-        for plane in VM_UID_PLANES:
+        row belonging to nobody."""
+        for row in VM_UID_DERIVED:
             for uid in (UID_MIN - 1, UID_MAX + 1, 0, -1):
-                with self.subTest(plane=plane.noun, uid=uid):
+                with self.subTest(row=row.noun, uid=uid):
                     with self.assertRaises(ValueError) as caught:
-                        vm._uid_plane_value(plane, uid)
-                    self.assertIn(plane.noun, str(caught.exception))
+                        vm._uid_derived_value(row, uid)
+                    self.assertIn(row.noun, str(caught.exception))
                     self.assertIn(str(uid), str(caught.exception))
 
     def test_the_bounds_are_inclusive_at_both_ends(self):
         """UID_MAX is allocatable, so a `>=` here would strand the last
         workload the allocator can hand out."""
-        for plane in VM_UID_PLANES:
-            with self.subTest(plane=plane.noun):
-                self.assertEqual(vm._uid_plane_value(plane, UID_MIN),
-                                 plane.base)
-                self.assertEqual(vm._uid_plane_value(plane, UID_MAX),
-                                 plane.base + SPAN)
+        for row in VM_UID_DERIVED:
+            with self.subTest(row=row.noun):
+                self.assertEqual(vm._uid_derived_value(row, UID_MIN),
+                                 row.base)
+                self.assertEqual(vm._uid_derived_value(row, UID_MAX),
+                                 row.base + SPAN)
 
 
 if __name__ == "__main__":

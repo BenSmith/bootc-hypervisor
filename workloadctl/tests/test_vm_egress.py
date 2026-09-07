@@ -203,7 +203,7 @@ class TestSkeleton(unittest.TestCase):
                       "drop the packet")
 
     def test_loopback_is_accepted_before_the_drop(self):
-        """Without this a filtered VM is cut off from its own control plane.
+        """Without this a filtered VM is cut off from its own management address.
 
         Found on a live VM, not in review: passt binds the management address
         as the workload user, so `workloadctl exec`'s replies are output
@@ -677,7 +677,7 @@ class TestInputChain(unittest.TestCase):
     def test_the_chain_exists_and_is_hooked_at_input_priority_0(self):
         """Presence. §7.2.6's first named failure is a version of this design
         with no input chain at all: the output rules above assume it, and its
-        absence fails open on both planes."""
+        absence fails open in both families."""
         decls = [d for d in self.directives
                  if d.startswith("add chain")
                  and " inet workload_filter input " in d]
@@ -689,7 +689,7 @@ class TestInputChain(unittest.TestCase):
     def test_both_families_are_dropped(self):
         """Both families, or neither.
 
-        A v4-only input chain leaves the plane clients try FIRST wide open —
+        A v4-only input chain leaves the family clients try FIRST wide open —
         happy-eyeballs dials the v6 address before the v4 one — and nothing
         about the v4 half's behaviour would say so. The failure is silent in
         the direction that matters, which is why the split is asserted rather
@@ -732,7 +732,7 @@ class TestInputChain(unittest.TestCase):
         """`iif != lo` is the entire exemption, and it is the load-bearing
         detail.
 
-        Everything legitimate on these planes is host-local: the guest's
+        Everything legitimate on these ranges is host-local: the guest's
         redirected connection is re-originated by passt as a host socket, so
         it arrives on lo; so does the inspector's reply; so does `diagnose`
         probing a listener as root. A drop missing the exemption takes every
@@ -744,11 +744,11 @@ class TestInputChain(unittest.TestCase):
         for rule in self.input_rules:
             self.assertIn("iif != lo", rule,
                           f"a drop without the loopback exemption breaks "
-                          f"host-local traffic on these planes: {rule}")
+                          f"host-local traffic on these ranges: {rule}")
 
     def test_both_drops_are_counted(self):
         """§11's off-box-arrivals figure IS these two counters, and it is the
-        one figure in that list with no benign reading: the listener planes
+        one figure in that list with no benign reading: the listener ranges
         are reachable from off the host only because the weak host model
         delivers them, so a non-zero value is an attack or a misrouted
         network. Drop the `counter` and the rule still drops -- the evidence
@@ -1916,7 +1916,7 @@ class TestInspectMapKeyShapes(unittest.TestCase):
 
 
 class TestAllowMayNotNameTheListenerRange(unittest.TestCase):
-    """An `allow` entry inside the inspector's planes is refused (HLD §3).
+    """An `allow` entry inside the inspector's ranges is refused (HLD §3).
 
     `allow` is matched ahead of the guard that stops one workload reaching
     another's inspector, so nothing downstream catches such an entry: it is
@@ -1979,10 +1979,10 @@ class TestAllowMayNotNameTheListenerRange(unittest.TestCase):
         self.assertIsNone(
             vm_allow_reserved_reason(ipaddress.ip_address("2606:2800::1")))
 
-    def test_a_v4_plane_address_does_not_refuse_the_v6_family_and_back(self):
-        """Each family is judged against its own plane.
+    def test_a_v4_address_does_not_refuse_the_v6_family_and_back(self):
+        """Each family is judged against its own range.
 
-        The planes are derived from one number, so a check that compared an
+        The ranges are derived from one number, so a check that compared an
         address against the wrong family's network would answer False for
         everything and read as a passing test.
         """
@@ -3192,7 +3192,7 @@ class TestAllowNameResolution(unittest.TestCase):
                 vm_filter_commands(10001, [allow_entry("git.local:2222")], "add")
         self.assertIn("git.local", str(caught.exception))
 
-    def test_a_name_resolving_into_the_listener_plane_is_refused(self):
+    def test_a_name_resolving_into_the_listener_range_is_refused(self):
         """The refusal parse_vm_allow cannot make, because it does not resolve.
 
         Without this the name form reaches around the address form's refusal
@@ -3205,11 +3205,11 @@ class TestAllowNameResolution(unittest.TestCase):
         self.assertIn("listener range", str(caught.exception))
 
 
-class TestReservedPlanes(unittest.TestCase):
-    """`ports` may not bind any plane this design owns (T2).
+class TestReservedRanges(unittest.TestCase):
+    """`ports` may not bind any range this design owns (T2).
 
     The check was one `in VM_MGMT_NETWORK` with a docstring committing to v4,
-    written when there was one plane and it was v4. Two listener planes arrived
+    written when there was one range and it was v4. Two listener ranges arrived
     and one of them is v6, so `198.18.1.4:8443:22` validated and 2001:2::/48
     was not checked at all -- and either gap produces a cross-workload denial
     of service on a security control, or one workload receiving another's
@@ -3222,31 +3222,31 @@ class TestReservedPlanes(unittest.TestCase):
                                                 "ports": [spec]})
                 if "ports" in e]
 
-    def test_the_list_holds_every_plane_and_both_families(self):
+    def test_the_list_holds_every_range_and_both_families(self):
         """Pins the LIST, not its first entry.
 
-        A test naming one plane passes unchanged while a second is added and
-        left unenforced, which is exactly how the v6 listener plane went
+        A test naming one range passes unchanged while a second is added and
+        left unenforced, which is exactly how the v6 listener range went
         unchecked -- so what is asserted here is the membership of the
         collection the check reads.
         """
         from vm import (VM_INSPECT_ADDR6_PREFIX, VM_INSPECT_NETWORK,
-                        VM_MGMT_NETWORK, VM_RESERVED_PLANES)
-        networks = [p.network for p in VM_RESERVED_PLANES]
+                        VM_MGMT_NETWORK, VM_RESERVED_RANGES)
+        networks = [p.network for p in VM_RESERVED_RANGES]
         self.assertIn(VM_MGMT_NETWORK, networks)
         self.assertIn(VM_INSPECT_NETWORK, networks)
         self.assertIn(VM_INSPECT_ADDR6_PREFIX, networks)
         self.assertTrue(any(n.version == 6 for n in networks),
-                        "a v6 plane exists and must be one of these")
-        # Every plane now owns a whole range on every port. The one
+                        "a v6 range exists and must be one of these")
+        # Every entry now owns a whole range on every port. The one
         # port-scoped entry was the host-wide broker's 127.0.0.1:8081, and it
-        # died with the host-wide listener -- a new port-scoped plane means
+        # died with the host-wide listener -- a new port-scoped entry means
         # something is again reserving a single socket on an address operators
         # publish on, which is the shape that needed its own written entry.
-        self.assertEqual([p.what for p in VM_RESERVED_PLANES
+        self.assertEqual([p.what for p in VM_RESERVED_RANGES
                           if p.port is not None], [])
 
-    def test_the_broker_plane_is_inherited_from_the_nine(self):
+    def test_the_broker_range_is_inherited_from_the_nine(self):
         """The broker's reservation moved from stated to inherited (rung 6).
 
         It had an entry of its own while there was one host-wide listener on
@@ -3256,48 +3256,48 @@ class TestReservedPlanes(unittest.TestCase):
         inside VM_MGMT_NETWORK (127.128.0.0/9), so `ports` cannot bind there for
         the same reason it cannot bind the responder.
 
-        Asserted through vm_reserved_plane rather than by reading the list,
+        Asserted through vm_reserved_range rather than by reading the list,
         because "the entry is gone" and "the reservation is gone" are the two
         outcomes of that deletion and only one of them is correct. A test that
         merely stopped checking would be indistinguishable from one that never
         did.
         """
         from vm import (UID_MAX, UID_MIN, VM_MGMT_NETWORK,
-                        vm_broker_listen_address, vm_reserved_plane)
+                        vm_broker_listen_address, vm_reserved_range)
         for uid in (UID_MIN, UID_MIN + 1, 42000, UID_MAX):
             addr = vm_broker_listen_address(uid)
             with self.subTest(uid=uid):
                 self.assertIn(ipaddress.ip_address(addr), VM_MGMT_NETWORK)
-                # Every port, not the one the listener uses: the plane owns the
+                # Every port, not the one the listener uses: the range owns the
                 # address, so a `ports` entry naming any port on it is refused.
                 for port in (80, 8081, 65535):
-                    plane = vm_reserved_plane(addr, port)
-                    self.assertIsNotNone(plane, (addr, port))
-                    self.assertEqual(plane.network, VM_MGMT_NETWORK)
+                    found = vm_reserved_range(addr, port)
+                    self.assertIsNotNone(found, (addr, port))
+                    self.assertEqual(found.network, VM_MGMT_NETWORK)
 
     def test_a_broker_address_is_refused_by_ports(self):
         """The end-to-end form of the rule above, through validation.
 
         The inheritance argument is only worth anything if `ports` actually
-        refuses the address, and that path reads vm_reserved_plane through
+        refuses the address, and that path reads vm_reserved_range through
         parse_vm_port rather than being handed one.
         """
         from vm import UID_MIN, vm_broker_listen_address
         addr = vm_broker_listen_address(UID_MIN + 7)
         self.assertTrue(self._ports(f"{addr}:8081:80"), addr)
 
-    def test_each_plane_is_refused(self):
+    def test_each_range_is_refused(self):
         for spec in ("127.128.0.3:2222:22",
                      "198.18.1.4:8443:22",
                      "[2001:2::c612:100]:8443:22",
-                     # The broker plane, reached through the /9 rather than
+                     # The broker range, reached through the /9 rather than
                      # through an entry of its own -- 127.129.0.7 is
                      # vm_broker_listen_address(UID_MIN + 7).
                      "127.129.0.7:8081:80"):
             with self.subTest(spec=spec):
                 self.assertTrue(self._ports(spec), spec)
 
-    def test_the_v6_listener_plane_is_refused(self):
+    def test_the_v6_listener_range_is_refused(self):
         """Called out on its own because it was unreachable by construction.
 
         The address is parsed and compared against a v4 network, which answers
@@ -3308,7 +3308,7 @@ class TestReservedPlanes(unittest.TestCase):
         self.assertTrue(any("2001:2::/48" in e for e in errors), errors)
 
     def test_the_message_names_what_would_collide_not_just_the_range(self):
-        """Three planes, three sentences.
+        """Three ranges, three sentences.
 
         A collision with a management address and one with an inspector are
         different problems with different remedies, and one recited range for
@@ -3317,7 +3317,7 @@ class TestReservedPlanes(unittest.TestCase):
         The broker, the responder and the management addresses now share ONE
         sentence -- the /9's -- and that is the cost of the inheritance the
         deletion above buys. It is the right trade only because all three are
-        planes `ports` has no business naming at all: the sentence an operator
+        ranges `ports` has no business naming at all: the sentence an operator
         needs there is "this range is not yours", and it is the same sentence
         for all three. It was not the right trade for 127.0.0.1:8081, which is
         an address they publish on daily.
@@ -3347,23 +3347,23 @@ class TestReservedPlanes(unittest.TestCase):
             with self.subTest(spec=spec):
                 self.assertEqual(self._ports(spec), [])
 
-    def test_the_helper_answers_none_off_plane_and_the_plane_on_it(self):
-        from vm import VM_MGMT_NETWORK, vm_reserved_plane
-        self.assertIsNone(vm_reserved_plane("192.168.0.5", 8080))
-        self.assertIsNone(vm_reserved_plane("not-an-address", 8080))
-        self.assertEqual(vm_reserved_plane("127.128.0.3", 2222).network,
+    def test_the_helper_answers_none_off_range_and_the_range_on_it(self):
+        from vm import VM_MGMT_NETWORK, vm_reserved_range
+        self.assertIsNone(vm_reserved_range("192.168.0.5", 8080))
+        self.assertIsNone(vm_reserved_range("not-an-address", 8080))
+        self.assertEqual(vm_reserved_range("127.128.0.3", 2222).network,
                          VM_MGMT_NETWORK)
 
-    def test_a_v4_plane_never_matches_a_v6_address_and_back(self):
-        """Each family is judged against its own plane.
+    def test_a_v4_range_never_matches_a_v6_address_and_back(self):
+        """Each family is judged against its own range.
 
         A comparison that crossed families would raise, or worse, answer False
         for everything and read as a passing test.
         """
-        from vm import vm_reserved_plane
-        self.assertIsNone(vm_reserved_plane("2001:db8::1", 8443))
-        self.assertIsNotNone(vm_reserved_plane("2001:2::c612:100", 8443))
-        self.assertIsNotNone(vm_reserved_plane("198.18.1.4", 8443))
+        from vm import vm_reserved_range
+        self.assertIsNone(vm_reserved_range("2001:db8::1", 8443))
+        self.assertIsNotNone(vm_reserved_range("2001:2::c612:100", 8443))
+        self.assertIsNotNone(vm_reserved_range("198.18.1.4", 8443))
 
 
 class TestInternalOkAccept(unittest.TestCase):
@@ -3963,7 +3963,7 @@ class TestRung6BrokerAddress(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     vm_broker_listen_address(uid)
 
-    def test_the_three_uid_derived_planes_never_overlap(self):
+    def test_the_three_uid_derived_addresses_never_overlap(self):
         """Three-way, over the COLLECTION, not over a chosen pair.
 
         Management (127.128.0.0), broker (127.129.0.0) and responder
@@ -3971,22 +3971,22 @@ class TestRung6BrokerAddress(unittest.TestCase):
         so a widened UID_MAX is the change that silently overlaps them --
         127.128 spills into 127.129 first, which makes the broker the first
         casualty rather than a bystander. A test naming one pair passes
-        unchanged while a third plane is added and left unchecked, which is the
-        failure TestReservedPlanes states in its own docstring.
+        unchanged while a third address is added and left unchecked, which is the
+        failure TestReservedRanges states in its own docstring.
         """
         from vm import (UID_MAX, UID_MIN, vm_broker_listen_address,
                         vm_management_address, vm_resolve_address)
-        planes = (vm_management_address, vm_broker_listen_address,
-                  vm_resolve_address)
+        derived = (vm_management_address, vm_broker_listen_address,
+                   vm_resolve_address)
         for uid in (UID_MIN, UID_MIN + 1, 42000, UID_MAX):
             with self.subTest(uid=uid):
-                got = [f(uid) for f in planes]
-                self.assertEqual(len(set(got)), len(planes), got)
+                got = [f(uid) for f in derived]
+                self.assertEqual(len(set(got)), len(derived), got)
         # And the ranges as wholes, which is what a widened UID_MAX breaks.
-        for f in planes:
+        for f in derived:
             span = (ipaddress.ip_address(f(UID_MIN)),
                     ipaddress.ip_address(f(UID_MAX)))
-            others = [g for g in planes if g is not f]
+            others = [g for g in derived if g is not f]
             for g in others:
                 low, high = (ipaddress.ip_address(g(UID_MIN)),
                              ipaddress.ip_address(g(UID_MAX)))
