@@ -23,6 +23,7 @@ from typing import NamedTuple
 
 from workload_lib import (UID_MAX, UID_MIN, container_credential_entries,
                           container_policy_entries, container_uses_inspect,
+                          parse_credential_entries, parse_policy_entries,
                           parse_volume_spec, workload_root_dir)
 
 
@@ -3383,27 +3384,7 @@ def vm_policy_entries(net: dict) -> list[VmPolicyEntry]:
     owns the shape and the boot generator skips a workload that does not
     validate.
     """
-    entries: list[VmPolicyEntry] = []
-    raw = net.get("policy", [])
-    if not isinstance(raw, list):
-        return entries
-    for item in raw:
-        if not isinstance(item, dict):
-            continue
-        host = item.get("host")
-        if not isinstance(host, str) or not host.strip():
-            continue
-        credential = item.get("credential")
-        if not isinstance(credential, str) or not credential.strip():
-            credential = None
-        else:
-            credential = credential.strip()
-        entries.append(VmPolicyEntry(
-            host=host.strip(),
-            methods=_normalise_policy_list(item.get("methods"), upper=True),
-            paths=_normalise_policy_list(item.get("paths")),
-            credential=credential))
-    return entries
+    return parse_policy_entries(net, VmPolicyEntry)
 
 
 class VmCredential(NamedTuple):
@@ -3457,55 +3438,7 @@ def vm_credential_entries(net: dict) -> list[VmCredential]:
     Shape-tolerant for the reason vm_policy_entries is: validate_vm_network owns
     the shape and the boot generator skips a workload that does not validate.
     """
-    creds: list[VmCredential] = []
-    raw = net.get("credential", [])
-    if not isinstance(raw, list):
-        return creds
-    for item in raw:
-        if not isinstance(item, dict):
-            continue
-        values = []
-        for key in ("name", "placeholder", "env"):
-            value = item.get(key)
-            if not isinstance(value, str) or not value.strip():
-                values = []
-                break
-            values.append(value.strip())
-        if not values:
-            continue
-        # Optional, and absent stays None rather than becoming the default
-        # here: the render emits nothing for an absent key and lets the broker
-        # apply its own, so there is one place the default lives. Writing it in
-        # twice is how the two come to disagree after one of them changes.
-        optional = []
-        for key in ("auth_header", "auth_format"):
-            value = item.get(key)
-            optional.append(value.strip()
-                            if isinstance(value, str) and value.strip()
-                            else None)
-        creds.append(VmCredential(*values, *optional))
-    return creds
-
-
-def _normalise_policy_list(value, *, upper: bool = False) -> tuple | None:
-    """One `methods` or `paths` value as a tuple, or None where it was absent.
-
-    None and () are different answers and the caller depends on it; see
-    VmPolicyEntry.
-    """
-    if value is None:
-        return None
-    if not isinstance(value, list):
-        return ()
-    out = []
-    for item in value:
-        if not isinstance(item, str):
-            continue
-        # NOT stripped: validation refuses a padded token or path outright,
-        # so nothing that reaches here needs it, and a strip in one of the two
-        # places is how they come to disagree about what the file said.
-        out.append(item.upper() if upper else item)
-    return tuple(out)
+    return parse_credential_entries(net, VmCredential)
 
 
 def vm_policy_governs(host: str, entries) -> list[VmPolicyEntry]:

@@ -1305,17 +1305,117 @@ def infer_workload_mode(config: dict) -> str:
     return "pod" if "containers" in config else "single"
 
 
+# --- Shared policy/credential parsing ---
+#
+# One parse loop per table, shared by both substrates. The TYPES stay
+# separate -- see the ContainerPolicyEntry note below for why -- but the
+# loops that fill them do not: they were verbatim copies of each other, and
+# a copy is how the two come to disagree about what a malformed entry means
+# after only one of them is fixed. The entry class is the parameter, so a
+# substrate keeps its own vocabulary and shares the shape-tolerance rules.
+#
+# Every function here is shape-tolerant on purpose. Real validation lives in
+# the per-substrate validate_* functions, and the boot generator skips a
+# workload that does not validate.
+
+def normalise_policy_list(value, *, upper: bool = False) -> tuple | None:
+    """One `methods` or `paths` value as a tuple, or None where it was absent.
+
+    None and () are different answers and the caller depends on it; see
+    VmPolicyEntry (lib/vm.py) and ContainerPolicyEntry below.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, list):
+        return ()
+    out = []
+    for item in value:
+        if not isinstance(item, str):
+            continue
+        # NOT stripped: validation refuses a padded token or path outright,
+        # so nothing that reaches here needs it, and a strip in one of the two
+        # places is how they come to disagree about what the file said.
+        out.append(item.upper() if upper else item)
+    return tuple(out)
+
+
+def parse_policy_entries(net: dict, entry_cls) -> list:
+    """The `policy` entries of one network table, normalised, in file order.
+
+    `entry_cls` is VmPolicyEntry or ContainerPolicyEntry -- field-identical
+    by construction, and the only thing that differs between the substrates.
+    """
+    entries = []
+    raw = net.get("policy", [])
+    if not isinstance(raw, list):
+        return entries
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        host = item.get("host")
+        if not isinstance(host, str) or not host.strip():
+            continue
+        credential = item.get("credential")
+        if not isinstance(credential, str) or not credential.strip():
+            credential = None
+        else:
+            credential = credential.strip()
+        entries.append(entry_cls(
+            host=host.strip(),
+            methods=normalise_policy_list(item.get("methods"), upper=True),
+            paths=normalise_policy_list(item.get("paths")),
+            credential=credential))
+    return entries
+
+
+def parse_credential_entries(net: dict, credential_cls) -> list:
+    """The `credential` blocks of one network table, normalised, in file order.
+
+    `credential_cls` is VmCredential or ContainerCredential; see VmCredential's
+    docstring for what each field is for and why the optional pair is optional.
+    """
+    creds = []
+    raw = net.get("credential", [])
+    if not isinstance(raw, list):
+        return creds
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        values = []
+        for key in ("name", "placeholder", "env"):
+            value = item.get(key)
+            if not isinstance(value, str) or not value.strip():
+                values = []
+                break
+            values.append(value.strip())
+        if not values:
+            continue
+        # Optional, and absent stays None rather than becoming the default
+        # here: the render emits nothing for an absent key and lets the broker
+        # apply its own, so there is one place the default lives. Writing it in
+        # twice is how the two come to disagree after one of them changes.
+        optional = []
+        for key in ("auth_header", "auth_format"):
+            value = item.get(key)
+            optional.append(value.strip()
+                            if isinstance(value, str) and value.strip()
+                            else None)
+        creds.append(credential_cls(*values, *optional))
+    return creds
+
+
 # --- Container egress policy/credential schema ---
 #
-# [network.policy] / [network.credential], parsed the same way and for the
-# same reason as [[vm.network.policy]] / [[vm.network.credential]] in
-# lib/vm.py: shape-tolerant here, with real validation living in a separate
+# [network.policy] / [network.credential], parsed BY the shared loops above
+# and for the same reason as [[vm.network.policy]] / [[vm.network.credential]]
+# in lib/vm.py: shape-tolerant here, with real validation living in a separate
 # validate_* function (not yet written -- there is no container inspector to
 # validate against yet). Deliberately its own small NamedTuple pair rather
 # than reuse of VmPolicyEntry/VmCredential: those are keyed on `[vm.network]`
 # specifically, and container topology has no `[vm]` section to key off of.
 # Widening them instead would put a substrate branch inside a pair of
-# structures whose whole job is to describe one substrate's table.
+# structures whose whole job is to describe one substrate's table. Sharing the
+# PARSE and not the TYPE is what keeps both of those true at once.
 
 class ContainerPolicyEntry(NamedTuple):
     """One [[network.policy]] entry, normalised.
@@ -1337,27 +1437,7 @@ def container_policy_entries(net: dict) -> list[ContainerPolicyEntry]:
     """The [[network.policy]] entries for one container's [network] table,
     normalised, in file order. Shape-tolerant; a future validate function
     owns rejecting malformed entries."""
-    entries: list[ContainerPolicyEntry] = []
-    raw = net.get("policy", [])
-    if not isinstance(raw, list):
-        return entries
-    for item in raw:
-        if not isinstance(item, dict):
-            continue
-        host = item.get("host")
-        if not isinstance(host, str) or not host.strip():
-            continue
-        credential = item.get("credential")
-        if not isinstance(credential, str) or not credential.strip():
-            credential = None
-        else:
-            credential = credential.strip()
-        entries.append(ContainerPolicyEntry(
-            host=host.strip(),
-            methods=_normalise_container_policy_list(item.get("methods"), upper=True),
-            paths=_normalise_container_policy_list(item.get("paths")),
-            credential=credential))
-    return entries
+    return parse_policy_entries(net, ContainerPolicyEntry)
 
 
 class ContainerCredential(NamedTuple):
@@ -1377,45 +1457,7 @@ def container_credential_entries(net: dict) -> list[ContainerCredential]:
     """The [[network.credential]] blocks for one container's [network]
     table, normalised, in file order. Shape-tolerant; a future validate
     function owns rejecting malformed entries."""
-    creds: list[ContainerCredential] = []
-    raw = net.get("credential", [])
-    if not isinstance(raw, list):
-        return creds
-    for item in raw:
-        if not isinstance(item, dict):
-            continue
-        values = []
-        for key in ("name", "placeholder", "env"):
-            value = item.get(key)
-            if not isinstance(value, str) or not value.strip():
-                values = []
-                break
-            values.append(value.strip())
-        if not values:
-            continue
-        optional = []
-        for key in ("auth_header", "auth_format"):
-            value = item.get(key)
-            optional.append(value.strip()
-                            if isinstance(value, str) and value.strip()
-                            else None)
-        creds.append(ContainerCredential(*values, *optional))
-    return creds
-
-
-def _normalise_container_policy_list(value, *, upper: bool = False) -> tuple | None:
-    """One `methods` or `paths` value as a tuple, or None where it was
-    absent. None and () are different answers; see ContainerPolicyEntry."""
-    if value is None:
-        return None
-    if not isinstance(value, list):
-        return ()
-    out = []
-    for item in value:
-        if not isinstance(item, str):
-            continue
-        out.append(item.upper() if upper else item)
-    return tuple(out)
+    return parse_credential_entries(net, ContainerCredential)
 
 
 # --- Container [network] scalars ---
