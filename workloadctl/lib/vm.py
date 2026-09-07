@@ -603,6 +603,57 @@ NFT_TABLE = "inet workload_filter"
 NFT_SET_FILTERED = "wl_filtered"
 NFT_SET_ALLOW4 = "wl_allow4"
 NFT_SET_ALLOW6 = "wl_allow6"
+
+
+# --- One object, two families ---
+#
+# In the inet family `ip daddr` matches v4 only and `ip6 daddr` v6 only, so
+# every address-bearing object here is two nftables objects. The RULES have to
+# be written twice; the Python does not, and writing it twice is how the v6
+# half goes missing. It has: the reserved-range check was v4 by construction
+# and 2001:2::/48 went unchecked for a whole rung (TestReservedRanges), and an
+# element in the wrong family's set matches nothing at all -- a silent failure,
+# because a set that never matches looks exactly like a set nothing dialled.
+#
+# So the two names are ONE value, and the builders below take a FamilyPair and
+# fill both halves rather than naming either. A builder cannot emit one family:
+# there is no line in it that says `.v4`.
+
+class FamilyPair(NamedTuple):
+    """The v4 and v6 names of one logical nftables set or map."""
+    v4: str
+    v6: str
+
+    def of(self, version: int) -> str:
+        return self.v6 if version == 6 else self.v4
+
+
+def _both_families(pair: FamilyPair, addr: "VmInspectAddress",
+                   build) -> dict[str, list[str]]:
+    """Both halves of one object, built from this workload's address in each.
+
+    BOTH, unconditionally: these objects are derived from a uid rather than
+    from operator input, so there is no such thing as a workload with a v4
+    inspector and no v6 one, and an empty half would mean the derivation
+    broke.
+    """
+    return {pair.v4: build(addr.v4), pair.v6: build(addr.v6)}
+
+
+def _split_by_family(pair: FamilyPair, elements) -> dict[str, list[str]]:
+    """Bucket (address, element-expression) pairs into their family's half.
+
+    Empty halves are dropped rather than emitted, because these objects come
+    from operator input -- an allowlist naming only v4 names is ordinary --
+    and `nft add element ... { }` is an error, not a no-op.
+    """
+    buckets: dict[str, list[str]] = {pair.v4: [], pair.v6: []}
+    for addr, element in elements:
+        buckets[pair.of(addr.version)].append(element)
+    return {name: entries for name, entries in buckets.items() if entries}
+
+
+NFT_PAIR_ALLOW = FamilyPair(NFT_SET_ALLOW4, NFT_SET_ALLOW6)
 # Internal destination prefixes the egress inspector may not connect OUT to. The
 # elements are constant and live in the skeleton, not here -- nothing in Python
 # manages them. The names exist so tests can name the sets and so
@@ -611,11 +662,13 @@ NFT_SET_ALLOW6 = "wl_allow6"
 # until reboot, so a VM started before an upgrade keeps the older chain.
 NFT_SET_INTERNAL4 = "wl_internal4"
 NFT_SET_INTERNAL6 = "wl_internal6"
+NFT_PAIR_INTERNAL = FamilyPair(NFT_SET_INTERNAL4, NFT_SET_INTERNAL6)
 # The per-workload exceptions to those drops -- [[vm.network.internal]]. Per
 # workload, so unlike the interval sets above these ARE managed from Python and
 # are never flushed by the skeleton.
 NFT_SET_INTERNAL_OK4 = "wl_internal_ok4"
 NFT_SET_INTERNAL_OK6 = "wl_internal_ok6"
+NFT_PAIR_INTERNAL_OK = FamilyPair(NFT_SET_INTERNAL_OK4, NFT_SET_INTERNAL_OK6)
 
 # The private ranges the skeleton's internal drop matches on, restated here so
 # the arming path can refuse an element the drop would never have caught.
@@ -645,8 +698,10 @@ VM_INTERNAL_PREFIXES6 = (
 # never emptied by it.
 NFT_SET_INSPECT_DST = "wl_inspect_dst"
 NFT_SET_INSPECT_DST6 = "wl_inspect_dst6"
+NFT_PAIR_INSPECT_DST = FamilyPair(NFT_SET_INSPECT_DST, NFT_SET_INSPECT_DST6)
 NFT_SET_INSPECT_SELF = "wl_inspect_self"
 NFT_SET_INSPECT_SELF6 = "wl_inspect_self6"
+NFT_PAIR_INSPECT_SELF = FamilyPair(NFT_SET_INSPECT_SELF, NFT_SET_INSPECT_SELF6)
 # The cross-workload guard's destination sets: every LIVE inspector address on
 # the host, one plain address per armed workload and no uid. Armed alongside
 # the four above, by the same helper, for the same reason.
@@ -660,6 +715,7 @@ NFT_SET_INSPECT_SELF6 = "wl_inspect_self6"
 # an abandoned table holds an empty set and is inert.
 NFT_SET_INSPECT_LIVE = "wl_inspect_live"
 NFT_SET_INSPECT_LIVE6 = "wl_inspect_live6"
+NFT_PAIR_INSPECT_LIVE = FamilyPair(NFT_SET_INSPECT_LIVE, NFT_SET_INSPECT_LIVE6)
 NFT_SKELETON = "/usr/share/workloadctl/workload-filter.nft"
 
 
@@ -683,16 +739,12 @@ def vm_filter_elements(uid: int, allow: list[str],
     is the family-agnostic question "is this workload under policy at all?",
     and both the ct-mark and the drop are guarded on it.
 
-    The allowlist splits by address family because in the inet family
-    `ip daddr` matches v4 only and `ip6 daddr` v6 only; an entry in the wrong
-    set would simply never match, which is a silent failure rather than a
-    loud one.
+    The allowlist splits by address family through _split_by_family, which is
+    where the reason for the split is written down.
     """
-    elements: dict[str, list[str]] = {NFT_SET_FILTERED: [str(uid)]}
-    v4: list[str] = []
-    v6: list[str] = []
     if resolved is None:
         resolved = vm_allow_resolved(allow)
+    allowed = []
     for entry, addresses in resolved:
         for addr in addresses:
             # The listener-range refusal, applied on this side of the
@@ -704,13 +756,9 @@ def vm_filter_elements(uid: int, allow: list[str],
             if reserved:
                 where = f"{entry.host!r} resolves there — " if entry.host else ""
                 raise ValueError(f"[vm.network].allow: {where}{reserved}")
-            (v6 if addr.version == 6 else v4).append(
-                f"{uid} . {addr} . {entry.port}")
-    if v4:
-        elements[NFT_SET_ALLOW4] = v4
-    if v6:
-        elements[NFT_SET_ALLOW6] = v6
-    return elements
+            allowed.append((addr, f"{uid} . {addr} . {entry.port}"))
+    return {NFT_SET_FILTERED: [str(uid)],
+            **_split_by_family(NFT_PAIR_ALLOW, allowed)}
 
 
 NFT_SETS = (NFT_SET_FILTERED, NFT_SET_ALLOW4, NFT_SET_ALLOW6)
@@ -829,6 +877,7 @@ NFT_PROXY_TABLE = "inet workload_proxy"
 # inet workload_proxy and are declared in workload-proxy.nft.
 NFT_MAP_INSPECT4 = "wl_inspect4"
 NFT_MAP_INSPECT6 = "wl_inspect6"
+NFT_PAIR_INSPECT_MAP = FamilyPair(NFT_MAP_INSPECT4, NFT_MAP_INSPECT6)
 NFT_SET_INSPECT_CG = "wl_inspect_cg"
 
 def vm_allowed_hosts(net: dict) -> list[str]:
@@ -1356,17 +1405,10 @@ def vm_inspect_map_elements(uid: int) -> dict[str, list[str]]:
     literal appears in it. The advertised address that once did is gone with the
     broker redirect that was its last consumer.
     """
-    addr = vm_inspect_address(uid)
-    return {
-        NFT_MAP_INSPECT4: [
-            f"{uid} . {VM_INSPECT_ORIG_CLEARTEXT} : {addr.v4} . {VM_INSPECT_PORT_CLEARTEXT}",
-            f"{uid} . {VM_INSPECT_ORIG_TLS} : {addr.v4} . {VM_INSPECT_PORT_TLS}",
-        ],
-        NFT_MAP_INSPECT6: [
-            f"{uid} . {VM_INSPECT_ORIG_CLEARTEXT} : {addr.v6} . {VM_INSPECT_PORT_CLEARTEXT}",
-            f"{uid} . {VM_INSPECT_ORIG_TLS} : {addr.v6} . {VM_INSPECT_PORT_TLS}",
-        ],
-    }
+    return _both_families(NFT_PAIR_INSPECT_MAP, vm_inspect_address(uid), lambda a: [
+        f"{uid} . {VM_INSPECT_ORIG_CLEARTEXT} : {a} . {VM_INSPECT_PORT_CLEARTEXT}",
+        f"{uid} . {VM_INSPECT_ORIG_TLS} : {a} . {VM_INSPECT_PORT_TLS}",
+    ])
 
 
 def vm_inspect_dst_elements(uid: int) -> dict[str, list[str]]:
@@ -1377,17 +1419,10 @@ def vm_inspect_dst_elements(uid: int) -> dict[str, list[str]]:
     match nothing (measured; §7.2) and the redirected connection would fall
     through to the default drop.
     """
-    addr = vm_inspect_address(uid)
-    return {
-        NFT_SET_INSPECT_DST: [
-            f"{uid} . {addr.v4} . {VM_INSPECT_PORT_CLEARTEXT}",
-            f"{uid} . {addr.v4} . {VM_INSPECT_PORT_TLS}",
-        ],
-        NFT_SET_INSPECT_DST6: [
-            f"{uid} . {addr.v6} . {VM_INSPECT_PORT_CLEARTEXT}",
-            f"{uid} . {addr.v6} . {VM_INSPECT_PORT_TLS}",
-        ],
-    }
+    return _both_families(NFT_PAIR_INSPECT_DST, vm_inspect_address(uid), lambda a: [
+        f"{uid} . {a} . {VM_INSPECT_PORT_CLEARTEXT}",
+        f"{uid} . {a} . {VM_INSPECT_PORT_TLS}",
+    ])
 
 
 def vm_inspect_self_elements(uid: int) -> dict[str, list[str]]:
@@ -1399,11 +1434,8 @@ def vm_inspect_self_elements(uid: int) -> dict[str, list[str]]:
     workload and is armed here, and it is what gives the guard's counter its
     per-workload attribution.
     """
-    addr = vm_inspect_address(uid)
-    return {
-        NFT_SET_INSPECT_SELF: [f"{uid} . {addr.v4}"],
-        NFT_SET_INSPECT_SELF6: [f"{uid} . {addr.v6}"],
-    }
+    return _both_families(NFT_PAIR_INSPECT_SELF, vm_inspect_address(uid),
+                          lambda a: [f"{uid} . {a}"])
 
 
 def vm_inspect_live_elements(uid: int) -> dict[str, list[str]]:
@@ -1421,11 +1453,8 @@ def vm_inspect_live_elements(uid: int) -> dict[str, list[str]]:
     guard's job includes dials to ports nothing serves, and naming 8080/8443
     would let a cross-workload caller walk in on any other port.
     """
-    addr = vm_inspect_address(uid)
-    return {
-        NFT_SET_INSPECT_LIVE: [str(addr.v4)],
-        NFT_SET_INSPECT_LIVE6: [str(addr.v6)],
-    }
+    return _both_families(NFT_PAIR_INSPECT_LIVE, vm_inspect_address(uid),
+                          lambda a: [str(a)])
 
 
 def vm_inspect_element_commands(uid: int, action: str) -> list[list[str]]:
@@ -1504,19 +1533,13 @@ def vm_internal_ok_elements(
     Returns only non-empty sets, like vm_filter_elements, so a caller emits one
     command per family that has entries.
     """
-    v4: list[str] = []
-    v6: list[str] = []
+    exempt = []
     for addr in addresses:
         reserved = vm_internal_reserved_reason(addr)
         if reserved:
             raise ValueError(f"[vm.network].internal: {reserved}")
-        (v6 if addr.version == 6 else v4).append(f"{uid} . {addr}")
-    elements: dict[str, list[str]] = {}
-    if v4:
-        elements[NFT_SET_INTERNAL_OK4] = v4
-    if v6:
-        elements[NFT_SET_INTERNAL_OK6] = v6
-    return elements
+        exempt.append((addr, f"{uid} . {addr}"))
+    return _split_by_family(NFT_PAIR_INTERNAL_OK, exempt)
 
 
 def vm_internal_ok_commands(
@@ -1535,7 +1558,7 @@ def vm_internal_ok_commands(
 def vm_internal_ok_list_commands() -> list[list[str]]:
     """argv lists that dump each `internal` exemption set as JSON, v4 then v6."""
     return [[NFT_BIN, "-j", "list", "set", *NFT_TABLE.split(), set_name]
-            for set_name in (NFT_SET_INTERNAL_OK4, NFT_SET_INTERNAL_OK6)]
+            for set_name in NFT_PAIR_INTERNAL_OK]
 
 
 def vm_internal_ok_uid_elements(uid: int, payload, user_name=None) -> list[str]:
