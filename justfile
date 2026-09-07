@@ -187,33 +187,29 @@ build-base-local: sync-cosy
     -t {{local_registry}}/hypervisor-bootc:latest \
     -f hypervisor.Containerfile .
 
-build-nvidia-rpmfusion:
+# Internal: build one NVIDIA variant against the base image already in local
+# storage. The two variants differ in exactly one token -- the repo the driver
+# comes from, which is also the Containerfile's name and the image's tag -- so
+# they are one recipe with that token as its argument. `--pull=never` is what
+# makes the base a *local* build artefact rather than whatever the registry
+# happens to hold.
+_build-nvidia variant:
   http_proxy={{proxy}} https_proxy={{proxy}} \
   podman build \
     --pull=never \
     --env=http_proxy={{proxy}} --env=https_proxy={{proxy}} \
     --build-arg BASE=localhost/hypervisor-bootc:{{fedora_version}} \
-    -t localhost/hypervisor-nvidia:rpmfusion-{{fedora_version}}-{{tag}} \
-    -t localhost/hypervisor-nvidia:rpmfusion-{{fedora_version}} \
-    -t localhost/hypervisor-nvidia:rpmfusion \
-    -t ghcr.io/bensmith/hypervisor-nvidia:rpmfusion-{{fedora_version}}-{{tag}} \
-    -t ghcr.io/bensmith/hypervisor-nvidia:rpmfusion \
-    -t {{local_registry}}/hypervisor-nvidia:rpmfusion \
-    -f hypervisor-nvidia-rpmfusion.Containerfile .
+    -t localhost/hypervisor-nvidia:{{variant}}-{{fedora_version}}-{{tag}} \
+    -t localhost/hypervisor-nvidia:{{variant}}-{{fedora_version}} \
+    -t localhost/hypervisor-nvidia:{{variant}} \
+    -t ghcr.io/bensmith/hypervisor-nvidia:{{variant}}-{{fedora_version}}-{{tag}} \
+    -t ghcr.io/bensmith/hypervisor-nvidia:{{variant}} \
+    -t {{local_registry}}/hypervisor-nvidia:{{variant}} \
+    -f hypervisor-nvidia-{{variant}}.Containerfile .
 
-build-nvidia-negativo17:
-  http_proxy={{proxy}} https_proxy={{proxy}} \
-  podman build \
-    --pull=never \
-    --env=http_proxy={{proxy}} --env=https_proxy={{proxy}} \
-    --build-arg BASE=localhost/hypervisor-bootc:{{fedora_version}} \
-    -t localhost/hypervisor-nvidia:negativo17-{{fedora_version}}-{{tag}} \
-    -t localhost/hypervisor-nvidia:negativo17-{{fedora_version}} \
-    -t localhost/hypervisor-nvidia:negativo17 \
-    -t ghcr.io/bensmith/hypervisor-nvidia:negativo17-{{fedora_version}}-{{tag}} \
-    -t ghcr.io/bensmith/hypervisor-nvidia:negativo17 \
-    -t {{local_registry}}/hypervisor-nvidia:negativo17 \
-    -f hypervisor-nvidia-negativo17.Containerfile .
+build-nvidia-rpmfusion: (_build-nvidia "rpmfusion")
+
+build-nvidia-negativo17: (_build-nvidia "negativo17")
 
 build-amd:
   http_proxy={{proxy}} https_proxy={{proxy}} \
@@ -239,25 +235,22 @@ build-amd-local:
     -t {{local_registry}}/hypervisor-amd:latest \
     -f hypervisor-amd.Containerfile .
 
-build-nvidia-rpmfusion-local: build-base-local
+# Internal: the local counterpart of _build-nvidia. No registry tags, because
+# nothing local is pushed, and `--from` rather than `--build-arg BASE` so the
+# Containerfile's own default is overridden without a pull.
+_build-nvidia-local variant:
   http_proxy={{proxy}} https_proxy={{proxy}} \
   podman build \
     --network=host \
     --from localhost/hypervisor-bootc:{{fedora_version}} \
     --env=http_proxy={{proxy}} --env=https_proxy={{proxy}} \
-    -t localhost/hypervisor-nvidia:rpmfusion-{{fedora_version}} \
-    -t localhost/hypervisor-nvidia:rpmfusion \
-    -f hypervisor-nvidia-rpmfusion.Containerfile .
+    -t localhost/hypervisor-nvidia:{{variant}}-{{fedora_version}} \
+    -t localhost/hypervisor-nvidia:{{variant}} \
+    -f hypervisor-nvidia-{{variant}}.Containerfile .
 
-build-nvidia-negativo17-local: build-base-local
-  http_proxy={{proxy}} https_proxy={{proxy}} \
-  podman build \
-    --network=host \
-    --from localhost/hypervisor-bootc:{{fedora_version}} \
-    --env=http_proxy={{proxy}} --env=https_proxy={{proxy}} \
-    -t localhost/hypervisor-nvidia:negativo17-{{fedora_version}} \
-    -t localhost/hypervisor-nvidia:negativo17 \
-    -f hypervisor-nvidia-negativo17.Containerfile .
+build-nvidia-rpmfusion-local: build-base-local (_build-nvidia-local "rpmfusion")
+
+build-nvidia-negativo17-local: build-base-local (_build-nvidia-local "negativo17")
 
 build-all: build-base build-nvidia-rpmfusion build-nvidia-negativo17 build-amd
 build-all-local: build-base-local build-amd-local build-nvidia-rpmfusion-local build-nvidia-negativo17-local
@@ -282,8 +275,12 @@ push-all:
 
 # === Disk image builds (ISO / qcow2) ========================================
 
-# Internal: build an anaconda ISO from a bootc image
-_build-iso image subdir label iso_name rootfs:
+# Internal: one bootc-image-builder run. The two callers differ in the output
+# type, which config.toml they mount and where the output lands; the rest --
+# the privileged run, the four bind mounts, the shared store/rpmmd caches
+# (which are what make a second build fast) and the --chown back to the
+# invoking user -- is one invocation that used to be written twice.
+_bib image type config subdir rootfs:
   #!/usr/bin/env bash
   set -euo pipefail
   mkdir -p {{build_dir}}/store {{build_dir}}/output/{{subdir}} {{build_dir}}/rpmmd
@@ -292,7 +289,7 @@ _build-iso image subdir label iso_name rootfs:
   sudo podman run \
     --privileged --pull=newer --rm \
     --security-opt label=type:unconfined_t \
-    -v $(pwd)/config-iso.toml:/config.toml:ro \
+    -v $(pwd)/{{config}}:/config.toml:ro \
     -v {{build_dir}}/output/{{subdir}}:/output \
     -v {{build_dir}}/rpmmd:/rpmmd \
     -v {{build_dir}}/store:/store \
@@ -303,8 +300,14 @@ _build-iso image subdir label iso_name rootfs:
       --rootfs {{rootfs}} \
       --rpmmd /rpmmd \
       --store /store \
-      --type anaconda-iso \
+      --type {{type}} \
     {{image}}
+
+# Internal: build an anaconda ISO from a bootc image
+_build-iso image subdir label iso_name rootfs:
+  #!/usr/bin/env bash
+  set -euo pipefail
+  just _bib {{image}} anaconda-iso config-iso.toml {{subdir}} {{rootfs}}
   echo "Relabeling ISO..."
   just relabel-iso \
     {{build_dir}}/output/{{subdir}}/bootiso/install.iso \
@@ -403,25 +406,9 @@ _generate-vm-config:
 _build-qcow2 image rootfs size="": _generate-vm-config
   #!/usr/bin/env bash
   set -euo pipefail
-  mkdir -p {{build_dir}}/store {{build_dir}}/output/qcow2 {{build_dir}}/rpmmd
-  echo "Pulling image..."
-  sudo podman pull {{image}}
-  sudo podman run \
-    --privileged --pull=newer --rm \
-    --security-opt label=type:unconfined_t \
-    -v $(pwd)/config.toml:/config.toml:ro \
-    -v {{build_dir}}/output/qcow2:/output \
-    -v {{build_dir}}/rpmmd:/rpmmd \
-    -v {{build_dir}}/store:/store \
-    -v /var/lib/containers/storage:/var/lib/containers/storage \
-    quay.io/centos-bootc/bootc-image-builder:latest build \
-      --chown $(id -u):$(id -g) \
-      --output /output \
-      --rootfs {{rootfs}} \
-      --rpmmd /rpmmd \
-      --store /store \
-      --type qcow2 \
-    {{image}}
+  # config.toml, not config-iso.toml: _generate-vm-config wrote it just above,
+  # and it carries the VM user/ssh key the ISO's installer prompts for instead.
+  just _bib {{image}} qcow2 config.toml qcow2 {{rootfs}}
   if [ -n "{{size}}" ]; then
     echo "Resizing disk to {{size}}..."
     qemu-img resize {{build_dir}}/output/qcow2/qcow2/disk.qcow2 {{size}}
