@@ -51,8 +51,26 @@ def script_env(**overrides):
     """A copy of os.environ with PYTHONPATH set, for running a script as a subprocess.
 
     Overrides are stringified, so callers can pass Paths and ints directly.
+
+    NO_COLOR is forced on, and it is not cosmetic. Python 3.14's argparse
+    colourises its own help, and it decides that from the ENVIRONMENT
+    (FORCE_COLOR) as well as from isatty -- so a developer or runner with
+    FORCE_COLOR set gets ANSI escapes on a captured pipe, where every earlier
+    Python emitted plain text. A test that reads a line out of `--help` then
+    sees a line beginning with an escape sequence rather than the verb, and
+    fails somewhere unrelated to what it was checking. That is what happened to
+    test_cli_docs's `egress` check the first time this suite ran in an
+    environment with FORCE_COLOR=3.
+
+    Set centrally rather than per test because the property wanted is not
+    "this test does not want colour" but "our scripts' output is parsed by
+    machine here", which is true of every caller. NO_COLOR wins over
+    FORCE_COLOR in CPython's resolution, so this holds regardless of what the
+    ambient environment asked for, and an override still wins over both for a
+    test that genuinely wants to see colour.
     """
     env = os.environ.copy()
     env["PYTHONPATH"] = LIB_DIR
+    env["NO_COLOR"] = "1"
     env.update({key: str(value) for key, value in overrides.items()})
     return env
