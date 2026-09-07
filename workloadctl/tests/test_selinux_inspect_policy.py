@@ -52,7 +52,7 @@ class TestFilecon(unittest.TestCase):
             self.assertNotIn("(", path)
 
     def test_the_entrypoint_filecon_is_the_installed_listener(self):
-        """The drift guard. The module and lib/vm.py each name this path, and
+        """The drift guard. The module and lib/vm_addr.py each name this path, and
         a disagreement looks exactly like the domain not being applied."""
         self.assertIn(VM_INSPECT_LISTENER_BIN, _filecons())
 

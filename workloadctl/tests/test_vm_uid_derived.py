@@ -36,11 +36,17 @@ name them -- tests/test_vm_egress.py and the manual rigs hold that. This is the
 arithmetic and the reservation only.
 """
 
+import ast
+import importlib
 import ipaddress
 import unittest
+from pathlib import Path
 
 import vm
+import vm_addr
 from vm import UID_MAX, UID_MIN, UidDerived, VM_RESERVED_RANGES, VM_UID_DERIVED
+
+LIB = Path(vm.__file__).resolve().parent
 
 SPAN = UID_MAX - UID_MIN
 
@@ -71,12 +77,57 @@ class TestTheTableIsComplete(unittest.TestCase):
         """The rows sit beside the constants they derive from, so the tuple is
         assembled by hand and a row can be written and never joined to it.
         A row outside the table derives fine and is reserved by nothing.
+
+        Swept over EVERY lib module, not over vm. This test read `vars(vm)`
+        while the rows lived in vm.py, and the moment they moved to vm_addr.py
+        it passed over an orphan row -- vars() sees what a module imported, so
+        a row defined in the new module and re-exported from neither the table
+        nor vm was invisible to it. Measured, not reasoned: a deliberate
+        orphan was added to vm_addr.py and this class stayed green.
         """
-        defined = {v for v in vars(vm).values() if isinstance(v, UidDerived)}
-        self.assertEqual(defined, set(VM_UID_DERIVED),
-                         "UidDerived(s) defined in lib/vm.py but absent from "
-                         "VM_UID_DERIVED: "
-                         f"{sorted(p.noun for p in defined - set(VM_UID_DERIVED))}")
+        defined = {}
+        for path in sorted(LIB.glob("*.py")):
+            if path.stem == "_version":
+                continue
+            module = importlib.import_module(path.stem)
+            for name, value in vars(module).items():
+                if isinstance(value, UidDerived):
+                    defined.setdefault(value, f"{path.name}:{name}")
+        orphans = sorted(where for row, where in defined.items()
+                         if row not in VM_UID_DERIVED)
+        self.assertEqual(orphans, [],
+                         f"UidDerived(s) defined in lib/ but absent from "
+                         f"VM_UID_DERIVED: {orphans}")
+
+    def test_the_sweep_reaches_more_than_one_module(self):
+        """Guards the guard above, whose whole failure was reading one module.
+
+        An import that raised, or a glob that stopped matching, would make it
+        pass over nothing -- and a green run over zero modules looks exactly
+        like a green run over all of them.
+        """
+        modules = [p.stem for p in LIB.glob("*.py")]
+        self.assertIn("vm", modules)
+        self.assertIn("vm_addr", modules)
+        self.assertGreater(len(modules), 30, modules)
+
+    def test_the_rows_are_defined_where_the_table_is_assembled_from(self):
+        """Every row is defined in vm_addr.py, and none in vm.py.
+
+        Not a style rule. vm re-exports them, so `vm.VM_UID_MGMT` resolves
+        either way and no import would break -- what breaks is the reader's
+        one place to look, and this file's first version proved that a row
+        outside the reader's one place is a row outside the table too.
+        """
+        source = ast.parse((LIB / "vm_addr.py").read_text())
+        assigned = {t.id for n in ast.walk(source)
+                    if isinstance(n, ast.Assign)
+                    for t in n.targets if isinstance(t, ast.Name)}
+        for row in VM_UID_DERIVED:
+            with self.subTest(row=row.noun):
+                names = [n for n in assigned
+                         if getattr(vm_addr, n, None) is row]
+                self.assertTrue(names, f"{row.noun} is not defined in vm_addr.py")
 
     def test_every_row_has_a_distinct_noun(self):
         """The noun is the whole of the out-of-range message, so two rows

@@ -26,8 +26,16 @@ re-exporting the moved names from the original -- the pattern 582948a
 established for vm_normalise_hostname -- is exactly the shape that produces a
 cycle, because the new module needs something from the old one and the old one
 now imports the new.
+
+The second class below holds the OTHER half of that pattern. A split keeps
+every caller working by re-exporting the moved names, and the re-export is a
+hand-written list: a name left out of it disappears from the original module's
+surface, and nothing in the suite notices. Measured, not reasoned -- dropping
+VM_UID_MGMT from vm.py's re-export passed all 4,867 tests, and would have
+failed on a host at the first entrypoint importing it by name.
 """
 
+import importlib
 import subprocess
 import sys
 import unittest
@@ -35,6 +43,13 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 LIB = REPO_ROOT / "lib"
+
+# module that was split -> the modules split out of it. The contract is that
+# the original still answers for every public name in each of them, because
+# that is the promise the split made to callers it did not touch.
+RE_EXPORTS = {
+    "vm": ("vm_addr",),
+}
 
 
 def _lib_modules():
@@ -61,6 +76,50 @@ class TestEveryLibModuleImportsAlone(unittest.TestCase):
                 last = result.stderr.strip().splitlines()[-1:] or ["(no output)"]
                 failures.append(f"{name}: {last[0]}")
         self.assertEqual(failures, [], "\n".join(failures))
+
+
+class TestASplitModuleStillAnswersForItsParts(unittest.TestCase):
+    """Every public name in a split-out module is reachable from the original.
+
+    Not a style preference. The split's whole claim is that no caller changed,
+    and there are fifteen extensionless entrypoints plus fifty-odd lib modules
+    importing names from vm by name; a name missing from the re-export fails
+    exactly one of them, at import, on a host.
+    """
+
+    def test_the_table_names_modules_that_exist(self):
+        """Guards the guard: a renamed module turns every check below into
+        zero assertions rather than a failure."""
+        for original, parts in RE_EXPORTS.items():
+            self.assertTrue((LIB / f"{original}.py").exists(), original)
+            for part in parts:
+                self.assertTrue((LIB / f"{part}.py").exists(), part)
+
+    def test_every_public_name_is_re_exported(self):
+        for original, parts in RE_EXPORTS.items():
+            parent = importlib.import_module(original)
+            for part in parts:
+                module = importlib.import_module(part)
+                public = sorted(
+                    name for name, value in vars(module).items()
+                    if not name.startswith("__")
+                    and getattr(value, "__module__", part) == part)
+                missing = [n for n in public if not hasattr(parent, n)]
+                with self.subTest(original=original, part=part):
+                    self.assertEqual(
+                        missing, [],
+                        f"{part} defines these and {original} does not "
+                        f"re-export them: {missing}")
+
+    def test_the_sweep_finds_names_to_check(self):
+        """The other half of the guard, on the FILTER rather than the table:
+        a `__module__` test that stopped matching would sweep zero names."""
+        module = importlib.import_module("vm_addr")
+        public = [n for n, v in vars(module).items()
+                  if not n.startswith("__")
+                  and getattr(v, "__module__", "vm_addr") == "vm_addr"]
+        self.assertGreater(len(public), 20, public)
+        self.assertIn("VM_UID_MGMT", public)
 
 
 if __name__ == "__main__":
