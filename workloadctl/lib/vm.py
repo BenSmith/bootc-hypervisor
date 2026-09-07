@@ -143,16 +143,9 @@ VM_INSPECT_PORT_TLS = 8443
 # never appear in an element value, which is why the constants live beside the
 # listener ports they select.
 #
-# Until rung 2 these two numbers had a rival: tinyproxy's ConnectPort directive
-# also named 443, and the two were deliberately NOT aliased so the redirect's
-# key could not be changed by editing a policy directive of the service it was
-# built to replace. That service is gone and these are now the only 80 and 443
-# in the design; the note survives because the reason a constant was not shared
-# is otherwise invisible once one of the two sharers is deleted.
-# Defined in workload_lib (the container half of the design redirects the same
-# two ports and used to restate them as literals); re-exported here because
-# every reader -- the listener, cmd_diagnose, the tests -- reaches them as
-# `vm.VM_INSPECT_ORIG_*`.
+# Defined in workload_lib, because the container half of the design redirects
+# the same two ports; re-exported here because every reader -- the listener,
+# cmd_diagnose, the tests -- reaches them as `vm.VM_INSPECT_ORIG_*`.
 VM_INSPECT_ORIG_CLEARTEXT = INSPECT_ORIG_CLEARTEXT
 VM_INSPECT_ORIG_TLS = INSPECT_ORIG_TLS
 
@@ -477,8 +470,9 @@ VM_EGRESS_DEFAULT = "filtered"
 VM_TLS_MODES = ("splice", "inspect")
 VM_TLS_DEFAULT = "inspect"
 
-# Modes named but not built, mapped to when they arrive. Empty since rung 3 T5
-# emptied it, and KEPT: the refusal it drives says WHEN a mode lands instead of
+# Modes named but not built, mapped to when they arrive. Empty today, and KEPT
+# empty rather than deleted: the refusal it drives says WHEN a mode lands
+# instead of
 # listing valid values, which is the difference between "you asked for a
 # property that is coming" and "you made a typo". A future mode belongs here
 # from the moment it is written down, not from the moment it works, because a
@@ -553,13 +547,13 @@ NFT_SET_INSPECT_SELF6 = "wl_inspect_self6"
 # the host, one plain address per armed workload and no uid. Armed alongside
 # the four above, by the same helper, for the same reason.
 #
-# WHY A SET AND NOT THE /16. The guard used to name 198.18.0.0/16 outright,
-# which made a workload-scoped tool drop every non-root packet on the host
-# bound for a /16 workloadctl does not own — an operator using that range for
-# anything of their own lost it, whether or not they run workloads. Bounding
-# the guard to the addresses workloadctl ITSELF allocated removes that
-# entirely, and gives back the property the /16 form cost: the drop is guarded
-# on set membership, so an abandoned table holds an empty set and is inert.
+# WHY A SET AND NOT THE /16. Naming 198.18.0.0/16 outright would make a
+# workload-scoped tool drop every non-root packet on the host bound for a /16
+# workloadctl does not own -- an operator using that range for anything of
+# their own would lose it whether or not they run workloads. Bounded to the
+# addresses workloadctl ITSELF allocated, the guard reaches exactly as far as
+# workloadctl's own listeners, and the drop stays guarded on set membership:
+# an abandoned table holds an empty set and is inert.
 NFT_SET_INSPECT_LIVE = "wl_inspect_live"
 NFT_SET_INSPECT_LIVE6 = "wl_inspect_live6"
 NFT_SKELETON = "/usr/share/workloadctl/workload-filter.nft"
@@ -620,41 +614,29 @@ NFT_SETS = (NFT_SET_FILTERED, NFT_SET_ALLOW4, NFT_SET_ALLOW6)
 
 # --- Hostname policy: what the guest is told, and what enforces it ---
 #
-# Kernel rules match addresses; policy is written about names. Through rung 1
-# the resolution was an HTTP forward proxy: one tinyproxy per workload reading
-# `CONNECT host:443` in plaintext and allowlisting the hostname directly, with
-# the guest configured to use it through HTTPS_PROXY. That proxy is gone. Its
-# weakness was never the filtering, it was the configuring: a proxy is advisory,
-# so a guest process that ignores the variables simply does not use it, and the
-# default-deny chain could only turn that into a failure — never into a
-# filtered request. Every language runtime, every static binary and every
-# vendored HTTP client was one more place the variables had to be honoured.
+# Kernel rules match addresses; policy is written about names, and the
+# resolution is transparent interception rather than a proxy.
 #
-# What replaced it is transparent: the guest is told nothing, dials 80 and 443
-# normally, and a uid-keyed DNAT lands it on this workload's own inspector,
-# which reads the Host header or the SNI and applies the same `hosts` patterns.
-# The guest's cooperation is no longer part of the enforcement path.
+# A PROXY IS ADVISORY. A guest process that ignores HTTPS_PROXY simply does not
+# use it, and a default-deny chain can only turn that into a failure — never
+# into a filtered request; every language runtime, every static binary and
+# every vendored HTTP client is one more place the variables would have to be
+# honoured. So the guest is told nothing, dials 80 and 443 normally, and a
+# uid-keyed DNAT lands it on this workload's own inspector, which reads the
+# Host header or the SNI and applies the `hosts` patterns. The guest's
+# cooperation is not part of the enforcement path.
 #
-# THE ADVERTISED ADDRESS DID NOT SURVIVE. Through rung 5 this paragraph said it
-# outlived the proxy -- "still the address every guest is told to use, now for
-# the credential broker alone" -- and rung 6 deleted that last consumer. ADR 007
-# decision 6 gave every workload its own broker instance on a uid-derived
-# loopback address that the GUEST is never told, so there is nothing left for a
-# shared advertised endpoint to reach and 192.0.2.1 is no longer put on the
-# link.
+# There is no advertised endpoint. Every workload's broker is on a uid-derived
+# loopback address the guest is never told (ADR 007 decision 6), so nothing
+# needs one; the dummy link carries each filtered workload's own
+# 198.18.x.y/32 and 2001:2::/128 inspector addresses and that is its whole job.
 #
-# The dummy link itself stays. It carries each filtered workload's own
-# 198.18.x.y/32 and 2001:2::/128 inspector addresses, which is now its whole
-# job; only the address half of ensure_advertised_interface went.
-#
-# The consequence is one range moving in the other direction: 192.0.2.0/24 was
-# excluded from the internal drop BECAUSE the advertised address lived there,
-# and with no consumer TEST-NET-1 becomes exactly what that drop exists to
-# refuse -- a documentation range no guest can legitimately want. It is in
-# VM_INTERNAL_PREFIXES4 and in the skeleton now, both, because that list is also
-# what decides whether an operator may write a [[vm.network.internal]] exemption
-# (_internal_refusal): armed on one side only, a site that genuinely routes
-# TEST-NET-1 internally would be refused with no writable escape hatch.
+# 192.0.2.0/24 is therefore an ordinary internal-drop range: a documentation
+# range no guest can legitimately want. It must be in VM_INTERNAL_PREFIXES4
+# AND in the skeleton, because that list is also what decides whether an
+# operator may write a [[vm.network.internal]] exemption (_internal_refusal).
+# Armed on one side only, a site that genuinely routes TEST-NET-1 internally
+# would be refused with no writable escape hatch.
 
 # What [vm.cloud_init].seed_provides may name — the concerns a custom seed can
 # declare it handles itself, suppressing the matching completeness check in
@@ -717,12 +699,10 @@ VM_ADVERTISED_IFACE = "workload-proxy"
 # forge it, and it widens no destination or port, so a guest that dials 443
 # past the inspector is still dropped.
 #
-# Named wl_egress_cg, not wl_proxy_cg. Through rung 1 its one member was the
-# per-workload tinyproxy and the name was accurate; rung 2 deleted that service
-# and left the set holding a member that is not a proxy at all -- the egress
-# inspector, and only it. The synthesising responder is not a second member:
-# it answers from memory and opens no socket, so there is no vm_resolve_cgroup
-# and nothing arms one. Its twin in the nat table, wl_inspect_cg, exempts the
+# ONE MEMBER: the egress inspector. The synthesising responder is not a second
+# one -- it answers from memory and opens no socket, so there is no
+# vm_resolve_cgroup and nothing arms one. Its twin in the nat table,
+# wl_inspect_cg, exempts the
 # same process from the REDIRECT; this one exempts it from the DROP. A process
 # needs both or it either reaches nothing or loops into the listener it is
 # dialling past.
@@ -859,10 +839,10 @@ VM_INSPECT_LOG_REQ_FIELD = "req"
 # `credential` is the NAME of the credstore material the request was brokered
 # with, or null on a request that was not brokered -- never the material, and
 # never an address. It is here because `upstream` is honestly the broker's
-# address on a brokered request (rung 6 decision 6): `upstream` is documented
-# as the address actually dialled, and recording the origin there instead would
-# put a second, false definition of "what this request touched" in the one
-# document rung 5 built to be evidence. What makes the honest value readable is
+# address on a brokered request: `upstream` is documented as the address
+# actually dialled, and recording the origin there instead would put a second,
+# false definition of "what this request touched" into the one document that
+# exists to be evidence. What makes the honest value readable is
 # this field naming which credential rode along, so `host` says where the
 # request went and `credential` says why `upstream` is a loopback address.
 VM_INSPECT_RECORD_FIELDS = (
@@ -924,14 +904,13 @@ VM_DROP_THROTTLED = "mint rationed"
 VM_DROP_MINT_FAILED = "could not mint a leaf"
 VM_DROP_NOT_H2 = "not HTTP/2"
 VM_DROP_NOT_PERMITTED = "not permitted by policy"
-# NOT VM_DROP_UNREACHABLE, and the split is rung 6 decision 5. "the provider is
-# down" and "this workload's credential broker is down" need different operator
-# responses -- the first is somebody else's outage, the second is a unit on this
-# host that failed to start, or an SELinux rule missing from
-# security/workload-inspect.cil, which is the failure that module's own
-# "THE UPSTREAM DIAL" block records as "a policy gap wearing a network error's
-# clothes". Merged into the generic reason, this rung's AVC would be
-# indistinguishable from a provider outage in exactly that way, and
+# NOT VM_DROP_UNREACHABLE. "the provider is down" and "this workload's
+# credential broker is down" need different operator responses -- the first is
+# somebody else's outage, the second is a unit on this host that failed to
+# start, or an SELinux rule missing from security/workload-inspect.cil, which
+# is the failure that module's own "THE UPSTREAM DIAL" block records as "a
+# policy gap wearing a network error's clothes". Merged into the generic
+# reason, such an AVC is indistinguishable from a provider outage, and
 # `workloadctl egress --reason` -- which validates against this closed set --
 # would have no filter that selects it.
 VM_DROP_BROKER_UNREACHABLE = "credential broker unreachable"
@@ -1062,10 +1041,7 @@ VM_INSPECT_RECORD_SELINUX_TYPE = "wlinspect_log_t"
 def vm_inspect_policy(net: dict) -> dict:
     """The inspector's policy document for one workload.
 
-    `hosts` is `[vm.network].hosts` unchanged. The key kept its name and its
-    meaning across rung 2 deliberately: an operator's allowlist means what it
-    meant when a proxy read it, and the only thing that changed is which
-    process reads it and whether the guest has to cooperate for it to apply.
+    `hosts` is `[vm.network].hosts` unchanged.
 
     `internal` is carried and AUTHORISES NOTHING. An `internal` entry names a
     host that is already on a list (validation refuses one that is not), and it
@@ -1819,8 +1795,8 @@ VM_DENIAL_DIR_NAME = "leaves-denied"
 #
 # `wlinspect_t` is a separate domain from `svirt_t` so that the component
 # terminating guest input cannot reach the workload's disks, volumes or state
-# directory. Rung 3 gives the inspector a reason to read a private key and
-# write a cache, and both live in that state directory beside the disk images.
+# directory. The inspector reads a private key and writes a leaf cache, and
+# both live in that state directory beside the disk images.
 # Granting the domain `svirt_image_t` would be one rule shorter, would work,
 # and would hand the inspector the guest's disks — so the material moves
 # instead: three directories with labels of their own, and the domain is
@@ -1947,27 +1923,15 @@ def vm_ca_openssl_argv(name: str, key_path, cert_path, *, now: float) -> list[st
 
 
 # Whether there is a bundle at VM_CA_BUNDLE_PATH for those variables to name.
-# TRUE SINCE RUNG 3 T3, which is the commit that mints the CA into the seed.
-# The paragraphs below are kept as written rather than trimmed: they are the
-# reason this flag exists at all, and they are the argument against anyone
-# splitting the three changes it binds together back apart.
 #
 # THIS IS NOT CAUTION, IT IS THE DIFFERENCE BETWEEN WORKING AND BROKEN. Every
 # one of those five variables REPLACES the runtime's default trust store rather
 # than adding to it, and every one of them fails closed when the file it names
 # does not exist: OpenSSL's SSL_CERT_FILE pointing at a missing path makes
 # loading the default verify paths fail outright, and requests, git and pip
-# raise on the open. Writing the block one rung early would take TLS
-# verification down inside every filtered guest, for a certificate nothing is
-# presenting yet -- a total outage in exchange for avoiding one seed migration.
-#
-# So the SEAM moves at rung 2 and the CONTENT at rung 3: the function, its call
-# site, the variable names and the guest path are all settled and tested here,
-# and rung 3 changes one boolean and adds the write_files entry. The cost is the
-# one the flag is paying for: a workload with no broker loses its guest
-# environment block at rung 2 and regains it at rung 3, which is a seed
-# migration for those workloads. A guest that cannot verify certificates is
-# worse than a guest re-seeded twice.
+# raise on the open. So the block must never be written for a certificate
+# nothing is presenting yet: that is a total outage inside every filtered
+# guest, not a degraded mode.
 #
 # THREE THINGS MOVE TOGETHER OR NONE OF THEM DO: this flag, the write_files
 # entry in _render_default_user_data that puts the PEM at VM_CA_BUNDLE_PATH,
@@ -1980,28 +1944,12 @@ VM_CA_BUNDLE_AVAILABLE = True
 def vm_ca_env(config: dict) -> dict[str, str]:
     """The CA environment a filtered guest is given, or {} if it has none.
 
-    WHAT THIS REPLACED, AND WHY THE SEAM SURVIVED THE THING IN IT
+    NO PROXY VARIABLES. The redirect is transparent, so nothing a guest sets
+    can turn the filtering off or on, and http_proxy/https_proxy/no_proxy are
+    not written: a guest that still sets https_proxy to some literal of its own
+    reaches a host address where nothing listens.
 
-    Through rung 1 this call wrote http_proxy/https_proxy/no_proxy at an
-    advertised literal, and the guest's cooperation was load-bearing: a client
-    that ignored the variables did not use the proxy, and the default-deny chain
-    could only turn that into a dropped connection. Rung 2's redirect is
-    transparent, so no variable in a guest can turn the filtering off or on —
-    and none of those six variables is written any more. A guest that still sets
-    https_proxy to the old literal now reaches a host address where nothing
-    listens.
-
-    The CALL is the same call at the same point, writing the same
-    once-per-instance-id block into the same seed. That is deliberate: the seed
-    has carried a guest environment block since rung 0, and a rung that deleted
-    the block and a later rung that re-added it would be two migrations of the
-    seed contract where one will do.
-
-    THE VALUES ARE HERE, SINCE RUNG 3
-
-    They were not, for one rung: the shape and the guest path moved first so
-    that the variable names were settled before there was a certificate to put
-    at the end of them. There is one now. This workload's own CA is minted into
+    This workload's own CA is minted into
     its state directory, written into the seed at VM_CA_BUNDLE_PATH, and named
     by these five variables -- and under the default `tls = "inspect"` the guest
     NEEDS it, because the leaf the inspector presents is signed by nothing else.
@@ -2012,12 +1960,11 @@ def vm_ca_env(config: dict) -> dict[str, str]:
     who switches egress mode on a live workload gets a guest whose environment
     still describes the previous mode.
     """
-    # G15 in the container egress-parity build spec: VM-only by
-    # construction -- vm_ca_env() is a cloud-init guest-env block. The
-    # container equivalent is env injection directly into the unit (not a
-    # cloud-init seed), built alongside the container's own CA generation
-    # (P1-10). These five vars REPLACE the trust store (VM_RESERVED_GUEST_ENV,
-    # V10), so that container path must not ship before the CA exists.
+    # VM-only by construction: this is a cloud-init guest-env block. The
+    # container equivalent would be env injection directly into the unit, and
+    # it must not ship before a container CA exists -- these five variables
+    # REPLACE the trust store (VM_RESERVED_GUEST_ENV), so an empty shape is
+    # not inert, it is every TLS verification in the workload failing.
     if not vm_uses_inspect(config) or not VM_CA_BUNDLE_AVAILABLE:
         return {}
     return {var: VM_CA_BUNDLE_PATH for var in VM_CA_ENV_VARS}
@@ -2155,33 +2102,28 @@ def vm_leaf_openssl_argv(name: str, ca_key_path, ca_cert_path,
 
 # --- The credential broker endpoint ---
 #
-# There is no advertised endpoint and no host-side service any more. ADR 007
-# decision 6 replaced the one broker on 127.0.0.1:8081, reached by a uid-keyed
-# nft redirect from an advertised literal, with one INSTANCE PER WORKLOAD bound
-# to an address derived from that workload's uid -- so the constants that
-# described the old shape (the advertised port, the shared listen address, the
-# redirect table and its map, and the WORKLOAD_BROKER_URL variable a guest was
-# told) are deleted rather than retained beside the new path.
+# There is no advertised endpoint and no host-side service: ADR 007 decision 6
+# gives every workload ONE INSTANCE OF ITS OWN, bound to an address derived
+# from that workload's uid.
 #
-# The guest is told nothing at all now, which is the point: it dials the name it
+# The guest is told nothing at all, which is the point: it dials the name it
 # always wanted, the inspector recognises the host as credential-backed and
-# sends that request to this workload's broker instead of to the origin. A guest
-# that cannot name the broker cannot choose to use it, and cannot be pointed at
-# somebody else's.
+# sends that request to this workload's broker instead of to the origin. A
+# guest that cannot name the broker cannot choose to use it, and cannot be
+# pointed at somebody else's.
 
 # Base of the per-workload broker listener addresses (ADR 007). 127.129.0.0, by
 # the same offset arithmetic vm_management_address uses against 127.128.0.0 and
 # the responder uses against 127.130.0.0 -- and, like the responder, deliberately
 # inside VM_MGMT_NETWORK (127.128.0.0/9), which is why there is no ReservedPlane
 # of its own: the /9 was cut wide precisely so the planes hung on loopback after
-# the management one would inherit the reservation. `ports` already cannot bind
-# here, and the entry that used to reserve 127.0.0.1:8081 is gone with the
-# host-wide listener it named.
+# the management one would inherit the reservation, and `ports` already cannot
+# bind here.
 #
 # One address per workload is the whole of ADR 007 decision 6. A shared
-# 127.0.0.1 with one listener is what made the old broker's caller identity a
-# peer-uid lookup on a socket every workload could reach; here each instance
-# answers on an address only its own inspector is told about, so a second
+# 127.0.0.1 with one listener would make caller identity a peer-uid lookup on a
+# socket every workload can reach; here each instance answers on an address
+# only its own inspector is told about, so a second
 # workload dialling it reaches its OWN loopback and finds nothing.
 VM_BROKER_ADDR_BASE = 0x7F810000  # 127.129.0.0
 
@@ -2207,9 +2149,8 @@ def vm_broker_listen_address(uid: int) -> str:
 
 # --- The generated broker instance (ADR 007 decision 6, HLD detail 7.8) ---
 
-# The program the generated unit runs. It has shipped in this RPM since the
-# broker moved in-tree; what rung 6 changes is who starts it -- one instance per
-# workload, generated, rather than one host-wide unit an operator enables.
+# The program the generated unit runs. One instance per workload, generated;
+# there is no host-wide unit for an operator to enable.
 VM_BROKER_BIN = "/usr/libexec/workloadctl/agent-broker"
 
 # The port every instance listens on. One value for all of them is safe here and
@@ -2268,12 +2209,8 @@ def vm_uses_credentials(config: dict) -> bool:
     credential therefore has its instance unlinked rather than left behind
     holding material nothing selects.
     """
-    # G16 in the container egress-parity build spec: VM-only for now.
-    # Container credential brokering is Phase 2 (P2-1..P2-4) -- resolved as
-    # a comment here per that phase's own instruction, so this predicate is
-    # not silently extended ahead of the broker wiring it would gate. The
-    # run-file `present=` half matters just as much as the emission half
-    # (G3-shaped leak if missed) when Phase 2 lands.
+    # The VM half. container_uses_credentials below is the container one, and
+    # the two are deliberately identical: one mechanism on both substrates.
     if not vm_uses_inspect(config):
         return False
     net = (config.get("vm", {}) or {}).get("network", {}) or {}
@@ -2307,14 +2244,12 @@ def vm_broker_credential(name: str, credential: str) -> tuple[Path, str]:
 
 
 # The guest variables workloadctl seeds itself, and therefore the ones a
-# credential's `env` may not be. Derived from the two producers rather than
-# listed, so a sixth CA variable cannot leave this behind: the failure a stale
-# copy produces is a silent overwrite in the seed, not an error anywhere.
+# credential's `env` may not be. Derived from the producers rather than listed,
+# so a sixth CA variable cannot leave this behind: the failure a stale copy
+# produces is a silent overwrite in the seed, not an error anywhere.
 #
-# WORKLOAD_BROKER_URL used to be the second producer and is not reserved any
-# more, because nothing seeds it: the guest is never told a broker address (ADR
-# 007 decision 6). A credential whose `env` is WORKLOAD_BROKER_URL is now an
-# ordinary name and overwrites nothing.
+# No broker variable is reserved, because nothing seeds one -- the guest is
+# never told a broker address (ADR 007 decision 6).
 VM_RESERVED_GUEST_ENV = frozenset(VM_CA_ENV_VARS)
 
 
@@ -2371,7 +2306,7 @@ def container_uses_credentials(config: dict) -> bool:
     an uninspected container would hold decrypted provider keys for a path
     that does not exist.
 
-    Also the run-file `present=` (P2-4), so a workload that drops its last
+    Also the run-file `present=`, so a workload that drops its last
     credential has the unit unlinked rather than left behind.
     """
     if not container_uses_inspect(config):
@@ -2406,7 +2341,7 @@ def render_vm_broker_config(config: dict, uid: int) -> str:
 def render_container_broker_config(config: dict, uid: int) -> str:
     """The broker.toml for one container workload's instance.
 
-    A call site, not a second renderer (P2-1). ContainerCredential and
+    A call site, not a second renderer. ContainerCredential and
     VmCredential are field-identical by construction, and both of the defects
     the VM render was fixed for -- the per-entry duplicate table that TOML
     refuses, and the dropped auth_header/auth_format that 401s a fully
@@ -2581,13 +2516,11 @@ def vm_host_resolver_addresses(resolv_conf: str = "/etc/resolv.conf") -> list[st
 def ensure_advertised_interface(run) -> None:
     """Create the dummy link the inspector's addresses hang on, idempotently.
 
-    THE LINK ONLY. It used to add 192.0.2.1/32 as well, and rung 6 deleted that
-    half with the broker redirect that was the address's last consumer (see the
-    hostname-policy preamble above). What the link carries now is each filtered
-    workload's own inspector addresses, put on by
-    vm_inspect_link_address_commands -- so this creates the object those `ip
-    addr add`s need to exist and nothing more. The name is historical, like
-    nftables/workload-proxy.nft's.
+    THE LINK ONLY. What it carries is each filtered workload's own inspector
+    addresses, put on by vm_inspect_link_address_commands -- so this creates
+    the object those `ip addr add`s need to exist and nothing more. No address
+    of its own: there is no advertised endpoint, and the name is historical,
+    like nftables/workload-proxy.nft's.
 
     `run(argv)` is injected rather than imported so this module stays free of
     subprocess; the inspect helper passes its own. libexec entrypoints have no
@@ -2909,20 +2842,18 @@ def vm_filter_commands(uid: int, allow: list[str], action: str,
 
 # --- `allow`: the address-scoped bypass, now a table with a reason ---
 #
-# Rung 2 widens `allow` from a bare `<addr>:<port>` string into a table carrying
-# `address` and a required `reason` — the shape every other bypass in this
-# schema has (`internal` below; `splice` and `http2` from rung 4). The bare
-# string is refused rather than accepted alongside it, because premise 3 — no
-# shipped release in which a guest can still choose the old terms — means there
-# is no deployed config to migrate: a compatibility path would exist only to let
-# the two shapes drift.
+# `allow` is a table carrying `address` and a required `reason` — the shape
+# every other bypass in this schema has (`internal` below; `splice`, `http2`).
+# A bare `<addr>:<port>` string is REFUSED rather than accepted alongside it:
+# there is no deployed config to migrate, so a compatibility path would exist
+# only to let the two shapes drift.
 #
 # The target is `<addr>:<port>` (`[<v6addr>]:<port>` for IPv6) **or a name with
-# a port** (`git.local:2222`), resolved host-side once at start. Names were
-# forbidden here for a real reason — a record that moved left the element
-# silently wrong for the life of the VM — and what retires it is that the
-# guest's own resolver is now a static map we serve (the inspector design, §9),
-# so the host-side answer and the guest-side answer come from the same place.
+# a port** (`git.local:2222`), resolved host-side once at start. A name is safe
+# here only because the guest's own resolver is a static map we serve (the
+# inspector design, §9), so the host-side answer and the guest-side answer come
+# from the same place; without that, a record that moved would leave the
+# element silently wrong for the life of the VM.
 VM_ALLOW_ADDR_RE = re.compile(
     r"^(?:\[(?P<v6>[0-9a-fA-F:]+)\]|(?P<v4>\d{1,3}(?:\.\d{1,3}){3})):"
     r"(?P<port>\d+)$")
@@ -3242,11 +3173,9 @@ def vm_uses_resolve(config: dict) -> bool:
     told about it in the same breath, so a disagreement here is a guest pointed
     at a port with nothing behind it.
     """
-    # G17 in the container egress-parity build spec: resolved VM-only (D7).
-    # A container resolves through the host/podman resolver, not a
-    # per-workload nameserver, so there is no container analogue to extend
-    # this to. D7 names two properties lost without one; closing this row
-    # by comment alone is not enough -- see P1-13's disclosures.
+    # VM-only, and not an omission: a container resolves through the
+    # host/podman resolver rather than a per-workload nameserver, so there is
+    # no container analogue to extend this to.
     if not vm_uses_inspect(config):
         return False
     net = (config.get("vm", {}) or {}).get("network", {}) or {}
@@ -4084,10 +4013,9 @@ def _validate_egress(net: dict) -> list[str]:
                 f"{', '.join(repr(m) for m in VM_TLS_MODES)}, got {tls!r}")
 
     # ADR 008 decision 2: splicing is a named exemption carrying a written
-    # reason, never a default and never implicit. The per-host hatch has
-    # enforced that since rung 4; the whole-workload one did not, which left
-    # the WIDEST bypass in the schema as the only one an operator could open
-    # silently. Checked here rather than in _validate_host_reason_entries
+    # reason, never a default and never implicit. The per-host hatches enforce
+    # it; the whole-workload one did not, which left the WIDEST bypass in the
+    # schema as the only one an operator could open silently. Checked here rather than in _validate_host_reason_entries
     # because there is no host to hang it on -- the exemption is the workload.
     #
     # Ordered so a bad mode is reported alone: `tls = "splic"` is a typo, and
@@ -4500,16 +4428,13 @@ class ReservedPlane(NamedTuple):
     what: str
 
 
-# Every plane `ports` may not bind, in both families.
-#
-# Before rung 1 there was one plane and the check was a single `in
-# VM_MGMT_NETWORK` with a docstring committing to v4. Rung 1 added two listener
-# planes and one of them is v6, so `ports = ["198.18.1.4:8443:22"]` validated
-# and 2001:2::/48 was not checked at all by construction. Either produces one of
-# two outcomes with nothing logged for either: a cross-workload denial of
-# service on a security control (the inspector fails to bind, and the
+# Every plane `ports` may not bind, IN BOTH FAMILIES. A plane left out of this
+# list is not checked at all, and the omission is silent both ways: a guest
+# port published into a listener plane produces either a cross-workload denial
+# of service on a security control (the inspector fails to bind, and the
 # fail-at-bind path reports it as the address being missing), or workload B
-# receiving workload A's intercepted traffic. Start order decides which.
+# receiving workload A's intercepted traffic. Start order decides which, and
+# nothing is logged for either.
 #
 # A list, so the answer to "is this reserved" is one lookup that a new plane
 # joins rather than a chain of ifs each new plane has to remember to extend.
@@ -4549,10 +4474,8 @@ VM_RESERVED_PLANES = (
 def vm_reserved_plane(addr: str, port: int | None = None) -> ReservedPlane | None:
     """The reserved plane this bind address and port fall in, or None.
 
-    Both families. The v4-only version this replaces was correct when there was
-    one plane and it was v4; it stopped being correct the moment a v6 plane
-    existed, and it said so in a docstring rather than in a failing test —
-    which is why the planes are a list now and this reads it.
+    Both families, read off VM_RESERVED_PLANES rather than spelled out here,
+    so a plane added there is checked here without anyone remembering to.
 
     An unparseable address answers None: parse_vm_port has already rejected
     anything malformed, so there is nothing here to report.
@@ -4779,8 +4702,8 @@ def validate_vm_config(config: dict) -> list[str]:
                 for entry in sorted(set(sp) & set(SEED_PROVIDES_RETIRED)):
                     errors.append(
                         f"[vm.cloud_init].seed_provides = [{entry!r}] is no "
-                        f"longer accepted: rung 2 replaced the per-workload "
-                        f"proxy with a transparent redirect, so a guest is "
+                        f"longer accepted: the per-workload proxy was "
+                        f"replaced with a transparent redirect, so a guest is "
                         f"given no proxy environment for a seed to provide. "
                         f"Write {SEED_PROVIDES_RETIRED[entry]!r} instead if "
                         f"the seed installs and trusts the egress CA bundle "
