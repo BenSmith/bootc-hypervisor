@@ -1015,7 +1015,12 @@ class TestFilterHelper(unittest.TestCase):
                 raise subprocess.CalledProcessError(rc, argv)
             return result
 
-        patcher = mock.patch.object(self.mod.subprocess, "run", fake_run)
+        # helper_main, not self.mod: `run` and the purge that uses it moved
+        # into the shared helper modules, so the script no longer imports
+        # subprocess at all. Same interception point either way -- one module
+        # object, patched once.
+        import helper_main
+        patcher = mock.patch.object(helper_main.subprocess, "run", fake_run)
         patcher.start()
         self.addCleanup(patcher.stop)
         self._patch("workload_uid", lambda name: 10001)

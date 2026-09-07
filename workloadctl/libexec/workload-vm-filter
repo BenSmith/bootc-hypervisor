@@ -14,40 +14,26 @@ The obvious shape is to let the generator emit the nft commands directly, and
 that very nearly works: `add element` is idempotent, several elements go in one
 command, and one `nft` invocation is one atomic transaction.
 
-It breaks on allowlist *edits*. `ExecStopPost` deletes the entries named in the
-unit file as it exists at stop time, so when an operator removes an entry from
-`allow` and re-enables, the regenerated unit deletes only the entries that are
-still configured, and the dropped one stays in the set — permitting traffic the
-config no longer permits, silently, until the host reboots. Verified on
-nftables 1.1.6: arming {A, B} and then deleting {B} leaves A behind.
+It breaks on allowlist *edits*, and closing that needs an enumerate-and-delete
+that is more than an Exec line can express — see nft.purge_uid_elements, which
+`up` calls before adding the configured entries.
 
-nft has no "delete every element whose first field is this uid", so closing
-that means enumerating the sets and deleting by exact value, which is more than
-an Exec line can express. `up` therefore purges this uid from every set before
-adding the configured entries, making the armed state a function of the config
-alone rather than of the config plus every config it ever had.
-
-EXIT CODES
-
-`up` fails loudly. A VM whose config says `egress = "filtered"` and whose
-filter did not arm would run wide open while claiming confinement, which is the
-exact misreport this layer exists to prevent — better to fail the start. `down`
-is tolerant: its element is legitimately absent whenever the start failed
-before arming, or an operator used the break-glass `nft delete table`.
+EXIT CODES: `up` fails loudly, `down` is tolerant. See helper_main.run_helper,
+which holds that asymmetry for all four arming helpers.
 """
 import json
 import os
 import pwd
-import subprocess
 import sys
 
 sys.dont_write_bytecode = True
 
+from helper_main import log, run, run_helper, up_down_main
+from nft import purge_uid_elements
 from vm import (
-    NFT_BIN, NFT_SETS, NFT_SKELETON, NFT_TABLE, VM_EGRESS_DEFAULT,
-    vm_allow_resolved, vm_filter_commands, vm_filter_delete_command,
-    vm_owned_elements, vm_resolve_policy, vm_resolve_policy_path,
-    vm_resolve_status_path, vm_uses_resolve,
+    NFT_BIN, NFT_SKELETON, VM_EGRESS_DEFAULT,
+    vm_allow_resolved, vm_filter_commands, vm_resolve_policy,
+    vm_resolve_policy_path, vm_resolve_status_path, vm_uses_resolve,
 )
 from vm_status import clear_status
 from workload_lib import workload_config_path
@@ -58,18 +44,7 @@ except ModuleNotFoundError:  # pragma: no cover - 3.11+ everywhere we ship
     tomllib = None
 
 
-def log(msg):
-    print(msg, flush=True)
-
-
-def run(argv, check):
-    """Run one nft invocation. Returns the CompletedProcess."""
-    return subprocess.run(argv, capture_output=True, text=True, check=check,
-                          timeout=30)
-
-
 def workload_uid(name: str) -> int:
-    import pwd
     return pwd.getpwnam(f"_wl-{name}").pw_uid
 
 
@@ -111,39 +86,6 @@ def write_resolve_policy(name: str, net: dict, uid: int, resolved) -> str:
     return path
 
 
-def purge(uid: int) -> int:
-    """Remove every element owned by `uid` from every set. Returns the count.
-
-    Tolerant throughout: a missing table or set means there is nothing of ours
-    to remove, which is the desired end state either way.
-    """
-    removed = 0
-    for set_name in NFT_SETS:
-        listed = run([NFT_BIN, "-j", "list", "set", *NFT_TABLE.split(),
-                      set_name], check=False)
-        if listed.returncode != 0:
-            continue
-        try:
-            payload = json.loads(listed.stdout)
-        except ValueError:
-            continue
-        elems = []
-        for item in payload.get("nftables", []):
-            if "set" in item:
-                elems = item["set"].get("elem", [])
-                break
-        owned = vm_owned_elements(uid, elems)
-        if not owned:
-            continue
-        result = run(vm_filter_delete_command(set_name, owned), check=False)
-        if result.returncode == 0:
-            removed += len(owned)
-        else:
-            log(f"  WARNING: could not clear {set_name}: "
-                f"{result.stderr.strip()}")
-    return removed
-
-
 def up(name: str) -> int:
     uid = workload_uid(name)
     net = network_config(name)
@@ -154,7 +96,7 @@ def up(name: str) -> int:
     # Not tolerant: everything below depends on the table existing.
     run([NFT_BIN, "-f", NFT_SKELETON], check=True)
 
-    stale = purge(uid)
+    stale = purge_uid_elements(uid)
     if stale:
         log(f"  Cleared {stale} stale element(s) for uid {uid}")
 
@@ -193,25 +135,15 @@ def down(name: str) -> int:
     except KeyError:
         # The user is already gone (purge ordering); nothing can be armed.
         return 0
-    purge(uid)
+    purge_uid_elements(uid)
     return 0
 
 
 def main(argv):
-    if len(argv) != 3 or argv[1] not in ("up", "down"):
-        print(f"usage: {argv[0]} <up|down> <name>", file=sys.stderr)
-        return 2
-    action, name = argv[1], argv[2]
-    if action == "up":
-        return up(name)
-    return down(name)
+    return up_down_main(argv, up, down)
 
 
 if __name__ == "__main__":
-    try:
-        sys.exit(main(sys.argv))
-    except Exception as e:  # noqa: BLE001
-        # `up` must fail loudly (see module docstring); `down` must not block a
-        # stop, and systemd already tolerates its failure via the `-` prefix.
-        print(f"  ERROR: {e}", file=sys.stderr)
-        sys.exit(1 if len(sys.argv) > 1 and sys.argv[1] == "up" else 0)
+    # `up` fails loudly, `down` does not block a stop -- see
+    # helper_main.run_helper, which holds that asymmetry for all four helpers.
+    sys.exit(run_helper(main, sys.argv))

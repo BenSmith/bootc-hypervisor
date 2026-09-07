@@ -355,7 +355,7 @@ class TestHelperArmsBothTables(unittest.TestCase):
         source = (ROOT / "libexec" / "workload-vm-inspect").read_text()
         down = source[source.index("def down("):source.index("def main(")]
         self.assertIn("vm_inspect_element_commands(uid, \"delete\")", down)
-        self.assertIn("vm_inspect_link_delete_commands", down)
+        self.assertIn("remove_listener_addresses", down)
         # The shared link and the advertised address are never torn down.
         self.assertNotIn('"link", "del"', down)
         self.assertNotIn("VM_ADVERTISED_ADDR", down)

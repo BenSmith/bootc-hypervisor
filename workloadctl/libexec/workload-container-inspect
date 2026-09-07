@@ -46,23 +46,21 @@ EXIT CODES: same convention as workload-vm-inspect. `up` fails loudly, `down`
 is tolerant.
 """
 import ipaddress
-import json
 import os
 import pwd
-import subprocess
 import sys
 
 sys.dont_write_bytecode = True
 
+from helper_main import log, run, run_helper, up_down_main
+from nft import (add_listener_addresses, purge_internal_exemptions,
+                 remove_listener_addresses)
 from vm import (
     NFT_BIN, NFT_PROXY_SKELETON, NFT_SKELETON,
-    NFT_SET_INTERNAL_OK4, NFT_SET_INTERNAL_OK6,
     container_uses_credentials, ensure_advertised_interface,
     vm_broker_listen_address, vm_inspect_element_commands,
-    vm_inspect_link_address_commands, vm_inspect_link_delete_commands,
     vm_inspect_policy_path, vm_inspect_status_path,
-    vm_internal_ok_commands, vm_internal_ok_delete_commands,
-    vm_internal_ok_list_commands, vm_internal_ok_uid_elements,
+    vm_internal_ok_commands,
 )
 from vm_status import clear_status
 from workload_lib import (
@@ -74,33 +72,6 @@ try:
     import tomllib
 except ModuleNotFoundError:  # pragma: no cover - 3.11+ everywhere we ship
     tomllib = None
-
-
-def log(msg):
-    print(msg, flush=True)
-
-
-def run(argv, check=False):
-    return subprocess.run(argv, capture_output=True, text=True, check=check,
-                          timeout=30)
-
-
-def purge_internal_exemptions(uid: int, name: str) -> None:
-    """Verbatim logic from workload-vm-inspect's twin: purge by uid, read
-    back out of the kernel rather than by re-resolving the config's names.
-    See that function's docstring for why the config is not the handle."""
-    for argv, set_name in zip(vm_internal_ok_list_commands(),
-                              (NFT_SET_INTERNAL_OK4, NFT_SET_INTERNAL_OK6)):
-        result = run(argv)
-        if result.returncode != 0:
-            continue
-        try:
-            payload = json.loads(result.stdout)
-        except ValueError:
-            continue
-        entries = vm_internal_ok_uid_elements(uid, payload, f"_wl-{name}")
-        for delete in vm_internal_ok_delete_commands(set_name, entries):
-            run(delete)
 
 
 def load_config(name: str) -> dict:
@@ -175,13 +146,7 @@ def up(name: str) -> int:
     run([NFT_BIN, "-f", NFT_PROXY_SKELETON], check=True)
     run([NFT_BIN, "-f", NFT_SKELETON], check=True)
 
-    v4_add, v6_add = vm_inspect_link_address_commands(uid)
-    for argv in (v4_add, v6_add):
-        result = run(argv)
-        if result.returncode != 0 and "xist" not in result.stderr \
-                and "assigned" not in result.stderr:
-            raise RuntimeError(f"could not add listener address: "
-                               f"{result.stderr.strip()}")
+    add_listener_addresses(uid)
 
     # Eight elements, both tables -- see vm_inspect_element_commands's
     # docstring. Purge before adding: `add element` on an existing key does
@@ -248,27 +213,13 @@ def down(name: str) -> int:
     except (OSError, ValueError) as e:
         log(f"  WARNING: could not clear internal exemptions: {e}")
 
-    v4_del, v6_del = vm_inspect_link_delete_commands(uid)
-    for argv in (v4_del, v6_del):
-        result = run(argv)
-        if result.returncode != 0 \
-                and "Cannot assign requested address" not in result.stderr:
-            log(f"  WARNING: could not remove listener address: "
-                f"{result.stderr.strip()}")
+    remove_listener_addresses(uid)
     return 0
 
 
 def main(argv):
-    if len(argv) != 3 or argv[1] not in ("up", "down"):
-        print(f"usage: {argv[0]} <up|down> <name>", file=sys.stderr)
-        return 2
-    action, name = argv[1], argv[2]
-    return up(name) if action == "up" else down(name)
+    return up_down_main(argv, up, down)
 
 
 if __name__ == "__main__":
-    try:
-        sys.exit(main(sys.argv))
-    except Exception as e:  # noqa: BLE001
-        print(f"  ERROR: {e}", file=sys.stderr)
-        sys.exit(1 if len(sys.argv) > 1 and sys.argv[1] == "up" else 0)
+    sys.exit(run_helper(main, sys.argv))

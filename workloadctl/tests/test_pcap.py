@@ -747,11 +747,16 @@ class TestHelperContract(unittest.TestCase):
         down = self._host_down()
         delete_at = down.index('"delete", "chain"')
         guard = down[:delete_at]
-        self.assertIn("if not still_there:", guard,
+        self.assertIn("if not log_rule_handles(remaining):", guard,
                       "the chain delete is not guarded on the chain being "
                       "empty of other captures' rules")
+        # Two listings, and the second one is what matters: the first payload
+        # predates our own deletes and would always look non-empty. Counted on
+        # the call, not on the argv it used to be spelled with -- the listing
+        # moved into nft.nft_chain, and the comment above the second call
+        # mentions neither, so this counts code and not prose.
         self.assertEqual(
-            2, guard.count("list\", \"chain"),
+            2, guard.count("nft_chain("),
             "host_down must re-list after deleting its own rules; the earlier "
             "payload predates them and would always look non-empty")
 

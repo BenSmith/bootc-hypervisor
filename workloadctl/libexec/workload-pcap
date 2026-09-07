@@ -50,6 +50,8 @@ import time
 
 sys.dont_write_bytecode = True
 
+from helper_main import log, run
+from nft import nft_chain
 from pcap import (
     PCAP_CHAINS, VANTAGE_GUEST, VANTAGE_HOST, PcapFormatError, filter_dump_id,
     filter_dump_object, guest_staging_path, log_rule_handles, log_rule_packets,
@@ -82,15 +84,6 @@ def _exit_on_term(signum, _frame):
 
 
 signal.signal(signal.SIGTERM, _exit_on_term)
-
-
-def log(msg):
-    print(msg, flush=True)
-
-
-def run(argv, check=False):
-    return subprocess.run(argv, capture_output=True, text=True, check=check,
-                          timeout=30)
 
 
 # --- host vantage ---
@@ -127,13 +120,8 @@ def matched_packets(uid: int) -> int | None:
     total = 0
     found = False
     for chain in PCAP_CHAINS:
-        listed = run([NFT_BIN, "-j", "-a", "list", "chain",
-                      *NFT_TABLE.split(), chain])
-        if listed.returncode != 0:
-            continue
-        try:
-            payload = json.loads(listed.stdout)
-        except ValueError:
+        payload = nft_chain(chain)
+        if payload is None:
             continue
         if log_rule_handles(payload, group):
             found = True
@@ -206,13 +194,8 @@ def host_down(uid: int) -> None:
     group = nflog_group(uid)
     removed = 0
     for chain in PCAP_CHAINS:
-        listed = run([NFT_BIN, "-j", "-a", "list", "chain",
-                      *NFT_TABLE.split(), chain])
-        if listed.returncode != 0:
-            continue
-        try:
-            payload = json.loads(listed.stdout)
-        except ValueError:
+        payload = nft_chain(chain)
+        if payload is None:
             continue
         # Highest handle first: deleting does not renumber, but reverse order
         # keeps the intent obvious if that ever changes.
@@ -225,15 +208,10 @@ def host_down(uid: int) -> None:
         # harmlessly" is not a thing that happens: it silently ended every
         # concurrent capture. Re-list rather than reusing `payload`, which is
         # from before our own deletes.
-        remaining = run([NFT_BIN, "-j", "-a", "list", "chain",
-                         *NFT_TABLE.split(), chain])
-        if remaining.returncode != 0:
+        remaining = nft_chain(chain)
+        if remaining is None:
             continue
-        try:
-            still_there = log_rule_handles(json.loads(remaining.stdout))
-        except ValueError:
-            continue
-        if not still_there:
+        if not log_rule_handles(remaining):
             run([NFT_BIN, "delete", "chain", *NFT_TABLE.split(), chain])
     if removed:
         log(f"  Removed {removed} log rule(s) for nflog group {group}")

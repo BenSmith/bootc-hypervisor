@@ -17,8 +17,8 @@ _head_unit()'s docstring in generators/workload-generate. Both operate on set
 *elements* in the shared `inet workload_filter` table; neither ever touches a
 rule. See workload-vm-filter's module docstring for why this has to be a
 script and not a handful of ExecStartPre lines -- the allowlist-edit /
-stale-element argument (nft has no "delete every element whose first field is
-this uid") applies unchanged.
+stale-element argument applies unchanged, and the purge that answers it is
+now literally the same function (nft.purge_uid_elements).
 
 WHAT DIFFERS FROM workload-vm-filter
 
@@ -35,21 +35,17 @@ WHAT DIFFERS FROM workload-vm-filter
   the whole statement for containers (R3 -- no default-deny, no `egress`
   key).
 
-EXIT CODES: same convention as workload-vm-filter. `up` fails loudly -- a
-workload that has a trigger and did not arm would run unfiltered while its
-config claims otherwise. `down` is tolerant.
+EXIT CODES: same convention as workload-vm-filter, and the same code --
+helper_main.run_helper. `up` fails loudly, `down` is tolerant.
 """
-import json
 import pwd
-import subprocess
 import sys
 
 sys.dont_write_bytecode = True
 
-from vm import (
-    NFT_BIN, NFT_SETS, NFT_SKELETON, NFT_TABLE,
-    vm_filter_delete_command, vm_owned_elements,
-)
+from helper_main import log, run, run_helper, up_down_main
+from nft import purge_uid_elements
+from vm import NFT_BIN, NFT_SKELETON
 from workload_lib import (
     container_allow_entries, container_allow_resolved, container_filter_commands,
     container_uses_inspect, workload_config_path,
@@ -61,15 +57,6 @@ except ModuleNotFoundError:  # pragma: no cover - 3.11+ everywhere we ship
     tomllib = None
 
 
-def log(msg):
-    print(msg, flush=True)
-
-
-def run(argv, check):
-    return subprocess.run(argv, capture_output=True, text=True, check=check,
-                          timeout=30)
-
-
 def workload_uid(name: str) -> int:
     return pwd.getpwnam(f"_wl-{name}").pw_uid
 
@@ -77,41 +64,6 @@ def workload_uid(name: str) -> int:
 def load_config(name: str) -> dict:
     with open(workload_config_path(name), "rb") as f:
         return tomllib.load(f)
-
-
-def purge(uid: int) -> int:
-    """Remove every element owned by `uid` from every set.
-
-    Verbatim copy of workload-vm-filter's purge(): same sets
-    (NFT_SETS -- wl_filtered, wl_allow4, wl_allow6), same tolerant-on-missing
-    behaviour. Nothing here is container-specific, so there is nothing to
-    change.
-    """
-    removed = 0
-    for set_name in NFT_SETS:
-        listed = run([NFT_BIN, "-j", "list", "set", *NFT_TABLE.split(),
-                      set_name], check=False)
-        if listed.returncode != 0:
-            continue
-        try:
-            payload = json.loads(listed.stdout)
-        except ValueError:
-            continue
-        elems = []
-        for item in payload.get("nftables", []):
-            if "set" in item:
-                elems = item["set"].get("elem", [])
-                break
-        owned = vm_owned_elements(uid, elems)
-        if not owned:
-            continue
-        result = run(vm_filter_delete_command(set_name, owned), check=False)
-        if result.returncode == 0:
-            removed += len(owned)
-        else:
-            log(f"  WARNING: could not clear {set_name}: "
-                f"{result.stderr.strip()}")
-    return removed
 
 
 def up(name: str) -> int:
@@ -123,7 +75,7 @@ def up(name: str) -> int:
     # not-tolerant choice workload-vm-filter makes, for the same reason.
     run([NFT_BIN, "-f", NFT_SKELETON], check=True)
 
-    stale = purge(uid)
+    stale = purge_uid_elements(uid)
     if stale:
         log(f"  Cleared {stale} stale element(s) for uid {uid}")
 
@@ -146,23 +98,13 @@ def down(name: str) -> int:
     except KeyError:
         # The user is already gone; nothing can be armed.
         return 0
-    purge(uid)
+    purge_uid_elements(uid)
     return 0
 
 
 def main(argv):
-    if len(argv) != 3 or argv[1] not in ("up", "down"):
-        print(f"usage: {argv[0]} <up|down> <name>", file=sys.stderr)
-        return 2
-    action, name = argv[1], argv[2]
-    if action == "up":
-        return up(name)
-    return down(name)
+    return up_down_main(argv, up, down)
 
 
 if __name__ == "__main__":
-    try:
-        sys.exit(main(sys.argv))
-    except Exception as e:  # noqa: BLE001
-        print(f"  ERROR: {e}", file=sys.stderr)
-        sys.exit(1 if len(sys.argv) > 1 and sys.argv[1] == "up" else 0)
+    sys.exit(run_helper(main, sys.argv))

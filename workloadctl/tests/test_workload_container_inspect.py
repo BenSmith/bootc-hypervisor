@@ -87,7 +87,7 @@ class TestHelperArmsBothTables(unittest.TestCase):
 
     def test_down_removes_elements_and_addresses_but_not_the_link(self):
         self.assertIn('vm_inspect_element_commands(uid, "delete")', self.down)
-        self.assertIn("vm_inspect_link_delete_commands", self.down)
+        self.assertIn("remove_listener_addresses", self.down)
         self.assertNotIn('"link", "del"', self.down)
         self.assertNotIn("VM_ADVERTISED_ADDR", self.down)
 

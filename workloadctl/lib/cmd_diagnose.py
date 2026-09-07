@@ -49,6 +49,7 @@ from provisioning import (
     host_setup_artifacts,
 )
 from validation import uses_host_userns
+from nft import nft_json
 from vm import (
     NFT_BIN, NFT_SET_ALLOW4, NFT_SET_ALLOW6, NFT_SET_FILTERED,
     NFT_SET_INTERNAL4, NFT_SET_INTERNAL6, NFT_TABLE,
@@ -691,19 +692,10 @@ def vm_network_check(config) -> tuple[str, bool, str]:
             f"capture with 'tcpdump -i nflog:{vm_nflog_group(uid)}'")
 
 
-def _nft_json(*args):
-    """Run `nft -j <args>` and return the parsed document, or None."""
-    try:
-        result = subprocess.run([NFT_BIN, "-j", *args],
-                                capture_output=True, text=True, timeout=10)
-    except (OSError, subprocess.SubprocessError):
-        return None
-    if result.returncode != 0:
-        return None
-    try:
-        return json.loads(result.stdout)
-    except ValueError:
-        return None
+# The read-only half of what the arming helpers use to write the same state.
+# Kept under this name because a dozen call sites and three test modules patch
+# `cmd_diagnose._nft_json`, and the alias is still a module attribute.
+_nft_json = nft_json
 
 
 # Sentinel for "measure this yourself", distinct from None, which several of
