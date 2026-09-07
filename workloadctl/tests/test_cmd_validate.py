@@ -506,3 +506,86 @@ class ValidateSingleInlinedSecretsTest(unittest.TestCase):
         )
         self.assertEqual(len(checks), 1)
         self.assertTrue(checks[0]["passed"])
+
+
+class WarningPassedFlagTest(unittest.TestCase):
+    """Every `_warn` site's `passed` value, pinned as one table.
+
+    `passed` on a warning answers "did this check find something", and the rule
+    is narrow: `passed=True` means THE CHECK COULD NOT RUN. Only the two
+    "cannot verify as non-root" checks qualify -- the credstore is root-only
+    and validate does not require root, so those looked at nothing.
+
+    Pinned as a whole table rather than one assertion per check because the
+    failure being guarded is drift at a NEW call site, and a per-check test is
+    only ever written for checks that already exist. Three checks had drifted
+    before this table existed (vm_memory_precision, custom_directives_conflict,
+    generator_warning) and nothing noticed, because nothing in workloadctl
+    reads the field: the totals derive from `severity`, the top-level `passed`
+    is `errors == 0`, and the printed symbol comes from `severity` too. It is a
+    --json contract with no in-tree consumer, which is the kind that rots.
+
+    Read from the SOURCE rather than by running validate against eleven
+    synthetic configs, because several of these branches need a root-only
+    credstore, an unresolvable host or a MAC collision to reach -- and a table
+    that could only pin the reachable half would leave the unreachable half
+    free to drift, which is where two of the three drifted checks lived. The
+    cost of that choice is the standing hazard of any source-scanning test: if
+    cmd_validate.py is ever split, this must move with the `_warn` calls or it
+    will read zero sites and pass over a file that no longer holds them.
+    test_every_warn_site_is_accounted_for is what makes that loud.
+    """
+
+    EXPECTED = {
+        # Could not run: root-only credstore, non-root process.
+        "credentials": True,
+        "broker-credentials": True,
+        # Found something.
+        "inlined_secrets": False,
+        "selinux_policy_string": False,
+        "selinux_filecon_shadowed": False,
+        "vm_memory_precision": False,
+        "custom_directives_conflict": False,
+        "generator_warning": False,
+        "vm_internal_unresolvable": False,
+        "container_internal_unresolvable": False,
+        "vm_mac_collision": False,
+    }
+
+    @staticmethod
+    def _warn_sites():
+        """(check name, passed) for every `_warn(...)` call in cmd_validate."""
+        import ast
+        source = Path(cmd_validate.__file__).read_text()
+        sites = []
+        for node in ast.walk(ast.parse(source)):
+            if not (isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Name)
+                    and node.func.id == "_warn"):
+                continue
+            name = ast.literal_eval(node.args[0])
+            passed = next((ast.literal_eval(kw.value) for kw in node.keywords
+                           if kw.arg == "passed"), None)
+            sites.append((name, passed))
+        return sites
+
+    def test_every_warn_site_is_accounted_for(self):
+        """Guards the guard: a scan that finds nothing would pass silently."""
+        found = {name for name, _ in self._warn_sites()}
+        self.assertEqual(found, set(self.EXPECTED),
+                         "a _warn site was added or renamed without updating "
+                         "EXPECTED; decide whether the new check COULD NOT RUN "
+                         "(True) or found something (False)")
+
+    def test_each_warn_site_carries_the_expected_flag(self):
+        wrong = {name: passed for name, passed in self._warn_sites()
+                 if passed is not self.EXPECTED[name]}
+        self.assertEqual(wrong, {})
+
+    def test_passed_is_never_omitted(self):
+        """_warn takes it keyword-only and will not guess, so an omission is a
+        TypeError at runtime -- on a branch that may only be reachable on a
+        real host. Fail here instead."""
+        missing = [name for name, passed in self._warn_sites()
+                   if passed is None]
+        self.assertEqual(missing, [])

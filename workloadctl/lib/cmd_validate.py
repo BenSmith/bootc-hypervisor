@@ -90,11 +90,28 @@ def validate_single(config: WorkloadConfig, manager: WorkloadManager, json_mode=
 
     # `severity` decides whether a check blocks (`error`) and what symbol it
     # prints; `passed` says whether the check found a problem. They are not the
-    # same axis, and only warnings can disagree: "cannot verify credentials as
-    # non-root" is a warning that found nothing, while "this looks like a
-    # pasted API key" is a warning that found something. So _warn takes
-    # `passed` as a keyword and will not guess it -- the two spellings are both
-    # deliberate, and both are pinned by tests/test_cmd_validate.py.
+    # same axis, and only warnings can disagree. So _warn takes `passed` as a
+    # keyword and will not guess it.
+    #
+    # THE RULE IS: `passed=True` on a warning means THE CHECK COULD NOT RUN.
+    # Both spellings of it here are "cannot verify credentials as non-root" --
+    # the credstore is root-only and validate does not require root, so the
+    # check looked at nothing and found nothing. Every other warning found
+    # something and says `passed=False`.
+    #
+    # It was stated as "found nothing" until 2026-09-07, and three checks had
+    # drifted under the looser wording: vm_memory_precision (the memory WAS
+    # truncated), custom_directives_conflict (a directive IS overridden) and
+    # generator_warning (the generator DID complain). Each is a finding about
+    # the config, reported and then flagged as if nothing were found -- so a
+    # consumer filtering --json for `passed == false` was silently missing
+    # them. Nothing in workloadctl reads the field (the totals derive from
+    # `severity`, the top-level `passed` is `errors == 0`), which is why it
+    # could drift with the suite green.
+    #
+    # "Could not run" is the sharper test and the one to apply at a new call
+    # site: it is a question about this process's ability to look, not a
+    # judgement about the config. tests/test_cmd_validate.py pins every site.
     #
     # The counts are derived from `checks` below rather than incremented beside
     # each append. There are forty-one appends, each of which used to carry its
@@ -425,7 +442,7 @@ def validate_single(config: WorkloadConfig, manager: WorkloadManager, json_mode=
                 _warn("vm_memory_precision",
                       f"vm.memory = {vm_memory!r} is not an exact number "
                       f"of MiB; truncated to {mib}M.",
-                      passed=True,
+                      passed=False,
                       fix=f'memory = "{mib}M"')
 
     # Warn if custom_directives overrides something the generator already sets.
@@ -434,7 +451,7 @@ def validate_single(config: WorkloadConfig, manager: WorkloadManager, json_mode=
         if directive in GENERATOR_OWNED_DIRECTIVES:
             _warn("custom_directives_conflict",
                   f"custom_directives overrides '{directive}' which is managed by the generator — may have no effect or cause unexpected behaviour",
-                  passed=True)
+                  passed=False)
 
     # Non-fatal generator warnings (invalid userns, bridge-mode ports ignored,
     # pet-in-multi fallback, unknown requires/after). The boot generator only
@@ -443,7 +460,7 @@ def validate_single(config: WorkloadConfig, manager: WorkloadManager, json_mode=
     # uniqueness check) is the fleet view the requires/after check needs.
     known_workload_names = {c.name for c in all_configs}
     for msg in collect_config_warnings(config.config, known_workload_names):
-        _warn("generator_warning", msg, passed=True)
+        _warn("generator_warning", msg, passed=False)
 
     # [[vm.network.internal]] names are resolved at VM START, by the inspect
     # socket's ExecStartPre, and one that does not resolve there fails that
