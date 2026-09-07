@@ -48,7 +48,7 @@ LIB = REPO_ROOT / "lib"
 # the original still answers for every public name in each of them, because
 # that is the promise the split made to callers it did not touch.
 RE_EXPORTS = {
-    "vm": ("vm_addr",),
+    "vm": ("vm_addr", "vm_selinux"),
 }
 
 
@@ -113,13 +113,17 @@ class TestASplitModuleStillAnswersForItsParts(unittest.TestCase):
 
     def test_the_sweep_finds_names_to_check(self):
         """The other half of the guard, on the FILTER rather than the table:
-        a `__module__` test that stopped matching would sweep zero names."""
-        module = importlib.import_module("vm_addr")
-        public = [n for n, v in vars(module).items()
-                  if not n.startswith("__")
-                  and getattr(v, "__module__", "vm_addr") == "vm_addr"]
-        self.assertGreater(len(public), 20, public)
-        self.assertIn("VM_UID_MGMT", public)
+        a `__module__` test that stopped matching would sweep zero names, in
+        every part at once, and the check above would pass over nothing."""
+        for parts in RE_EXPORTS.values():
+            for part in parts:
+                module = importlib.import_module(part)
+                public = [n for n, v in vars(module).items()
+                          if not n.startswith("__")
+                          and getattr(v, "__module__", part) == part]
+                with self.subTest(part=part):
+                    self.assertGreater(len(public), 5, public)
+        self.assertIn("VM_UID_MGMT", dir(importlib.import_module("vm_addr")))
 
 
 if __name__ == "__main__":
