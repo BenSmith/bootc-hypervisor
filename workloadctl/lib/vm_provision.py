@@ -50,11 +50,10 @@ import os
 import pwd
 import subprocess
 import time
-import tomllib
 from pathlib import Path
 
 from vm import VM_DEFAULT_GUEST_USER, VM_MGMT_SSH_PORT, vm_management_address
-from workload_lib import (workload_config_path, workload_state_dir,
+from workload_lib import (load_workload_config, workload_state_dir,
                           workload_username)
 
 # Written into the workload's state dir (its $HOME), beside
@@ -315,8 +314,7 @@ def _vm_probe_target(name: str) -> tuple[str, Path, str, int] | None:
     discovered. The discovery chain is the substrate's, imported lazily so the
     VM service's main process pays for it only when a bridge VM is watched.
     """
-    with open(workload_config_path(name), "rb") as f:
-        config = tomllib.load(f)
+    config = load_workload_config(name)
     vm_cfg = config.get("vm")
     if not vm_cfg:
         return None

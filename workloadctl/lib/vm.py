@@ -16,15 +16,19 @@ import json
 import os
 import re
 import socket
-import string
 import time
 from pathlib import Path
 from typing import NamedTuple
 
-from workload_lib import (UID_MAX, UID_MIN, container_credential_entries,
+from workload_lib import (BROKER_DEFAULT_AUTH_FORMAT,
+                          BROKER_DEFAULT_AUTH_HEADER, INSPECT_ORIG_CLEARTEXT,
+                          INSPECT_ORIG_TLS, UID_MAX,
+                          UID_MIN, container_credential_entries,
                           container_policy_entries, container_uses_inspect,
-                          parse_credential_entries, parse_policy_entries,
-                          parse_volume_spec, workload_root_dir)
+                          normalise_hostname, parse_credential_entries,
+                          parse_policy_entries, parse_volume_spec,
+                          patterns_overlap, validate_credential_entries,
+                          validate_host_pattern, workload_root_dir)
 
 
 # --- VM constants ---
@@ -145,8 +149,12 @@ VM_INSPECT_PORT_TLS = 8443
 # built to replace. That service is gone and these are now the only 80 and 443
 # in the design; the note survives because the reason a constant was not shared
 # is otherwise invisible once one of the two sharers is deleted.
-VM_INSPECT_ORIG_CLEARTEXT = 80
-VM_INSPECT_ORIG_TLS = 443
+# Defined in workload_lib (the container half of the design redirects the same
+# two ports and used to restate them as literals); re-exported here because
+# every reader -- the listener, cmd_diagnose, the tests -- reaches them as
+# `vm.VM_INSPECT_ORIG_*`.
+VM_INSPECT_ORIG_CLEARTEXT = INSPECT_ORIG_CLEARTEXT
+VM_INSPECT_ORIG_TLS = INSPECT_ORIG_TLS
 
 # The inspector's listener binary, the socket unit's ExecStart. Named here so
 # the unit and the RPM stay one place apart.
@@ -1185,16 +1193,11 @@ def vm_inspect_digest_short(digest: str | None) -> str:
     return digest[:VM_INSPECT_DIGEST_SHORT] if digest else "unknown"
 
 
-def vm_normalise_hostname(host: str) -> str:
-    """A hostname in the one form every match in this design is made against.
-
-    Lowercased and stripped of a single trailing root dot. Both halves matter:
-    DNS names are case-insensitive, and `example.com.` and `example.com` are the
-    same name — a guest that writes either spelling must get the same decision,
-    or the spelling becomes the bypass.
-    """
-    host = host.strip().lower()
-    return host[:-1] if host.endswith(".") and host != "." else host
+# workload_lib.normalise_hostname, under the name the listener, vm_mint and the
+# tests already import. Moved down rather than copied when the container half
+# needed it too: a second normalisation is a second answer to "what is this
+# name", and the guest picks which one it gets by how it spells the host.
+vm_normalise_hostname = normalise_hostname
 
 
 def vm_hostname_control_character(host: str) -> str | None:
@@ -3477,30 +3480,6 @@ def vm_policy_permits(host: str, method: str, path: str, entries) -> bool:
                for e in vm_policy_governs(host, entries))
 
 
-def _patterns_overlap(a: str, b: str) -> bool:
-    """Whether two fnmatch host patterns can name a host in common.
-
-    Approximate, and deliberately approximate in the ACCEPTING direction: it
-    answers yes when either pattern matches the other read as a literal, which
-    is exact whenever at least one of the two carries no wildcard and is a
-    good-enough over-approximation when both do. `*.a.example.com` and
-    `*.b.example.com` overlap on nothing and this says so; `*.example.com` and
-    `*.com` overlap and this says so too.
-
-    Used for the "this entry matches no allowlisted name" rules, where the two
-    sides are an entry's `host` and an allowlist pattern and only one of them is
-    ordinarily a wildcard. Wrong in the accepting direction means a dead entry
-    occasionally survives validation; wrong the other way would refuse a config
-    that works, which is the expensive mistake for a rule whose whole job is to
-    catch a typo.
-    """
-    a = vm_normalise_hostname(a)
-    b = vm_normalise_hostname(b)
-    if not a or not b:
-        return False
-    return (a == b or fnmatch.fnmatchcase(a, b) or fnmatch.fnmatchcase(b, a))
-
-
 def _validate_host_reason_entries(entries, key: str, reason_clause: str):
     """Shape-check an array of [[vm.network.<key>]] `host`/`reason` tables.
 
@@ -3627,237 +3606,25 @@ def _validate_policy_methods(item, host: str) -> tuple[tuple | None, list[str]]:
     return tuple(out), errors
 
 
-# What a credential `name` may be. The same character class cmd_secret enforces,
-# because the name IS the credstore filename -- the material lands at
-# /etc/credstore.encrypted/broker/<workload>/<name>. The absence of `/` from this
-# class is load-bearing twice over: it keeps a name from escaping the workload's
-# own subtree, and it is the same absence that makes the scoped path unnameable
-# from ${SECRET:...} in workload env (secrets_template.SECRET_PATTERN has no `/`
-# either), so broker material cannot be pulled into a container's environment by
-# spelling its path.
-_CREDENTIAL_NAME_RE = re.compile(r"^[a-zA-Z0-9_-]+$")
-
-# What a credential `env` may be. POSIX shell name, because it is written into an
-# EnvironmentFile the guest seed reads: a name with `=` or a space in it would
-# produce a line the reader silently drops or, worse, mis-splits.
-_CREDENTIAL_ENV_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+# Re-exported under the names test_vm_broker.py and the docs already use. The
+# bodies moved to workload_lib because the container schema has the same five
+# keys, the same render and the same broker binary -- see
+# validate_credential_entries there.
+VM_BROKER_DEFAULT_AUTH_HEADER = BROKER_DEFAULT_AUTH_HEADER
+VM_BROKER_DEFAULT_AUTH_FORMAT = BROKER_DEFAULT_AUTH_FORMAT
 
 
 def _validate_credentials(net: dict) -> tuple[list[VmCredential], list[str]]:
     """Validate [[vm.network.credential]]. Returns (credentials, errors).
 
-    Shape only, plus uniqueness. Whether a block is USED, and whether a policy
-    entry names one that exists, are relations between the two tables and live
-    in _validate_policy, which is the one place that has both.
-
-    Whether the credstore actually HOLDS the named material is not checked here
-    and deliberately: this function is called from the boot generator, where
-    /etc is not the authority it is at config time, and a rule that read the
-    credstore would make a validation result depend on host state. `workloadctl
-    validate` performs that check, beside the one it already performs for
-    ${SECRET:} names.
+    The VM half of validate_credential_entries: it names the table this
+    substrate spells the block under, the noun its messages use for the thing
+    the placeholder is seeded into, and the variables workloadctl already puts
+    there.
     """
-    errors: list[str] = []
-    raw = net.get("credential", [])
-    if not isinstance(raw, list):
-        return [], [f"[vm.network].credential must be an array of "
-                    f"[[vm.network.credential]] tables, got "
-                    f"{type(raw).__name__}"]
-
-    known = {"name", "placeholder", "env", "auth_header", "auth_format"}
-    creds: list[VmCredential] = []
-    seen: set[str] = set()
-    seen_envs: set[str] = set()
-    for item in raw:
-        if not isinstance(item, dict):
-            errors.append(
-                f"[vm.network].credential entries are tables with `name`, "
-                f"`placeholder` and `env`, got {item!r}")
-            continue
-        unknown = sorted(set(item) - known)
-        if unknown:
-            errors.append(
-                f"[vm.network].credential: unknown key(s) "
-                f"{', '.join(unknown)}; a credential block carries `name`, "
-                f"`placeholder` and `env`, and optionally `auth_header` and "
-                f"`auth_format`")
-        values = {}
-        for key in ("name", "placeholder", "env"):
-            value = item.get(key)
-            if not isinstance(value, str) or not value.strip():
-                # All three are required, and `placeholder` is the one whose
-                # absence would otherwise fail invisibly: with no placeholder
-                # the guest is seeded with nothing, its client sends no
-                # Authorization header at all, and the broker's substitution
-                # has nothing to replace -- which surfaces as the provider
-                # returning 401 on a request the inspector considers fully
-                # authorised. The seed is where the fiction is maintained, so
-                # a credential with no fiction is not a credential.
-                errors.append(
-                    f"[vm.network].credential: entry {item!r} has no `{key}`; "
-                    f"a block carries all three -- `name` selects the sealed "
-                    f"material, `placeholder` is the fiction the guest holds "
-                    f"in its place, and `env` is the variable it is seeded "
-                    f"into")
-                values = {}
-                break
-            values[key] = value.strip()
-        if not values:
-            continue
-        name, placeholder, env = (values["name"], values["placeholder"],
-                                  values["env"])
-        if not _CREDENTIAL_NAME_RE.match(name):
-            errors.append(
-                f"[vm.network].credential: {name!r} is not a usable credstore "
-                f"name -- letters, numbers, underscore and hyphen only. The "
-                f"name is the filename the sealed material lands under, and a "
-                f"`/` in it would put one workload's credential outside its "
-                f"own subtree")
-            continue
-        if not _CREDENTIAL_ENV_RE.match(env):
-            errors.append(
-                f"[vm.network].credential: {name!r} has `env` = {env!r}, "
-                f"which is not a shell variable name. It is written into the "
-                f"guest's environment as `{env}=...`, so a name with a space "
-                f"or an `=` in it produces a line the guest silently drops")
-            continue
-        if env in VM_RESERVED_GUEST_ENV:
-            # The seed merges this block over workloadctl's own guest variables,
-            # so a collision resolves silently whichever way the merge happens
-            # to go: either the guest loses the placeholder (its client sends no
-            # key and the provider answers 401 on a request this layer fully
-            # authorised) or it loses its CA path (every HTTPS request fails
-            # validation inside the guest, where no line on the host can see
-            # it). Both are invisible from here, so the collision is refused
-            # where it is still visible.
-            errors.append(
-                f"[vm.network].credential: {name!r} has `env` = {env!r}, which "
-                f"is a variable workloadctl already seeds this guest with. "
-                f"Choose another name -- the guest maps it to whatever its "
-                f"client reads, so it is yours to pick")
-            continue
-        if env in seen_envs:
-            errors.append(
-                f"[vm.network].credential: `env` = {env!r} is used by two "
-                f"credential blocks, so one placeholder overwrites the other "
-                f"in the guest and one credential's host answers 401 for a "
-                f"reason nothing on this host reports")
-            continue
-        seen_envs.add(env)
-        if name in seen:
-            errors.append(
-                f"[vm.network].credential: {name!r} is declared twice. A "
-                f"policy entry selects a credential by name, so two blocks "
-                f"sharing one make the selector ambiguous -- and the file "
-                f"states two placeholders for material that has one")
-            continue
-        seen.add(name)
-        auth_header, auth_format = None, None
-        raw_header = item.get("auth_header")
-        if raw_header is not None:
-            if not isinstance(raw_header, str) or not raw_header.strip():
-                errors.append(
-                    f"[vm.network].credential: {name!r} has `auth_header` = "
-                    f"{raw_header!r}; it is the HTTP header the broker attaches "
-                    f"the material in, and omitting the key means the broker's "
-                    f"own default, {VM_BROKER_DEFAULT_AUTH_HEADER!r}")
-                continue
-            auth_header = raw_header.strip()
-            errors.extend(_validate_auth_header(name, auth_header))
-        raw_format = item.get("auth_format")
-        if raw_format is not None:
-            if not isinstance(raw_format, str) or not raw_format.strip():
-                errors.append(
-                    f"[vm.network].credential: {name!r} has `auth_format` = "
-                    f"{raw_format!r}; it is the value template the material is "
-                    f"substituted into, and omitting the key means the "
-                    f"broker's own default, "
-                    f"{VM_BROKER_DEFAULT_AUTH_FORMAT!r}")
-                continue
-            auth_format = raw_format.strip()
-            errors.extend(_validate_auth_format(name, auth_format))
-        creds.append(VmCredential(name=name, placeholder=placeholder, env=env,
-                                  auth_header=auth_header,
-                                  auth_format=auth_format))
-    return creds, errors
-
-
-# The broker's own defaults, restated so an error message can name them. They
-# are NOT applied here: the render emits nothing for an absent key, so the
-# default lives in one place and these two are only ever quoted at an operator.
-# tests/test_vm_broker.py pins them against the broker's own source.
-VM_BROKER_DEFAULT_AUTH_HEADER = "x-api-key"
-VM_BROKER_DEFAULT_AUTH_FORMAT = "{secret}"
-
-# RFC 9110 §5.1: a field name is one or more tchar. Spelled out rather than
-# approximated with \w, because the characters that are NOT here are the whole
-# point -- a colon, a space or a newline in this string writes a header the
-# provider reads as something else, or splits one into two.
-_AUTH_HEADER_RE = re.compile(r"^[!#$%&'*+.^_`|~0-9A-Za-z-]+$")
-
-# Header names the broker must be the only writer of, or that decide how the
-# message is framed. Refused rather than allowed to produce a broken request:
-# `content-length` would be overwritten by a number describing a different
-# body, `host` is set from the upstream and would silently not take, and the
-# hop-by-hop names are stripped on the way out so the credential would simply
-# vanish -- a 401 whose cause is invisible from every layer of ours.
-_AUTH_HEADER_REFUSED = {
-    "content-length": "it frames the message, and the broker sets its own",
-    "transfer-encoding": "it frames the message, and it is hop-by-hop",
-    "host": "the broker sets it from the upstream, so this would not take",
-    "connection": "it is hop-by-hop and is stripped before the request leaves",
-    "upgrade": "it is hop-by-hop and is stripped before the request leaves",
-    "te": "it is hop-by-hop and is stripped before the request leaves",
-    "trailer": "it is hop-by-hop and is stripped before the request leaves",
-    "keep-alive": "it is hop-by-hop and is stripped before the request leaves",
-    "proxy-authorization":
-        "it is hop-by-hop and is stripped before the request leaves",
-    "proxy-authenticate":
-        "it is hop-by-hop and is stripped before the request leaves",
-}
-
-
-def _validate_auth_header(name: str, header: str) -> list[str]:
-    if not _AUTH_HEADER_RE.match(header):
-        return [f"[vm.network].credential: {name!r} has `auth_header` = "
-                f"{header!r}, which is not an HTTP field name (RFC 9110 §5.1 "
-                f"tchar). A colon, a space or a newline here does not produce "
-                f"a header the provider ignores -- it produces a different "
-                f"header, or two"]
-    why = _AUTH_HEADER_REFUSED.get(header.lower())
-    if why:
-        return [f"[vm.network].credential: {name!r} has `auth_header` = "
-                f"{header!r}, which cannot carry a credential: {why}. The "
-                f"request would go upstream with no material on it and the "
-                f"provider would answer 401, on a request every layer here "
-                f"considers fully authorised"]
-    return []
-
-
-def _validate_auth_format(name: str, fmt: str) -> list[str]:
-    """`auth_format` must substitute the material exactly once and name nothing
-    else.
-
-    Checked HERE because the broker renders it at startup with `str.format` and
-    exits on a bad one -- which, for a generated unit, is a workload whose
-    broker will not start and whose only symptom is a restart loop. An operator
-    writing `Bearer {token}` gets the reason at `validate` instead.
-    """
-    fields = []
-    try:
-        for _literal, field, _spec, _conv in string.Formatter().parse(fmt):
-            if field is not None:
-                fields.append(field)
-    except ValueError as exc:
-        return [f"[vm.network].credential: {name!r} has `auth_format` = "
-                f"{fmt!r}, which is not a usable format string ({exc})"]
-    if fields != ["secret"]:
-        return [f"[vm.network].credential: {name!r} has `auth_format` = "
-                f"{fmt!r}, which substitutes {fields or 'nothing'} -- it must "
-                f"name `{{secret}}` exactly once and nothing else. The broker "
-                f"renders this once at startup and exits on anything it cannot "
-                f"format, so a generated instance would not start at all"]
-    return []
+    return validate_credential_entries(
+        net, table="vm.network", noun="guest", credential_cls=VmCredential,
+        reserved_env=VM_RESERVED_GUEST_ENV)
 
 
 def _validate_policy(net: dict, splice_hosts, http2_hosts, egress: str,
@@ -4034,7 +3801,7 @@ def _validate_policy(net: dict, splice_hosts, http2_hosts, egress: str,
     # run, and the file states two intentions that cannot both hold.
     for entry in entries:
         for spliced in splice_hosts:
-            if _patterns_overlap(entry.host, spliced):
+            if patterns_overlap(entry.host, spliced):
                 errors.append(
                     f"[vm.network].policy: {entry.host!r} is also in .splice "
                     f"({spliced!r}) — a spliced connection is never decrypted, "
@@ -4053,7 +3820,7 @@ def _validate_policy(net: dict, splice_hosts, http2_hosts, egress: str,
     # rather than being folded into the loop above.
     for entry in entries:
         for h2_host in http2_hosts:
-            if _patterns_overlap(entry.host, h2_host):
+            if patterns_overlap(entry.host, h2_host):
                 errors.append(
                     f"[vm.network].policy: {entry.host!r} is also in .http2 "
                     f"({h2_host!r}) — an h2 connection is relayed at the frame "
@@ -4072,7 +3839,7 @@ def _validate_policy(net: dict, splice_hosts, http2_hosts, egress: str,
         if not entry.credential:
             continue
         for spliced in splice_hosts:
-            if _patterns_overlap(entry.host, spliced):
+            if patterns_overlap(entry.host, spliced):
                 errors.append(
                     f"[vm.network].policy: {entry.host!r} selects credential "
                     f"{entry.credential!r} and is also in .splice "
@@ -4090,7 +3857,7 @@ def _validate_policy(net: dict, splice_hosts, http2_hosts, egress: str,
             # method and no path; and (uid, Host) is the ENTIRE dispatch key of
             # a broker instance, which is an HTTP/1.1 server. A credential here
             # cannot be attached at all, not merely attached less precisely.
-            if _patterns_overlap(entry.host, h2_host):
+            if patterns_overlap(entry.host, h2_host):
                 errors.append(
                     f"[vm.network].policy: {entry.host!r} selects credential "
                     f"{entry.credential!r} and is also in .http2 "
@@ -4114,7 +3881,7 @@ def _validate_policy(net: dict, splice_hosts, http2_hosts, egress: str,
     # exactly the file this rule exists to catch.
     for i, entry in enumerate(entries):
         siblings = [o for j, o in enumerate(entries)
-                    if j != i and _patterns_overlap(entry.host, o.host)]
+                    if j != i and patterns_overlap(entry.host, o.host)]
         if not siblings:
             continue
         missing = [k for k, v in (("methods", entry.methods),
@@ -4143,14 +3910,14 @@ def _validate_policy(net: dict, splice_hosts, http2_hosts, egress: str,
     # this layer considers fully authorised.
     for i, entry in enumerate(entries):
         siblings = [o for j, o in enumerate(entries)
-                    if j != i and _patterns_overlap(entry.host, o.host)]
+                    if j != i and patterns_overlap(entry.host, o.host)]
         if not siblings:
             continue
         # Reported from the EARLIER entry of the pair only (`j > i`), so a
         # disagreement produces one message rather than one per participant --
         # the same pair read from both ends is the same finding.
         disagreeing = [o for j, o in enumerate(entries)
-                       if j > i and _patterns_overlap(entry.host, o.host)
+                       if j > i and patterns_overlap(entry.host, o.host)
                        and o.credential and entry.credential
                        and o.credential != entry.credential]
         if disagreeing:
@@ -4238,7 +4005,7 @@ def _validate_apex_coverage(hosts, entries, key: str, consequence: str, *,
                    for e in named):
             continue
         if not self_allowlisting and not any(
-                _patterns_overlap(wildcard, pattern) for pattern in literal):
+                patterns_overlap(wildcard, pattern) for pattern in literal):
             continue
         if any(vm_hostname_match(apex, (e,)) for e in named):
             continue
@@ -4376,7 +4143,7 @@ def _validate_egress(net: dict) -> list[str]:
         # one, which is why the two rules are written out separately rather
         # than shared: an ignored `splice` line gets you inspection you did not
         # want, on the host you exempted precisely because it cannot take it.
-        if not any(_patterns_overlap(host, pattern)
+        if not any(patterns_overlap(host, pattern)
                    for pattern in hosts if isinstance(pattern, str)):
             errors.append(
                 f"[vm.network].splice: {host!r} matches no allowlisted name — "
@@ -4399,7 +4166,7 @@ def _validate_egress(net: dict) -> list[str]:
         # Dead in the same direction a dead `splice` entry is: the host is
         # refused before the exemption is reached, so the operator's belief
         # about what is reachable is contradicted by the config.
-        if not any(_patterns_overlap(host, pattern)
+        if not any(patterns_overlap(host, pattern)
                    for pattern in hosts if isinstance(pattern, str)):
             errors.append(
                 f"[vm.network].http2: {host!r} matches no allowlisted name — "
@@ -4413,7 +4180,7 @@ def _validate_egress(net: dict) -> list[str]:
             # in splice's favour, because the two entries state different
             # beliefs about the host -- one that it cannot take our CA, one
             # that it can and speaks h2 -- and only the operator knows which.
-            if _patterns_overlap(host, spliced):
+            if patterns_overlap(host, spliced):
                 errors.append(
                     f"[vm.network].http2: {host!r} is also in .splice "
                     f"({spliced!r}) — a spliced connection is never "
@@ -4470,9 +4237,9 @@ def _validate_egress(net: dict) -> list[str]:
         # config. Wrong in the accepting direction leaves a dead entry
         # standing; wrong the other way refuses a config that works, which is
         # the expensive mistake for a rule whose whole job is to catch a typo.
-        if not any(_patterns_overlap(host, pattern)
+        if not any(patterns_overlap(host, pattern)
                    for pattern in hosts if isinstance(pattern, str)) \
-                and not any(_patterns_overlap(host, pattern)
+                and not any(patterns_overlap(host, pattern)
                             for pattern in policy_hosts):
             errors.append(
                 f"[vm.network].internal: {host!r} is on no list — nothing "
@@ -4621,32 +4388,18 @@ def _validate_egress(net: dict) -> list[str]:
 # path and no port. So a pattern carrying any of those never matches anything: a
 # silent hole in an allowlist, which is the failure worth catching at validate
 # time rather than at 3am.
-_PROXY_HOST_RE = re.compile(r"^[A-Za-z0-9*?.\[\]!_-]+$")
-
-
 def _validate_proxy_host(pattern) -> list[str]:
-    """Validate one [vm.network].hosts pattern. Returns error strings."""
-    if not isinstance(pattern, str):
-        return [f"entries must be strings, got {pattern!r}"]
-    text = pattern.strip()
-    if not text:
-        return ["entries must not be empty"]
-    if "://" in text:
-        return [f"{pattern!r} looks like a URL — patterns match the hostname "
-                f"only, so drop the scheme"]
-    if "/" in text:
-        return [f"{pattern!r} contains a path — patterns match the hostname "
-                f"only, so a path never matches"]
-    if ":" in text:
-        return [f"{pattern!r} contains a port — hostname policy applies to the "
-                f"redirected ports ({VM_INSPECT_ORIG_CLEARTEXT} and "
-                f"{VM_INSPECT_ORIG_TLS}) only; use .allow for other ports"]
-    if text == "*":
-        return ["'*' matches every host, which is the same as egress = 'open' "
-                "but harder to notice — set egress = 'open' if that is meant"]
-    if not _PROXY_HOST_RE.match(text):
-        return [f"{pattern!r} is not a hostname or fnmatch pattern"]
-    return []
+    """Validate one [vm.network].hosts pattern. Returns error strings.
+
+    The VM half of validate_host_pattern: it exists to state the two sentences
+    the VM schema owns. `egress = "open"` is one of them, and it is a key only
+    this substrate has.
+    """
+    return validate_host_pattern(
+        pattern,
+        allow_key=".allow",
+        star_remedy=("which is the same as egress = 'open' but harder to "
+                     "notice — set egress = 'open' if that is meant"))
 
 
 def _registration_domain_parent(pattern: str) -> str | None:

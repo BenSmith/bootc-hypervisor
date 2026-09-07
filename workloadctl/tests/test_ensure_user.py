@@ -2199,19 +2199,6 @@ class TestBundleWorkloadctlRpm(unittest.TestCase):
             self.assertFalse((seed_dir / "workloadctl.rpm").exists())
 
 
-class TestLoadConfig(unittest.TestCase):
-    def setUp(self):
-        self.mod = _load_script()
-
-    def test_loads_toml_config(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            cfg_path = Path(tmp) / "workload.toml"
-            cfg_path.write_text('[workload]\nname = "myapp"\n')
-            with mock.patch.object(self.mod, "workload_config_path", lambda n: cfg_path):
-                cfg = self.mod.load_config("myapp")
-            self.assertEqual(cfg["workload"]["name"], "myapp")
-
-
 class TestDecryptSystemdCredentialMore(unittest.TestCase):
     """Additional coverage for the encrypted-success, encrypted-failure and
     plain-fallback branches of _decrypt_systemd_credential."""
@@ -2704,7 +2691,7 @@ class TestMain(unittest.TestCase):
             "getpwnam": mock.patch.object(self.mod.pwd, "getpwnam", return_value=self.pw),
             "warn_if_stale_home": mock.patch.object(self.mod, "warn_if_stale_home"),
             "mkdir": mock.patch.object(type(self.mod.WORKLOADS_BASE), "mkdir"),
-            "load_config": mock.patch.object(self.mod, "load_config", return_value={"workload": {"name": "test"}}),
+            "load_workload_config": mock.patch.object(self.mod, "load_workload_config", return_value={"workload": {"name": "test"}}),
             "infer_workload_kind": mock.patch.object(self.mod, "infer_workload_kind", return_value=kind),
             "setup_home_directory": mock.patch.object(self.mod, "setup_home_directory"),
             "configure_subuid_subgid": mock.patch.object(self.mod, "configure_subuid_subgid"),
@@ -2738,7 +2725,7 @@ class TestMain(unittest.TestCase):
 
     def test_load_config_failure_returns_1(self):
         mocks = self._patch_common("container")
-        mocks["load_config"].side_effect = Exception("bad toml")
+        mocks["load_workload_config"].side_effect = Exception("bad toml")
         with mock.patch.object(self.mod.sys, "argv", ["prog", "myapp"]):
             rc = self.mod.main()
         self.assertEqual(rc, 1)
@@ -2977,7 +2964,7 @@ class ContainerEgressCaGateTest(unittest.TestCase):
                 mock.patch.object(mod, attr, mock.MagicMock()))
                 for attr in self._GATED}
             stack.enter_context(mock.patch.object(
-                mod, "load_config", mock.MagicMock(return_value=config)))
+                mod, "load_workload_config", mock.MagicMock(return_value=config)))
             stack.enter_context(mock.patch.object(
                 mod.pwd, "getpwnam", mock.MagicMock(return_value=pw)))
             stack.enter_context(mock.patch.object(

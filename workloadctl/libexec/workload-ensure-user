@@ -21,7 +21,6 @@ import stat
 import subprocess
 import sys
 import time
-import tomllib
 import uuid
 from pathlib import Path, PurePosixPath
 
@@ -29,7 +28,8 @@ import deployment
 import service_runtime
 from workload_lib import (
     UID_MIN, UID_MAX, derived_subid_range,
-    WORKLOAD_CONFIG_DIR, WORKLOADS_BASE, workload_config_path, workload_username, expand_volume_path,
+    WORKLOAD_CONFIG_DIR, WORKLOADS_BASE, load_workload_config, workload_config_path,
+    workload_username, expand_volume_path,
     infer_workload_kind,
     virtiofs_tags, parse_volume_spec, normalize_containers,
     workload_state_dir, workload_data_dir, workload_root_dir, subid_lock,
@@ -58,12 +58,6 @@ def log(msg):
     """Print to stdout (captured by systemd journal)."""
     print(msg, flush=True)
 
-
-def load_config(name):
-    """Load and return the TOML config for a workload."""
-    config_path = workload_config_path(name)
-    with open(config_path, "rb") as f:
-        return tomllib.load(f)
 
 
 def configure_subuid_subgid(pw, config):
@@ -2012,7 +2006,7 @@ def _ensure_user(name: str) -> int:
 
     # Load config once — needed by volume setup and environment file
     try:
-        config = load_config(name)
+        config = load_workload_config(name)
     except Exception as e:
         log(f"ERROR: Failed to load config for {name}: {e}")
         return 1

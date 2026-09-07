@@ -26,7 +26,6 @@ import shutil
 import subprocess
 import sys
 import tempfile
-import tomllib
 import urllib.request
 import urllib.error
 from pathlib import Path
@@ -34,18 +33,13 @@ from pathlib import Path
 sys.dont_write_bytecode = True
 
 from workload_lib import (
-    workload_config_path, workload_state_dir, workload_data_dir,
+    load_workload_config, workload_state_dir, workload_data_dir,
 )
 
 
 def log(msg: str):
     print(msg, flush=True)
 
-
-def load_config(name: str) -> dict:
-    config_path = workload_config_path(name)
-    with open(config_path, "rb") as f:
-        return tomllib.load(f)
 
 
 def rotate_generations(home_dir: Path, keep: int) -> Path | None:
@@ -292,7 +286,7 @@ def main():
     name = args[0]
     log(f"Building system disk for VM workload: {name}")
 
-    config = load_config(name)
+    config = load_workload_config(name)
     vm_cfg = config.get("vm", {})
     home_dir = workload_state_dir(name)
     home_dir.mkdir(parents=True, exist_ok=True)

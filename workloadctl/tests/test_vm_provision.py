@@ -15,6 +15,7 @@ from pathlib import Path
 from unittest import mock
 
 import vm_provision
+import workload_lib
 from vm_provision import (
     MAX_HEAL_ATTEMPTS,
     PROVISION_DONE,
@@ -234,7 +235,7 @@ class TestGuestProvisionResult(unittest.TestCase):
             lambda user: types.SimpleNamespace(pw_uid=10007)))
         self.toml = self.tmp / "workload.toml"
         self.enterContext(mock.patch.object(
-            vm_provision, "workload_config_path", lambda name: self.toml))
+            workload_lib, "workload_config_path", lambda name: self.toml))
         self.toml.write_text('[vm]\nuser = "workload"\n')
 
     def _run(self, stdout="", raises=None):

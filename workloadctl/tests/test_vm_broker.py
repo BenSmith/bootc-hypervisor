@@ -534,7 +534,7 @@ class TestTheHelperWritesTheConfig(unittest.TestCase):
 
     def write(self, cfg):
         from unittest import mock
-        with mock.patch.object(self.mod, "load_config", lambda name: cfg):
+        with mock.patch.object(self.mod, "load_workload_config", lambda name: cfg):
             buf = io.StringIO()
             with contextlib.redirect_stdout(buf), \
                     contextlib.redirect_stderr(io.StringIO()):

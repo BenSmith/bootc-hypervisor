@@ -135,12 +135,7 @@ from pathlib import Path
 sys.dont_write_bytecode = True
 
 from vm import vm_resolve_address, vm_uses_resolve
-from workload_lib import workload_config_path, workload_env_dir
-
-try:
-    import tomllib
-except ModuleNotFoundError:  # pragma: no cover - 3.11+ everywhere we ship
-    tomllib = None
+from workload_lib import load_workload_config, workload_env_dir
 
 RESOLV_CONF = Path("/etc/resolv.conf")
 
@@ -318,8 +313,7 @@ def workload_config(name: str) -> dict:
     old resolver_mode made when the file was unreadable.
     """
     try:
-        with open(workload_config_path(name), "rb") as f:
-            return tomllib.load(f)
+        return load_workload_config(name)
     except (OSError, ValueError) as e:
         log(f"  WARNING: could not read config for {name}: {e}; assuming "
             f"resolver = \"host\" and no responder")

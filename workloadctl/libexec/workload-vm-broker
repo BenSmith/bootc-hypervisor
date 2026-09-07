@@ -47,21 +47,12 @@ from vm import (
     container_uses_credentials, render_container_broker_config,
     render_vm_broker_config, vm_broker_config_path, vm_uses_credentials,
 )
-from workload_lib import workload_config_path
-
-try:
-    import tomllib
-except ModuleNotFoundError:  # pragma: no cover - 3.11+ everywhere we ship
-    tomllib = None
+from workload_lib import load_workload_config
 
 
 def log(msg):
     print(msg, flush=True)
 
-
-def load_config(name: str) -> dict:
-    with open(workload_config_path(name), "rb") as f:
-        return tomllib.load(f)
 
 
 def write_config(name: str) -> int:
@@ -83,7 +74,7 @@ def write_config(name: str) -> int:
     a missing or stale config either refuses every request or attaches the wrong
     credential to one, and the second is silent.
     """
-    config = load_config(name)
+    config = load_workload_config(name)
     uid = pwd.getpwnam(f"_wl-{name}").pw_uid
     # One helper, both substrates. The unit directive is identical on either
     # side and the config it writes is the same file at the same path, so the

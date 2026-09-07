@@ -40,7 +40,7 @@ class TestInspectionAppliesDelegatesToTheSharedPredicate(unittest.TestCase):
         any subprocess call, so an untriggered config must never reach
         either -- a config with no [network] trigger at all stops here."""
         import unittest.mock as mock
-        with mock.patch.object(self.mod, "load_config",
+        with mock.patch.object(self.mod, "load_workload_config",
                                return_value={"network": {}}), \
              mock.patch.object(self.mod, "pwd") as fake_pwd, \
              mock.patch.object(self.mod, "run") as fake_run:

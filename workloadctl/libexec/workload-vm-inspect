@@ -113,17 +113,11 @@ from vm import (
     vm_broker_listen_address, vm_uses_credentials,
 )
 from vm_status import clear_status
-from workload_lib import workload_config_path
-
-try:
-    import tomllib
-except ModuleNotFoundError:  # pragma: no cover - 3.11+ everywhere we ship
-    tomllib = None
+from workload_lib import load_workload_config
 
 
 def network_config(name: str) -> dict:
-    with open(workload_config_path(name), "rb") as f:
-        config = tomllib.load(f)
+    config = load_workload_config(name)
     return config.get("vm", {}).get("network", {}) or {}
 
 

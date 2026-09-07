@@ -65,18 +65,9 @@ from vm import (
 from vm_status import clear_status
 from workload_lib import (
     container_inspect_policy_text, container_internal_entries,
-    container_internal_resolve, container_uses_inspect, workload_config_path,
+    container_internal_resolve, container_uses_inspect, load_workload_config,
 )
 
-try:
-    import tomllib
-except ModuleNotFoundError:  # pragma: no cover - 3.11+ everywhere we ship
-    tomllib = None
-
-
-def load_config(name: str) -> dict:
-    with open(workload_config_path(name), "rb") as f:
-        return tomllib.load(f)
 
 
 def inspection_applies(config: dict) -> bool:
@@ -124,7 +115,7 @@ def internal_failure(name: str, host: str, cause: Exception) -> str:
 
 
 def up(name: str) -> int:
-    config = load_config(name)
+    config = load_workload_config(name)
     net = config.get("network", {}) or {}
     if not inspection_applies(config):
         # The unit should not have been generated at all; treat it as a

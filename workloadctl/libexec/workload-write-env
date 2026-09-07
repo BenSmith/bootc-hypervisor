@@ -23,11 +23,10 @@ per-container file to avoid concurrent services clobbering each other's secrets.
 import os
 import pwd
 import sys
-import tomllib
 from pathlib import Path
 
 from workload_lib import (
-    workload_config_path, workload_username, normalize_containers,
+    load_workload_config, workload_username, normalize_containers,
 )
 from secrets_template import (
     resolve_secret_env_vars, SECRET_PATTERN, auto_detect_credentials,
@@ -46,9 +45,7 @@ def main():
     name = sys.argv[1]
     container = sys.argv[2] if len(sys.argv) == 3 else None
 
-    config_path = workload_config_path(name)
-    with open(config_path, "rb") as f:
-        config = tomllib.load(f)
+    config = load_workload_config(name)
 
     # Pick the right container's env vars. normalize_containers gives us the
     # same shape for both single and multi (env lives under entry["container"]

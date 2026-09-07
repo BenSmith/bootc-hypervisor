@@ -48,27 +48,18 @@ from nft import purge_uid_elements
 from vm import NFT_BIN, NFT_SKELETON
 from workload_lib import (
     container_allow_entries, container_allow_resolved, container_filter_commands,
-    container_uses_inspect, workload_config_path,
+    container_uses_inspect, load_workload_config,
 )
-
-try:
-    import tomllib
-except ModuleNotFoundError:  # pragma: no cover - 3.11+ everywhere we ship
-    tomllib = None
 
 
 def workload_uid(name: str) -> int:
     return pwd.getpwnam(f"_wl-{name}").pw_uid
 
 
-def load_config(name: str) -> dict:
-    with open(workload_config_path(name), "rb") as f:
-        return tomllib.load(f)
-
 
 def up(name: str) -> int:
     uid = workload_uid(name)
-    config = load_config(name)
+    config = load_workload_config(name)
     net = config.get("network", {}) or {}
 
     # Not tolerant: everything below depends on the table existing. Same

@@ -9,6 +9,7 @@ import subprocess
 import stat
 import tempfile
 import threading
+import tomllib
 import unittest
 import warnings
 from pathlib import Path
@@ -283,6 +284,42 @@ class TestAutoDetectCredentialsMulti(unittest.TestCase):
             }]
         }
         self.assertEqual(auto_detect_credentials(config), {"tls-cert"})
+
+
+class TestLoadWorkloadConfig(unittest.TestCase):
+    """The one loader every boot-time helper now shares.
+
+    Was TestLoadConfig in tests/test_ensure_user.py, back when
+    workload-ensure-user had a copy of its own -- moved with the function
+    rather than deleted, because the property is the same one.
+    """
+
+    def test_parses_the_instance_toml_for_a_name(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "myapp").mkdir()
+            (Path(tmp) / "myapp" / "workload.toml").write_text(
+                '[workload]\nname = "myapp"\n')
+            with patch.object(workload_lib, "WORKLOAD_CONFIG_DIR", Path(tmp)):
+                cfg = workload_lib.load_workload_config("myapp")
+        self.assertEqual(cfg["workload"]["name"], "myapp")
+
+    def test_a_config_that_will_not_parse_raises(self):
+        # Not caught here on purpose: a helper that cannot read its config has
+        # nothing to do but fail, and the two callers that survive a bad config
+        # each want their own handling. Swallowing it here would take that
+        # choice away from both.
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "myapp").mkdir()
+            (Path(tmp) / "myapp" / "workload.toml").write_text("not = = toml")
+            with patch.object(workload_lib, "WORKLOAD_CONFIG_DIR", Path(tmp)):
+                with self.assertRaises(tomllib.TOMLDecodeError):
+                    workload_lib.load_workload_config("myapp")
+
+    def test_a_missing_config_raises_oserror(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.object(workload_lib, "WORKLOAD_CONFIG_DIR", Path(tmp)):
+                with self.assertRaises(OSError):
+                    workload_lib.load_workload_config("absent")
 
 
 class TestNaming(unittest.TestCase):
@@ -2481,6 +2518,94 @@ class TestValidateContainerNetwork(unittest.TestCase):
         errors = validate_container_network(net)
         self.assertTrue(any("CA trust-store variables" in e for e in errors), errors)
 
+    # --- The rules the container port had dropped ---
+    #
+    # Every one of these existed on the VM side and on no other. They are the
+    # reason the two validators are now one function: each of these six went
+    # missing by being a rule nobody re-typed, and a missing rule is invisible
+    # in a suite that only ever asks whether the rules present still fire.
+    # They all fail the same way at runtime -- the broker attaches the wrong
+    # header or none, the provider answers 401, and nothing on this host
+    # considers the request anything but authorised.
+
+    def test_an_unknown_credential_key_is_named(self):
+        """A typo, not a feature: `auth_hedaer` was accepted and dropped, so
+        the workload got the broker's default header on every request and the
+        file said otherwise."""
+        net = {"hosts": ["a.com"], "ca_delivery": "env",
+               "policy": [{"host": "a.com", "credential": "c"}],
+               "credential": [{"name": "c", "placeholder": "x", "env": "K",
+                               "auth_hedaer": "Authorization"}]}
+        errors = validate_container_network(net)
+        self.assertTrue(any("unknown key(s) auth_hedaer" in e for e in errors),
+                        errors)
+
+    def test_a_credential_name_that_is_not_a_credstore_name_is_refused(self):
+        net = {"hosts": ["a.com"], "ca_delivery": "env",
+               "policy": [{"host": "a.com", "credential": "a/b"}],
+               "credential": [{"name": "a/b", "placeholder": "x",
+                               "env": "K"}]}
+        errors = validate_container_network(net)
+        self.assertTrue(any("usable credstore name" in e for e in errors),
+                        errors)
+
+    def test_a_credential_env_that_is_not_a_shell_name_is_refused(self):
+        net = {"hosts": ["a.com"], "ca_delivery": "env",
+               "policy": [{"host": "a.com", "credential": "c"}],
+               "credential": [{"name": "c", "placeholder": "x",
+                               "env": "MY KEY"}]}
+        errors = validate_container_network(net)
+        self.assertTrue(any("not a shell variable name" in e for e in errors),
+                        errors)
+
+    def test_an_empty_auth_header_is_refused_not_defaulted(self):
+        """Refused rather than coerced to None. Coercion is what the port did,
+        and it turns a stated intent into the broker's default silently."""
+        net = {"hosts": ["a.com"], "ca_delivery": "env",
+               "policy": [{"host": "a.com", "credential": "c"}],
+               "credential": [{"name": "c", "placeholder": "x", "env": "K",
+                               "auth_header": "  "}]}
+        errors = validate_container_network(net)
+        self.assertTrue(any("auth_header" in e for e in errors), errors)
+
+    def test_an_auth_header_that_cannot_carry_a_credential_is_refused(self):
+        net = {"hosts": ["a.com"], "ca_delivery": "env",
+               "policy": [{"host": "a.com", "credential": "c"}],
+               "credential": [{"name": "c", "placeholder": "x", "env": "K",
+                               "auth_header": "connection"}]}
+        errors = validate_container_network(net)
+        self.assertTrue(any("cannot carry a credential" in e for e in errors),
+                        errors)
+
+    def test_an_auth_format_naming_the_wrong_field_is_refused(self):
+        """The broker renders this with str.format at startup and exits on a
+        bad one, so the only symptom on a generated unit is a restart loop."""
+        net = {"hosts": ["a.com"], "ca_delivery": "env",
+               "policy": [{"host": "a.com", "credential": "c"}],
+               "credential": [{"name": "c", "placeholder": "x", "env": "K",
+                               "auth_format": "Bearer {token}"}]}
+        errors = validate_container_network(net)
+        self.assertTrue(any("auth_format" in e for e in errors), errors)
+
+    def test_an_unknown_policy_key_is_named(self):
+        net = {"hosts": ["a.com"], "ca_delivery": "env",
+               "policy": [{"host": "a.com", "pathes": ["/v1"]}]}
+        errors = validate_container_network(net)
+        self.assertTrue(any("unknown key(s) pathes" in e for e in errors),
+                        errors)
+
+    def test_a_well_formed_credential_block_still_validates_clean(self):
+        """The six rows above are only meaningful beside this one: the port's
+        gaps are closed without the shared body having tightened onto the
+        ordinary shape."""
+        net = {"hosts": ["a.com"], "ca_delivery": "env",
+               "policy": [{"host": "a.com", "credential": "c"}],
+               "credential": [{"name": "c", "placeholder": "sk-placeholder",
+                               "env": "API_KEY",
+                               "auth_header": "Authorization",
+                               "auth_format": "Bearer {secret}"}]}
+        self.assertEqual(validate_container_network(net), [])
+
     def test_v12_internal_entry_not_on_any_list_is_error(self):
         net = {"hosts": ["a.com"], "internal": [{"host": "nas.lan", "reason": "backup"}]}
         errors = validate_container_network(net)
@@ -2562,9 +2687,11 @@ class TestValidateContainerNetworkAllowAndHostPatterns(unittest.TestCase):
 
     Every rule here is one the VM schema also has, which is exactly why it went
     untested -- a rule that reads like a port of a proven one looks covered.
-    They are separate implementations (workload_lib.py cannot import vm.py at
-    module level), so a port that dropped a clause fails on the container side
-    alone and no VM test can see it."""
+    They were separate implementations, and a port that dropped a clause failed
+    on the container side alone where no VM test could see it. They share one
+    body now, so what these rows still measure is the part that is NOT shared:
+    the two sentences the container schema owns, which the shared body takes as
+    arguments and cannot check for itself."""
 
     # --- `hosts` pattern shape (_validate_container_host_pattern) ---
 

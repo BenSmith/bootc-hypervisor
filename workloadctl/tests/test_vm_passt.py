@@ -33,6 +33,7 @@ from vm import (
     vm_management_address,
     vm_nflog_group,
 )
+import workload_lib
 from workload_lib import UID_MAX, UID_MIN
 
 
@@ -473,7 +474,7 @@ class TestNetdevUnderSynthesis(unittest.TestCase):
 
         entry = mock.MagicMock()
         entry.pw_uid = uid
-        with mock.patch.object(self.mod, "workload_config_path",
+        with mock.patch.object(workload_lib, "workload_config_path",
                                return_value=str(config_path)), \
                 mock.patch.object(self.mod, "workload_env_dir",
                                   return_value=env_dir), \

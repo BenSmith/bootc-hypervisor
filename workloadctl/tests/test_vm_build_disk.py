@@ -14,6 +14,7 @@ import urllib.error
 from pathlib import Path
 from unittest import mock
 
+import workload_lib
 from tests import load_script
 
 
@@ -137,14 +138,6 @@ class TestLoadConfig(unittest.TestCase):
     def tearDown(self):
         import shutil
         shutil.rmtree(self.tmp)
-
-    def test_load_config_parses_toml(self):
-        cfg = Path(self.tmp) / "workload.toml"
-        cfg.write_bytes(b'[vm]\ncloud_image_url = "http://x/img.qcow2"\n')
-        with mock.patch.object(self.mod, "workload_config_path", return_value=cfg):
-            result = self.mod.load_config("demo")
-        self.assertEqual(result["vm"]["cloud_image_url"], "http://x/img.qcow2")
-
 
 class TestDownloadCloudImage(unittest.TestCase):
     def setUp(self):
@@ -434,7 +427,7 @@ class TestMain(unittest.TestCase):
         self.cfg.write_text(toml)
         patches = [
             mock.patch.object(self.mod.sys, "argv", ["build-disk"] + argv),
-            mock.patch.object(self.mod, "workload_config_path", return_value=self.cfg),
+            mock.patch.object(workload_lib, "workload_config_path", return_value=self.cfg),
             mock.patch.object(self.mod, "workload_state_dir", return_value=self.state),
             mock.patch.object(self.mod, "workload_data_dir", return_value=self.data),
         ]
