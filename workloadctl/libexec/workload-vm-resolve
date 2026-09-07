@@ -88,7 +88,6 @@ negative-cache one. Repeat MX/TXT lookups therefore reach us every time. They
 are answered from memory with no I/O; the cost is a syscall, not a timeout.
 """
 import json
-import os
 import selectors
 import signal
 import socket
@@ -103,6 +102,9 @@ from vm import (
     VM_RESOLVE_TTL, vm_hostname_control_character, vm_hostname_match,
     vm_normalise_hostname, vm_resolve_policy_path, vm_resolve_status_path,
 )
+from sd_listen import NotSocketActivated
+from sd_listen import (
+    inherited_listening_sockets as sd_inherited_listening_sockets)
 from vm_status import STATUS_TOP_N, BoundedCounts, write_status
 
 # Header flags and fields, by name rather than by magic number at the use site.
@@ -162,10 +164,6 @@ _SELECT_POLL = 0.5
 
 class Malformed(Exception):
     """The query could not be parsed far enough to answer it."""
-
-
-class NotSocketActivated(Exception):
-    """LISTEN_FDS/LISTEN_PID did not describe sockets that are ours."""
 
 
 def log(msg):
@@ -510,32 +508,15 @@ def error_response(query, rcode):
 def inherited_listening_sockets():
     """Recover the sockets systemd passed in, or fail loudly.
 
-    Reads LISTEN_PID and LISTEN_FDS; the fds are 3 .. 3+LISTEN_FDS.
-    socket.socket(fileno=fd) recovers each one's family and type from the fd on
-    Linux, so this does not have to be told which is the datagram one.
+    The mechanics are shared with workload-vm-inspect-listener
+    (lib/sd_listen.py); what is ours is the reason a fallback bind is refused.
+    Port 53 is privileged and this process is not, so a fallback would not fail
+    -- it would succeed on some other port that nothing forwards to.
     """
-    listen_pid = os.environ.get("LISTEN_PID")
-    listen_fds = os.environ.get("LISTEN_FDS")
-    missing = [n for n, v in (("LISTEN_PID", listen_pid),
-                              ("LISTEN_FDS", listen_fds)) if v is None]
-    if missing:
-        raise NotSocketActivated(
-            "this program is socket-activated and never binds: it takes its "
-            f"sockets from the .socket unit, but {', '.join(missing)} is not "
-            "set. It refuses to open a socket of its own -- port 53 is "
-            "privileged and this process is not, so a fallback bind would be a "
-            "listener on some other port that nothing forwards to")
-    if listen_pid != str(os.getpid()):
-        raise NotSocketActivated(
-            f"LISTEN_PID={listen_pid} is not this process ({os.getpid()}); "
-            "the activation environment belongs to another process, so the "
-            "inherited fds would not be ours to read")
-    try:
-        count = int(listen_fds)
-    except ValueError:
-        raise NotSocketActivated(
-            f"LISTEN_FDS={listen_fds!r} is not an integer") from None
-    return [socket.socket(fileno=fd) for fd in range(3, 3 + count)]
+    return sd_inherited_listening_sockets(
+        refusal=(" -- port 53 is privileged and this process is not, so a "
+                 "fallback bind would be a listener on some other port that "
+                 "nothing forwards to"))
 
 
 # --- the serve loop ---

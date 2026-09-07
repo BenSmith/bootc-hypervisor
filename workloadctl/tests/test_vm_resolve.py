@@ -836,26 +836,49 @@ class TestNoUpstream(unittest.TestCase):
                 called.add(name)
         self.assertEqual(called & forbidden, set(), sorted(called & forbidden))
 
-    def test_the_one_socket_constructor_only_adopts_an_inherited_fd(self):
-        """socket.socket() appears exactly once, and only with `fileno=`.
-
-        That call adopts a descriptor systemd already opened; the same
-        constructor without `fileno=` would CREATE a socket, which is the one
-        line that could turn this program into something that speaks to the
-        network on its own initiative.
-        """
+    @staticmethod
+    def _socket_constructions(relative: str):
         import ast
         import pathlib
-        source = pathlib.Path(__file__).resolve().parent.parent \
-            / "libexec" / "workload-vm-resolve"
+        source = pathlib.Path(__file__).resolve().parent.parent / relative
         tree = ast.parse(source.read_text())
-        constructions = [
+        return [
             node for node in ast.walk(tree)
             if isinstance(node, ast.Call)
             and isinstance(node.func, ast.Attribute)
             and node.func.attr == "socket"
         ]
-        self.assertEqual(len(constructions), 1, ast.dump(tree)[:0] or
+
+    def test_the_program_itself_constructs_no_socket_at_all(self):
+        """This file contains no socket.socket() call of any kind.
+
+        The one constructor it relies on moved to lib/sd_listen.py when the
+        activation mechanics were shared with workload-vm-inspect-listener.
+        The invariant did not move with it, which is the whole point of
+        splitting this into two assertions: the property is that THIS program
+        never creates a socket, and a file with zero constructors states that
+        more strongly than one with a construction that happens to be safe.
+        """
+        import ast
+        found = self._socket_constructions("libexec/workload-vm-resolve")
+        self.assertEqual(found, [], [ast.unparse(c) for c in found])
+
+    def test_the_shared_constructor_only_adopts_an_inherited_fd(self):
+        """sd_listen's socket.socket() appears exactly once, and only with
+        `fileno=`.
+
+        That call adopts a descriptor systemd already opened; the same
+        constructor without `fileno=` would CREATE a socket, which is the one
+        line that could turn this program into something that speaks to the
+        network on its own initiative. It is asserted from this module, not
+        the listener's, because the listener legitimately creates sockets of
+        its own -- so sd_listen is the only place the resolver's guarantee can
+        still be read, and a creating constructor added there for the
+        listener's benefit would silently become the resolver's too.
+        """
+        import ast
+        constructions = self._socket_constructions("lib/sd_listen.py")
+        self.assertEqual(len(constructions), 1,
                          [ast.unparse(c) for c in constructions])
         self.assertEqual([kw.arg for kw in constructions[0].keywords],
                          ["fileno"])

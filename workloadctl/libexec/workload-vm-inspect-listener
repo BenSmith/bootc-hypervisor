@@ -139,6 +139,9 @@ from vm_clock import vm_resync_guest_clock_if_skewed
 from vm_mint import MintFailed, MintThrottled, Minter
 from vm_status import STATUS_TOP_N, BoundedCounts, write_status
 from peer_identity import local_endpoints, peer_uid
+from sd_listen import NotSocketActivated
+from sd_listen import (
+    inherited_listening_sockets as sd_inherited_listening_sockets)
 from workload_lib import workload_state_dir
 
 
@@ -271,40 +274,17 @@ LOG_REQ_FIELD = "req"
 _ACCEPT_POLL = 0.1
 
 
-class NotSocketActivated(Exception):
-    """The process was not handed its listeners by the socket unit."""
-
-
 def inherited_listening_sockets():
     """Recover the listening sockets systemd passed in, or fail loudly.
 
-    Reads LISTEN_PID and LISTEN_FDS; the fds are 3 .. 3+LISTEN_FDS.
-    socket.socket(fileno=fd) recovers each one's family and type from the fd on
-    Linux, so this does not have to be told which of the four is which.
+    The mechanics are shared with workload-vm-resolve (lib/sd_listen.py); what
+    is ours is the reason a fallback bind is refused. Binding here rather than
+    accepting the inherited fd would move the bind into the workload SELinux
+    domain, which is the property the socket unit exists to hold.
     """
-    listen_pid = os.environ.get("LISTEN_PID")
-    listen_fds = os.environ.get("LISTEN_FDS")
-    missing = [name for name, value in (("LISTEN_PID", listen_pid),
-                                        ("LISTEN_FDS", listen_fds))
-               if value is None]
-    if missing:
-        raise NotSocketActivated(
-            "this program is socket-activated and never binds: it takes its "
-            f"listening sockets from the .socket unit, but {', '.join(missing)} "
-            "is not set. It refuses to open a socket of its own, because a "
-            "fallback bind would move the bind out of the inherited fd and "
-            "back into the workload SELinux domain")
-    if listen_pid != str(os.getpid()):
-        raise NotSocketActivated(
-            f"LISTEN_PID={listen_pid} is not this process ({os.getpid()}); "
-            "the activation environment belongs to another process, so the "
-            "inherited fds would not be ours to accept")
-    try:
-        count = int(listen_fds)
-    except ValueError:
-        raise NotSocketActivated(
-            f"LISTEN_FDS={listen_fds!r} is not an integer") from None
-    return [socket.socket(fileno=fd) for fd in range(3, 3 + count)]
+    return sd_inherited_listening_sockets(
+        refusal=(", because a fallback bind would move the bind out of the "
+                 "inherited fd and back into the workload SELinux domain"))
 
 
 def plane_for_port(port):
