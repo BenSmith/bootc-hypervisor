@@ -293,17 +293,17 @@ name = "schema-reference"
 # Same convention as a container's [network].ports. Ignored (and rejected by
 # validate) when .bridge is set, since a bridged guest has its own address.
 #
-# REJECTED: a bind address in a plane this design owns. There are four, and the
+# REJECTED: a bind address in a range this design owns. There are four, and the
 # error names which one and what would collide with it:
 #   127.128.0.0/9   the per-workload management addresses `exec` and `shell`
 #                   reach a guest on. The rest of 127/8, 127.0.0.1 included, is
 #                   a normal thing to publish on.
-#   198.18.0.0/16   the egress inspector's IPv4 listener plane, where every
+#   198.18.0.0/16   the egress inspector's IPv4 listener range, where every
 #   2001:2::/48     filtered VM's redirected 80 and 443 land, and its IPv6 twin
 #                   carrying the same numbers.
 # In every case the collision is decided by start order and reported by neither
 # side: the loser fails to bind, which surfaces as the address being missing
-# rather than as a conflict, and the winner serves a plane it does not own.
+# rather than as a conflict, and the winner serves a range it does not own.
 # ports = ["8080:80", "5353:53/udp", "127.0.0.1:9090:9090"]
 #
 # Optional: Pin this VM's outbound traffic to one host interface.
@@ -551,7 +551,7 @@ name = "schema-reference"
 #
 # REFUSED: an address inside the egress inspector's listener ranges,
 # 198.18.0.0/16 or 2001:2::/48 — including a NAME that resolves into one.
-# Those planes carry every filtered VM's own inspector, and .allow is matched
+# Those ranges carry every filtered VM's own inspector, and .allow is matched
 # AHEAD of the rule that stops one workload reaching another's — so such an
 # entry does not bypass that guard so much as replace it: the connection is
 # accepted, lands on a policy point enforcing a different workload's

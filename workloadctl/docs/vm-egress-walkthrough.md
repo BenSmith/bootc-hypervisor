@@ -169,7 +169,7 @@ Four groups, and the order among them is the whole design:
   the rewritten destination — which is why 5 and 6 match the translated tuple
   (uid . listener address . listener port), armed by the same script that armed
   the DNAT maps.
-- **7–10** are the listener-plane guards, and they come *after* the served ports
+- **7–10** are the listener-range guards, and they come *after* the served ports
   are admitted. 7 and 8 are per workload and carry per-element counters, so
   `diagnose` can say "this guest dialled its own listener on a port nothing
   serves" — the case that actually happens. 9 and 10 catch what is left, which is
@@ -425,11 +425,11 @@ management address.
 The rule stays as it is; the guards go **in front of it** — rules 7 to 10.
 Two things bound what rule 16 now admits, and neither is rule 16:
 
-- an `input` chain drops anything addressed to a listener plane that arrives on
-  any interface other than `lo`, so the planes are reachable only from this
+- an `input` chain drops anything addressed to a listener range that arrives on
+  any interface other than `lo`, so the ranges are reachable only from this
   host. Measured, both families, in `tests/manual/input_chain_rig.py`;
 - the output chain carries per-uid guards ahead of rule 16 so that one
-  workload's uid cannot reach *another* workload's plane — the addresses are
+  workload's uid cannot reach *another* workload's — the addresses are
   derived from the uid, so they are guessable by construction. This was
   measured, not assumed: workload B reached A's listener on the first try
   before the guard existed. Rules 9 and 10 catch whatever the per-workload

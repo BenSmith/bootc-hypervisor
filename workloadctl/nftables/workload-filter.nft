@@ -43,7 +43,7 @@ add set inet workload_filter wl_filtered { typeof meta skuid ; }
 add set inet workload_filter wl_allow4 { typeof meta skuid . ip daddr . th dport ; }
 add set inet workload_filter wl_allow6 { typeof meta skuid . ip6 daddr . th dport ; }
 
-# The inspector's listener planes (198.18.0.0/16 / 2001:2::/48) are ordinary
+# The inspector's listener ranges (198.18.0.0/16 / 2001:2::/48) are ordinary
 # host-local ranges, not 127/8, so they have none of the protection the
 # management addresses got for free. Two rules each, one per family.
 #
@@ -248,7 +248,7 @@ add rule inet workload_filter output meta skuid . ip6 daddr . th dport @wl_allow
 # 2001:2::/48), where it would otherwise be accepted ahead of the guard that
 # exists to refuse exactly it. Refused in the schema and again in the helper
 # that arms the element, in both families, including an entry written as a name
-# that RESOLVES into a plane — see vm_allow_reserved_reason in lib/vm.py.
+# that RESOLVES into one — see vm_allow_reserved_reason in lib/vm.py.
 add rule inet workload_filter output meta skuid . ip  daddr . th dport @wl_inspect_dst  accept
 add rule inet workload_filter output meta skuid . ip6 daddr . th dport @wl_inspect_dst6 accept
 
@@ -360,7 +360,7 @@ add rule inet workload_filter output socket cgroupv2 level 2 @wl_egress_cg meta 
 add rule inet workload_filter output socket cgroupv2 level 2 @wl_egress_cg ct direction original ip daddr @wl_internal4 counter drop
 add rule inet workload_filter output socket cgroupv2 level 2 @wl_egress_cg ct direction original ip6 daddr @wl_internal6 counter drop
 
-# Loopback is the workload's own control plane, not egress. Without this a
+# Loopback is the workload's own management path, not egress. Without this a
 # filtered VM is cut off from the host in two ways that both look like bugs
 # elsewhere (both observed on a live VM before this rule existed):
 #
@@ -428,7 +428,7 @@ add rule inet workload_filter output meta skuid @wl_filtered udp dport 443 count
 # operator after the wrong VM.
 add rule inet workload_filter output meta skuid @wl_filtered counter drop
 
-# --- The input half of the inspector's listener planes ---
+# --- The input half of the inspector's listener ranges ---
 #
 # 127/8 is protected inbound by the kernel, unconditionally: a packet arriving
 # on a non-loopback interface with a 127/8 destination is martian and dies
@@ -450,7 +450,7 @@ add rule inet workload_filter output meta skuid @wl_filtered counter drop
 # whoever they are.
 #
 # `iif != lo` is the entire exemption, and it is the load-bearing detail.
-# Everything legitimate on these planes is host-local: the guest's redirected
+# Everything legitimate on these ranges is host-local: the guest's redirected
 # connection, the inspector's reply and `diagnose` probing as root all arrive
 # on lo. Getting it wrong takes every inspected connection down rather than
 # opening anything — the safe direction, and it presents as the whole design
@@ -464,7 +464,7 @@ add rule inet workload_filter output meta skuid @wl_filtered counter drop
 # and would still be caught, but one that merely LOOKED like a reply would
 # not be.
 #
-# Both families or neither: a v4-only input chain leaves the plane clients
+# Both families or neither: a v4-only input chain leaves the family clients
 # reach first wide open, and nothing about the v4 half's behaviour would say
 # so.
 #
