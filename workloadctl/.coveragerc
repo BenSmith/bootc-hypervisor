@@ -2,6 +2,20 @@
 # scripts that some tests invoke as subprocesses (see tests/covhelper.py).
 [run]
 parallel = true
+# Branch coverage, for the file splits: statement coverage catches a line that
+# was deleted, but the characteristic failure of a split is a condition that
+# quietly loses an arm -- a re-export that now always resolves one way, a
+# dispatch that only ever takes the half that stayed behind. That is a partial
+# branch and invisible without this.
+#
+# Read the result as a DIFFERENTIAL, not a score. Many untaken arms here are
+# untakeable by the unit suite by construction: the `except OSError` around an
+# nft call, the arm/disarm paths in workload-container-inspect, anything
+# needing a real SELinux label. Those are covered by the manual rigs, where
+# coverage.py is not watching, so the absolute percentage understates reality
+# by a margin nobody has measured. before -> after on the same conditionals is
+# the reading that means something.
+branch = true
 # Record every filename relative to this tree so a script measured both
 # in-process and as a covhelper subprocess (absolute argv path) lands under one
 # identical name and `coverage combine` unions them — otherwise the subprocess

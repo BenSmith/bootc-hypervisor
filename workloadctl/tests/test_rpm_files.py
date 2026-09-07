@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""The spec must install every libexec helper, once, under its own name.
+"""The spec must install every libexec helper and generator, once, under its
+own name.
 
 `%install` and `%files` are two hand-maintained lists of the same set, and a
 copy-pasted `install -Dpm` line is invisible to every other test in the suite:
@@ -13,6 +14,21 @@ script.
 Caught for real on 2026-08-10: adding workload-vm-netdev cloned the
 workload-vm-notify install line, leaving netdev holding notify's content and
 netdev missing from %files entirely.
+
+`generators/` is checked on the same terms as `libexec/`, and the asymmetry
+that makes it worth stating: `lib/*.py` is installed by a GLOB, so a new
+library module ships with no spec change at all, while every file in
+`libexec/` and `generators/` is a hand-written `install -Dpm` line. That is
+the whole reason a file split should move code DOWN into lib/ rather than
+sideways into a new sibling entrypoint -- sideways is the shape that needs the
+spec edited, and forgetting it ships a package whose unit points at a file
+that is not there. This test is what turns that from a silent RPM defect into
+a failing unit run.
+
+The two generators do not share a destination -- workload-generator is a
+systemd system-generator and lands under %{_prefix}/lib/systemd, while
+workload-generate is a libexec-dir helper -- so the check is "installed
+somewhere and packaged at that same path", not a fixed directory.
 """
 
 import re
@@ -22,6 +38,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 SPEC = ROOT / "rpm" / "workloadctl.spec"
 LIBEXEC = ROOT / "libexec"
+GENERATORS = ROOT / "generators"
 
 # `install -Dpm 0755 %{_sourcedir}/<src> \\\n    %{buildroot}<dest>`
 INSTALL_RE = re.compile(
@@ -68,6 +85,28 @@ class TestSpecInstallsEveryHelper(unittest.TestCase):
                 f"libexec/{helper} is installed but absent from %files, so "
                 f"rpmbuild would fail on unpackaged files (or silently drop "
                 f"it if a glob covers the directory)")
+
+    def test_every_generator_is_installed_and_packaged(self):
+        """Same contract as the libexec helpers, different destinations.
+
+        Asserted against the install line's own destination rather than an
+        expected directory, because the two generators legitimately land in
+        different trees and a test that pinned one would have to be edited to
+        add a generator that belongs in the other.
+        """
+        by_source = {Path(src).name: dest for src, dest in self.installs}
+        for gen in sorted(p.name for p in GENERATORS.iterdir() if p.is_file()):
+            self.assertIn(
+                gen, by_source,
+                f"generators/{gen} exists in the tree but no %install line "
+                f"puts it in the buildroot. Unlike lib/*.py, which the spec "
+                f"installs by glob, every generator needs its own line")
+            dest = by_source[gen]
+            self.assertRegex(
+                self.files_section,
+                rf"(?m)^{re.escape(dest)}$",
+                f"generators/{gen} is installed to {dest} but that path is "
+                f"absent from %files")
 
     def test_no_helper_is_installed_twice(self):
         dests = [dest for _, dest in self.installs]
