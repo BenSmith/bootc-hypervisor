@@ -17,7 +17,7 @@ from cli_log import emit_result, error, info
 from workload_lib import workload_config_path
 from workloadctl_core import WorkloadConfig, WorkloadManager, require_root
 from substrate import get_substrate, service_active
-from provisioning import apply_vm_fcontext, transfer_image
+from provisioning import apply_vm_fcontext, regenerate_units, transfer_image
 
 
 # ---------------------------------------------------------------------------
@@ -109,14 +109,10 @@ def cmd_recreate(args, manager: WorkloadManager):
 
     info(f"Recreating workload: {args.workload}")
     info("  Regenerating service files...")
-    # --no-start: reprovision() below owns the restart, after transfer_image —
-    # a generator-enqueued start would race ahead of the transfer.
-    subprocess.run(
-        ["/usr/libexec/workloadctl/workload-generate", "/run/systemd/system",
-         "--workload", config.name, "--no-start"],
-        check=True,
-    )
-    subprocess.run(["systemctl", "daemon-reload"], check=True)
+    # reprovision() below owns the restart, after transfer_image — a
+    # generator-enqueued start would race ahead of the transfer, which is the
+    # --no-start regenerate_units always passes.
+    regenerate_units(config.name)
     # Clear any failed/start-limit state before restarting. A VM that was
     # stopped and started several times in quick succession (e.g. during
     # debug cycles or immediately after a fresh enable) can hit

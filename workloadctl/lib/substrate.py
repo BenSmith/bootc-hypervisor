@@ -111,6 +111,19 @@ class LifecycleError(Exception):
         super().__init__(f"lifecycle action failed (exit {returncode})")
 
 
+def systemctl_or_raise(verb: str, unit: str) -> None:
+    """`systemctl <verb> <unit>`, raising LifecycleError on a non-zero exit.
+
+    Output is deliberately NOT captured: systemctl's own failure text is what
+    the operator needs, and it goes straight to their terminal. The returncode
+    travels in the exception because the CLI layer exits with it -- see
+    LifecycleError.
+    """
+    result = subprocess.run(["systemctl", verb, unit])
+    if result.returncode != 0:
+        raise LifecycleError(result.returncode)
+
+
 # ---------------------------------------------------------------------------
 # Shared liveness primitive
 # ---------------------------------------------------------------------------

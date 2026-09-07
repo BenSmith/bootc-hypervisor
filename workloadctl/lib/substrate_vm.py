@@ -34,6 +34,7 @@ from substrate import (
     ProvisionFailed,
     Substrate,
     service_active,
+    systemctl_or_raise,
 )
 from vm import (
     VM_MGMT_SSH_PORT,
@@ -508,21 +509,15 @@ class VMSubstrate(Substrate):
     def lifecycle(self, action: str) -> None:
         """Unified lifecycle for VMs: start / stop / restart / reboot."""
         if action == "start":
-            result = subprocess.run(["systemctl", "start", self.config.service_name])
-            if result.returncode != 0:
-                raise LifecycleError(result.returncode)
+            systemctl_or_raise("start", self.config.service_name)
         elif action == "stop":
-            result = subprocess.run(["systemctl", "stop", self.config.service_name])
-            if result.returncode != 0:
-                raise LifecycleError(result.returncode)
+            systemctl_or_raise("stop", self.config.service_name)
         elif action == "restart":
             # A power-cycle onto the existing disks and cloud-init seed. The setup
             # oneshot (RemainAfterExit=yes) is deliberately left alone: re-rendering
             # the seed from a changed TOML is reprovision(recreate=True)'s job, and
             # a bounce shouldn't silently re-seed the guest.
-            result = subprocess.run(["systemctl", "restart", self.config.service_name])
-            if result.returncode != 0:
-                raise LifecycleError(result.returncode)
+            systemctl_or_raise("restart", self.config.service_name)
         elif action == "reboot":
             endpoint = self._guest_ip()
             if not endpoint:

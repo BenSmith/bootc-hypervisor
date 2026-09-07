@@ -31,6 +31,7 @@ from substrate import (
     podman_stat_row,
     rollback_tag,
     service_active,
+    systemctl_or_raise,
 )
 from workload_lib import (
     RUN_SYSTEMD_SYSTEM,
@@ -291,13 +292,9 @@ class ContainerSubstrate(Substrate):
                 except subprocess.CalledProcessError as e:
                     raise LifecycleError(e.returncode or 1)
             else:
-                result = subprocess.run(["systemctl", "start", self.config.service_name])
-                if result.returncode != 0:
-                    raise LifecycleError(result.returncode)
+                systemctl_or_raise("start", self.config.service_name)
         elif action == "stop":
-            result = subprocess.run(["systemctl", "stop", self.config.service_name])
-            if result.returncode != 0:
-                raise LifecycleError(result.returncode)
+            systemctl_or_raise("stop", self.config.service_name)
         elif action == "restart":
             # A bounce: the container is re-created from its existing overlay by
             # the unit's own ExecStartPre. Snapshotting a pet's overlay and
@@ -308,9 +305,7 @@ class ContainerSubstrate(Substrate):
                 except subprocess.CalledProcessError as e:
                     raise LifecycleError(e.returncode or 1)
             else:
-                result = subprocess.run(["systemctl", "restart", self.config.service_name])
-                if result.returncode != 0:
-                    raise LifecycleError(result.returncode)
+                systemctl_or_raise("restart", self.config.service_name)
         elif action == "reboot":
             result = self.manager.run_podman_exec(
                 self.config,

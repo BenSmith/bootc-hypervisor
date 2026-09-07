@@ -453,6 +453,34 @@ def transfer_one_image(config: WorkloadConfig, manager: WorkloadManager,
     return True
 
 
+WORKLOAD_GENERATE_BIN = "/usr/libexec/workloadctl/workload-generate"
+
+
+def regenerate_units(name: str, *, log_stderr: bool = False) -> None:
+    """Re-run the generator for one workload into /run, then daemon-reload.
+
+    `--workload` keeps the run to the one being changed: an unfiltered run
+    rewrites every enabled workload's units. `--no-start` keeps the generator
+    from enqueuing its own start job -- every caller owns its own apply step,
+    and a generator-enqueued start would race ahead of it.
+
+    `log_stderr` routes the generator's own skip/failure lines to stderr. Only
+    enable's path asks for it, because there the generator's silence is the
+    difference between "nothing to do" and "skipped your workload and exited 0"
+    -- and enable checks for produced artifacts immediately after. Edit and
+    recreate act on a workload that already generated once, and leave it off
+    rather than adding generator chatter to an interactive command.
+    """
+    subprocess.run(
+        [WORKLOAD_GENERATE_BIN, "/run/systemd/system",
+         "--workload", name, "--no-start"],
+        check=True,
+        **({"env": {**os.environ, "WORKLOAD_GENERATE_LOG_STDERR": "1"}}
+           if log_stderr else {}),
+    )
+    subprocess.run(["systemctl", "daemon-reload"], check=True)
+
+
 def generate_units(config: WorkloadConfig):
     """Run the boot generator against the live /run dir — the single producer.
 
@@ -484,13 +512,7 @@ def generate_units(config: WorkloadConfig):
     image transfer, pinning them to the stale user-store image.
     """
     info("  Generating service files...")
-    subprocess.run(
-        ["/usr/libexec/workloadctl/workload-generate", "/run/systemd/system",
-         "--workload", config.name, "--no-start"],
-        check=True,
-        env={**os.environ, "WORKLOAD_GENERATE_LOG_STDERR": "1"},
-    )
-    subprocess.run(["systemctl", "daemon-reload"], check=True)
+    regenerate_units(config.name, log_stderr=True)
 
     # The generator always exits 0 and *skips* any workload it can't process
     # (logging the reason above), so a produced-artifact check is how enable

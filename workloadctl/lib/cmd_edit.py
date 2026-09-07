@@ -20,6 +20,7 @@ from workload_lib import (
     replace_file_atomically, workload_config_path, workload_service_units,
 )
 from workloadctl_core import WorkloadConfig, WorkloadManager, require_root
+from provisioning import regenerate_units
 from service_runtime import restart_workload_service
 from cmd_validate import validate_single
 
@@ -312,16 +313,9 @@ def cmd_edit(args, manager: WorkloadManager):
             # only the systemd shell-generator re-runs, and it just emits a
             # oneshot that doesn't fire until next boot. Run workload-generate
             # explicitly so [container.environment] and other inlined values
-            # actually take effect. --workload keeps the run to the workload
-            # being edited: an unfiltered run rewrites every enabled workload's
-            # units and starts each one. --no-start: the explicit restart below
-            # is the apply step; the generator must not start anything itself.
-            subprocess.run(
-                ["/usr/libexec/workloadctl/workload-generate", "/run/systemd/system",
-                 "--workload", config.name, "--no-start"],
-                check=True,
-            )
-            subprocess.run(["systemctl", "daemon-reload"], check=True)
+            # actually take effect. The explicit restart below is the apply
+            # step -- see regenerate_units for why it must not start anything.
+            regenerate_units(config.name)
             if config.is_vm:
                 # VM cloud-init/nvram are built by the setup oneshot
                 # (RemainAfterExit=yes); restart it so edits to [vm.cloud_init]
