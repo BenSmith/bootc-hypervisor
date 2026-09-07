@@ -786,7 +786,7 @@ Run a raw command against the workload's runtime **control plane** as the owning
 workloadctl incant <workload>[/<container>] -- <command> [args...]
 ```
 
-**Container workloads:** runs `podman <command>` as the owning `_wl-<name>` user with the correct rootless environment (`XDG_RUNTIME_DIR`/session bus) — you never hand-build the `sudo … podman` invocation yourself. This replaces the old `network create` verb.
+**Container workloads:** runs `podman <command>` as the owning `_wl-<name>` user with the correct rootless environment (`XDG_RUNTIME_DIR`/session bus) — you never hand-build the `sudo … podman` invocation yourself.
 
 **VM workloads:** sends a QMP command to the QEMU monitor. The first token after `--` is the QMP command name; additional `key=value` tokens become the arguments dict. The JSON reply is printed.
 

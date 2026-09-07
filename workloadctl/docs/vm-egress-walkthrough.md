@@ -68,9 +68,9 @@ root:
    to start the listener.
 2. Creates the `workload-proxy` dummy link and puts `192.0.2.1/32` on it.
    Shared and host-global, created on demand, never torn down by a workload
-   stop — it holds no per-workload state and an orphan is inert. (The name is
-   the retired proxy's; it is a kernel object on running hosts, and renaming it
-   would strand addresses on two links for no gain.)
+   stop — it holds no per-workload state and an orphan is inert. (The name predates the
+   design and is kept deliberately: it is a kernel object on running hosts, and
+   renaming it would strand addresses on two links for no gain.)
 3. Applies both nft skeletons — the nat table *and* the filter table. The second
    is not redundant: the guard sets live in the filter table, and this unit
    starts before the VM whose prestart would otherwise be first to create it.
@@ -228,9 +228,9 @@ Then the paths that don't work, which are the point:
   the port, not the destination, so it is DNATed into the inspector anyway —
   where a TLS record with no SNI, or a byte stream that is not a handshake at
   all, has no name to match. Dropped, and counted under *no readable name*.
-  There is nothing to opt out of: this is the difference from the retired proxy,
-  where the same guest simply did not use it and had to be caught by the default
-  deny instead.
+  There is nothing to opt out of: the guest never chooses whether a connection
+  is inspected, so dialling by literal is caught by the rule that inspects
+  everything rather than by a default deny that has to notice the evasion.
 - **The guest asks for a host not on the list.** For HTTP, a `403` before
   anything is forwarded. For HTTPS under `inspect`, the same `403` — delivered
   *through* a completed handshake, using a leaf minted for the refused name, so
@@ -362,11 +362,10 @@ Rules 14 and 15 are the check. Four things about them are load-bearing:
   responder synthesises, every inspected connection's reply is addressed back
   into a host-local range; without the qualifier every one of them hangs with the
   SYN already accepted. Measured: the qualified form works, the unqualified one
-  does not. `192.0.2.0/24` is now *present* in `wl_internal4`. It was excluded while
-  the advertised address `192.0.2.1` lived in it — first for the retired proxy,
-  then for the host-wide credential broker — and rung 6 deleted the last
-  consumer. With nothing carrying it, TEST-NET-1 is exactly what this drop
-  exists to catch. A site that really routes it internally writes a
+  does not. `192.0.2.0/24` is *present* in `wl_internal4`. Nothing in this design
+  advertises an address inside TEST-NET-1, so it is exactly the kind of
+  destination this drop exists to catch. A site that really routes it
+  internally writes a
   `[[vm.network.internal]]` exemption.
 - **Rule 11, the DNS carve-out, comes first.** The inspector resolves through the
   host's configured resolver, and that address is inside these ranges whichever
@@ -375,10 +374,10 @@ Rules 14 and 15 are the check. Four things about them are load-bearing:
   every other signal looks correct. It is scoped to destination port 53, so the
   residual is an internal service answering HTTP on port 53.
 
-  **This carve-out was written for the retired proxy and had to survive it.**
-  Deleting it alongside the proxy is the obvious mistake: the inspector resolves
-  host-side on every connection it authorises, permanently, and the responder
-  resolves the names it synthesises answers for. Both are in `wl_egress_cg`.
+  **Do not delete it as an unused exemption.** The inspector resolves host-side
+  on every connection it authorises, permanently, and the responder resolves the
+  names it synthesises answers for. Both are in `wl_egress_cg`, so both lose
+  every lookup they make the moment it goes.
 - **Rules 12 and 13 are `[[vm.network.internal]]`** — the per-workload
   exceptions, for an allowlisted name that is *supposed* to resolve into private
   space. Without them a homelab forge on the LAN fails as

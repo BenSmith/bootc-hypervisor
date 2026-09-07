@@ -61,7 +61,7 @@ lifecycle note under "The set").
 | `/run/systemd/system/workload-<name>-inspect.socket` + `-inspect.service` | VM workloads whose egress is inspected (`vm_uses_inspect`). Enumerated for every VM regardless, on the superset rule below |
 | `/run/systemd/system/workload-<name>-resolve.socket` + `-resolve.service` | the synthesising responder — inspected **and** `resolver` not `"none"` (`vm_uses_resolve`). Same superset rule |
 | `/run/systemd/system/workload-<name>-broker.service` | VM workloads declaring `[[vm.network.credential]]` material and inspected (`vm_uses_credentials`). Same superset rule |
-| `/run/systemd/system/workload-<name>-proxy.service` | **Nothing emits this.** A migration entry: the retired hostname-policy proxy, listed so an in-place RPM upgrade's leftover unit has something that knows its name. `emitted=False` always. Deletable once every host has rebooted past the rung-2 upgrade |
+| `/run/systemd/system/workload-<name>-proxy.service` | **Nothing emits this.** A cleanup entry, listed only so that a host carrying this unit from an earlier install has something that knows its name and can unlink it. `emitted=False` always. Deletable once no host has one |
 
 The socket/service pairs are listed unconditionally on purpose: a workload that
 switches inspection (or the resolver, or its last credential) *off* has to have
@@ -150,11 +150,12 @@ compare generated-vs-live in both directions and so cannot start from a config).
 
 ## Maintenance note
 
-This table used to be hand-enumerated at half a dozen call sites and re-derived
-in the generator, and the mode→run-files membership drifted between the copies —
-two past bugs (the exporter `workload_health` miss and disable/purge
-completeness) came from exactly that. `workload_run_files()` is the durable fix
-and has landed.
+`workload_run_files()` is the single definition of mode→run-files membership,
+and it has to stay that way. Every consumer — the generator, `disable`, `purge`,
+the exporter, `diagnose` — derives its set from that one function rather than
+listing units itself, because a second copy drifts from the first silently: the
+units still exist, so nothing errors, and the miss only shows up as a workload
+that will not fully go away.
 
 **Adding or renaming a per-workload run-file is now a three-place change:** the
 generator that writes it, `workload_run_files()` (with the right `emitted`

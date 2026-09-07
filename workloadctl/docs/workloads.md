@@ -1130,7 +1130,7 @@ See [Egress filtering](#egress-filtering) for what `[vm.network].egress` and `.a
 - **The host's default-route address: unreachable, structurally** — the guest is assigned that same address, so traffic to it never leaves the guest's own stack.
 - **Any other host address** — a secondary IP, a second interface — is an ordinary routable destination and *is* reachable.
 
-This is why there is no longer a firewalld zone: on the two addresses that matter, passt's default posture is stricter than the zone was.
+No host firewall rule closes any of this. On the two addresses that matter, passt's own defaults do it, which is why the posture holds even on a host with no firewall configured at all.
 
 #### DNS
 
@@ -1138,13 +1138,13 @@ passt intercepts the guest's DNS, so the guest is never told a real resolver add
 
 **`egress = "filtered"` — the query reaches this workload's own synthesising responder and stops there.** Every A/AAAA, for any name, is answered with the workload's inspector address; everything else is NODATA. **Nothing is forwarded** — there is no upstream socket in the responder at all — so no query the guest emits ever leaves the host, and the host's own resolver never sees it. That is what makes DNS exfiltration *absent* rather than filtered, and it is the property to check first if anyone ever proposes "just add a fallback".
 
-**`egress = "open"` (and any `bridge` VM) — forwarded to the host's resolver**, as before. The advertised address and the resolver behind it are derived from the host at unit start by `workload-vm-netdev` — the generator runs before the network is up, so it cannot compute them. On a host running a stub resolver the query is then made *by the host*, which means guest DNS is invisible to uid-keyed egress policy; log at the host resolver rather than expecting to filter it.
+**`egress = "open"` (and any `bridge` VM) — forwarded to the host's resolver.** The advertised address and the resolver behind it are derived from the host at unit start by `workload-vm-netdev` — the generator runs before the network is up, so it cannot compute them. On a host running a stub resolver the query is then made *by the host*, which means guest DNS is invisible to uid-keyed egress policy; log at the host resolver rather than expecting to filter it.
 
-`[vm.network].resolver = "none"` gives the guest no resolver at all. It **kept its meaning and lost its coherence**: under the retired forward proxy a guest that could not resolve named hosts in a `CONNECT` instead, which is what made it immune to encrypted SNI, but under a transparent redirect the same guest can only dial literals — and a literal reaches the inspector with no name to match and is dropped. It is also no longer what closes DNS tunnelling; synthesis already did that. `validate` errors if it is set alongside `.hosts`, `.internal`, or an `.allow` entry written by name, and warns even in the one coherent case (a workload reaching only address-keyed `allow` entries).
+`[vm.network].resolver = "none"` gives the guest no resolver at all, and it is **almost never what you want**. A guest with no resolver can only dial literals; a literal arrives at the inspector with no name to match against and is dropped, so the setting mostly just breaks the workload. Nor is it what closes DNS tunnelling — synthesis does that, and does it whether or not a resolver is advertised. `validate` errors if it is set alongside `.hosts`, `.internal`, or an `.allow` entry written by name, and warns even in the one coherent case (a workload reaching only address-keyed `allow` entries).
 
 #### Published ports
 
-VMs can publish ports onto the host, following the same convention as containers. This is new capability: managed-bridge VMs had no port publishing at all.
+VMs can publish ports onto the host, following the same convention as containers.
 
 ```toml
 [vm.network]
@@ -1508,18 +1508,17 @@ How it fits together:
   is h2.
 - Only **80 and 443** are redirected. Anything else belongs in `allow`.
 
-**`hosts` still requires `egress = "filtered"`**, and `validate` rejects the pair
-otherwise — but for a different reason than it had under the proxy. Under
-`"open"` nothing is redirected at all: the guest dials 443 and the packet leaves,
-so the list would be read by a process no connection ever reaches while the
-workload looked configured. It joins `hosts` with `bridge` (a bridged guest
+**`hosts` requires `egress = "filtered"`**, and `validate` rejects the pair
+otherwise. Under `"open"` nothing is redirected at all: the guest dials 443 and
+the packet leaves, so the list would be read by a process no connection ever
+reaches while the workload looked configured. It joins `hosts` with `bridge` (a bridged guest
 sends from its own LAN address, with no host socket for the uid to key on) and
 `hosts = ["*"]` (`egress = "open"` spelled so nobody notices in review).
 
-**Nothing is asked of a custom seed.** A workload supplying its own
-`[vm.cloud_init].user_data_file` used to have to set the proxy environment
-itself or be dropped by the filter. There is no guest-side half any more, so a
-hand-written seed and the built-in one are filtered identically.
+**Nothing is asked of a custom seed.** Filtering has no guest-side half, so a
+workload supplying its own `[vm.cloud_init].user_data_file` is filtered exactly
+as the built-in seed is. There is nothing a hand-written seed must set to stay
+covered, and nothing it can omit to escape.
 
 Patterns match the hostname only, so a scheme, a path or a port in a `hosts`
 entry is a validation error rather than a pattern that silently matches nothing.
@@ -1568,11 +1567,10 @@ Two consequences to know:
 - **Host-side name resolution is exempt**, by destination port 53 only. It has
   to be: the inspector resolves through whatever the host uses, which is inside
   one of these ranges either way — a stub resolver on `127.0.0.53` or a box on
-  the LAN. This carve-out was written for the retired proxy and **had to
-  survive** it: the inspector resolves on every connection it authorises, and
-  the responder resolves the names it synthesises for, so removing it with the
-  proxy would have dropped every lookup both of them make. The residual is an
-  internal service answering HTTP on port 53.
+  the LAN. **Removing it would break filtering itself**: the inspector resolves
+  on every connection it authorises, and the responder resolves the names it
+  synthesises for, so both halves would lose every lookup they make. The
+  residual is an internal service answering HTTP on port 53.
 - **`internal` is the escape hatch, for a name reached over HTTP or HTTPS.** An
   allowlisted host that is *supposed* to resolve into private space is named
   there, with the reason it may:

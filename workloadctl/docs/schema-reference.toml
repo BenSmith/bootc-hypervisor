@@ -290,8 +290,7 @@ name = "schema-reference"
 # Optional: Ports published from the guest onto the host.
 # Type: array of "[bindaddr:]hostport[:guestport][/proto]" strings
 # Default: [] — nothing but the management address is bound.
-# Same convention as a container's [network].ports. This is new capability:
-# managed-bridge VMs had no port publishing at all. Ignored (and rejected by
+# Same convention as a container's [network].ports. Ignored (and rejected by
 # validate) when .bridge is set, since a bridged guest has its own address.
 #
 # REJECTED: a bind address in a plane this design owns. There are four, and the
@@ -329,7 +328,7 @@ name = "schema-reference"
 #                the guest emits ever leaves the host and the host's own
 #                resolver never sees it. /etc/resolv.conf is not consulted.
 #              egress = "open" (and any .bridge VM) — forwarded to the host's
-#                own resolver, as before. Note that when the host runs a stub
+#                own resolver. Note that when the host runs a stub
 #                resolver the query is made BY THE HOST, so guest DNS is
 #                invisible to uid-keyed egress policy; log at the host
 #                resolver instead.
@@ -337,18 +336,15 @@ name = "schema-reference"
 #            to look a name up, including cloud-init, package installs and NTP.
 #            For purpose-built guests.
 #
-#            IT KEPT ITS MEANING AND LOST ITS COHERENCE. Under the retired
-#            forward proxy a guest that could not resolve was in a strong
-#            position: it named hosts in a `CONNECT` instead, which is what
-#            made it immune to encrypted-SNI. Under a transparent redirect the
-#            same guest can only dial LITERALS, and a literal reaches the
+#            IT IS ALMOST NEVER WHAT YOU WANT, and it fails quietly. A guest
+#            with no resolver can only dial LITERALS, and a literal reaches the
 #            inspector with no name to match — so it is dropped, and every
 #            name-based destination is unreachable while the workload starts
-#            clean and reports healthy. It is also no longer what closes DNS
-#            tunnelling: synthesis makes that channel absent rather than
-#            filtered, whatever this key says.
+#            clean and reports healthy. Nor is it what closes DNS tunnelling:
+#            synthesis makes that channel absent rather than filtered, whatever
+#            this key says.
 #
-#            The one coherent use left is a workload whose destinations are all
+#            The one coherent use is a workload whose destinations are all
 #            address-keyed .allow entries — those reach the filter chain
 #            without touching the inspector. `validate` ERRORS if .hosts,
 #            .internal, or an .allow entry written by NAME is set alongside it,
@@ -427,13 +423,12 @@ name = "schema-reference"
 # while the workload looked configured. Set egress = "filtered" to enforce the
 # list, or drop .hosts to run without hostname policy.
 #
-# NOTHING IS ASKED OF A CUSTOM SEED for this key. A workload supplying its own
-# [vm.cloud_init].user_data_file used to have to set the proxy environment
-# itself; there is no guest-side half any more, so a hand-written seed and the
-# built-in one are filtered identically. If you are copying an older seed
-# forward, DELETE its proxy exports — they name an endpoint where nothing
-# listens, and a client that honours them fails while every client that ignores
-# them works.
+# NOTHING IS ASKED OF A CUSTOM SEED for this key. Filtering has no guest-side
+# half, so a workload supplying its own [vm.cloud_init].user_data_file is
+# filtered exactly as the built-in seed is — there is nothing it must set to
+# stay covered. A seed that exports proxy variables is the one thing to avoid:
+# they name an endpoint where nothing listens, so a client that honours them
+# fails while every client that ignores them works.
 # hosts = ["example.com", "*.fedoraproject.org"]
 #
 # WARNED: a wildcard whose parent is a registration domain anyone can create
@@ -515,10 +510,10 @@ name = "schema-reference"
 # tried terminating" are the same line without it.
 # tls_reason = "appliance image; its trust store cannot be modified"
 #
-# REMOVED: broker = true. `validate` refuses this key by name rather than
-# ignoring it. It used to mean "translate an advertised endpoint to the one
-# host-side broker for this uid" -- there is no advertised endpoint and no
-# host-side broker now. Each workload gets its own broker instance, and which
+# REJECTED: broker = true. `validate` refuses this key by name rather than
+# ignoring it, because the shape it asks for -- one shared broker at an endpoint
+# the guest is told about -- is not how brokering works here and would be a
+# weaker thing. Each workload gets its own broker instance, and which
 # hosts it serves is stated per policy entry: declare the material in a
 # [[vm.network.credential]] table and name it with `credential = "<name>"` on
 # the [[vm.network.policy]] entries it applies to. The guest is told nothing and
@@ -706,7 +701,7 @@ name = "schema-reference"
 # HOW THIS COMPOSES WITH .hosts, WHICH IS THE THING TO GET RIGHT. A host that
 # ANY policy entry matches is governed by policy ALONE — being in .hosts
 # allowlists it and contributes no rules. A host no entry matches is allowed by
-# .hosts with no method or path constraint, as before. A policy entry
+# .hosts with no method or path constraint. A policy entry
 # allowlists on its own, so a host named here need not also be in .hosts.
 #
 # The reason it works that way: if .hosts unioned in, a single wildcard written
@@ -889,12 +884,12 @@ name = "schema-reference"
 #
 # Break-glass, if the filter itself is the problem. There are TWO tables, and
 # which one you want depends on the symptom:
-#   nft delete table inet workload_proxy    # nothing is redirected any more;
-#                                           # 80 and 443 leave unintercepted
-#   nft delete table inet workload_filter   # nothing is dropped any more
-# Either is rebuilt by the next start of any workload that arms it -- which is
-# no longer VM-only: a container with a [network] egress trigger arms both
-# tables the same way. An abandoned table is inert: the chain's policy is accept
+#   nft delete table inet workload_proxy    # nothing is redirected: 80 and 443
+#                                           # leave unintercepted
+#   nft delete table inet workload_filter   # nothing is dropped
+# Either is rebuilt by the next start of any workload that arms it, VM or
+# container -- a container with a [network] egress trigger arms both tables the
+# same way. An abandoned table is inert: the chain's policy is accept
 # and each rule matches only uids or cgroups in its own set, so deleting one
 # leaves every unrelated workload untouched and leaves the OTHER table still
 # doing its half.

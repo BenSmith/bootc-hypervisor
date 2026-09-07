@@ -47,10 +47,10 @@ auth_format = "{secret}"
 # Optional. Serve HTTPS to the guest for agents that refuse plaintext
 # credentials. One certificate for one hostname, signed by a private CA that
 # the guest trusts. Leave both unset to serve plain HTTP.
-# Any path the broker's unit can read; there is no /etc/agent-broker/ any more
-# (retired at rung 6 with the host-wide instance), and the generated per-workload
-# config does not emit these -- an instance that needs TLS is one you are
-# configuring by hand.
+# Any path the broker's unit can read. There is no shared config directory --
+# each broker instance is per-workload -- and the generated per-workload config
+# does not emit these, so an instance that needs TLS is one you are configuring
+# by hand.
 # tls_cert = "/etc/pki/tls/certs/agent-broker.crt"
 # tls_key  = "/etc/pki/tls/private/agent-broker.key"
 
