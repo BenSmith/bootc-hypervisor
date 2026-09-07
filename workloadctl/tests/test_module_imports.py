@@ -21,11 +21,11 @@ So each module is imported in a SUBPROCESS, alone, as the first thing that
 interpreter does. That is the one condition the test suite never reproduces
 and every libexec helper creates on every run.
 
-This matters most for the file splits in docs/wip/simplification-survey.md
-(§1, §4, §5): splitting a module and re-exporting the moved names from the
-original -- the pattern 582948a established for vm_normalise_hostname -- is
-exactly the shape that produces a cycle, because the new module needs
-something from the old one and the old one now imports the new.
+This matters most when a large module is SPLIT: splitting it and
+re-exporting the moved names from the original -- the pattern 582948a
+established for vm_normalise_hostname -- is exactly the shape that produces a
+cycle, because the new module needs something from the old one and the old one
+now imports the new.
 """
 
 import subprocess
