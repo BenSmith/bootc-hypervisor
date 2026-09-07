@@ -96,6 +96,75 @@ VM_GUEST_HOME_BASE = "/home"
 VM_HOME_SELINUX_TYPES = ("user_home_t", "ssh_home_t")
 VM_HOME_SELINUX_CONTEXT = "system_u:object_r:user_home_t:s0"
 
+# --- The uid planes ---
+#
+# Everything this design gives a workload of its own -- two loopback listeners,
+# an inspector address in both families, an nflog group -- is the SAME
+# derivation: bounds-check the uid, add its offset into the workload range to a
+# base. There is no registry and no allocation step, so uniqueness is inherited
+# from the uid allocator; the only thing a plane needs to state is where it
+# starts and which reservation covers it.
+#
+# ROWS, BECAUSE THE RESERVATION IS THE PART THAT GOES WRONG. `ports` may name
+# any bind address, and a plane no reservation covers is not checked at all --
+# an omission that is silent both ways, producing either a cross-workload
+# denial of service on a security control (the inspector fails to bind, and the
+# fail-at-bind path reports it as the address being missing) or workload B
+# receiving workload A's intercepted traffic. Start order decides which, and
+# nothing is logged for either. With planes as rows, VM_RESERVED_PLANES is
+# DERIVED from them: a plane whose reservation is one already listed adds
+# nothing, and a plane outside every listed range cannot be added without
+# naming the reservation that covers it.
+
+
+class PlaneReservation(NamedTuple):
+    """A range `[vm.network].ports` may not bind into, and why.
+
+    `port` is None for a reservation that owns a whole range on every port, and
+    a number for one that owns a single socket on an address operators
+    otherwise use freely. The distinction is not cosmetic: 127.0.0.1:8080 is a
+    normal thing to publish on and the management range is not a normal thing
+    to publish on at all, so a check that treated an ordinary loopback socket
+    the way it treats the management range would refuse most of what `ports`
+    is for.
+
+    `what` is a sentence, not a label, because the collisions want different
+    explanations and reciting the range explains none of them.
+    """
+    network: ipaddress.IPv4Network | ipaddress.IPv6Network
+    port: int | None
+    what: str
+
+
+class UidPlane(NamedTuple):
+    """One per-workload value derived by offsetting the workload uid.
+
+    `noun` is what the out-of-range error calls it, so the five raises are one
+    raise. `base` is the value at UID_MIN. `reservation`/`reservation6` are the
+    ranges that cover it, or None for a plane that is not an address at all
+    (the nflog group) -- and a plane that IS an address and names no
+    reservation is the shape test_vm_planes.py refuses.
+    """
+    noun: str
+    base: int
+    reservation: PlaneReservation | None = None
+    reservation6: PlaneReservation | None = None
+
+
+def _uid_plane_value(plane: UidPlane, uid: int) -> int:
+    """This plane's value for one workload uid.
+
+    The bounds check is here rather than in each caller because an unchecked
+    offset does not fail -- it produces a plausible value on a plane that is
+    not this workload's, which is a collision nothing reports.
+    """
+    if uid < UID_MIN or uid > UID_MAX:
+        raise ValueError(
+            f"UID {uid} is outside the workload range {UID_MIN}-{UID_MAX}; "
+            f"no {plane.noun} is derivable for it")
+    return plane.base + (uid - UID_MIN)
+
+
 # --- passt networking (ADR 006) ---
 #
 # The inspector's listening addresses. The inspector cannot live on the
@@ -129,6 +198,27 @@ VM_INSPECT_NETWORK = ipaddress.ip_network("198.18.0.0/16")
 # OR-ing the v4 into this prefix, so it inherits both the base offset and the
 # whole-range boundary from the v4 and one prefix plays both roles.
 VM_INSPECT_ADDR6_PREFIX = ipaddress.ip_network("2001:2::/48")
+
+VM_RESERVATION_INSPECT4 = PlaneReservation(
+    VM_INSPECT_NETWORK, None,
+    "the egress inspector's IPv4 listener plane. Every filtered VM's "
+    "redirected 80 and 443 land on an address in it, so publishing here "
+    "either takes the bind another workload's inspector needs — which fails "
+    "as the address being missing, not as a conflict — or hands this guest "
+    "another workload's intercepted traffic")
+
+VM_RESERVATION_INSPECT6 = PlaneReservation(
+    VM_INSPECT_ADDR6_PREFIX, None,
+    "the egress inspector's IPv6 listener plane, the v6 twin of "
+    "198.18.0.0/16 carrying the same numbers. Refusing one family and not the "
+    "other refuses half of every address, and the half left open is the one "
+    "clients try first")
+
+# Both families on ONE row, because there is one derivation: the v6 address is
+# the v4 OR-ed into the prefix, so a reservation for one family and not the
+# other is not a narrower guard, it is half a guard.
+VM_PLANE_INSPECT = UidPlane("inspector address", VM_INSPECT_ADDR_BASE,
+                            VM_RESERVATION_INSPECT4, VM_RESERVATION_INSPECT6)
 
 # The two listener ports, selected by the redirected connection's ORIGINAL port
 # via the DNAT map rather than recovered by the inspector: a guest dial to 80
@@ -182,15 +272,28 @@ VM_MGMT_ADDR_BASE = 0x7F800000  # 127.128.0.0
 # reachable from a config key.
 #
 # It is /9 rather than the /16 the management addresses actually occupy, and the
-# extra bits are load-bearing rather than slack: everything else this design
-# hangs on loopback is carved out of the same range, so a narrowing pass that
-# "tidied" this to 127.128.0.0/16 would take the reservation away from planes
-# that never had one of their own. The synthesising responder is the case that
-# proved it — it sits at 127.130.0.0 + the same uid offset, and needs no
-# ReservedPlane entry of its own precisely because this /9 already covers it.
-# The reservation is enforced through VM_RESERVED_PLANES, which is where a plane
-# OUTSIDE this range is added — not by widening or narrowing this.
+# extra bits are load-bearing rather than slack: every other loopback plane is
+# carved out of the same range and names this reservation instead of one of its
+# own, so a narrowing pass that "tidied" this to 127.128.0.0/16 would take the
+# reservation away from the broker at 127.129.0.0 and the responder at
+# 127.130.0.0 at once. A plane OUTSIDE this range needs a PlaneReservation of
+# its own -- which VM_RESERVED_PLANES then picks up by derivation, not by
+# anyone remembering to list it.
 VM_MGMT_NETWORK = ipaddress.ip_network("127.128.0.0/9")
+
+# The one reservation every loopback plane names. The broker and the
+# synthesising responder hang off the same /9 at their own bases, so each is
+# covered by naming this rather than by an entry of its own -- which is the
+# whole reason the /9 is wider than the /16 the management addresses occupy.
+VM_RESERVATION_MGMT = PlaneReservation(
+    VM_MGMT_NETWORK, None,
+    "the per-workload management addresses `workloadctl exec` and `shell` "
+    "reach a guest's sshd on. Publishing here puts a guest port where another "
+    "workload's control plane belongs, and start order decides which of the "
+    "two gets the bind")
+
+VM_PLANE_MGMT = UidPlane("management address", VM_MGMT_ADDR_BASE,
+                         VM_RESERVATION_MGMT)
 
 # Port passt forwards to the guest's sshd for `workloadctl exec` / `shell`.
 # Fixed, never configurable, and bound only on the workload's own management
@@ -204,6 +307,10 @@ VM_MGMT_SSH_PORT = 2222
 # lands the first workload on group 0, which is the netfilter default. See
 # vm_nflog_group. 1000 + 42,948 = 43,948, inside the 16-bit group space.
 NFLOG_GROUP_BASE = 1000
+
+# No reservation: a group is not an address, so there is nothing `ports` could
+# bind into. The only plane in the table for which that is true.
+VM_PLANE_NFLOG = UidPlane("nflog group", NFLOG_GROUP_BASE)
 
 # The advertised DNS address is derived at unit start, not here: the generator
 # runs Before=basic.target, where there is no default route yet. See
@@ -258,11 +365,7 @@ def vm_management_address(uid: int) -> str:
     no registry, no allocation step, and no collision. uid 10000 -> 127.128.0.0,
     uid 10003 -> 127.128.0.3.
     """
-    if uid < UID_MIN or uid > UID_MAX:
-        raise ValueError(
-            f"UID {uid} is outside the workload range {UID_MIN}-{UID_MAX}; "
-            f"no management address is derivable for it")
-    return str(ipaddress.IPv4Address(VM_MGMT_ADDR_BASE + (uid - UID_MIN)))
+    return str(ipaddress.IPv4Address(_uid_plane_value(VM_PLANE_MGMT, uid)))
 
 
 class VmInspectAddress(NamedTuple):
@@ -288,11 +391,7 @@ def vm_inspect_address(uid: int) -> VmInspectAddress:
     no registry, no allocation step, and no collision. uid 10000 -> 198.18.1.0 /
     2001:2::c612:100.
     """
-    if uid < UID_MIN or uid > UID_MAX:
-        raise ValueError(
-            f"UID {uid} is outside the workload range {UID_MIN}-{UID_MAX}; "
-            f"no inspector address is derivable for it")
-    v4 = ipaddress.IPv4Address(VM_INSPECT_ADDR_BASE + (uid - UID_MIN))
+    v4 = ipaddress.IPv4Address(_uid_plane_value(VM_PLANE_INSPECT, uid))
     v6 = ipaddress.IPv6Address(
         int(VM_INSPECT_ADDR6_PREFIX.network_address) | int(v4))
     return VmInspectAddress(str(v4), str(v6))
@@ -320,11 +419,7 @@ def vm_nflog_group(uid: int) -> int:
     21,587 to spare, and nothing else changes: the value is still a pure
     function of the uid, with no registry and no allocation step.
     """
-    if uid < UID_MIN or uid > UID_MAX:
-        raise ValueError(
-            f"UID {uid} is outside the workload range {UID_MIN}-{UID_MAX}; "
-            f"no nflog group is derivable for it")
-    return NFLOG_GROUP_BASE + (uid - UID_MIN)
+    return _uid_plane_value(VM_PLANE_NFLOG, uid)
 
 
 def vm_mac_address(name: str) -> str:
@@ -2127,6 +2222,9 @@ def vm_leaf_openssl_argv(name: str, ca_key_path, ca_cert_path,
 # workload dialling it reaches its OWN loopback and finds nothing.
 VM_BROKER_ADDR_BASE = 0x7F810000  # 127.129.0.0
 
+VM_PLANE_BROKER = UidPlane("broker listen address", VM_BROKER_ADDR_BASE,
+                           VM_RESERVATION_MGMT)
+
 
 def vm_broker_listen_address(uid: int) -> str:
     """The workload's own loopback address for its credential broker instance.
@@ -2140,11 +2238,7 @@ def vm_broker_listen_address(uid: int) -> str:
     decision 6 closes grows back -- so the render gate asserts those two
     negatives explicitly rather than only asserting the positive.
     """
-    if uid < UID_MIN or uid > UID_MAX:
-        raise ValueError(
-            f"UID {uid} is outside the workload range {UID_MIN}-{UID_MAX}; "
-            f"no broker listen address is derivable for it")
-    return str(ipaddress.IPv4Address(VM_BROKER_ADDR_BASE + (uid - UID_MIN)))
+    return str(ipaddress.IPv4Address(_uid_plane_value(VM_PLANE_BROKER, uid)))
 
 
 # --- The generated broker instance (ADR 007 decision 6, HLD detail 7.8) ---
@@ -3118,6 +3212,9 @@ def vm_allow_resolved(allow):
 # every other workload on the host can query.
 VM_RESOLVE_ADDR_BASE = 0x7F820000  # 127.130.0.0
 
+VM_PLANE_RESOLVE = UidPlane("responder address", VM_RESOLVE_ADDR_BASE,
+                            VM_RESERVATION_MGMT)
+
 # Port 53, on the workload's own address. Fixed and never configurable, for the
 # reason the management SSH port is: it is not a service an operator publishes,
 # it is where passt is told to forward.
@@ -3150,11 +3247,7 @@ def vm_resolve_address(uid: int) -> str:
     address whose absence the inspector's fail-at-bind argument would then
     appear to depend on.
     """
-    if uid < UID_MIN or uid > UID_MAX:
-        raise ValueError(
-            f"UID {uid} is outside the workload range {UID_MIN}-{UID_MAX}; "
-            f"no responder address is derivable for it")
-    return str(ipaddress.IPv4Address(VM_RESOLVE_ADDR_BASE + (uid - UID_MIN)))
+    return str(ipaddress.IPv4Address(_uid_plane_value(VM_PLANE_RESOLVE, uid)))
 
 
 def vm_resolve_policy_path(name: str) -> str:
@@ -4406,69 +4499,58 @@ def vm_network_warnings(net: dict) -> list[str]:
     return warnings
 
 
+# Every uid plane this design allocates. Assembled here rather than inline
+# because the rows sit beside the constants they derive from, in the sections
+# that own them; test_vm_planes.py refuses a UidPlane defined in this module
+# and left out of this tuple, which is the one way a row can go missing.
+VM_UID_PLANES = (
+    VM_PLANE_MGMT,
+    VM_PLANE_BROKER,
+    VM_PLANE_RESOLVE,
+    VM_PLANE_INSPECT,
+    VM_PLANE_NFLOG,
+)
+
+
 class ReservedPlane(NamedTuple):
     """One host-side plane a [vm.network].ports entry may not bind into.
 
-    `port` is None for a plane that owns a whole address range on every port,
-    and a number for one that owns a single socket on an address operators
-    otherwise use freely. The distinction is not cosmetic: 127.0.0.1:8080 is a
-    normal thing to publish on and the management range is not a normal thing
-    to publish on at all, so a check that treated an ordinary loopback socket
-    the way it treats the management range would refuse most of what `ports` is
-    for. No plane currently needs the `port` form -- the last one that did was
-    the host-wide broker on 127.0.0.1:8081, deleted in rung 6 -- and the field
-    stays because the distinction it draws is the reason the list can hold both
-    kinds at all.
-
-    `what` is a sentence, not a label, because the collisions want different
-    explanations and reciting the range explains none of them.
+    The shape vm_reserved_plane answers in, kept distinct from
+    PlaneReservation because a caller wants the range that refused it and not
+    the plane bookkeeping that produced the range.
     """
     network: ipaddress.IPv4Network | ipaddress.IPv6Network
     port: int | None
     what: str
 
 
-# Every plane `ports` may not bind, IN BOTH FAMILIES. A plane left out of this
-# list is not checked at all, and the omission is silent both ways: a guest
-# port published into a listener plane produces either a cross-workload denial
-# of service on a security control (the inspector fails to bind, and the
-# fail-at-bind path reports it as the address being missing), or workload B
-# receiving workload A's intercepted traffic. Start order decides which, and
-# nothing is logged for either.
-#
-# A list, so the answer to "is this reserved" is one lookup that a new plane
-# joins rather than a chain of ifs each new plane has to remember to extend.
-VM_RESERVED_PLANES = (
-    ReservedPlane(
-        VM_MGMT_NETWORK, None,
-        "the per-workload management addresses `workloadctl exec` and `shell` "
-        "reach a guest's sshd on. Publishing here puts a guest port where "
-        "another workload's control plane belongs, and start order decides "
-        "which of the two gets the bind"),
-    ReservedPlane(
-        VM_INSPECT_NETWORK, None,
-        "the egress inspector's IPv4 listener plane. Every filtered VM's "
-        "redirected 80 and 443 land on an address in it, so publishing here "
-        "either takes the bind another workload's inspector needs — which "
-        "fails as the address being missing, not as a conflict — or hands this "
-        "guest another workload's intercepted traffic"),
-    ReservedPlane(
-        VM_INSPECT_ADDR6_PREFIX, None,
-        "the egress inspector's IPv6 listener plane, the v6 twin of "
-        "198.18.0.0/16 carrying the same numbers. Refusing one family and not "
-        "the other refuses half of every address, and the half left open is "
-        "the one clients try first"),
-)
-# The credential broker had a fourth entry here, 127.0.0.1:8081, when there was
-# one host-wide listener on an address operators publish on freely. Rung 6 moved
-# it to a per-workload address at VM_BROKER_ADDR_BASE, which is INSIDE
-# VM_MGMT_NETWORK -- so the reservation is inherited from the /9 rather than
-# stated, exactly as the synthesising responder's is. Deleted rather than
-# retargeted: an entry naming 127.129.0.0/9 would restate the first entry, and
-# one naming a single workload's address would need a uid this list does not
-# have. tests/test_vm_egress.py asserts the inheritance, because a test that
-# stopped checking the reservation would be indistinguishable from one that
-# never did.
+def _reserved_planes() -> tuple[ReservedPlane, ...]:
+    """The reservations the uid planes name, deduplicated, in table order.
+
+    DERIVED, NOT LISTED, and that is the whole of this. A hand-written list is
+    a second place to remember: the v6 listener plane went unchecked in exactly
+    that gap -- present in the design, absent from the list, and `ports =
+    ["198.18.1.4:8443:22"]` validated. Here a plane cannot exist without naming
+    the reservation that covers it, so the list cannot lag the planes.
+
+    Deduplicated because three planes share the /9: the management addresses,
+    the broker and the responder each hang off it at their own base, and the
+    reservation is inherited rather than restated. An entry naming
+    127.129.0.0/9 would restate the first one; one naming a single workload's
+    address would need a uid this list does not have.
+    """
+    seen, planes = [], []
+    for plane in VM_UID_PLANES:
+        for reservation in (plane.reservation, plane.reservation6):
+            if reservation is None or reservation in seen:
+                continue
+            seen.append(reservation)
+            planes.append(ReservedPlane(reservation.network, reservation.port,
+                                        reservation.what))
+    return tuple(planes)
+
+
+VM_RESERVED_PLANES = _reserved_planes()
 
 
 def vm_reserved_plane(addr: str, port: int | None = None) -> ReservedPlane | None:
