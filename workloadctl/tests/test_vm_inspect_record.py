@@ -12,6 +12,8 @@ These tests hold three properties: the key is on every line, one connection's
 lines share it, and two connections do not.
 """
 
+import importlib
+from tests import load_script
 import io
 import json
 import os
@@ -25,7 +27,6 @@ import unittest
 import unittest.mock
 from pathlib import Path
 
-from tests import load_script
 from vm import (
     VM_INSPECT_LOG_ID_FIELD, VM_INSPECT_LOG_REQ_FIELD,
     VM_INSPECT_RECORD_DECISIONS, VM_INSPECT_RECORD_FIELDS,
@@ -330,7 +331,7 @@ class TestTheUnitCarriesTheDirectory(unittest.TestCase):
     statement in the unit, so losing this line loses the write silently."""
 
     def _unit(self):
-        gen = load_script("generators/workload-generate")
+        gen = importlib.import_module("gen_vm")
         config = {
             "workload": {"name": "recdemo", "mode": "vm"},
             "vm": {"image": "/tmp/x.qcow2", "memory": "1G", "cpus": 1,

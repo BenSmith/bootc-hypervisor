@@ -13,6 +13,8 @@ docstring cited are gone: rung 2 reuses those labels for different work, and a
 stale "T5a" reads as a live forward reference to it.
 """
 
+import importlib
+from tests import load_script
 import unittest
 import unittest.mock
 
@@ -81,8 +83,7 @@ class TestGeneratedSocket(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        from tests import load_script
-        cls.gen = load_script("generators/workload-generate")
+        cls.gen = importlib.import_module("gen_vm")
         cls.addr = vm_inspect_address(UID)
         # The uid is a parameter, not a lookup. It used to be mocked here --
         # which is precisely what hid the defect the mock was standing in for:
@@ -185,12 +186,18 @@ class TestGenerationPredatesTheUser(unittest.TestCase):
     """
 
     def test_generation_does_not_need_the_user_to_exist_yet(self):
-        from tests import load_script
-        gen = load_script("generators/workload-generate")
+        # Patched on `pwd` itself, not on a reference to it held by the
+        # generator's module: that makes every lookup in the process raise, so
+        # the test cannot go quiet if the call moves to another module. It did
+        # go quiet once -- the patch used to name the entrypoint's `pwd`, and
+        # when the VM generators moved to gen_vm (which does not import pwd at
+        # all) it was suppressing a call nobody made.
+        import pwd
         with unittest.mock.patch.object(
-                gen.pwd, "getpwnam",
+                pwd, "getpwnam",
                 side_effect=KeyError(
                     "getpwnam(): name not found: '_wl-web'")):
+            gen = importlib.import_module("gen_vm")
             unit = gen.generate_vm_inspect_socket(_config({}), "_wl-web", UID)
         addr = vm_inspect_address(UID)
         self.assertIn(str(addr.v4), unit)
@@ -207,8 +214,7 @@ class TestGeneratedService(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        from tests import load_script
-        cls.gen = load_script("generators/workload-generate")
+        cls.gen = importlib.import_module("gen_vm")
         cls.unit = cls.gen.generate_vm_inspect_service(_config({}), "_wl-web")
 
     def test_runs_as_the_workload_user(self):
@@ -323,8 +329,7 @@ class TestSidecarHardening(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        from tests import load_script
-        cls.gen = load_script("generators/workload-generate")
+        cls.gen = importlib.import_module("gen_vm")
         cls.inspect = cls.gen.generate_vm_inspect_service(_config({}), "_wl-web")
         cls.resolve = cls.gen.generate_vm_resolve_service(_config({}), "_wl-web")
 
@@ -410,7 +415,6 @@ class TestSidecarHardening(unittest.TestCase):
     def test_the_inspectors_task_ceiling_covers_its_connection_ceiling(self):
         """One thread per connection, so a TasksMax below MAX_CONNECTIONS is a
         listener that refuses connections it counted as admitted."""
-        from tests import load_script
         listener = load_script("libexec/workload-vm-inspect-listener")
         tasks = [l for l in self.inspect.splitlines()
                  if l.startswith("TasksMax=")]
@@ -438,19 +442,14 @@ class TestGeneratorWiring(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        from tests import load_script
-        cls.gen = load_script("generators/workload-generate")
-        # Patch the generator's pwd lookup so the test runs without a real
-        # _wl-web user: the inspect socket generator looks the uid up to
-        # derive the listener addresses. Must be active before generation.
-        cls._pw_patch = unittest.mock.patch.object(
-            cls.gen.pwd, "getpwnam",
-            return_value=unittest.mock.Mock(pw_uid=UID))
-        cls._pw_patch.start()
-
-    @classmethod
-    def tearDownClass(cls):
-        cls._pw_patch.stop()
+        cls.gen = importlib.import_module("gen_vm")
+        # No pwd patch. There used to be one here, described as standing in for
+        # a real _wl-web user because "the inspect socket generator looks the
+        # uid up" -- it does not, and did not: the uid arrives as an argument.
+        # The patch was inert, and inert is invisible, because a patch that
+        # suppresses rather than asserts leaves a passing test behind either
+        # way. The class above patches `pwd` itself, which is where the claim
+        # can actually be measured.
 
     def _predicate(self, net):
         return self.gen.vm_uses_inspect(_config(net))

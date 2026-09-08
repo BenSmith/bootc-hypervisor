@@ -216,9 +216,10 @@ class TestASharedModuleIsNotShadowedByItsCaller(unittest.TestCase):
     invisible to `_lib_modules()` and importing one runs its argv parsing.
     """
 
-    # entrypoint (repo-relative) -> lib modules it imports names from
+    # file (repo-relative) -> lib modules it imports names from
     SHARED_IMPORTS = {
-        "generators/workload-generate": ("gen_common",),
+        "generators/workload-generate": ("gen_common", "gen_vm"),
+        "lib/gen_vm.py": ("gen_common",),
     }
 
     @staticmethod
@@ -235,15 +236,15 @@ class TestASharedModuleIsNotShadowedByItsCaller(unittest.TestCase):
                         names.add(t.id)
         return names
 
-    def test_the_entrypoints_exist_and_define_names(self):
-        """Guards the guard: a renamed entrypoint, or an AST walk that stopped
+    def test_the_files_exist_and_define_names(self):
+        """Guards the guard: a renamed file, or an AST walk that stopped
         matching, turns the check below into zero comparisons reading green."""
         for entry in self.SHARED_IMPORTS:
             path = REPO_ROOT / entry
             self.assertTrue(path.exists(), entry)
-            self.assertGreater(len(self._top_level_names(path)), 50, entry)
+            self.assertGreater(len(self._top_level_names(path)), 5, entry)
 
-    def test_no_entrypoint_shadows_a_shared_name(self):
+    def test_no_file_shadows_a_shared_name(self):
         collisions = []
         for entry, modules in self.SHARED_IMPORTS.items():
             local = self._top_level_names(REPO_ROOT / entry)

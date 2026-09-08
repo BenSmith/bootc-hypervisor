@@ -13,6 +13,8 @@ rather than filtered, and it is a property of the source text, so it is checked
 as one.
 """
 
+import importlib
+from tests import load_script
 import ipaddress
 import json
 import os
@@ -135,7 +137,6 @@ def _module():
     per answer and the tests below build thousands. The log is not thereby
     untested -- TestLogging asserts what it says, reading the same list.
     """
-    from tests import load_script
     mod = load_script("libexec/workload-vm-resolve")
     mod.logged = []
     mod.log = mod.logged.append
@@ -1284,8 +1285,7 @@ class TestGeneratedUnits(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        from tests import load_script
-        cls.gen = load_script("generators/workload-generate")
+        cls.gen = importlib.import_module("gen_vm")
         config = {"workload": {"name": "web"}, "vm": {"network": {}}}
         cls.socket_unit = cls.gen.generate_vm_resolve_socket(
             config, "_wl-web", UID)

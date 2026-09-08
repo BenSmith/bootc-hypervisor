@@ -16,7 +16,6 @@ pinned here rather than left to the seeds.
 
 import re
 import unittest
-from pathlib import Path
 
 from tests import REPO_ROOT, load_script
 from vm import (
@@ -285,15 +284,35 @@ class TestTheHostSidePremise(unittest.TestCase):
     either side.
     """
 
+    @staticmethod
+    def _argv_source():
+        """The source of the function that writes the QEMU argv.
+
+        Reached through the symbol, not through a path. Both checks below used
+        to read generators/workload-generate by name; when the VM generators
+        moved to gen_vm the first turned red -- but the second is an assertNotIn
+        and turned GREEN, over a file that no longer contains the argv at all.
+        A source scan anchored to a filename cannot tell "the premise holds"
+        from "I am reading the wrong file".
+        """
+        import inspect
+
+        import gen_vm
+        return inspect.getsource(gen_vm.generate_vm_service)
+
+    def test_the_scan_reads_the_argv(self):
+        """Guards the guard: if getsource ever returns something that is not
+        the argv builder, the two checks below stop measuring anything."""
+        self.assertIn("qemu", self._argv_source().lower())
+
     def test_the_qemu_argv_still_enables_kvm(self):
-        source = (REPO_ROOT / "generators" / "workload-generate").read_text()
+        source = self._argv_source()
         self.assertIn('"-machine q35,accel=kvm"', source)
         self.assertIn('"-cpu host"', source)
 
     def test_nothing_adds_a_ptp_device_to_the_argv(self):
         """If someone ever adds `-device ptp...`, this premise changed."""
-        source = (REPO_ROOT / "generators" / "workload-generate").read_text()
-        self.assertNotIn("ptp", source)
+        self.assertNotIn("ptp", self._argv_source())
 
 
 if __name__ == "__main__":

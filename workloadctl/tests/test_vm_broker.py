@@ -17,13 +17,14 @@ TestReservedRanges; and the sweep the generator ran on every VM's stop is gone
 with the map, asserted below by its absence.
 """
 
+import importlib
+from tests import load_script
 import contextlib
 import io
 import tempfile
 import unittest
 from pathlib import Path
 
-from tests import load_script
 from vm import (
     UID_MIN, VM_BROKER_BIN, VM_BROKER_INSTANCE_PORT, VM_CA_ENV_VARS,
     VM_RESERVED_GUEST_ENV,
@@ -190,7 +191,7 @@ class TestTheGeneratedUnit(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.gen = load_script("generators/workload-generate")
+        cls.gen = importlib.import_module("gen_vm")
 
     def unit(self, cfg=None, uid=UID_MIN + 5):
         return self.gen.generate_vm_broker_service(cfg or cred_config(), uid)
@@ -278,7 +279,7 @@ class TestTheVmUnitWaitsForIt(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.gen = load_script("generators/workload-generate")
+        cls.gen = importlib.import_module("gen_vm")
 
     def vm_unit(self, cfg):
         return self.gen.generate_vm_service(cfg, "_wl-agent", UID_MIN + 5)
@@ -1241,7 +1242,7 @@ class TestTheMapSweepIsGone(unittest.TestCase):
     """
 
     def _unit(self, config):
-        gen = load_script("generators/workload-generate")
+        gen = importlib.import_module("gen_vm")
         return gen.generate_vm_service(config, "_wl-agent", 10007)
 
     def test_no_vm_arms_a_broker_map_element(self):
