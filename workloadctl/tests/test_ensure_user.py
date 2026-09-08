@@ -18,8 +18,30 @@ from pathlib import Path
 from unittest import mock
 
 from tests import load_script
+
+# `lib/` reaches sys.path via tests/__init__, so this import follows it.
+import ensure_common
 from vm_provision import (PROVISION_FAILED, PROVISION_UNVERIFIED,
                           read_provision_marker, write_provision_marker)
+
+
+def _patch_path_helpers(root, *mods):
+    """Patch the canonical path helpers on every module that READS them.
+
+    `from workload_lib import workload_state_dir` copies the binding, so
+    patching the definition reaches nobody and patching one importer reaches
+    only that importer. These tests call a function in one module which calls a
+    shared helper in another, and each holds its own copy -- patch only the
+    caller and the shared helper stays pointed at the real /var/lib/workloads,
+    which is why the first symptom is a FileNotFoundError under /var rather
+    than a wrong answer. `hasattr` rather than a fixed list: a module that does
+    not import a helper cannot be reading it.
+    """
+    helpers = {"workload_state_dir": lambda n: root / "state",
+               "workload_data_dir": lambda n: root / "data",
+               "workload_root_dir": lambda n: root}
+    return [mock.patch.object(m, k, v)
+            for m in mods for k, v in helpers.items() if hasattr(m, k)]
 
 
 def _load_script():
@@ -1152,14 +1174,14 @@ class TestSetupVmVolumeDirectories(unittest.TestCase):
     def setUp(self):
         self.mod = _load_script()
 
+    @contextlib.contextmanager
     def _patch(self, root):
         """Anchor the canonical path helpers into the temp tree (the function
         keys off these, not pw.pw_dir, so it's correct even with a mismatched passwd home)."""
-        return (
-            mock.patch.object(self.mod, "workload_state_dir", lambda n: root / "state"),
-            mock.patch.object(self.mod, "workload_data_dir", lambda n: root / "data"),
-            mock.patch.object(self.mod, "workload_root_dir", lambda n: root),
-        )
+        with contextlib.ExitStack() as stack:
+            for patcher in _patch_path_helpers(root, self.mod, ensure_common):
+                stack.enter_context(patcher)
+            yield
 
     def test_relative_anchor_created_under_data(self):
         # ./ anchors to the precious data/ subtree, matching the virtiofsd
@@ -1168,8 +1190,7 @@ class TestSetupVmVolumeDirectories(unittest.TestCase):
             root = Path(tmp)
             (root / "state").mkdir()
             config = {"workload": {"name": "vmx"}, "vm": {"volumes": ["./shared:/data"]}}
-            ps, pd, pr = self._patch(root)
-            with ps, pd, pr, mock.patch("os.fchown"), mock.patch("os.fchmod"):
+            with self._patch(root), mock.patch("os.fchown"), mock.patch("os.fchmod"):
                 self.mod.setup_vm_volume_directories(_fake_pw(root / "state"), config)
             self.assertTrue((root / "data" / "shared").is_dir())
 
@@ -1179,8 +1200,7 @@ class TestSetupVmVolumeDirectories(unittest.TestCase):
             (root / "state").mkdir()
             config = {"workload": {"name": "vmx"},
                       "vm": {"volumes": ["/etc/passwd:/etc/passwd"]}}
-            ps, pd, pr = self._patch(root)
-            with ps, pd, pr, mock.patch("os.fchown"), mock.patch("os.fchmod"):
+            with self._patch(root), mock.patch("os.fchown"), mock.patch("os.fchmod"):
                 self.mod.setup_vm_volume_directories(_fake_pw(root / "state"), config)
             self.assertFalse((root / "etc" / "passwd").exists())
 
@@ -1188,8 +1208,7 @@ class TestSetupVmVolumeDirectories(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             (root / "state").mkdir()
-            ps, pd, pr = self._patch(root)
-            with ps, pd, pr, mock.patch("os.fchown"), mock.patch("os.fchmod"):
+            with self._patch(root), mock.patch("os.fchown"), mock.patch("os.fchmod"):
                 self.mod.setup_vm_volume_directories(
                     _fake_pw(root / "state"), {"workload": {"name": "vmx"}, "vm": {}})
 
@@ -1207,8 +1226,7 @@ class TestSetupVmVolumeDirectories(unittest.TestCase):
                 # back to a path via /proc to assert on the target.
                 chown_calls.append((os.readlink(f"/proc/self/fd/{fd}"), u, g))
 
-            ps, pd, pr = self._patch(root)
-            with ps, pd, pr, \
+            with self._patch(root), \
                  mock.patch("os.fchown", side_effect=rec_fchown), \
                  mock.patch("os.fchmod"):
                 self.mod.setup_vm_volume_directories(
@@ -1231,11 +1249,10 @@ class TestSetupVmVolumeDirectories(unittest.TestCase):
             os.symlink(target, root / "data" / "shared")
             config = {"workload": {"name": "vmx"}, "vm": {"volumes": ["./shared:/data"]}}
             fchown_fds = []
-            ps, pd, pr = self._patch(root)
-            with ps, pd, pr, \
+            with self._patch(root), \
                  mock.patch("os.fchown", side_effect=lambda fd, u, g: fchown_fds.append(fd)), \
                  mock.patch("os.fchmod"), \
-                 mock.patch.object(self.mod, "log"):
+                 mock.patch.object(ensure_common, "log"):
                 self.mod.setup_vm_volume_directories(
                     _fake_pw(root / "state", uid=1234, gid=1234), config)
             # Refused: nothing was chowned via the symlinked component.
@@ -1252,11 +1269,10 @@ class TestSetupVmVolumeDirectories(unittest.TestCase):
             config = {"workload": {"name": "vmx"},
                       "vm": {"volumes": [f"{root}:/mnt"]}}
             fchown_fds = []
-            ps, pd, pr = self._patch(root)
-            with ps, pd, pr, \
+            with self._patch(root), \
                  mock.patch("os.fchown", side_effect=lambda fd, u, g: fchown_fds.append(fd)), \
                  mock.patch("os.fchmod"), \
-                 mock.patch.object(self.mod, "log"):
+                 mock.patch.object(ensure_common, "log"):
                 self.mod.setup_vm_volume_directories(
                     _fake_pw(root / "state", uid=1234, gid=1234), config)
             self.assertEqual(fchown_fds, [])
@@ -1287,13 +1303,13 @@ class TestSeedVmHomeShareSshKey(unittest.TestCase):
         if user is not None:
             vm["user"] = user
         config = {"workload": {"name": name}, "vm": vm}
-        with mock.patch.object(self.mod, "workload_state_dir",
-                               lambda n: self.root / "state"), \
-             mock.patch.object(self.mod, "workload_data_dir",
-                               lambda n: self.root / "data"), \
-             mock.patch.object(self.mod, "workload_root_dir", lambda n: self.root), \
-             mock.patch("os.fchown"), \
-             mock.patch.object(self.mod, "log") as logged:
+        with contextlib.ExitStack() as stack:
+            for patcher in _patch_path_helpers(self.root, self.mod,
+                                               ensure_common):
+                stack.enter_context(patcher)
+            stack.enter_context(mock.patch("os.fchown"))
+            logged = stack.enter_context(
+                mock.patch.object(ensure_common, "log"))
             self.mod.seed_vm_home_share_ssh_key(self.pw, config)
         return logged
 
@@ -1670,11 +1686,11 @@ class TestWarnIfStaleHome(unittest.TestCase):
     podman healthchecks) without trying to fix them."""
 
     def setUp(self):
-        self.mod = _load_script()
+        self.mod = ensure_common
 
     def _capture(self, pw, name):
         msgs: list = []
-        with mock.patch.object(self.mod, "log", side_effect=msgs.append):
+        with mock.patch.object(ensure_common, "log", side_effect=msgs.append):
             self.mod.warn_if_stale_home(pw, name)
         return "\n".join(msgs)
 
@@ -1797,7 +1813,7 @@ class TestResolveCloudInitInstanceId(unittest.TestCase):
 
 class TestSetupHomeDirectory(unittest.TestCase):
     def setUp(self):
-        self.mod = _load_script()
+        self.mod = ensure_common
 
     def test_creates_state_and_data_dirs_with_perms(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1839,7 +1855,7 @@ class TestRecordDeploymentProvenance(unittest.TestCase):
     and that failing to write it can never fail a service start."""
 
     def setUp(self):
-        self.mod = _load_script()
+        self.mod = ensure_common
 
     def test_writes_the_marker_into_the_workload_root(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1859,7 +1875,7 @@ class TestRecordDeploymentProvenance(unittest.TestCase):
         msgs = []
         missing = Path(tempfile.gettempdir()) / "wl-does-not-exist-9d1f" / "myapp"
         with mock.patch.object(self.mod, "workload_root_dir", lambda n: missing), \
-             mock.patch.object(self.mod, "log", side_effect=msgs.append):
+             mock.patch.object(ensure_common, "log", side_effect=msgs.append):
             self.mod.record_deployment_provenance("myapp")  # must not raise
         self.assertTrue(any("Failed to record deployment provenance" in m
                             for m in msgs))
@@ -1867,7 +1883,7 @@ class TestRecordDeploymentProvenance(unittest.TestCase):
 
 class TestRestoreSelinuxLabels(unittest.TestCase):
     def setUp(self):
-        self.mod = _load_script()
+        self.mod = ensure_common
 
     def test_invokes_restorecon_on_workload_root(self):
         calls = []
@@ -1892,14 +1908,14 @@ class TestRestoreSelinuxLabels(unittest.TestCase):
         with mock.patch.object(self.mod, "workload_root_dir", lambda n: Path("/x")), \
              mock.patch.object(self.mod.subprocess, "run",
                                return_value=types.SimpleNamespace(returncode=1, stderr="denied")), \
-             mock.patch.object(self.mod, "log", side_effect=msgs.append):
+             mock.patch.object(ensure_common, "log", side_effect=msgs.append):
             self.mod.restore_selinux_labels("myapp")
         self.assertTrue(any("restorecon failed" in m for m in msgs))
 
 
 class TestDetectHostIp(unittest.TestCase):
     def setUp(self):
-        self.mod = _load_script()
+        self.mod = ensure_common
 
     def test_parses_src_token(self):
         out = "1.1.1.1 via 192.168.0.1 dev eth0 src 192.168.0.42 uid 0\n"
@@ -1919,7 +1935,7 @@ class TestDetectHostIp(unittest.TestCase):
 
 class TestWriteEnvironmentFile(unittest.TestCase):
     def setUp(self):
-        self.mod = _load_script()
+        self.mod = ensure_common
 
     def test_writes_uid_and_host_ip(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1968,7 +1984,7 @@ class TestEnableLinger(unittest.TestCase):
                                return_value=mock.Mock(returncode=0, stderr="")) as run, \
              mock.patch.object(self.mod.service_runtime, "ensure_runtime_dir",
                                return_value=True) as ensure, \
-             mock.patch.object(self.mod, "log"):
+             mock.patch.object(ensure_common, "log"):
             self.mod.enable_linger(pw)  # must not raise
         # The marker is set unconditionally, before ensure_runtime_dir.
         run.assert_called_once()
@@ -1983,7 +1999,7 @@ class TestEnableLinger(unittest.TestCase):
                                return_value=mock.Mock(returncode=1, stderr="boom")), \
              mock.patch.object(self.mod.service_runtime, "ensure_runtime_dir",
                                return_value=True) as ensure, \
-             mock.patch.object(self.mod, "log"):
+             mock.patch.object(ensure_common, "log"):
             with self.assertRaises(RuntimeError) as ctx:
                 self.mod.enable_linger(pw)
             self.assertIn("enable-linger failed", str(ctx.exception))
@@ -1997,7 +2013,7 @@ class TestEnableLinger(unittest.TestCase):
                                return_value=mock.Mock(returncode=0, stderr="")), \
              mock.patch.object(self.mod.service_runtime, "ensure_runtime_dir",
                                return_value=False), \
-             mock.patch.object(self.mod, "log"):
+             mock.patch.object(ensure_common, "log"):
             with self.assertRaises(RuntimeError) as ctx:
                 self.mod.enable_linger(pw)
             self.assertIn("did not become active", str(ctx.exception))
@@ -2047,7 +2063,7 @@ class TestSetupNvram(unittest.TestCase):
 
 class TestSetupVmSocketDir(unittest.TestCase):
     def setUp(self):
-        self.mod = _load_script()
+        self.mod = ensure_common
 
     def test_creates_socket_dir_mode_0750(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -2402,7 +2418,7 @@ class TestConfigureSubuidSubgidMore(unittest.TestCase):
              mock.patch.object(self.mod.Path, "mkdir"), \
              mock.patch.object(self.mod.grp, "getgrnam", side_effect=KeyError()), \
              mock.patch.object(self.mod, "subprocess", mock.MagicMock()), \
-             mock.patch.object(self.mod, "log", side_effect=msgs.append):
+             mock.patch.object(ensure_common, "log", side_effect=msgs.append):
             self.mod.configure_subuid_subgid(pw, config)
         self.assertTrue(any("not found" in m for m in msgs))
 
@@ -2448,7 +2464,7 @@ class TestConfigureSubuidSubgidMore(unittest.TestCase):
              mock.patch.object(self.mod.Path, "mkdir"), \
              mock.patch.object(self.mod.subprocess, "run",
                                side_effect=self.mod.subprocess.TimeoutExpired("podman", 30)), \
-             mock.patch.object(self.mod, "log", side_effect=msgs.append):
+             mock.patch.object(ensure_common, "log", side_effect=msgs.append):
             self.mod.configure_subuid_subgid(pw, {})
         self.assertTrue(any("timed out" in m for m in msgs))
 
@@ -2469,7 +2485,7 @@ class TestConfigureSubuidSubgidMore(unittest.TestCase):
              mock.patch.object(self.mod.Path, "mkdir"), \
              mock.patch.object(self.mod.subprocess, "run",
                                return_value=types.SimpleNamespace(returncode=0, stdout="", stderr="")), \
-             mock.patch.object(self.mod, "log", side_effect=msgs.append):
+             mock.patch.object(ensure_common, "log", side_effect=msgs.append):
             self.mod.configure_subuid_subgid(pw, {})
         self.assertTrue(any("Migrated podman storage" in m for m in msgs))
 
@@ -2569,7 +2585,7 @@ class TestBuildCloudInitIsoValidation(unittest.TestCase):
              mock.patch.object(self.mod, "VM_SOCKET_DIR", self.runtime), \
              mock.patch.object(self.mod, "workload_state_dir", lambda n: self.home), \
              mock.patch.object(_shutil, "which", return_value=None), \
-             mock.patch.object(self.mod, "log", side_effect=msgs.append):
+             mock.patch.object(ensure_common, "log", side_effect=msgs.append):
             self.mod.build_cloud_init_iso(self.pw, cfg, "myvm")
         self.assertTrue(any("No ISO tool found" in m for m in msgs))
         self.assertFalse((self.runtime / "myvm" / "cloud-init.iso").exists())
@@ -2585,7 +2601,7 @@ class TestBuildCloudInitIsoValidation(unittest.TestCase):
                                lambda name: "/usr/bin/genisoimage" if name == "genisoimage" else None), \
              mock.patch.object(self.mod.subprocess, "run",
                                return_value=types.SimpleNamespace(returncode=1, stdout="", stderr="iso failed")), \
-             mock.patch.object(self.mod, "log", side_effect=msgs.append):
+             mock.patch.object(ensure_common, "log", side_effect=msgs.append):
             self.mod.build_cloud_init_iso(self.pw, cfg, "myvm")
         self.assertTrue(any("ISO build failed" in m for m in msgs))
 
@@ -2637,7 +2653,7 @@ class TestEnsureUserLock(unittest.TestCase):
         ran = []
         with mock.patch.object(self.mod, "ENSURE_LOCK_DIR",
                                Path("/proc/nonexistent/lock")), \
-             mock.patch.object(self.mod, "log", side_effect=msgs.append):
+             mock.patch.object(ensure_common, "log", side_effect=msgs.append):
             with self.mod.ensure_user_lock("web"):
                 ran.append(True)
         self.assertEqual(ran, [True])

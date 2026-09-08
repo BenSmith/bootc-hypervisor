@@ -50,7 +50,13 @@ from workload_lib import (
     login_defs_subid_window,
 )
 
-from tests import REPO_ROOT
+from tests import load_script
+
+
+def _writer():
+    """The function that writes a workload's subuid/subgid ranges."""
+    return load_script(
+        "libexec/workload-ensure-user").configure_subuid_subgid
 
 SUBUID = "/etc/subuid"
 SUBGID = "/etc/subgid"
@@ -88,7 +94,13 @@ class DerivationTests(unittest.TestCase):
         so only an independent comparison can catch a range that is off — and
         it can only catch it if it is comparing against the same rule.
         """
-        source = (REPO_ROOT / "libexec" / "workload-ensure-user").read_text()
+        # Read through the symbol, not the path. `assertNotIn` over a whole
+        # file gets weaker every time that file loses a function to a split --
+        # it would still pass over the wrong file, or over a file the formula
+        # had simply moved out of, and say nothing either way.
+        import inspect
+
+        source = inspect.getsource(_writer())
         self.assertIn("derived_subid_range", source)
         self.assertNotIn(str(SUBID_BASE), source)
 

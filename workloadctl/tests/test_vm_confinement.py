@@ -300,6 +300,22 @@ class TestRpmShipsTheModule(unittest.TestCase):
         self.assertIn(f"semodule -r {VM_SELINUX_MODULE}", block)
 
 
+def _socket_dir_source():
+    """The source of the function that creates the VM runtime directory.
+
+    Reached through the symbol, not through a file path. Both checks below
+    used to split `libexec/workload-ensure-user` on the def line; the function
+    is shared with the container egress path and now lives in ensure_common,
+    where a path-anchored scan would read the wrong file. That is only safe to
+    notice when it raises -- an ordering assertion over an empty string does
+    not.
+    """
+    import inspect
+
+    import ensure_common
+    return inspect.getsource(ensure_common.setup_vm_socket_dir)
+
+
 class TestSocketDirIsRelabelled(unittest.TestCase):
     """The fcontext rule alone is inert for a directory created at runtime."""
 
@@ -310,15 +326,12 @@ class TestSocketDirIsRelabelled(unittest.TestCase):
         var_run_t from /run, and a confined QEMU then cannot create its QMP
         socket. /run is a tmpfs, so this recurs every boot.
         """
-        text = (ROOT / "libexec" / "workload-ensure-user").read_text()
-        body = text.split("def setup_vm_socket_dir", 1)[1].split("\ndef ", 1)[0]
-        self.assertIn("restorecon", body)
+        self.assertIn("restorecon", _socket_dir_source())
 
     def test_relabel_happens_before_anything_is_written_into_the_dir(self):
         """Files created inside inherit from the directory, so a later relabel
         would leave the sockets and cloud-init.iso behind."""
-        text = (ROOT / "libexec" / "workload-ensure-user").read_text()
-        body = text.split("def setup_vm_socket_dir", 1)[1].split("\ndef ", 1)[0]
+        body = _socket_dir_source()
         self.assertLess(body.index("restorecon"), body.index("os.chown"))
 
     def test_rpm_registers_the_rule_the_relabel_resolves(self):

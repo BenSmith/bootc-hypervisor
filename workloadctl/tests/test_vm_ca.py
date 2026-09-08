@@ -25,6 +25,9 @@ from vm import (VM_CA_BACKDATE_SECONDS, VM_CA_CERT_NAME, VM_CA_KEY_NAME,
 
 from tests import load_script
 
+# `lib/` reaches sys.path via tests/__init__, so this import follows it.
+import ensure_common
+
 HAVE_OPENSSL = shutil.which("openssl") is not None
 
 
@@ -161,7 +164,12 @@ class TestGeneratorIsIdempotent(unittest.TestCase):
     whole feature."""
 
     def setUp(self):
-        self.mod = load_script("libexec/workload-ensure-user")
+        # ensure_common, not the entrypoint: both generators are keyed on the
+        # workload name and read nothing under [vm], so they are shared with
+        # the container egress path and live there. The entrypoint imports
+        # them by name, so a patch installed on it would not be the copy these
+        # functions resolve.
+        self.mod = ensure_common
         self.tmp = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
         self.state = Path(self.tmp) / "state"

@@ -20,43 +20,41 @@ import shutil
 import stat
 import subprocess
 import sys
-import time
 import uuid
 from pathlib import Path, PurePosixPath
 
-import deployment
 import service_runtime
 from workload_lib import (
-    UID_MIN, UID_MAX, derived_subid_range,
-    WORKLOAD_CONFIG_DIR, WORKLOADS_BASE, load_workload_config, workload_config_path,
-    workload_username, expand_volume_path,
-    infer_workload_kind,
-    virtiofs_tags, parse_volume_spec, normalize_containers,
-    workload_state_dir, workload_data_dir, workload_root_dir, subid_lock,
-    workload_env_dir,
-    append_subid_entries, replace_file_atomically, subgid_file, subuid_file,
+    derived_subid_range, WORKLOAD_CONFIG_DIR, WORKLOADS_BASE,
+    load_workload_config, workload_config_path, workload_username,
+    expand_volume_path, infer_workload_kind, virtiofs_tags,
+    parse_volume_spec, normalize_containers, workload_state_dir,
+    workload_root_dir, subid_lock, append_subid_entries,
+    replace_file_atomically, subgid_file, subuid_file,
     container_uses_inspect,
 )
-from vm import (VM_SOCKET_DIR, VM_DEFAULT_GUEST_USER, VM_GUEST_HOME_BASE,
-                VM_GUEST_UID, VM_CA_BUNDLE_AVAILABLE, VM_CA_BUNDLE_PATH,
-                VM_CA_ENV_VARS,
-                VM_HOME_SELINUX_CONTEXT, VM_HOME_SELINUX_TYPES,
-                VM_SEED_CONTRACT_EXIT, SeedContractError, find_ovmf_vars,
-                vm_ca_env, vm_ca_cert_path, vm_ca_dir,
-                vm_credential_env,
-                vm_denial_dir, vm_leaf_dir,
-                vm_ca_key_path, vm_ca_openssl_argv,
-                vm_ptp_kvm_runcmd_lines, vm_ptp_kvm_seed_files,
-                vm_uses_inspect)
-from vm_provision import (MAX_HEAL_ATTEMPTS, PROVISION_UNVERIFIED,
-                          heal_attempts, read_provision_marker, should_heal,
-                          write_provision_marker)
+from vm import (
+    VM_SOCKET_DIR, VM_DEFAULT_GUEST_USER, VM_GUEST_HOME_BASE, VM_GUEST_UID,
+    VM_CA_BUNDLE_AVAILABLE, VM_CA_BUNDLE_PATH, VM_CA_ENV_VARS,
+    VM_HOME_SELINUX_CONTEXT, VM_HOME_SELINUX_TYPES, VM_SEED_CONTRACT_EXIT,
+    SeedContractError, find_ovmf_vars, vm_ca_env, vm_ca_cert_path,
+    vm_credential_env, vm_ptp_kvm_runcmd_lines, vm_ptp_kvm_seed_files,
+    vm_uses_inspect,
+)
+from vm_provision import (
+    MAX_HEAL_ATTEMPTS, PROVISION_UNVERIFIED, heal_attempts,
+    read_provision_marker, should_heal, write_provision_marker,
+)
 from secrets_template import substitute_template
+import ensure_common
+from ensure_common import (
+    warn_if_stale_home, setup_home_directory,
+    record_deployment_provenance, _provision_dir_secure, _descend_nofollow,
+    restore_selinux_labels, write_environment_file, setup_vm_socket_dir,
+    generate_vm_egress_ca, provision_vm_pki_dirs,
+)
 
 
-def log(msg):
-    """Print to stdout (captured by systemd journal)."""
-    print(msg, flush=True)
 
 
 
@@ -104,7 +102,7 @@ def configure_subuid_subgid(pw, config):
             try:
                 gid = grp.getgrnam(group_name).gr_gid
             except KeyError:
-                log(f"  WARNING: Group '{group_name}' not found, skipping subgid entry")
+                ensure_common.log(f"  WARNING: Group '{group_name}' not found, skipping subgid entry")
                 continue
             gid_entry = f"{username}:{gid}:1"
             if gid_entry not in required_gid_entries:
@@ -143,7 +141,7 @@ def configure_subuid_subgid(pw, config):
                 # no-op (see workload_lib._subid_lock_depth).
                 append_subid_entries(path, missing)
                 for entry in missing:
-                    log(f"  Configured {path.name} entry: {entry}")
+                    ensure_common.log(f"  Configured {path.name} entry: {entry}")
                 changed = True
 
     # Migrate podman storage to use new subuid/subgid mappings
@@ -156,176 +154,23 @@ def configure_subuid_subgid(pw, config):
                 capture_output=True, text=True, timeout=30
             )
             if result.returncode == 0:
-                log(f"  Migrated podman storage for {username}")
+                ensure_common.log(f"  Migrated podman storage for {username}")
             else:
-                log(f"  Note: podman system migrate returned {result.returncode} for {username}")
+                ensure_common.log(f"  Note: podman system migrate returned {result.returncode} for {username}")
         except subprocess.TimeoutExpired:
-            log(f"  WARNING: podman system migrate timed out for {username}")
+            ensure_common.log(f"  WARNING: podman system migrate timed out for {username}")
         except Exception as e:
-            log(f"  WARNING: Failed to migrate podman storage for {username}: {e}")
+            ensure_common.log(f"  WARNING: Failed to migrate podman storage for {username}: {e}")
 
 
-def warn_if_stale_home(pw, name):
-    """Warn (don't fix) when a workload user's passwd home doesn't match the expected state/ dir.
-
-    The workload service is unaffected — the generator forces Environment=HOME=<state>
-    in the unit — but podman's auto-generated healthcheck timer runs a bare
-    `podman healthcheck run` that inherits the user manager's HOME (= the mismatched
-    passwd home), resolves an empty graphroot, can't find the container, and leaves
-    health frozen at 'starting' forever.
-
-    We only warn: rewriting an in-use user's home (usermod -d) requires stopping
-    the workload and bouncing user@<uid>.service to take effect, which is an
-    operator decision, not something to do under an ExecStartPre on every boot.
-    """
-    expected = str(workload_state_dir(name))
-    actual = pw.pw_dir
-    if actual == expected:
-        return
-    uid = pw.pw_uid
-    log(f"  WARNING: mismatched home for {pw.pw_name}: {actual!r} (expected {expected!r}).")
-    log( "           The service runs correctly, but podman's healthcheck timer "
-         "inherits this home and reads an empty graphroot, so health is frozen at 'starting'.")
-    log(f"           Fix: systemctl stop workload-{name}; usermod -d {expected} "
-        f"{pw.pw_name}; systemctl restart workload-{name}  "
-        f"(restarting bounces user@{uid}.service so the new HOME takes effect).")
 
 
-def setup_home_directory(pw, name):
-    """Create and configure the workload's state/ ($HOME) and data/ subdirs.
-
-    Anchored on workload_state_dir/workload_data_dir, not pw.pw_dir: the generator
-    forces HOME=<state> independently, so these must land where the service actually
-    reads/writes regardless of what passwd records. See warn_if_stale_home.
-    """
-    state_path = workload_state_dir(name)
-    if not state_path.exists():
-        log(f"  Creating home (state) directory {state_path}")
-        state_path.mkdir(parents=True, exist_ok=True)
-    os.chown(state_path, pw.pw_uid, pw.pw_gid)
-    os.chmod(state_path, 0o700)
-
-    data_path = workload_data_dir(name)
-    if not data_path.exists():
-        log(f"  Creating data directory {data_path}")
-        data_path.mkdir(parents=True, exist_ok=True)
-    os.chown(data_path, pw.pw_uid, pw.pw_gid)
-    os.chmod(data_path, 0o700)
 
 
-def record_deployment_provenance(name):
-    """Stamp the workload's /var root with the deployment provisioning it now.
-
-    /etc is per-deployment on ostree and /var is shared, so `bootc rollback`
-    takes a workload's config and passwd line away while its state stays behind
-    — and `cleanup`'s definition of an orphan ("state with no config") is then
-    satisfied by state another deployment still owns. The stamp is how cleanup
-    tells the two apart; see lib/deployment.py for the rule it feeds.
-
-    Runs after setup_home_directory, which creates the root. Best-effort by
-    design: a missing stamp costs exactly the pre-marker behavior, so warning
-    and continuing is strictly better than failing a service start over it.
-    """
-    root = workload_root_dir(name)
-    try:
-        if deployment.write_marker(root, name):
-            log(f"  Recorded deployment provenance in {deployment.marker_path(root)}")
-    except Exception as e:
-        log(f"  WARNING: Failed to record deployment provenance for {name}: {e}")
 
 
-def _provision_dir_secure(root_dir, host_path, uid, gid, mode):
-    """Create `host_path` (a descendant of `root_dir`) and chown/chmod it to the
-    workload user WITHOUT ever following a symlink (B1 — root-TOCTOU hardening).
-
-    This runs as **root** on every service start inside a tree the *workload
-    user* owns, so a `resolve()`-then-`os.chown()` sequence is racy: the workload
-    user can swap a path component to a symlink between the containment check and
-    the chown, tricking root into chowning an arbitrary host file. We instead
-    descend from `root_dir` one literal component at a time with
-    `O_NOFOLLOW|O_DIRECTORY` (openat) and `fchown`/`fchmod` the final fd. A
-    symlink anywhere on the path makes the openat fail (ELOOP) and we refuse —
-    the walk itself enforces containment, so a swapped component can only abort
-    provisioning, never escape the tree. `root_dir` is root-created and trusted
-    as the anchor.
-
-    Returns True on success, False if a component was unsafe (symlink/non-dir).
-    """
-    # Walk the LITERAL path components (not host_path.resolve(), which would
-    # collapse away the very symlink we must refuse). `root_dir` is the trusted,
-    # root-created anchor; every component below it is opened O_NOFOLLOW.
-    try:
-        parts = host_path.relative_to(root_dir).parts
-    except ValueError:
-        return False  # not lexically under the root — caller also gates this
-    if not parts:
-        # host_path == root_dir: chowning the anchor would hand the workload
-        # user ownership of the root-owned trust boundary this walk relies on.
-        log(f"  WARNING: refusing to provision {host_path}: it is the "
-            f"workload root itself")
-        return False
-    if ".." in parts:
-        log(f"  WARNING: refusing to provision {host_path}: '..' in path")
-        return False
-    dir_fd = os.open(str(root_dir), os.O_RDONLY | os.O_DIRECTORY)
-    try:
-        for part in parts:
-            child_fd = None
-            for _ in range(2):
-                try:
-                    child_fd = os.open(
-                        part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
-                        dir_fd=dir_fd)
-                    break
-                except FileNotFoundError:
-                    try:
-                        os.mkdir(part, mode, dir_fd=dir_fd)
-                    except FileExistsError:
-                        pass  # created concurrently — retry the O_NOFOLLOW open
-                except OSError as exc:
-                    # ELOOP (symlink) or ENOTDIR — refuse to traverse.
-                    log(f"  WARNING: refusing to provision {host_path}: unsafe "
-                        f"path component {part!r} ({exc.strerror})")
-                    return False
-            if child_fd is None:
-                log(f"  WARNING: refusing to provision {host_path}: unsafe "
-                    f"path component {part!r}")
-                return False
-            os.close(dir_fd)
-            dir_fd = child_fd
-        os.fchown(dir_fd, uid, gid)
-        os.fchmod(dir_fd, mode)
-        return True
-    finally:
-        os.close(dir_fd)
 
 
-def _descend_nofollow(root_dir, parts, what: str):
-    """Open the directory at `parts` below `root_dir`, one literal component at a
-    time, never following a symlink — the non-creating half of the walk
-    `_provision_dir_secure` documents at length, factored out because more than
-    one caller needs root to reach a path inside a tree the workload user owns.
-
-    Returns the final directory fd (the CALLER closes it), or None if a
-    component was missing, not a directory, or a symlink.
-    """
-    dir_fd = os.open(str(root_dir), os.O_RDONLY | os.O_DIRECTORY)
-    for part in parts:
-        try:
-            child_fd = os.open(
-                part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
-                dir_fd=dir_fd)
-        except FileNotFoundError:
-            os.close(dir_fd)
-            return None
-        except OSError as exc:
-            log(f"  WARNING: refusing to {what}: unsafe path "
-                f"component {part!r} ({exc.strerror})")
-            os.close(dir_fd)
-            return None
-        os.close(dir_fd)
-        dir_fd = child_fd
-    return dir_fd
 
 
 def _chown_file_secure(root_dir, host_path, uid, gid):
@@ -357,7 +202,7 @@ def _chown_file_secure(root_dir, host_path, uid, gid):
         except FileNotFoundError:
             return False
         except OSError as exc:
-            log(f"  WARNING: refusing to chown {host_path}: unsafe final "
+            ensure_common.log(f"  WARNING: refusing to chown {host_path}: unsafe final "
                 f"component ({exc.strerror})")
             return False
         try:
@@ -370,7 +215,7 @@ def _chown_file_secure(root_dir, host_path, uid, gid):
             # it does not own, but the fd is in hand, so check rather than
             # lean on a tunable.
             if st.st_nlink != 1:
-                log(f"  WARNING: refusing to chown {host_path}: "
+                ensure_common.log(f"  WARNING: refusing to chown {host_path}: "
                     f"{st.st_nlink} hardlinks")
                 return False
             if st.st_uid == uid and st.st_gid == gid:
@@ -412,7 +257,7 @@ def setup_required_file_ownership(pw, config):
         except ValueError:
             continue  # Outside the workload tree — not ours to chown.
         if _chown_file_secure(root_dir, host_path, pw.pw_uid, pw.pw_gid):
-            log(f"  Required file {host_path} owned by {pw.pw_name}")
+            ensure_common.log(f"  Required file {host_path} owned by {pw.pw_name}")
 
 
 def setup_volume_directories(pw, config):
@@ -468,7 +313,7 @@ def setup_volume_directories(pw, config):
             continue  # Outside the workload dir — admin must create
 
         if not host_path.exists():
-            log(f"  Creating volume directory {host_path}")
+            ensure_common.log(f"  Creating volume directory {host_path}")
         _provision_dir_secure(root_dir, host_path, pw.pw_uid, pw.pw_gid, 0o755)
 
 
@@ -493,79 +338,14 @@ def setup_vm_volume_directories(pw, config):
         except ValueError:
             continue  # Outside the workload dir — admin's responsibility
         if not host_path.exists():
-            log(f"  Creating virtiofs host directory {host_path}")
+            ensure_common.log(f"  Creating virtiofs host directory {host_path}")
         _provision_dir_secure(root_dir, host_path, pw.pw_uid, pw.pw_gid, 0o755)
 
 
-def restore_selinux_labels(name):
-    """Restore SELinux labels on the workload's whole tree (state/ + data/).
-
-    Relabels the canonical workload root, not the passwd home: for a correct
-    user the passwd home is state/ (which would miss data/), and for a stale
-    user it's the root — anchoring on workload_root_dir covers both subtrees.
-    """
-    target = str(workload_root_dir(name))
-    # -F is REQUIRED, not belt-and-braces. Both container_file_t and
-    # svirt_image_t are listed in contexts/customizable_types, and plain
-    # restorecon SKIPS any file whose *current* type is customizable — it
-    # prints "not reset as customized by admin", visible only under -v, and
-    # exits 0. Without -F a VM workload's tree would silently never migrate
-    # from the blanket container_file_t to svirt_image_t, and the failure would
-    # surface much later as a confined QEMU unable to read its own disk.
-    result = subprocess.run(
-        ["restorecon", "-RF", target],
-        capture_output=True, text=True
-    )
-    if result.returncode != 0:
-        log(f"  WARNING: restorecon failed for {target}: {result.stderr}")
 
 
-def _detect_host_ip():
-    """Return the host's primary LAN IP via the default route, or empty string.
-
-    Uses the source address that would be chosen to reach 1.1.1.1, which
-    selects the default-route interface and ignores secondary addresses (e.g.
-    libvirt bridges, VPN tuns). Override by setting HOST_IP in the workload's
-    [container.environment] in its TOML — an explicit value there takes
-    precedence over the EnvironmentFile.
-    """
-    try:
-        out = subprocess.check_output(
-            ["ip", "-4", "route", "get", "1.1.1.1"],
-            stderr=subprocess.DEVNULL, text=True
-        )
-        for token, nxt in zip(out.split(), out.split()[1:]):
-            if token == "src":
-                return nxt
-    except Exception:
-        pass
-    return ""
 
 
-def write_environment_file(name, pw, config):
-    """Write UID-dependent environment variables for the systemd service.
-
-    The generated service uses EnvironmentFile= to pick up XDG_RUNTIME_DIR
-    (which depends on the UID). This allows the generator to create service
-    files before the user exists.
-    """
-    # No mode= here: systemd/workloads-dirs.conf owns this directory's mode and
-    # tmpfiles runs under sysinit.target, long before any workload's
-    # ExecStartPre — so exist_ok=True makes a mode= argument dead, and 0700
-    # would be wrong anyway (see that file: the workload user must traverse
-    # this dir to read its own --env-file). Bare mkdir is the boot-order
-    # fallback only.
-    env_dir = workload_env_dir()
-    env_dir.mkdir(parents=True, exist_ok=True)
-
-    lines = [
-        f"XDG_RUNTIME_DIR=/run/user/{pw.pw_uid}",
-        f"HOST_IP={_detect_host_ip()}",
-    ]
-
-    env_file = env_dir / f"workload-{name}.env"
-    env_file.write_text("\n".join(lines) + "\n")
-    log(f"  Wrote environment file {env_file}")
 
 
 def enable_linger(pw):
@@ -597,7 +377,7 @@ def enable_linger(pw):
     if result.returncode != 0:
         raise RuntimeError(f"loginctl enable-linger failed: {result.stderr}")
     if service_runtime.ensure_runtime_dir(pw.pw_uid, timeout=15):
-        log(f"  Enabled linger for {pw.pw_name} (UID {pw.pw_uid})")
+        ensure_common.log(f"  Enabled linger for {pw.pw_name} (UID {pw.pw_uid})")
         return
     raise RuntimeError(
         f"linger enabled but user@{pw.pw_uid}.service did not become active "
@@ -636,7 +416,7 @@ def ensure_manager_slice(pw, config):
     if not cgroup or target in cgroup:
         return  # unknown state, or already correctly placed — nothing to do
 
-    log(f"  Migrating user@{uid}.service into {slice_name} "
+    ensure_common.log(f"  Migrating user@{uid}.service into {slice_name} "
         f"(logind started it at {cgroup!r})")
     subprocess.run(
         ["systemctl", "restart", f"user@{uid}.service"],
@@ -647,9 +427,9 @@ def ensure_manager_slice(pw, config):
 
     cgroup = manager_cgroup()
     if target in cgroup:
-        log(f"  user@{uid}.service now in {slice_name}")
+        ensure_common.log(f"  user@{uid}.service now in {slice_name}")
     else:
-        log(f"  WARNING: user@{uid}.service still not in {slice_name} after restart "
+        ensure_common.log(f"  WARNING: user@{uid}.service still not in {slice_name} after restart "
             f"(cgroup={cgroup!r}); workload runs but aggregate-slice grouping is lost")
 
 
@@ -670,38 +450,9 @@ def setup_nvram(pw, config: dict):
     shutil.copy2(ovmf_vars, nvram_dst)
     os.chown(nvram_dst, pw.pw_uid, pw.pw_gid)
     os.chmod(nvram_dst, 0o600)
-    log(f"  Copied NVRAM: {ovmf_vars} → {nvram_dst}")
+    ensure_common.log(f"  Copied NVRAM: {ovmf_vars} → {nvram_dst}")
 
 
-def setup_vm_socket_dir(pw, name: str):
-    """Create the runtime socket directory /run/workload-vm/{name}/, labelled.
-
-    The relabel is REQUIRED, and registering the fcontext rule is not enough on
-    its own. The kernel labels a newly created file from its parent directory,
-    not from `file_contexts` — that file is consulted only by userspace tools
-    like restorecon. So the rule the RPM's %post registers
-    (`/run/workload-vm(/.*)? -> svirt_var_run_t`) does nothing for a directory
-    mkdir'd here: it inherits `var_run_t` from /run, and a confined QEMU then
-    cannot create its QMP socket, cannot read the cloud-init ISO, and fails to
-    start rather than degrading. /run is a tmpfs, so this recurs every boot.
-
-    It happens HERE, before anything is written into the directory, because
-    everything created inside afterwards (the sockets, cloud-init.iso) inherits
-    from the directory — relabelling later would leave those behind.
-
-    Plain restorecon, no -F: var_run_t is not a customizable type, unlike the
-    container_file_t/svirt_image_t pair under /var/lib/workloads.
-    """
-    sock_dir = VM_SOCKET_DIR / name
-    sock_dir.mkdir(parents=True, exist_ok=True)
-    if shutil.which("restorecon"):
-        # Recursive and rooted at the parent: the parent is what the rule names,
-        # and a wrong label there is inherited by every workload's subdirectory.
-        subprocess.run(["restorecon", "-R", str(VM_SOCKET_DIR)],
-                       check=False, capture_output=True)
-    os.chown(sock_dir, pw.pw_uid, pw.pw_gid)
-    os.chmod(sock_dir, 0o750)
-    log(f"  Socket directory: {sock_dir}")
 
 
 def _ssh_keygen(key_path: Path, comment: str, what: str):
@@ -759,7 +510,7 @@ def generate_ssh_keypair(pw, name: str):
     if pub_path.exists():
         os.chown(pub_path, pw.pw_uid, pw.pw_gid)
         os.chmod(pub_path, 0o644)
-    log(f"  Generated SSH keypair: {key_path}")
+    ensure_common.log(f"  Generated SSH keypair: {key_path}")
 
 
 def _read_ssh_pubkey(pw) -> str:
@@ -909,7 +660,7 @@ def seed_vm_home_share_ssh_key(pw, config):
         try:
             home_host.resolve().relative_to(root_dir.resolve())
         except ValueError:
-            log(f"  WARNING: {guest_str} shares {host_str}, which is outside "
+            ensure_common.log(f"  WARNING: {guest_str} shares {host_str}, which is outside "
                 f"{root_dir} — it hides the guest's authorized_keys and only you "
                 f"can seed it. Copy {Path(pw.pw_dir) / '.ssh/id_ed25519.pub'} to "
                 f"{home_host}/.ssh/authorized_keys (0600) or `workloadctl exec` "
@@ -924,7 +675,7 @@ def seed_vm_home_share_ssh_key(pw, config):
                                      0o700):
             raise RuntimeError(f"could not provision {ssh_dir}")
         if _seed_authorized_keys(root_dir, ssh_dir, pubkey, pw.pw_uid, pw.pw_gid):
-            log(f"  Seeded SSH key into {guest_str} share: "
+            ensure_common.log(f"  Seeded SSH key into {guest_str} share: "
                 f"{ssh_dir}/authorized_keys")
 
 
@@ -954,114 +705,11 @@ def generate_vm_host_keypair(pw, name: str):
     if pub_path.exists():
         os.chown(pub_path, pw.pw_uid, pw.pw_gid)
         os.chmod(pub_path, 0o644)
-    log(f"  Generated VM host keypair: {key_path}")
+    ensure_common.log(f"  Generated VM host keypair: {key_path}")
 
 
-def generate_vm_egress_ca(pw, name: str):
-    """Generate this workload's egress CA if absent, or raise with openssl's words.
-
-    Symmetric to generate_vm_host_keypair, and here for the same reason it is:
-    the seed ISO carries this certificate, so "before the seed" has to be a fact
-    about one function rather than an ordering between units. Both are called a
-    few lines above build_cloud_init_iso in the same process.
-
-    Idempotent, and the guard is what keeps it so. Re-minting would invalidate
-    the anchor already installed in a provisioned guest exactly as churning the
-    host key would invalidate the SSH pin -- and worse, because cloud-init runs
-    once per instance-id, so the replacement never arrives and every HTTPS
-    request fails validation on a VM `diagnose` calls healthy.
-
-    Generated for every filtered VM whatever `tls` says. Gating it on
-    tls = "inspect" would turn the emergency splice into a one-way door: the
-    seed is fingerprinted over its rendered text, so dropping the CA out of it
-    rotates the instance-id and re-provisions the guest in the middle of the
-    incident the hatch exists for.
-
-    When it DOES mint, it clears the leaf caches -- see the comment at the end.
-    provision_vm_pki_dirs recreates and relabels them a moment later, which is
-    why removing them here is safe.
-    """
-    ca_dir = vm_ca_dir(workload_state_dir(name))
-    key_path = vm_ca_key_path(workload_state_dir(name))
-    cert_path = vm_ca_cert_path(workload_state_dir(name))
-
-    if key_path.exists() and cert_path.exists():
-        return  # already minted -- keep the guest's anchor valid
-
-    ca_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
-    os.chown(ca_dir, pw.pw_uid, pw.pw_gid)
-
-    result = subprocess.run(
-        vm_ca_openssl_argv(name, key_path, cert_path, now=time.time()),
-        capture_output=True, text=True,
-    )
-    if result.returncode != 0:
-        # Same both-streams reasoning as _ssh_keygen: openssl splits its
-        # diagnostics across stdout and stderr depending on the failure, so
-        # reporting one of them yields an empty message on some runs.
-        said = " / ".join(s.strip() for s in (result.stdout, result.stderr)
-                          if s.strip())
-        raise RuntimeError(
-            f"openssl (egress CA) failed: "
-            f"{said or f'no output, exit {result.returncode}'}")
-
-    os.chown(key_path, pw.pw_uid, pw.pw_gid)
-    os.chmod(key_path, 0o600)
-    os.chown(cert_path, pw.pw_uid, pw.pw_gid)
-    # The certificate is 0644 and the key is 0600: the certificate is a public
-    # anchor that the seed builder and `diagnose` both read, and the private
-    # half is the only part worth protecting.
-    os.chmod(cert_path, 0o644)
-
-    # A NEW CA MAKES EVERY CACHED LEAF A FORGERY, so the caches go with it.
-    # This runs only on the branch that actually minted -- the guard above
-    # returns before it for the ordinary case -- and the case it exists for is
-    # an operator recovering a lost or damaged CA by deleting state/ca. The
-    # leaves are files with a 30-day life, LeafCache adopts any PEM it finds at
-    # the hashed path without asking who signed it, and the guest by then
-    # trusts only the replacement. The result is a guest that fails handshakes
-    # on exactly its established hosts, told by the listener's own log line to
-    # re-seed -- which is both the wrong remedy and already done.
-    for cache_dir in (vm_leaf_dir(workload_state_dir(name)),
-                      vm_denial_dir(workload_state_dir(name))):
-        shutil.rmtree(cache_dir, ignore_errors=True)
-
-    log(f"  Generated egress CA: {cert_path}")
 
 
-def provision_vm_pki_dirs(pw, name: str):
-    """Create the leaf caches beside the CA, then label the whole PKI subtree.
-
-    Two jobs that have to happen in this order and in this process.
-
-    The directories exist here rather than being left to the minter's own
-    mkdir because of the labelling below: a directory the inspector creates
-    for itself inherits its parent's type (svirt_image_t, the workload tree
-    rule), and the inspector has no `relabelto` on anything, so it would
-    create a directory it then cannot use. Creating them as root and relabelling
-    once is the only ordering where the inspector never has to.
-
-    And the relabel is needed at all because `restorecon` is userspace:
-    file_contexts.local decides what a path SHOULD be labelled, while the
-    kernel labels a newly created directory from its parent. The fcontext rules
-    are registered at enable, before this runs, so nothing has applied them to
-    a subtree that did not exist yet.
-
-    Best-effort: a host without restorecon, or with SELinux disabled, gets an
-    unlabelled subtree and an inspector that fails loudly at startup, which is
-    a better failure than refusing to provision the VM at all.
-    """
-    state_dir = workload_state_dir(name)
-    for directory in (vm_ca_dir(state_dir), vm_leaf_dir(state_dir),
-                      vm_denial_dir(state_dir)):
-        directory.mkdir(mode=0o700, parents=True, exist_ok=True)
-        os.chown(directory, pw.pw_uid, pw.pw_gid)
-        if shutil.which("restorecon"):
-            # -F for the same reason apply_vm_fcontext needs it: svirt_image_t
-            # is in contexts/customizable_types, so a plain restorecon skips
-            # every directory currently carrying it and exits 0.
-            subprocess.run(["restorecon", "-RF", str(directory)],
-                           check=False, capture_output=True)
 
 
 def _read_vm_egress_ca(name: str) -> str:
@@ -1113,7 +761,7 @@ def write_vm_known_hosts(pw, name: str, host_pubkey: str):
     # read the pin mid-rewrite and fail against a truncated line.
     replace_file_atomically(known_hosts, line, default_mode=0o644,
                             owner=(pw.pw_uid, pw.pw_gid))
-    log(f"  Pinned VM host key in {known_hosts}")
+    ensure_common.log(f"  Pinned VM host key in {known_hosts}")
 
 
 def _decrypt_systemd_credential(name: str) -> str:
@@ -1373,10 +1021,10 @@ def _bundle_workloadctl_rpm(seed_dir: Path) -> bool:
     cached = Path("/usr/share/workloadctl/workloadctl.rpm")
     if cached.exists():
         shutil.copy2(cached, dest)
-        log("  Bundled workloadctl RPM (cached copy)")
+        ensure_common.log("  Bundled workloadctl RPM (cached copy)")
         return True
 
-    log("  WARNING: no cached workloadctl RPM at /usr/share/workloadctl/workloadctl.rpm; "
+    ensure_common.log("  WARNING: no cached workloadctl RPM at /usr/share/workloadctl/workloadctl.rpm; "
         "bootstrap will not be able to install workloadctl from the ISO.")
     return False
 
@@ -1482,15 +1130,15 @@ def build_cloud_init_iso(pw, config: dict, name: str, config_path: Path | None =
     legacy_iso = home_path / "cloud-init.iso"
     try:
         legacy_iso.unlink()
-        log(f"  Removed legacy on-disk cloud-init ISO: {legacy_iso}")
+        ensure_common.log(f"  Removed legacy on-disk cloud-init ISO: {legacy_iso}")
     except FileNotFoundError:
         pass
     except OSError as e:
-        log(f"  WARNING: could not remove legacy ISO {legacy_iso}: {e}")
+        ensure_common.log(f"  WARNING: could not remove legacy ISO {legacy_iso}: {e}")
     legacy_seed_dir = home_path / ".cloud-init-seed"
     if legacy_seed_dir.exists():
         shutil.rmtree(legacy_seed_dir, ignore_errors=True)
-        log(f"  Removed legacy on-disk cloud-init seed dir: {legacy_seed_dir}")
+        ensure_common.log(f"  Removed legacy on-disk cloud-init seed dir: {legacy_seed_dir}")
 
     vm_cfg = config.get("vm", {})
     guest_user = _validated_guest_user(vm_cfg)
@@ -1846,7 +1494,7 @@ def build_cloud_init_iso(pw, config: dict, name: str, config_path: Path | None =
     if minted:
         if attempts:
             errors = (marker or {}).get("errors") or []
-            log(f"  cloud-init reported failure for instance {existing_id}"
+            ensure_common.log(f"  cloud-init reported failure for instance {existing_id}"
                 + (f": {errors[0]}" if errors else "")
                 + f" — re-provisioning with a fresh instance-id (heal {attempts}"
                   f"/{MAX_HEAL_ATTEMPTS})")
@@ -1886,7 +1534,7 @@ def build_cloud_init_iso(pw, config: dict, name: str, config_path: Path | None =
             break
 
     if iso_tool is None:
-        log("  WARNING: No ISO tool found (genisoimage/mkisofs/xorriso). "
+        ensure_common.log("  WARNING: No ISO tool found (genisoimage/mkisofs/xorriso). "
             "cloud-init will not work.")
         return
 
@@ -1909,7 +1557,7 @@ def build_cloud_init_iso(pw, config: dict, name: str, config_path: Path | None =
 
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
-        log(f"  WARNING: ISO build failed: {result.stderr.strip()}")
+        ensure_common.log(f"  WARNING: ISO build failed: {result.stderr.strip()}")
         return
 
     os.chown(iso_path, pw.pw_uid, pw.pw_gid)
@@ -1921,7 +1569,7 @@ def build_cloud_init_iso(pw, config: dict, name: str, config_path: Path | None =
     # Remove the seed staging directory — the rendered user-data contains
     # secrets in plaintext and is no longer needed once the ISO is built.
     shutil.rmtree(seed_dir, ignore_errors=True)
-    log(f"  Built cloud-init ISO: {iso_path}")
+    ensure_common.log(f"  Built cloud-init ISO: {iso_path}")
 
 
 # Per-workload provisioning lock. A module constant so tests can redirect it.
@@ -1963,7 +1611,7 @@ def ensure_user_lock(name: str):
         if fd is not None:
             fd.close()
             fd = None
-        log(f"  WARNING: could not take the provisioning lock for {name} ({e}); "
+        ensure_common.log(f"  WARNING: could not take the provisioning lock for {name} ({e}); "
             f"continuing unlocked")
     try:
         yield
@@ -1986,20 +1634,20 @@ def main():
 def _ensure_user(name: str) -> int:
     username = workload_username(name)
 
-    log(f"Ensuring user setup for workload: {name}")
+    ensure_common.log(f"Ensuring user setup for workload: {name}")
 
     # Look up user once — all functions receive the pwd struct
     try:
         pw = pwd.getpwnam(username)
     except KeyError:
-        log(f"ERROR: User {username} does not exist")
+        ensure_common.log(f"ERROR: User {username} does not exist")
         return 1
 
     # Flag (don't fix) a pre-Step-2 home dir — it silently breaks healthchecks.
     try:
         warn_if_stale_home(pw, name)
     except Exception as e:
-        log(f"  WARNING: stale-home check failed for {username}: {e}")
+        ensure_common.log(f"  WARNING: stale-home check failed for {username}: {e}")
 
     # Ensure base directory exists
     WORKLOADS_BASE.mkdir(parents=True, exist_ok=True)
@@ -2008,7 +1656,7 @@ def _ensure_user(name: str) -> int:
     try:
         config = load_workload_config(name)
     except Exception as e:
-        log(f"ERROR: Failed to load config for {name}: {e}")
+        ensure_common.log(f"ERROR: Failed to load config for {name}: {e}")
         return 1
 
     kind = infer_workload_kind(config)
@@ -2027,7 +1675,7 @@ def _ensure_user(name: str) -> int:
     try:
         setup_home_directory(pw, name)
     except Exception as e:
-        log(f"  WARNING: Failed to set up home directory for {username}: {e}")
+        ensure_common.log(f"  WARNING: Failed to set up home directory for {username}: {e}")
 
     record_deployment_provenance(name)
 
@@ -2050,18 +1698,18 @@ def _ensure_user(name: str) -> int:
         try:
             setup_nvram(pw, config)
         except Exception as e:
-            log(f"  ERROR: Failed to set up NVRAM for {name}: {e}")
+            ensure_common.log(f"  ERROR: Failed to set up NVRAM for {name}: {e}")
             return 1
 
         try:
             setup_vm_socket_dir(pw, name)
         except Exception as e:
-            log(f"  WARNING: Failed to create socket dir for {name}: {e}")
+            ensure_common.log(f"  WARNING: Failed to create socket dir for {name}: {e}")
 
         try:
             setup_vm_volume_directories(pw, config)
         except Exception as e:
-            log(f"  WARNING: Failed to create virtiofs host directories for {name}: {e}")
+            ensure_common.log(f"  WARNING: Failed to create virtiofs host directories for {name}: {e}")
 
         # SSH keypair + cloud-init ISO are prerequisites for a usable VM:
         # without them, `workloadctl exec` has no way in. Surface as failures
@@ -2070,7 +1718,7 @@ def _ensure_user(name: str) -> int:
         try:
             generate_ssh_keypair(pw, name)
         except Exception as e:
-            log(f"  ERROR: Failed to generate SSH keypair for {name}: {e}")
+            ensure_common.log(f"  ERROR: Failed to generate SSH keypair for {name}: {e}")
             return 1
 
         # Must run after the keypair (it needs the pubkey) and after the volume
@@ -2080,7 +1728,7 @@ def _ensure_user(name: str) -> int:
         try:
             seed_vm_home_share_ssh_key(pw, config)
         except Exception as e:
-            log(f"  ERROR: Failed to seed SSH key into the home share for {name}: {e}")
+            ensure_common.log(f"  ERROR: Failed to seed SSH key into the home share for {name}: {e}")
             return 1
 
         # Host keypair for SSH host-key pinning (S1) — must exist before
@@ -2088,7 +1736,7 @@ def _ensure_user(name: str) -> int:
         try:
             generate_vm_host_keypair(pw, name)
         except Exception as e:
-            log(f"  ERROR: Failed to generate VM host keypair for {name}: {e}")
+            ensure_common.log(f"  ERROR: Failed to generate VM host keypair for {name}: {e}")
             return 1
 
         # The egress CA, for the same reason and at the same point: the seed
@@ -2104,7 +1752,7 @@ def _ensure_user(name: str) -> int:
             try:
                 generate_vm_egress_ca(pw, name)
             except Exception as e:
-                log(f"  ERROR: Failed to generate egress CA for {name}: {e}")
+                ensure_common.log(f"  ERROR: Failed to generate egress CA for {name}: {e}")
                 return 1
 
             # The leaf caches and the labels, after the CA so one relabel
@@ -2114,7 +1762,7 @@ def _ensure_user(name: str) -> int:
             try:
                 provision_vm_pki_dirs(pw, name)
             except Exception as e:
-                log(f"  ERROR: Failed to prepare the egress PKI directories "
+                ensure_common.log(f"  ERROR: Failed to prepare the egress PKI directories "
                     f"for {name}: {e}")
                 return 1
 
@@ -2126,28 +1774,28 @@ def _ensure_user(name: str) -> int:
         except SeedContractError as e:
             # The operator's seed is wrong and the message says how to fix it.
             # A distinct exit code keeps the CLI from framing it as a crash.
-            log(f"  ERROR: {e}")
+            ensure_common.log(f"  ERROR: {e}")
             return VM_SEED_CONTRACT_EXIT
         except Exception as e:
-            log(f"  ERROR: Failed to build cloud-init ISO for {name}: {e}")
+            ensure_common.log(f"  ERROR: Failed to build cloud-init ISO for {name}: {e}")
             return 1
 
         try:
             restore_selinux_labels(name)
         except Exception as e:
-            log(f"  WARNING: Failed to restore SELinux labels for {username}: {e}")
+            ensure_common.log(f"  WARNING: Failed to restore SELinux labels for {username}: {e}")
 
         try:
             write_environment_file(name, pw, config)
         except Exception as e:
-            log(f"  WARNING: Failed to write environment file for {name}: {e}")
+            ensure_common.log(f"  WARNING: Failed to write environment file for {name}: {e}")
 
     else:
         # Container workloads: full existing setup
         try:
             configure_subuid_subgid(pw, config)
         except Exception as e:
-            log(f"  ERROR: Failed to configure subuid/subgid for {username}: {e}")
+            ensure_common.log(f"  ERROR: Failed to configure subuid/subgid for {username}: {e}")
             return 1
 
         # The egress CA (P1-10, G12's container half). generate_vm_egress_ca
@@ -2168,25 +1816,25 @@ def _ensure_user(name: str) -> int:
             try:
                 setup_vm_socket_dir(pw, name)
             except Exception as e:
-                log(f"  ERROR: Failed to create the egress inspector's "
+                ensure_common.log(f"  ERROR: Failed to create the egress inspector's "
                     f"runtime directory for {name}: {e}")
                 return 1
             try:
                 generate_vm_egress_ca(pw, name)
             except Exception as e:
-                log(f"  ERROR: Failed to generate egress CA for {name}: {e}")
+                ensure_common.log(f"  ERROR: Failed to generate egress CA for {name}: {e}")
                 return 1
             try:
                 provision_vm_pki_dirs(pw, name)
             except Exception as e:
-                log(f"  ERROR: Failed to prepare the egress PKI directories "
+                ensure_common.log(f"  ERROR: Failed to prepare the egress PKI directories "
                     f"for {name}: {e}")
                 return 1
 
         try:
             setup_volume_directories(pw, config)
         except Exception as e:
-            log(f"  ERROR: Failed to create volume directories for {username}: {e}")
+            ensure_common.log(f"  ERROR: Failed to create volume directories for {username}: {e}")
             return 1
 
         # After the volume dirs: a required file lands inside one of them, and
@@ -2194,33 +1842,33 @@ def _ensure_user(name: str) -> int:
         try:
             setup_required_file_ownership(pw, config)
         except Exception as e:
-            log(f"  ERROR: Failed to fix required-file ownership for {username}: {e}")
+            ensure_common.log(f"  ERROR: Failed to fix required-file ownership for {username}: {e}")
             return 1
 
         try:
             write_environment_file(name, pw, config)
         except Exception as e:
-            log(f"  ERROR: Failed to write environment file for {name}: {e}")
+            ensure_common.log(f"  ERROR: Failed to write environment file for {name}: {e}")
             return 1
 
         try:
             restore_selinux_labels(name)
         except Exception as e:
-            log(f"  WARNING: Failed to restore SELinux labels for {username}: {e}")
+            ensure_common.log(f"  WARNING: Failed to restore SELinux labels for {username}: {e}")
 
         try:
             enable_linger(pw)
         except Exception as e:
-            log(f"  ERROR: Failed to enable linger for {username}: {e}")
+            ensure_common.log(f"  ERROR: Failed to enable linger for {username}: {e}")
             return 1
 
         try:
             ensure_manager_slice(pw, config)
         except Exception as e:
-            log(f"  WARNING: Failed to migrate user@{pw.pw_uid}.service into its "
+            ensure_common.log(f"  WARNING: Failed to migrate user@{pw.pw_uid}.service into its "
                 f"slice for {username}: {e}")
 
-    log(f"User setup complete for {name} ({kind})")
+    ensure_common.log(f"User setup complete for {name} ({kind})")
     return 0
 
 

@@ -222,6 +222,7 @@ class TestASharedModuleIsNotShadowedByItsCaller(unittest.TestCase):
                                         "gen_container"),
         "lib/gen_vm.py": ("gen_common",),
         "lib/gen_container.py": ("gen_common",),
+        "libexec/workload-ensure-user": ("ensure_common",),
     }
 
     @staticmethod
