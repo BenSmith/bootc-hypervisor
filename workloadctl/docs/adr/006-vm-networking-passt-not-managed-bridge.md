@@ -194,8 +194,10 @@ None of these would have failed a unit test or a review.
 new file from its *parent*, and `file_contexts` is consulted only by userspace
 tools. A directory mkdir'd under `/run` inherits `var_run_t` however many rules
 name it, so a confined QEMU could not create its QMP socket or read the cloud-init
-ISO — and `/run` is a tmpfs, so it recurs every boot. `setup_vm_socket_dir` runs
-`restorecon` on the directory *before* anything is written into it.
+ISO — and `/run` is a tmpfs, so it recurs every boot.
+`setup_workload_runtime_dir` runs `restorecon` on the directory *before*
+anything is written into it. (It was `setup_vm_socket_dir` when this ADR was
+written; the directory serves filtered containers too now.)
 
 **passt needs a grant no audit harvest will show you.** QEMU's native netdev forks
 passt with one end of a socketpair already open, where libvirt starts it

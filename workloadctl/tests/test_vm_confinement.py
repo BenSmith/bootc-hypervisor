@@ -313,7 +313,7 @@ def _socket_dir_source():
     import inspect
 
     import ensure_common
-    return inspect.getsource(ensure_common.setup_vm_socket_dir)
+    return inspect.getsource(ensure_common.setup_workload_runtime_dir)
 
 
 class TestSocketDirIsRelabelled(unittest.TestCase):

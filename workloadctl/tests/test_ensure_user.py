@@ -2073,7 +2073,7 @@ class TestSetupVmSocketDir(unittest.TestCase):
             pw = _fake_pw(Path(tmp), uid=10001, gid=10001)
             with mock.patch.object(self.mod, "VM_SOCKET_DIR", socket_base), \
                  mock.patch("os.chown"):
-                self.mod.setup_vm_socket_dir(pw, "myvm")
+                self.mod.setup_workload_runtime_dir(pw, "myvm")
             sock_dir = socket_base / "myvm"
             self.assertTrue(sock_dir.is_dir())
             self.assertEqual(oct(sock_dir.stat().st_mode & 0o777), "0o750")
@@ -2085,7 +2085,7 @@ class TestSetupVmSocketDir(unittest.TestCase):
             pw = _fake_pw(Path(tmp), uid=10001, gid=10001)
             with mock.patch.object(self.mod, "VM_SOCKET_DIR", socket_base), \
                  mock.patch("os.chown"):
-                self.mod.setup_vm_socket_dir(pw, "myvm")  # must not raise
+                self.mod.setup_workload_runtime_dir(pw, "myvm")  # must not raise
 
 
 class TestGenerateSshKeypair(unittest.TestCase):
@@ -2718,7 +2718,7 @@ class TestMain(unittest.TestCase):
             "restore_selinux_labels": mock.patch.object(self.mod, "restore_selinux_labels"),
             "enable_linger": mock.patch.object(self.mod, "enable_linger"),
             "setup_nvram": mock.patch.object(self.mod, "setup_nvram"),
-            "setup_vm_socket_dir": mock.patch.object(self.mod, "setup_vm_socket_dir"),
+            "setup_workload_runtime_dir": mock.patch.object(self.mod, "setup_workload_runtime_dir"),
             "setup_vm_volume_directories": mock.patch.object(self.mod, "setup_vm_volume_directories"),
             "generate_ssh_keypair": mock.patch.object(self.mod, "generate_ssh_keypair"),
             "generate_vm_host_keypair": mock.patch.object(self.mod, "generate_vm_host_keypair"),
@@ -2814,7 +2814,7 @@ class TestMain(unittest.TestCase):
             rc = self.mod.main()
         self.assertEqual(rc, 0)
         mocks["setup_nvram"].assert_called_once()
-        mocks["setup_vm_socket_dir"].assert_called_once()
+        mocks["setup_workload_runtime_dir"].assert_called_once()
         mocks["setup_vm_volume_directories"].assert_called_once()
         mocks["generate_ssh_keypair"].assert_called_once()
         mocks["generate_vm_host_keypair"].assert_called_once()
@@ -2833,7 +2833,7 @@ class TestMain(unittest.TestCase):
             rc = self.mod.main()
         self.assertEqual(rc, 1)
         # main returns immediately after the fatal NVRAM failure
-        mocks["setup_vm_socket_dir"].assert_not_called()
+        mocks["setup_workload_runtime_dir"].assert_not_called()
         mocks["generate_ssh_keypair"].assert_not_called()
 
     def test_vm_ssh_keypair_failure_is_fatal(self):
@@ -2854,7 +2854,7 @@ class TestMain(unittest.TestCase):
 
     def test_vm_non_fatal_step_failures_still_succeed(self):
         mocks = self._patch_common("vm")
-        mocks["setup_vm_socket_dir"].side_effect = Exception("socket boom")
+        mocks["setup_workload_runtime_dir"].side_effect = Exception("socket boom")
         with mock.patch.object(self.mod.sys, "argv", ["prog", "myvm"]):
             rc = self.mod.main()
         self.assertEqual(rc, 0)
@@ -2961,8 +2961,8 @@ class ContainerEgressCaGateTest(unittest.TestCase):
         "write_environment_file", "restore_selinux_labels", "enable_linger",
         "ensure_manager_slice",
     )
-    _GATED = ("setup_vm_socket_dir", "generate_vm_egress_ca",
-              "provision_vm_pki_dirs")
+    _GATED = ("setup_workload_runtime_dir", "generate_egress_ca",
+              "provision_egress_pki_dirs")
 
     def _drive(self, network):
         """Run _ensure_user() for a container config and report which of the

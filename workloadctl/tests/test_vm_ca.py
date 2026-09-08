@@ -190,20 +190,20 @@ class TestGeneratorIsIdempotent(unittest.TestCase):
 
     @unittest.skipUnless(HAVE_OPENSSL, "needs openssl")
     def test_it_mints_once_and_leaves_it_alone(self):
-        self.mod.generate_vm_egress_ca(self.pw, "myvm")
+        self.mod.generate_egress_ca(self.pw, "myvm")
         cert = vm_ca_cert_path(self.state)
         key = vm_ca_key_path(self.state)
         self.assertTrue(cert.exists() and key.exists())
         first = (cert.read_bytes(), key.read_bytes())
 
-        self.mod.generate_vm_egress_ca(self.pw, "myvm")
+        self.mod.generate_egress_ca(self.pw, "myvm")
         self.assertEqual((cert.read_bytes(), key.read_bytes()), first,
                          "the CA was re-minted; a provisioned guest's anchor "
                          "is now stale and cloud-init will never replace it")
 
     @unittest.skipUnless(HAVE_OPENSSL, "needs openssl")
     def test_the_private_half_is_not_world_readable(self):
-        self.mod.generate_vm_egress_ca(self.pw, "myvm")
+        self.mod.generate_egress_ca(self.pw, "myvm")
         self.assertEqual(vm_ca_key_path(self.state).stat().st_mode & 0o777, 0o600)
         # The certificate is a public anchor -- the seed builder and `diagnose`
         # both read it -- so it is deliberately NOT 0600.
@@ -221,7 +221,7 @@ class TestGeneratorIsIdempotent(unittest.TestCase):
             returncode=1, stdout="", stderr="openssl: unrecognised option")
         with mock.patch.object(self.mod.subprocess, "run", return_value=fake):
             with self.assertRaises(RuntimeError) as ctx:
-                self.mod.generate_vm_egress_ca(self.pw, "myvm")
+                self.mod.generate_egress_ca(self.pw, "myvm")
         self.assertIn("unrecognised option", str(ctx.exception))
 
     def test_a_failure_with_no_output_still_says_something(self):
@@ -230,7 +230,7 @@ class TestGeneratorIsIdempotent(unittest.TestCase):
         fake = types.SimpleNamespace(returncode=3, stdout="", stderr="")
         with mock.patch.object(self.mod.subprocess, "run", return_value=fake):
             with self.assertRaises(RuntimeError) as ctx:
-                self.mod.generate_vm_egress_ca(self.pw, "myvm")
+                self.mod.generate_egress_ca(self.pw, "myvm")
         self.assertIn("exit 3", str(ctx.exception))
 
     # ------------------------------------------------------------------
@@ -247,7 +247,7 @@ class TestGeneratorIsIdempotent(unittest.TestCase):
         # creates inherits its parent's svirt_image_t, and the domain has no
         # relabelto -- it would create a directory it then cannot use.
         with mock.patch.object(self.mod.shutil, "which", return_value=None):
-            self.mod.provision_vm_pki_dirs(self.pw, "myvm")
+            self.mod.provision_egress_pki_dirs(self.pw, "myvm")
         for name in ("ca", "leaves", "leaves-denied"):
             d = self.state / name
             self.assertTrue(d.is_dir(), name)
@@ -262,7 +262,7 @@ class TestGeneratorIsIdempotent(unittest.TestCase):
                                return_value="/usr/sbin/restorecon"):
             with mock.patch.object(self.mod.subprocess, "run",
                                    side_effect=lambda argv, **kw: calls.append(argv)):
-                self.mod.provision_vm_pki_dirs(self.pw, "myvm")
+                self.mod.provision_egress_pki_dirs(self.pw, "myvm")
         self.assertEqual(len(calls), 3)
         self.assertTrue(all(c[:2] == ["restorecon", "-RF"] for c in calls), calls)
         self.assertEqual(
@@ -275,15 +275,15 @@ class TestGeneratorIsIdempotent(unittest.TestCase):
         # failure.
         with mock.patch.object(self.mod.shutil, "which", return_value=None):
             with mock.patch.object(self.mod.subprocess, "run") as run_mock:
-                self.mod.provision_vm_pki_dirs(self.pw, "myvm")
+                self.mod.provision_egress_pki_dirs(self.pw, "myvm")
         run_mock.assert_not_called()
         self.assertTrue((self.state / "leaves").is_dir())
 
     def test_it_is_idempotent(self):
         with mock.patch.object(self.mod.shutil, "which", return_value=None):
-            self.mod.provision_vm_pki_dirs(self.pw, "myvm")
+            self.mod.provision_egress_pki_dirs(self.pw, "myvm")
             (self.state / "leaves" / "keep.pem").write_text("x")
-            self.mod.provision_vm_pki_dirs(self.pw, "myvm")
+            self.mod.provision_egress_pki_dirs(self.pw, "myvm")
         self.assertTrue((self.state / "leaves" / "keep.pem").exists())
 
 

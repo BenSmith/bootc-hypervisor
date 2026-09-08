@@ -24,8 +24,8 @@ from vm import (
 import ensure_common
 from ensure_common import (
     warn_if_stale_home, setup_home_directory, record_deployment_provenance,
-    restore_selinux_labels, write_environment_file, setup_vm_socket_dir,
-    generate_vm_egress_ca, provision_vm_pki_dirs,
+    restore_selinux_labels, write_environment_file, setup_workload_runtime_dir,
+    generate_egress_ca, provision_egress_pki_dirs,
 )
 from ensure_vm import (
     setup_nvram, setup_vm_volume_directories, generate_ssh_keypair,
@@ -247,7 +247,7 @@ def _ensure_user(name: str) -> int:
             return 1
 
         try:
-            setup_vm_socket_dir(pw, name)
+            setup_workload_runtime_dir(pw, name)
         except Exception as e:
             ensure_common.log(f"  WARNING: Failed to create socket dir for {name}: {e}")
 
@@ -295,7 +295,7 @@ def _ensure_user(name: str) -> int:
         # branch below this one.
         if vm_uses_inspect(config):
             try:
-                generate_vm_egress_ca(pw, name)
+                generate_egress_ca(pw, name)
             except Exception as e:
                 ensure_common.log(f"  ERROR: Failed to generate egress CA for {name}: {e}")
                 return 1
@@ -305,7 +305,7 @@ def _ensure_user(name: str) -> int:
             # read its own CA fails to start, and every guest dial to 80/443
             # then times out with nothing in the guest to say why.
             try:
-                provision_vm_pki_dirs(pw, name)
+                provision_egress_pki_dirs(pw, name)
             except Exception as e:
                 ensure_common.log(f"  ERROR: Failed to prepare the egress PKI directories "
                     f"for {name}: {e}")
@@ -343,15 +343,15 @@ def _ensure_user(name: str) -> int:
             ensure_common.log(f"  ERROR: Failed to configure subuid/subgid for {username}: {e}")
             return 1
 
-        # The egress CA (P1-10, G12's container half). generate_vm_egress_ca
-        # and provision_vm_pki_dirs are already name-keyed only -- nothing
-        # inside either reads [vm.network] -- so they are reused verbatim
-        # rather than duplicated. Must land before the container's own
+        # The egress CA (P1-10, G12's container half). generate_egress_ca
+        # and provision_egress_pki_dirs are name-keyed only -- nothing inside
+        # either reads [vm.network] -- so they are called verbatim rather than
+        # duplicated. Must land before the container's own
         # ExecStartPre (podman run, with the --volume the generator's
         # _container_ca_delivery_args added) or that mount has nothing to
         # bind: setup.service's ExecStartPre order is what enforces "before".
         if container_uses_inspect(config):
-            # setup_vm_socket_dir is also name-keyed only, and the inspect
+            # setup_workload_runtime_dir is also name-keyed only, and the inspect
             # socket's ExecStartPre (workload-container-inspect up) writes
             # inspect.json under the directory it creates -- the socket's own
             # Requires=/After= names only setup.service (never the workload's
@@ -359,18 +359,18 @@ def _ensure_user(name: str) -> int:
             # is explicit that the listener must exist before the workload's
             # first packet), so nothing else in the container path creates it.
             try:
-                setup_vm_socket_dir(pw, name)
+                setup_workload_runtime_dir(pw, name)
             except Exception as e:
                 ensure_common.log(f"  ERROR: Failed to create the egress inspector's "
                     f"runtime directory for {name}: {e}")
                 return 1
             try:
-                generate_vm_egress_ca(pw, name)
+                generate_egress_ca(pw, name)
             except Exception as e:
                 ensure_common.log(f"  ERROR: Failed to generate egress CA for {name}: {e}")
                 return 1
             try:
-                provision_vm_pki_dirs(pw, name)
+                provision_egress_pki_dirs(pw, name)
             except Exception as e:
                 ensure_common.log(f"  ERROR: Failed to prepare the egress PKI directories "
                     f"for {name}: {e}")

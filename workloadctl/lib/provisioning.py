@@ -797,7 +797,7 @@ def apply_vm_fcontext(config: WorkloadConfig, action: str):
     subtree that needs moving OFF container_file_t: wlinspect_t has read on
     wlinspect_ca_t/wlinspect_leaf_t only, never on the blanket type (see
     workload-inspect.cil). Skipping this for containers is exactly the bug
-    P1-10 shipped — `provision_vm_pki_dirs()`'s `restorecon` had nothing
+    P1-10 shipped — `provision_egress_pki_dirs()`'s `restorecon` had nothing
     registered to relabel the subtree TO, so it silently stayed
     container_file_t and the inspector's own `os.path.exists()` on its CA
     read back False (EACCES reads the same as ENOENT). So this registers the

@@ -5,13 +5,14 @@ home directory, the environment file, the SELinux relabel, the provenance
 record. A function belongs here when it cannot tell a VM from a container --
 not when it merely happens to be called from both branches today.
 
-Three of these are named `..._vm_...` and are not VM-only: `setup_vm_socket_dir`,
-`generate_vm_egress_ca` and `provision_vm_pki_dirs` are keyed on the workload
-NAME and read nothing under `[vm]`, which is why the container egress path
-reuses them verbatim rather than growing a second copy. The names are the
-older half of the story; this module is the current one. Renaming them is a
-separate change with its own blast radius (an ADR and ~20 call sites), and
-until it happens the file a function lives in is the more reliable statement.
+`setup_workload_runtime_dir`, `generate_egress_ca` and
+`provision_egress_pki_dirs` are keyed on the workload NAME and read nothing
+under `[vm]`, which is what lets the container egress path call them verbatim
+rather than grow a second copy. Their names must stay substrate-neutral for
+the same reason. The PATH the first one operates on is still
+`/run/workload-vm/<name>`, and that is not an oversight: the string is an
+SELinux fcontext rule the RPM registers, so it is an interface rather than a
+name we are free to correct.
 
 `log` is reached as `ensure_common.log(...)` from every other module, never
 imported by name. `from ensure_common import log` would COPY the binding, and
@@ -278,8 +279,12 @@ def write_environment_file(name, pw, config):
     log(f"  Wrote environment file {env_file}")
 
 
-def setup_vm_socket_dir(pw, name: str):
-    """Create the runtime socket directory /run/workload-vm/{name}/, labelled.
+def setup_workload_runtime_dir(pw, name: str):
+    """Create the runtime directory /run/workload-vm/{name}/, labelled.
+
+    Both substrates: a VM's QMP and console sockets, and a filtered
+    container's inspect.json. The path keeps `workload-vm` in it because the
+    RPM registers an fcontext rule on that exact string.
 
     The relabel is REQUIRED, and registering the fcontext rule is not enough on
     its own. The kernel labels a newly created file from its parent directory,
@@ -309,7 +314,7 @@ def setup_vm_socket_dir(pw, name: str):
     log(f"  Socket directory: {sock_dir}")
 
 
-def generate_vm_egress_ca(pw, name: str):
+def generate_egress_ca(pw, name: str):
     """Generate this workload's egress CA if absent, or raise with openssl's words.
 
     Symmetric to generate_vm_host_keypair, and here for the same reason it is:
@@ -330,7 +335,7 @@ def generate_vm_egress_ca(pw, name: str):
     incident the hatch exists for.
 
     When it DOES mint, it clears the leaf caches -- see the comment at the end.
-    provision_vm_pki_dirs recreates and relabels them a moment later, which is
+    provision_egress_pki_dirs recreates and relabels them a moment later, which is
     why removing them here is safe.
     """
     ca_dir = vm_ca_dir(workload_state_dir(name))
@@ -381,7 +386,7 @@ def generate_vm_egress_ca(pw, name: str):
     log(f"  Generated egress CA: {cert_path}")
 
 
-def provision_vm_pki_dirs(pw, name: str):
+def provision_egress_pki_dirs(pw, name: str):
     """Create the leaf caches beside the CA, then label the whole PKI subtree.
 
     Two jobs that have to happen in this order and in this process.

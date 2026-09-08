@@ -350,7 +350,7 @@ def _read_vm_egress_ca(name: str) -> str:
     """The egress CA certificate in PEM, or '' if this workload has none.
 
     '' is an ordinary answer, not an error: an egress = "open" workload never
-    gets a CA, and generate_vm_egress_ca only runs for filtered ones.
+    gets a CA, and generate_egress_ca only runs for filtered ones.
     """
     try:
         return vm_ca_cert_path(workload_state_dir(name)).read_text()
@@ -708,7 +708,7 @@ def build_cloud_init_iso(pw, config: dict, name: str, config_path: Path | None =
     than the persistent workload home: in template mode it embeds decrypted
     secrets in plaintext, so keeping it on tmpfs means it never survives a
     reboot at rest (the threat being an offline disk read without the TPM).
-    The setup service (setup_vm_socket_dir, run earlier in this same invocation)
+    The setup service (setup_workload_runtime_dir, run earlier in this same invocation)
     has already created the dir; the main VM service later adopts it via
     RuntimeDirectory + RuntimeDirectoryPreserve=yes, which preserves this file.
 
@@ -743,7 +743,7 @@ def build_cloud_init_iso(pw, config: dict, name: str, config_path: Path | None =
     # wrong tree (see warn_if_stale_home).
     home_path = workload_state_dir(name)
     # The ISO lives on tmpfs (the VM runtime dir), never the persistent home —
-    # it can embed decrypted secrets. setup_vm_socket_dir() created this dir
+    # it can embed decrypted secrets. setup_workload_runtime_dir() created this dir
     # earlier in the same invocation; recreate it defensively in case this is
     # called out of order (e.g. tests).
     runtime_dir = VM_SOCKET_DIR / name
