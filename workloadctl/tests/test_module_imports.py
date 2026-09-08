@@ -195,5 +195,70 @@ class TestNoTestPatchesAReExportedName(unittest.TestCase):
         self.assertEqual(offenders, [], "\n".join(offenders))
 
 
+class TestASharedModuleIsNotShadowedByItsCaller(unittest.TestCase):
+    """No entrypoint redefines a name it imports from a shared lib module.
+
+    The other end of the split hazard. generators/workload-generate does
+    `from gen_common import log_msg, generate_setup_service, ...`; if someone
+    later adds a `def log_msg` back into the generator -- restoring a helper
+    from a stale branch, or writing one without noticing the import forty lines
+    up -- Python takes the local definition and the import becomes dead. The
+    generator then uses one implementation and gen_common's own internals use
+    the other, and the two drift apart with every edit to either.
+
+    Nothing else sees it. `just lint` is py_compile, which does not diagnose a
+    redefinition. The unit suite drives the generator end to end, so both
+    copies are exercised and both are usually right -- until they are not, and
+    then the failure reads as the shared helper being wrong rather than as
+    there being two of it.
+
+    Checked by AST on the entrypoint alone: the extensionless entrypoints are
+    invisible to `_lib_modules()` and importing one runs its argv parsing.
+    """
+
+    # entrypoint (repo-relative) -> lib modules it imports names from
+    SHARED_IMPORTS = {
+        "generators/workload-generate": ("gen_common",),
+    }
+
+    @staticmethod
+    def _top_level_names(path):
+        tree = ast.parse(path.read_text())
+        names = set()
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef,
+                                 ast.ClassDef)):
+                names.add(node.name)
+            elif isinstance(node, ast.Assign):
+                for t in node.targets:
+                    if isinstance(t, ast.Name):
+                        names.add(t.id)
+        return names
+
+    def test_the_entrypoints_exist_and_define_names(self):
+        """Guards the guard: a renamed entrypoint, or an AST walk that stopped
+        matching, turns the check below into zero comparisons reading green."""
+        for entry in self.SHARED_IMPORTS:
+            path = REPO_ROOT / entry
+            self.assertTrue(path.exists(), entry)
+            self.assertGreater(len(self._top_level_names(path)), 50, entry)
+
+    def test_no_entrypoint_shadows_a_shared_name(self):
+        collisions = []
+        for entry, modules in self.SHARED_IMPORTS.items():
+            local = self._top_level_names(REPO_ROOT / entry)
+            for name in modules:
+                module = importlib.import_module(name)
+                shared = {n for n, v in vars(module).items()
+                          if not n.startswith("__")
+                          and getattr(v, "__module__", name) == name}
+                self.assertGreater(len(shared), 5, name)
+                for clash in sorted(local & shared):
+                    collisions.append(
+                        f"{entry} defines {clash}, which it also imports from "
+                        f"{name}; the import is dead and the two copies drift")
+        self.assertEqual(collisions, [], "\n".join(collisions))
+
+
 if __name__ == "__main__":
     unittest.main()
