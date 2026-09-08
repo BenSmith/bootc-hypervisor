@@ -33,7 +33,6 @@ prose but not to the reference fails here.
 import pathlib
 import re
 import subprocess
-import sys
 import tomllib
 import unittest
 
@@ -41,8 +40,7 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 DOCS = ROOT / "docs"
 REFERENCE = DOCS / "schema-reference.toml"
 
-sys.path.insert(0, str(ROOT / "lib"))
-from validation import validate_workload_config  # noqa: E402
+from validation import validate_workload_config
 
 BLOCK = re.compile(r"```toml\n(.*?)```", re.S)
 # Keys and table headers, read through a leading "# " so a commented-out example

@@ -15,15 +15,13 @@ actually drifted (a workload named one thing, its user and its unit named
 another). That half is still checked by nobody.
 """
 import pathlib
-import sys
 import tomllib
 import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 EXAMPLES = ROOT / "docs" / "examples"
 
-sys.path.insert(0, str(ROOT / "lib"))
-from validation import validate_workload_config  # noqa: E402
+from validation import validate_workload_config
 
 
 class TestTheExamplesAreConfigs(unittest.TestCase):

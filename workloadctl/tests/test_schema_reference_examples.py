@@ -21,15 +21,13 @@ floor: what we tell an operator to copy is at least accepted by the tool we
 tell them to run.
 """
 import pathlib
-import sys
 import tomllib
 import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 REFERENCE = ROOT / "docs" / "schema-reference.toml"
 
-sys.path.insert(0, str(ROOT / "lib"))
-from validation import validate_workload_config  # noqa: E402
+from validation import validate_workload_config
 
 
 def examples():
