@@ -50,7 +50,7 @@ def _seeds():
 
 
 def _built_in_seed(**kwargs):
-    mod = load_script("libexec/workload-ensure-user")
+    import ensure_vm as mod
     args = dict(name="myvm", guest_user="fedora", pubkey="ssh-ed25519 AAAA",
                 mounts=[], has_data_disk=False)
     args.update(kwargs)

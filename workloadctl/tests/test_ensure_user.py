@@ -21,6 +21,7 @@ from tests import load_script
 
 # `lib/` reaches sys.path via tests/__init__, so this import follows it.
 import ensure_common
+import ensure_vm
 from vm_provision import (PROVISION_FAILED, PROVISION_UNVERIFIED,
                           read_provision_marker, write_provision_marker)
 
@@ -72,7 +73,7 @@ def _fake_pw(home: Path, uid: int = 9999, gid: int = 9999):
 
 class TestRenderDefaultUserData(unittest.TestCase):
     def setUp(self):
-        self.mod = _load_script()
+        self.mod = ensure_vm
 
     def test_minimal_no_mounts_no_data_disk(self):
         out = self.mod._render_default_user_data(
@@ -188,7 +189,7 @@ class TestVirtiofsMountOpts(unittest.TestCase):
     """
 
     def setUp(self):
-        self.mod = _load_script()
+        self.mod = ensure_vm
         self.guest_home = Path("/home/fedora")
 
     def test_share_at_home_gets_context(self):
@@ -224,7 +225,7 @@ class TestBuildCloudInitIsoTemplateMode(unittest.TestCase):
     """
 
     def setUp(self):
-        self.mod = _load_script()
+        self.mod = ensure_vm
         self.tmp = tempfile.mkdtemp()
         self.home = Path(self.tmp) / "home"
         self.home.mkdir()
@@ -1139,7 +1140,7 @@ class TestVmHostKeyGeneration(unittest.TestCase):
     """generate_vm_host_keypair + write_vm_known_hosts (S1)."""
 
     def setUp(self):
-        self.mod = _load_script()
+        self.mod = ensure_vm
         self.tmp = tempfile.mkdtemp()
         self.home = Path(self.tmp) / "home"
         self.home.mkdir()
@@ -1172,7 +1173,7 @@ class TestVmHostKeyGeneration(unittest.TestCase):
 
 class TestSetupVmVolumeDirectories(unittest.TestCase):
     def setUp(self):
-        self.mod = _load_script()
+        self.mod = ensure_vm
 
     @contextlib.contextmanager
     def _patch(self, root):
@@ -1288,7 +1289,7 @@ class TestSeedVmHomeShareSshKey(unittest.TestCase):
     PUBKEY = "ssh-ed25519 AAAAFAKEKEY workload-vmx@hypervisor"
 
     def setUp(self):
-        self.mod = _load_script()
+        self.mod = ensure_vm
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
         (self.root / "state" / ".ssh").mkdir(parents=True)
@@ -1670,7 +1671,7 @@ class TestDecryptSystemdCredential(unittest.TestCase):
     """The decrypt helper consults real paths; we patch Path resolution."""
 
     def setUp(self):
-        self.mod = _load_script()
+        self.mod = ensure_vm
 
     def test_raises_when_neither_path_exists(self):
         with mock.patch.object(self.mod.Path, "exists", return_value=False):
@@ -1718,7 +1719,7 @@ class TestResolveCloudInitInstanceId(unittest.TestCase):
     """
 
     def setUp(self):
-        self.mod = _load_script()
+        self.mod = ensure_vm
         self.tmp = Path(self.enterContext(tempfile.TemporaryDirectory()))
         self.id_file = self.tmp / ".cloud-init-instance-id"
 
@@ -2021,7 +2022,7 @@ class TestEnableLinger(unittest.TestCase):
 
 class TestSetupNvram(unittest.TestCase):
     def setUp(self):
-        self.mod = _load_script()
+        self.mod = ensure_vm
 
     def test_copies_ovmf_vars_when_missing(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -2088,7 +2089,7 @@ class TestSetupVmSocketDir(unittest.TestCase):
 
 class TestGenerateSshKeypair(unittest.TestCase):
     def setUp(self):
-        self.mod = _load_script()
+        self.mod = ensure_vm
 
     def test_generates_keypair_when_missing(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -2169,7 +2170,7 @@ class TestGenerateSshKeypair(unittest.TestCase):
 
 class TestReadSshPubkey(unittest.TestCase):
     def setUp(self):
-        self.mod = _load_script()
+        self.mod = ensure_vm
 
     def test_returns_pubkey_when_present(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -2189,7 +2190,7 @@ class TestReadSshPubkey(unittest.TestCase):
 
 class TestBundleWorkloadctlRpm(unittest.TestCase):
     def setUp(self):
-        self.mod = _load_script()
+        self.mod = ensure_vm
 
     def test_copies_when_cached_rpm_present(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -2220,7 +2221,7 @@ class TestDecryptSystemdCredentialMore(unittest.TestCase):
     plain-fallback branches of _decrypt_systemd_credential."""
 
     def setUp(self):
-        self.mod = _load_script()
+        self.mod = ensure_vm
 
     def test_encrypted_success_decodes_stdout(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -2530,7 +2531,7 @@ class TestBuildCloudInitIsoValidation(unittest.TestCase):
     """Guest-user validation and legacy-ISO cleanup branches."""
 
     def setUp(self):
-        self.mod = _load_script()
+        self.mod = ensure_vm
         self.tmp = tempfile.mkdtemp()
         self.home = Path(self.tmp) / "home"
         self.home.mkdir()
@@ -2664,7 +2665,7 @@ class TestKeygenLosesTheRaceGracefully(unittest.TestCase):
     """If the lock ever degrades to unlocked, a lost keygen race is still benign."""
 
     def setUp(self):
-        self.mod = _load_script()
+        self.mod = ensure_vm
 
     def test_a_key_that_appeared_after_the_guard_is_adopted_not_fatal(self):
         # ssh-keygen refuses to overwrite and exits nonzero. Only a concurrent

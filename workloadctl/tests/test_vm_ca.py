@@ -23,10 +23,10 @@ from vm import (VM_CA_BACKDATE_SECONDS, VM_CA_CERT_NAME, VM_CA_KEY_NAME,
                 VM_CA_VALIDITY_DAYS, vm_ca_cert_path, vm_ca_dir,
                 vm_ca_key_path, vm_ca_openssl_argv, vm_ca_subject)
 
-from tests import load_script
 
 # `lib/` reaches sys.path via tests/__init__, so this import follows it.
 import ensure_common
+import ensure_vm
 
 HAVE_OPENSSL = shutil.which("openssl") is not None
 
@@ -305,7 +305,7 @@ class TestTheCaReachesTheSeed(unittest.TestCase):
     PEM = "-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n"
 
     def setUp(self):
-        self.mod = load_script("libexec/workload-ensure-user")
+        self.mod = ensure_vm
 
     def _render(self, **kw):
         return self.mod._render_default_user_data(

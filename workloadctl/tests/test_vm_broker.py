@@ -19,6 +19,9 @@ with the map, asserted below by its absence.
 
 import importlib
 from tests import load_script
+
+# `lib/` reaches sys.path via tests/__init__, so this import follows it.
+import ensure_vm
 import contextlib
 import io
 import tempfile
@@ -341,8 +344,7 @@ class TestTheGuestHalf(unittest.TestCase):
                                             "vm": {"network": {}}}), {})
 
     def test_the_rendered_seed_carries_it(self):
-        ensure = load_script("libexec/workload-ensure-user")
-        out = ensure._render_default_user_data(
+        out = ensure_vm._render_default_user_data(
             name="agent", guest_user="fedora", pubkey="ssh-ed25519 AAAA u@h",
             mounts=[], has_data_disk=False,
             guest_env=vm_credential_env(cred_config()))

@@ -185,9 +185,14 @@ class TestTheGuestIsToldNothing(unittest.TestCase):
         output, because the output is empty at this rung -- vm_ca_env returns
         {} until rung 3 mints the CA, so a check on the rendered text would
         pass against a renderer that still had the block in it."""
-        source = (ROOT / "libexec" / "workload-ensure-user").read_text()
-        body = source[source.index("def _render_default_user_data"):]
-        body = body[:body.index("\ndef ")]
+        import inspect
+
+        import ensure_vm
+        # Through the symbol, not a path plus two index() calls into it: the
+        # renderer moved to ensure_vm with the rest of the VM provisioning, and
+        # a scan that slices a file by def line reads whatever the wrong file
+        # happens to contain.
+        body = inspect.getsource(ensure_vm._render_default_user_data)
         for var in RETIRED_ENV_VARS:
             self.assertNotIn(f"{var}=", body, (
                 f"the default seed renderer still emits {var}"))
