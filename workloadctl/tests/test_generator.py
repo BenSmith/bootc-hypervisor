@@ -1647,6 +1647,32 @@ class TestGeneratorServiceType(unittest.TestCase):
         self.assertNotIn("Type=notify", service)
         self.assertNotIn("--sdnotify=conmon", service)
 
+    def test_systemd_value_is_lowercased_before_it_reaches_podman(self):
+        """`systemd = "Always"` must render `--systemd=always`.
+
+        The whitelist check that rejects a bogus value runs against the
+        LOWERCASED string, so a capitalised-but-valid value passes it and then
+        has to actually be lowered on the way into the argv -- podman takes
+        always/true/false and nothing else. Two separate steps, and only the
+        first one had a test: an argv builder that read [container].systemd
+        back off the config instead of taking the resolved value would keep
+        `Invalid container.systemd='bogus'` working perfectly while shipping
+        `--systemd=Always` to podman, which fails at container start with a
+        message about the flag rather than about the TOML.
+        """
+        write_config(self.config_dir, "sysdcase", """\
+            [workload]
+            name = "sysdcase"
+
+            [container]
+            image = "systemd-app"
+            systemd = "Always"
+        """)
+        self.run_gen()
+        service = self.read_service("sysdcase")
+        self.assertIn("--systemd=always", service)
+        self.assertNotIn("--systemd=Always", service)
+
     def test_explicit_notify_service_type(self):
         """Explicit service_type = "notify" → Type=notify, --sdnotify=conmon."""
         write_config(self.config_dir, "notifywl", """\

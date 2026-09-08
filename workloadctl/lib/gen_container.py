@@ -16,6 +16,8 @@ Installed to /usr/libexec/workloadctl/gen_container.py.
 
 import os
 import grp
+from dataclasses import dataclass
+from functools import cached_property
 from pathlib import Path
 
 from workload_lib import (
@@ -416,6 +418,90 @@ def generate_umbrella_service(workload_name, container_names, slice_name, mode):
     return unit.render()
 
 
+@dataclass(frozen=True)
+class RunSpec:
+    """The four things every podman-argv builder below needs, in one object.
+
+    WHY THIS EXISTS. Ten builders assemble the `podman run` argv, and each used
+    to take its own subset of the same handful of values: `container` appeared
+    in eight signatures, `name` in seven, `mode` in four -- and in three
+    different positions, so `_cgroup_args(container, name, mode)` sat beside
+    `_network_args(mode, workload, name, container)`. Nothing was wrong with
+    any one of them; the cost was that adding a value to a builder meant
+    editing a signature, its call, and every test that had pinned the old
+    arity, which is friction with no reader benefit.
+
+    WHAT IT DELIBERATELY DOES NOT HOLD. Only values that are a PURE FUNCTION of
+    these four fields. Anything the caller had to *decide* -- with a validity
+    check, a fallback, or a warning -- stays an explicit argument, because a
+    resolved decision passed in a bundle reads exactly like a raw config read
+    and it is not one. That is why `_base_run_args` still takes `service_type`
+    and `lifecycle` by hand: each is a value the caller validated and logged
+    about, and burying that in a constructor would both hide it and reorder the
+    generator's warning output.
+
+    The two narrow builders keep their own signatures for the same reason in
+    reverse: `_health_check_args(container)` and `_gpu_device_args(gpu_vendor,
+    gpu_spec)` each state exactly what they read, and a spec would only make
+    that less true. `gpu_vendor` is not derivable here anyway -- resolving
+    `gpu = "auto"` does I/O, and this object is constructed on the boot path.
+    """
+
+    workload: dict
+    """The full parsed TOML. Workload-level tables ([network], [security],
+    [setup]) are read from here, never from `container`."""
+
+    container: dict
+    """One element of normalize_containers(workload) -- in single mode a
+    synthesised one-element shape, which is what makes single-container TOMLs
+    render byte-identical units."""
+
+    uid: int
+    name: str
+    container_name: str
+    mode: str
+
+    @property
+    def home_dir(self) -> str:
+        return str(workload_state_dir(self.name))
+
+    @property
+    def container_name_quoted(self) -> str:
+        return dq(self.container_name)
+
+    @property
+    def pull_policy(self) -> str:
+        """[container].pull -- missing (default), always, newer, never.
+
+        A property and not an argument because nothing resolves it: podman
+        owns the value's validity, so there is no check here to hide.
+        """
+        return self.container["container"].get("pull", "missing")
+
+    @property
+    def privileged(self) -> bool:
+        """Workload-level, not per-container: one uid per workload, so a
+        per-container answer here would be a lie (see D1)."""
+        return self.workload.get("security", {}).get("privileged", False)
+
+    @property
+    def extra_groups(self) -> list:
+        return self.workload.get("security", {}).get("extra_groups", [])
+
+    @cached_property
+    def has_secret_env_vars(self) -> bool:
+        """Does any [container.environment] value reference ${SECRET:...}?
+
+        Decides whether the unit gets the per-container --env-file that
+        workload-write-env produces. Cached because the scan is the only
+        non-trivial derivation on this object and `frozen=True` makes it safe.
+        """
+        return any(
+            SECRET_PATTERN.search(str(v))
+            for v in self.container.get("container", {}).get("environment", {}).values()
+        )
+
+
 def _gpu_device_args(gpu_vendor, gpu_spec):
     """--device flags for the [devices].gpu convenience flag.
 
@@ -463,7 +549,7 @@ def _health_check_args(container):
     return args
 
 
-def _secret_mount_args(container, container_name):
+def _secret_mount_args(spec):
     """--volume flags bind-mounting [[secrets.files]] credentials.
 
     Credentials are decrypted by systemd to
@@ -472,6 +558,7 @@ def _secret_mount_args(container, container_name):
     umbrella, so the bind-mount source must use container_name, not the
     workload name.
     """
+    container, container_name = spec.container, spec.container_name
     service_name = f"{container_name}.service"
     secrets_config = container.get("secrets", {})
     secrets_files = secrets_config.get("files", [])
@@ -504,9 +591,22 @@ def _secret_mount_args(container, container_name):
     return args
 
 
-def _base_run_args(wl_lifecycle, container_name_quoted, mode, name, systemd_mode, service_type, pull_policy):
+def _base_run_args(spec, service_type, wl_lifecycle, systemd_mode):
     """Base podman run/create invocation: name/hostname/rm/replace/init/
-    systemd/sdnotify/pull/log-driver."""
+    systemd/sdnotify/pull/log-driver.
+
+    The last three are passed rather than read off `spec` because the caller
+    did not read them, it DECIDED them: `service_type` and `wl_lifecycle` each
+    have a validity check and a warn-and-fall-back path, and `systemd_mode` is
+    lowercased and whitelisted with an invalid value ABORTING unit generation
+    outright. A resolved decision that arrives looking like a config read is
+    how a fallback stops being visible at the point it matters -- and reading
+    `container["container"]["systemd"]` off the spec here would silently
+    restore the raw, unchecked value on the one path that must not have it.
+    """
+    container_name_quoted = spec.container_name_quoted
+    mode, name = spec.mode, spec.name
+    pull_policy = spec.pull_policy
     args = [
         "/usr/bin/podman run" if wl_lifecycle == "cattle" else "/usr/bin/podman create",
         f"--name {container_name_quoted}",
@@ -549,9 +649,18 @@ def _base_run_args(wl_lifecycle, container_name_quoted, mode, name, systemd_mode
     return args
 
 
-def _security_args(container, config, mode, name, privileged, extra_groups):
+def _security_args(spec):
     """--user/--cap-add/--security-opt (selinux label, seccomp baseline,
-    privileged)/--group-add=keep-groups flags from [security]."""
+    privileged)/--group-add=keep-groups flags from [security].
+
+    Reads BOTH levels on purpose: capabilities and security_opt are
+    per-container, while selinux_policy, privileged and extra_groups are
+    workload-level (one uid, one policy module per workload) and a
+    per-container spelling of them is warned about and ignored below.
+    """
+    container, config = spec.container, spec.workload
+    mode, name = spec.mode, spec.name
+    privileged, extra_groups = spec.privileged, spec.extra_groups
     args = []
 
     # Override the container image's USER directive if specified
@@ -619,7 +728,7 @@ def _security_args(container, config, mode, name, privileged, extra_groups):
     return args
 
 
-def _device_args(container, uid):
+def _device_args(spec):
     """--device flags: generic passthrough + input/audio/virtualization
     convenience flags from [devices].
 
@@ -630,6 +739,7 @@ def _device_args(container, uid):
     bind-mounted via [storage] volumes instead (resolved live at start) -- the
     generic `devices` list stays literal --device, and the convenience flags
     below emit volumes for their directory parts (/dev/input, /dev/snd)."""
+    container, uid = spec.container, spec.uid
     args = []
     devices_config = container.get("devices", {})
     generic_devices = devices_config.get("devices", [])
@@ -668,9 +778,10 @@ def _device_args(container, uid):
     return args
 
 
-def _cgroup_args(container, name, mode):
+def _cgroup_args(spec):
     """--shm-size/--pids-limit/--memory/--cpus/--cpu-shares/--device-read-bps/
     --device-write-bps flags from [resources], plus their warnings."""
+    container, name, mode = spec.container, spec.name, spec.mode
     args = []
 
     # Shared memory size
@@ -728,8 +839,10 @@ def _cgroup_args(container, name, mode):
     return args
 
 
-def _network_args(mode, workload, name, container):
+def _network_args(spec):
     """--network/--publish/--network-alias flags: single/pod/bridge mode."""
+    mode, workload = spec.mode, spec.workload
+    name, container = spec.name, spec.container
     args = []
     if mode == "single":
         network_config = workload.get("network", {})
@@ -776,7 +889,7 @@ def _rw_path_is_bindable(resolved):
     return os.path.isdir(resolved) or os.path.isfile(resolved)
 
 
-def _volume_args(container, home_dir, name):
+def _volume_args(spec):
     """--volume flags: [storage].volumes expansion, escape-warn, quoting.
 
     Returns (args, external_paths, external_rw_paths). `external_paths` are the
@@ -801,6 +914,7 @@ def _volume_args(container, home_dir, name):
     regular file -- see _rw_path_is_bindable, where naming it is both
     unnecessary and fatal.
     """
+    container, home_dir, name = spec.container, spec.home_dir, spec.name
     args = []
     external = []
     external_rw = []
@@ -827,10 +941,12 @@ def _volume_args(container, home_dir, name):
     return args, external, external_rw
 
 
-def _env_args(container, container_name, has_secret_env_vars):
+def _env_args(spec):
     """--env flags: HOST_IP, plain container env vars, and (if any env var
     references a secret) the per-container --env-file written by
     workload-write-env."""
+    container, container_name = spec.container, spec.container_name
+    has_secret_env_vars = spec.has_secret_env_vars
     args = ["--env HOST_IP=${HOST_IP}"]
     # Plain env vars go as --env args; secret env vars go via --env-file
     args.extend(build_plain_env_args(container))
@@ -1104,7 +1220,7 @@ def _container_egress_exec(svc, name: str) -> None:
             f"-+/usr/libexec/workloadctl/workload-container-filter down {dq(name)}")
 
 
-def _container_credential_env_args(workload) -> list:
+def _container_credential_env_args(spec) -> list:
     """`--env <ENV>=<placeholder>` for each declared credential.
 
     The container half of the fiction, and without it the brokered path does
@@ -1119,6 +1235,7 @@ def _container_credential_env_args(workload) -> list:
     material, so it is safe on a podman command line in a generated unit --
     which is where the CA variables one function down already are.
     """
+    workload = spec.workload
     net = workload.get("network", {}) or {}
     if not container_uses_credentials(workload):
         return []
@@ -1126,7 +1243,7 @@ def _container_credential_env_args(workload) -> list:
             for cred in container_credential_entries(net)]
 
 
-def _container_ca_delivery_args(workload, name: str) -> list:
+def _container_ca_delivery_args(spec) -> list:
     """--volume / --env podman flags delivering this workload's egress CA
     into one container, per [network].ca_delivery (P1-10, G12-G15's
     container counterpart).
@@ -1165,6 +1282,7 @@ def _container_ca_delivery_args(workload, name: str) -> list:
     container_t; see that file for the whole argument). No `:Z` here on
     purpose: the label is deliberate and shared.
     """
+    workload, name = spec.workload, spec.name
     net = workload.get("network", {}) or {}
     if not container_uses_inspect(workload):
         return []
@@ -1193,7 +1311,6 @@ def generate_system_service(workload, container, user_name, uid, mode="single"):
     [network] and [setup]); 'container' is one element of
     normalize_containers(workload). 'mode' is "single", "pod", or "bridge".
     """
-    config = workload  # alias kept for the few remaining workload-level reads
     name = workload["workload"]["name"]
     if mode == "single":
         container_name = f"workload-{name}"
@@ -1203,7 +1320,6 @@ def generate_system_service(workload, container, user_name, uid, mode="single"):
 
     image = container["container"]["image"]
     command = container["container"].get("command", None)
-    pull_policy = container["container"].get("pull", "missing")  # missing, always, newer, never
     gpu_type = container.get("devices", {}).get("gpu", "none")
     if gpu_type == "auto":
         gpu_type = resolve_auto_gpu(name)
@@ -1211,9 +1327,6 @@ def generate_system_service(workload, container, user_name, uid, mode="single"):
     # When a spec is set, only that GPU's DRM nodes are mounted — the umbrella
     # /dev/dri is dropped so the other GPUs are invisible inside the container.
     gpu_vendor, _, gpu_spec = gpu_type.partition(":")
-    extra_groups = config.get("security", {}).get("extra_groups", [])
-    privileged = config.get("security", {}).get("privileged", False)
-
     setup_service = f"workload-{name}-setup.service"
     pod_service = f"workload-{name}-pod.service"
     net_service = f"workload-{name}-net.service"
@@ -1233,8 +1346,9 @@ def generate_system_service(workload, container, user_name, uid, mode="single"):
     # Expanded ahead of the [Unit] section: the host paths that land outside the
     # workload tree become RequiresMountsFor= there, and the flags themselves go
     # into podman_args further down.
-    volume_args, external_volume_paths, external_rw_paths = _volume_args(
-        container, home_dir, name)
+    spec = RunSpec(workload=workload, container=container, uid=uid,
+                   name=name, container_name=container_name, mode=mode)
+    volume_args, external_volume_paths, external_rw_paths = _volume_args(spec)
 
     unit = Unit()
     if mode == "single":
@@ -1315,9 +1429,7 @@ def generate_system_service(workload, container, user_name, uid, mode="single"):
         )
         wl_lifecycle = "cattle"
 
-    podman_args = _base_run_args(
-        wl_lifecycle, container_name_quoted, mode, name, systemd_mode, service_type, pull_policy
-    )
+    podman_args = _base_run_args(spec, service_type, wl_lifecycle, systemd_mode)
 
     # User namespace / UID-GID maps.
     # In pod mode the user namespace is owned by the pod's infra container and
@@ -1331,17 +1443,18 @@ def generate_system_service(workload, container, user_name, uid, mode="single"):
                     f"the top-level [security] block)", level="warning")
     else:
         podman_args.extend(
-            build_userns_args(container.get("security", {}), uid, extra_groups, name)
+            build_userns_args(container.get("security", {}), uid,
+                              spec.extra_groups, name)
         )
 
-    podman_args.extend(_security_args(container, config, mode, name, privileged, extra_groups))
+    podman_args.extend(_security_args(spec))
 
     # GPU devices (convenience flag)
     podman_args.extend(_gpu_device_args(gpu_vendor, gpu_spec))
 
-    podman_args.extend(_device_args(container, uid))
+    podman_args.extend(_device_args(spec))
 
-    podman_args.extend(_cgroup_args(container, name, mode))
+    podman_args.extend(_cgroup_args(spec))
 
     # Network configuration.
     #  - single: workload-level [network] mode + ports.
@@ -1349,7 +1462,7 @@ def generate_system_service(workload, container, user_name, uid, mode="single"):
     #    --network/--publish — podman rejects them on a pod member).
     #  - bridge: the container joins the per-workload bridge network and
     #    publishes its own [containers.network].ports.
-    podman_args.extend(_network_args(mode, workload, name, container))
+    podman_args.extend(_network_args(spec))
 
     podman_args.extend(volume_args)
 
@@ -1357,8 +1470,8 @@ def generate_system_service(workload, container, user_name, uid, mode="single"):
     # regardless of topology -- [network] is workload-level (D1: one uid, so
     # per-container granularity would be a lie), and each container process
     # makes its own outbound requests with its own trust path.
-    podman_args.extend(_container_ca_delivery_args(workload, name))
-    podman_args.extend(_container_credential_env_args(workload))
+    podman_args.extend(_container_ca_delivery_args(spec))
+    podman_args.extend(_container_credential_env_args(spec))
 
     credentials = auto_detect_credentials({
         "container": container.get("container", {}),
@@ -1367,16 +1480,11 @@ def generate_system_service(workload, container, user_name, uid, mode="single"):
     # In multi-container modes the credential is loaded onto the per-container
     # service unit, so systemd decrypts it to /run/credentials/<container-unit>/.
     # Using the umbrella name here would point the bind-mount at the wrong dir.
-    podman_args.extend(_secret_mount_args(container, container_name))
+    podman_args.extend(_secret_mount_args(spec))
 
     # HOST_IP is auto-detected by workload-ensure-user and written to the
     # EnvironmentFile; pass it into the container so configs can use it.
-    # Check if any env vars reference secrets (need --env-file from workload-write-env)
-    has_secret_env_vars = any(
-        SECRET_PATTERN.search(str(v))
-        for v in container.get("container", {}).get("environment", {}).values()
-    )
-    podman_args.extend(_env_args(container, container_name, has_secret_env_vars))
+    podman_args.extend(_env_args(spec))
 
     # Health checks — podman's native user-manager timer works under 1b (non-split)
     podman_args.extend(_health_check_args(container))
@@ -1400,9 +1508,10 @@ def generate_system_service(workload, container, user_name, uid, mode="single"):
 
     _credential_loads(svc, credentials)
 
-    _exec_start_pre(svc, mode, name, container, has_secret_env_vars, gpu_vendor, uid)
+    _exec_start_pre(svc, mode, name, container, spec.has_secret_env_vars, gpu_vendor,
+                    uid)
 
-    _lifecycle_exec(svc, wl_lifecycle, podman_cmd, container_name_quoted, pull_policy,
+    _lifecycle_exec(svc, wl_lifecycle, podman_cmd, container_name_quoted, spec.pull_policy,
                      mode, uid, resources)
 
     _logging(svc, container_name, resources)
