@@ -7,13 +7,11 @@ at `podman run` time, far from the edit that caused it. Nothing else in the suit
 looks at the file's contents.
 """
 import json
-import re
 import unittest
 
 from tests import REPO_ROOT
 
 PROFILE = REPO_ROOT / "seccomp-workload-baseline.json"
-GENERATOR = REPO_ROOT / "generators" / "workload-generate"
 SPEC = REPO_ROOT / "rpm" / "workloadctl.spec"
 
 # The futex2 syscalls. glibc currently probes and falls back to `futex` when
@@ -138,9 +136,11 @@ class TestSeccompBaseline(unittest.TestCase):
         """The generator points every unit at an absolute path; the spec is what
         puts the file there. A rename that touches one and not the other yields
         units referencing a profile that does not exist."""
-        m = re.search(r'^SECCOMP_BASELINE = "([^"]+)"', GENERATOR.read_text(), re.M)
-        self.assertIsNotNone(m, "SECCOMP_BASELINE not found in the generator")
-        baseline = m.group(1)
+        # Imported, not scanned for. This used to regex the generator's source
+        # by path; when the container generators moved to gen_container the
+        # regex found nothing, which is the same reading it would give for a
+        # constant that had genuinely been deleted.
+        from gen_container import SECCOMP_BASELINE as baseline
         self.assertEqual(baseline.rsplit("/", 1)[-1], PROFILE.name)
         spec = SPEC.read_text()
         installed = baseline.replace("/usr/share", "%{_datadir}")

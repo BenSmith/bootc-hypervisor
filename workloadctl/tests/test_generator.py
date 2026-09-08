@@ -1714,7 +1714,10 @@ class TestResolveAutoGpu(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.wg = _load_generator_module()
+        # gen_container, not the entrypoint: `Path` is patched below, and a
+        # patch has to land on the module that READS the name.
+        import importlib
+        cls.wg = importlib.import_module("gen_container")
 
     def setUp(self):
         self.root = tempfile.mkdtemp()
