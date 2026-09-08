@@ -21,6 +21,7 @@ from tests import load_script
 
 # `lib/` reaches sys.path via tests/__init__, so this import follows it.
 import ensure_common
+import ensure_container
 import ensure_vm
 from vm_provision import (PROVISION_FAILED, PROVISION_UNVERIFIED,
                           read_provision_marker, write_provision_marker)
@@ -1410,7 +1411,7 @@ class TestSetupVolumeDirectoriesMultiContainer(unittest.TestCase):
     """C1: multi-container workload volume dirs are created."""
 
     def setUp(self):
-        self.mod = _load_script()
+        self.mod = ensure_container
 
     def test_multi_container_volumes_created(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1474,7 +1475,7 @@ class TestSetupRequiredFileOwnership(unittest.TestCase):
     """
 
     def setUp(self):
-        self.mod = _load_script()
+        self.mod = ensure_container
 
     def _run(self, root, config, pw, chown):
         with mock.patch.object(self.mod, "workload_state_dir",
@@ -1598,7 +1599,7 @@ class TestConfigureSubuidSubgid(unittest.TestCase):
     """Tests for configure_subuid_subgid — formula and grandfathering logic."""
 
     def setUp(self):
-        self.mod = _load_script()
+        self.mod = ensure_container
 
     def _run(self, uid, subuid_content="", subgid_content="", config=None):
         """Call configure_subuid_subgid with mocked /etc/subuid|subgid."""
@@ -1976,7 +1977,7 @@ class TestEnableLinger(unittest.TestCase):
     guarantee the marker itself. It also adds fail-loud semantics on top."""
 
     def setUp(self):
-        self.mod = _load_script()
+        self.mod = ensure_container
 
     def test_enable_linger_success(self):
         pw = _fake_pw(Path("/home/_wl-test"), uid=10001, gid=10001)
@@ -2271,7 +2272,7 @@ class TestConfigureSubuidSubgidMore(unittest.TestCase):
     podman migrate success/failure/timeout branches."""
 
     def setUp(self):
-        self.mod = _load_script()
+        self.mod = ensure_container
 
     def test_uid_below_minimum_raises(self):
         pw = _fake_pw(Path("/home/_wl-test"), uid=999)
@@ -2493,7 +2494,7 @@ class TestConfigureSubuidSubgidMore(unittest.TestCase):
 
 class TestSetupVolumeDirectoriesSkipBranches(unittest.TestCase):
     def setUp(self):
-        self.mod = _load_script()
+        self.mod = ensure_container
 
     def test_required_files_path_skipped(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -2866,7 +2867,7 @@ class TestEnsureManagerSlice(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.mod = _load_script()
+        cls.mod = ensure_container
 
     def _drive(self, cgroups, config=None):
         """Run ensure_manager_slice with a scripted sequence of ControlGroup

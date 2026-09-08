@@ -50,13 +50,7 @@ from workload_lib import (
     login_defs_subid_window,
 )
 
-from tests import load_script
-
-
-def _writer():
-    """The function that writes a workload's subuid/subgid ranges."""
-    return load_script(
-        "libexec/workload-ensure-user").configure_subuid_subgid
+from ensure_container import configure_subuid_subgid as _writer
 
 SUBUID = "/etc/subuid"
 SUBGID = "/etc/subgid"
@@ -100,7 +94,7 @@ class DerivationTests(unittest.TestCase):
         # had simply moved out of, and say nothing either way.
         import inspect
 
-        source = inspect.getsource(_writer())
+        source = inspect.getsource(_writer)
         self.assertIn("derived_subid_range", source)
         self.assertNotIn(str(SUBID_BASE), source)
 
