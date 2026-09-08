@@ -197,7 +197,11 @@ from types import SimpleNamespace
 import cmd_diagnose
 
 uid = %d
-cfg = SimpleNamespace(name="wlsd", uid=uid, vm_bridge=None,
+# is_vm is not decoration: vm_inspect_check dispatches its nouns, its
+# schema section and its remedy on it (G7), so a stub without it raises
+# AttributeError and this row reports "diagnose produced no line" -- a
+# rig defect wearing a product defect's face.
+cfg = SimpleNamespace(name="wlsd", uid=uid, vm_bridge=None, is_vm=True,
                       vm_network={"egress": "filtered"},
                       config={"vm": {"network": {"egress": "filtered"}}})
 elems = [{"concat": [uid, 80]}, {"concat": [uid, 443]}]
