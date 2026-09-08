@@ -35,6 +35,7 @@ VM_UID_MGMT from vm.py's re-export passed all 4,867 tests, and would have
 failed on a host at the first entrypoint importing it by name.
 """
 
+import ast
 import importlib
 import subprocess
 import sys
@@ -48,7 +49,10 @@ LIB = REPO_ROOT / "lib"
 # the original still answers for every public name in each of them, because
 # that is the promise the split made to callers it did not touch.
 RE_EXPORTS = {
-    "vm": ("vm_addr", "vm_selinux"),
+    "vm": ("vm_addr", "vm_selinux", "vm_ptp",
+            "netfilter_state", "vm_defs",
+            "vm_network_config",
+            "vm_broker_config"),
 }
 
 
@@ -124,6 +128,71 @@ class TestASplitModuleStillAnswersForItsParts(unittest.TestCase):
                 with self.subTest(part=part):
                     self.assertGreater(len(public), 5, public)
         self.assertIn("VM_UID_MGMT", dir(importlib.import_module("vm_addr")))
+
+
+class TestNoTestPatchesAReExportedName(unittest.TestCase):
+    """No test aims a patch at a name its target module only re-exports.
+
+    Found by the split, not reasoned about. `mock.patch("vm.vm_mac_address")`
+    and `mock.patch.object(vm, "VM_TLS_UNBUILT")` both stopped working the
+    moment those names moved down, because `from x import name` copies the
+    binding: rebinding it on the re-exporting module leaves the module that
+    actually reads it holding the original. Both failed loudly here, which is
+    luck -- they patch something the assertion depends on. A patch installed to
+    SUPPRESS something (a network call, a sleep, a subprocess) fails the other
+    way: it goes inert, the real thing runs, and the test still passes.
+
+    So the rule is mechanical: patch the module that defines the name, or the
+    module that reads it -- never the one that re-exports it.
+    """
+
+    @staticmethod
+    def _patch_targets():
+        """(file, line, module, attribute) for every patch of a `<mod>.<attr>`."""
+        found = []
+        for path in sorted((REPO_ROOT / "tests").glob("*.py")):
+            tree = ast.parse(path.read_text())
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call):
+                    continue
+                func = node.func
+                name = func.attr if isinstance(func, ast.Attribute) else (
+                    func.id if isinstance(func, ast.Name) else None)
+                if name == "patch" and node.args:
+                    arg = node.args[0]
+                    if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+                        mod, _, attr = arg.value.rpartition(".")
+                        if mod and "." not in mod:
+                            found.append((path.name, node.lineno, mod, attr))
+                elif name == "object" and isinstance(func, ast.Attribute) \
+                        and len(node.args) >= 2:
+                    target, attr = node.args[0], node.args[1]
+                    if isinstance(target, ast.Name) and isinstance(attr, ast.Constant) \
+                            and isinstance(attr.value, str):
+                        found.append((path.name, node.lineno, target.id, attr.value))
+        return found
+
+    def test_the_scan_finds_patches(self):
+        """Guards the guard: an AST shape that stopped matching passes silently."""
+        self.assertGreater(len(self._patch_targets()), 20)
+
+    def test_no_patch_targets_a_re_exported_name(self):
+        offenders = []
+        for original, parts in RE_EXPORTS.items():
+            owned = set()
+            for part in parts:
+                owned |= {n for n, v in vars(importlib.import_module(part)).items()
+                          if not n.startswith("__")
+                          and getattr(v, "__module__", part) == part}
+            for filename, lineno, mod, attr in self._patch_targets():
+                if mod == original and attr in owned:
+                    where = [p for p in parts
+                             if hasattr(importlib.import_module(p), attr)]
+                    offenders.append(
+                        f"{filename}:{lineno} patches {mod}.{attr}, which {mod} "
+                        f"only re-exports; patch {where[0]}.{attr} or the module "
+                        f"that reads it")
+        self.assertEqual(offenders, [], "\n".join(offenders))
 
 
 if __name__ == "__main__":

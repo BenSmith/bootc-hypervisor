@@ -1879,7 +1879,10 @@ class TestVmMacCollisions(unittest.TestCase):
         # having to construct a real md5 collision.
         fixed = "02:00:00:00:00:01"
         collide = {"git", "forge"}
-        with patch("vm.vm_mac_address",
+        # Patched on vm_defs, not on vm. vm re-exports the name, but
+        # vm_mac_collisions resolves it in the module that DEFINES it, so a
+        # patch aimed at the re-export binds a copy nothing calls.
+        with patch("vm_defs.vm_mac_address",
                    side_effect=lambda n: fixed if n in collide else f"02:00:00:00:00:{ord(n[0]):02x}"):
             self.assertEqual(vm_mac_collisions("git", ["forge", "other"]), ["forge"])
 

@@ -2275,8 +2275,13 @@ class TestRung2Schema(unittest.TestCase):
         the next time a mode is written down before it works.
         """
         from unittest import mock
-        import vm
-        with mock.patch.object(vm, "VM_TLS_UNBUILT",
+        import vm_network_config
+        # Patched in the module that READS it, which is neither the module that
+        # defines it (vm_defs) nor the one that re-exports it (vm). `from x
+        # import name` copies the binding, so rebinding either of the other two
+        # leaves the validator looking at the original empty map -- and the
+        # assertion below is what says so rather than the test quietly passing.
+        with mock.patch.object(vm_network_config, "VM_TLS_UNBUILT",
                                {"tunnel": "rung 9, with the thing it needs"}):
             errors = self._egress({"hosts": ["github.com"], "tls": "tunnel"})
         self.assertTrue(errors)

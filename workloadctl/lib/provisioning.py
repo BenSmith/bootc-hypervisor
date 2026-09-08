@@ -128,7 +128,10 @@ def preflight_checks(config: WorkloadConfig) -> bool:
             info("    Enable nested KVM or run on bare metal")
             failed = True
 
-        from vm import find_ovmf_code
+        # From vm_defs, the module that DEFINES it, not from vm, which only
+        # re-exports it: a name reached through a re-export cannot be patched
+        # at its source, and this check is exercised entirely by patching.
+        from vm_defs import find_ovmf_code
         if not find_ovmf_code():
             info("  ✗ OVMF firmware (edk2-ovmf) not found")
             info("    Install: dnf install edk2-ovmf")

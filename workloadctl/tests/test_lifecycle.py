@@ -1111,7 +1111,7 @@ class TestPreflightChecks(unittest.TestCase):
         with _cfg(_VM_TOML, 'test-vm') as cfg:
             with patch.object(provisioning.shutil, 'which', self._patched_which()):
                 with patch.object(provisioning.Path, 'exists', return_value=False):
-                    with patch('vm.find_ovmf_code', return_value="/usr/share/edk2/ovmf/OVMF_CODE.fd"):
+                    with patch('vm_defs.find_ovmf_code', return_value="/usr/share/edk2/ovmf/OVMF_CODE.fd"):
                         buf = io.StringIO()
                         with redirect_stdout(buf):
                             ok = provisioning.preflight_checks(cfg)
@@ -1122,7 +1122,7 @@ class TestPreflightChecks(unittest.TestCase):
         with _cfg(_VM_TOML, 'test-vm') as cfg:
             with patch.object(provisioning.shutil, 'which', self._patched_which()):
                 with patch.object(provisioning.Path, 'exists', return_value=True):
-                    with patch('vm.find_ovmf_code', return_value=None):
+                    with patch('vm_defs.find_ovmf_code', return_value=None):
                         buf = io.StringIO()
                         with redirect_stdout(buf):
                             ok = provisioning.preflight_checks(cfg)
@@ -1133,7 +1133,7 @@ class TestPreflightChecks(unittest.TestCase):
         with _cfg(_VM_TOML, 'test-vm') as cfg:
             with patch.object(provisioning.shutil, 'which', self._patched_which()):
                 with patch.object(provisioning.Path, 'exists', return_value=True):
-                    with patch('vm.find_ovmf_code', return_value="/usr/share/edk2/ovmf/OVMF_CODE.fd"):
+                    with patch('vm_defs.find_ovmf_code', return_value="/usr/share/edk2/ovmf/OVMF_CODE.fd"):
                         buf = io.StringIO()
                         with redirect_stdout(buf):
                             ok = provisioning.preflight_checks(cfg)

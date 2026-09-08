@@ -394,24 +394,52 @@ class TestCodeCitations(unittest.TestCase):
             "that it is gone and add it to RETIRED:\n  "
             + "\n  ".join(violations))
 
+    def _a_real_citation(self):
+        """Some tracked lib module and one test path it cites, found by
+        searching rather than named.
+
+        Both guards below were pinned to `lib/vm.py` citing
+        `tests/test_vm_egress.py`, and both broke when that comment moved into
+        a module split out of vm.py. The pin was measuring which file happened
+        to hold a citation, which is not what either guard is for -- and the
+        failure it produces is indistinguishable from the regex genuinely
+        breaking, so the next person is told the wrong thing.
+        """
+        for rel in sorted(self.tracked):
+            if not (rel.startswith("workloadctl/lib/") and rel.endswith(".py")):
+                continue
+            path = GIT_ROOT / rel
+            hits = {m.group(1) for m in CODE_CITATION.finditer(path.read_text())}
+            hits = {h for h in hits if _resolves_against(self.tracked, path, h)}
+            if hits:
+                return path, sorted(hits)
+        return None, []
+
     def test_the_checker_would_notice_a_regression(self):
         """Vacuous-green guard, for the reason the doc rule has one: this
         regex walks comments, and a green run over zero matches looks
         identical to a green run over all of them."""
-        probe = GIT_ROOT / "workloadctl" / "lib" / "vm.py"
+        probe, hits = self._a_real_citation()
+        self.assertIsNotNone(probe, "no tracked lib module cites a test file")
         self.assertFalse(
             _resolves_against(self.tracked, probe, "tests/test_nonesuch.py"))
-        self.assertTrue(
-            _resolves_against(self.tracked, probe, "tests/test_vm_egress.py"))
+        self.assertTrue(_resolves_against(self.tracked, probe, hits[0]))
 
     def test_the_scan_actually_finds_citations(self):
         """The other half of the same guard, on the REGEX rather than on the
         resolver: a pattern that stopped matching would make _violations()
-        return [] over nothing at all."""
-        text = (GIT_ROOT / "workloadctl" / "lib" / "vm.py").read_text()
-        hits = {m.group(1) for m in CODE_CITATION.finditer(text)}
-        self.assertIn("tests/test_vm_egress.py", hits)
-        self.assertGreater(len(hits), 1)
+        return [] over nothing at all.
+
+        Counted across all of lib/ rather than inside one module, so that
+        moving a comment from one file to another is not a failure while
+        the pattern matching nothing at all still is.
+        """
+        total = 0
+        for rel in sorted(self.tracked):
+            if rel.startswith("workloadctl/lib/") and rel.endswith(".py"):
+                text = (GIT_ROOT / rel).read_text()
+                total += len({m.group(1) for m in CODE_CITATION.finditer(text)})
+        self.assertGreater(total, 5, "the citation regex matched almost nothing")
 
     def test_a_root_file_may_write_a_workloadctl_relative_path(self):
         """The root CLAUDE.md and hypervisor.Containerfile both do. Pinned so
