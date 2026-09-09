@@ -459,6 +459,7 @@ lib/workloadctl_core.py            # WorkloadConfig / WorkloadManager (TOML load
 lib/config_parser.py               # The TOML grammar both substrates read (hostname patterns, policy/credential blocks, volumes)
 lib/workload_lib.py                # Shared library (UID allocation, paths, subid math)
 lib/broker_config.py               # The generated broker instance: the credential table, the rendered broker.toml, the unit's addresses
+lib/egress_selinux.py              # How QEMU enters a confined domain, which policy modules ship, and the label the QMP socket dir needs
 lib/egress_ca.py                   # The per-workload egress CA and the leaves it signs (paths, validity, openssl argv, guest anchor)
 lib/egress_policy.py               # What a filtered workload may reach: TLS mode, hostname rules, the inspector's document and record vocabulary
 lib/vm.py                          # VM constants and derivations (addresses, planes, unit names)

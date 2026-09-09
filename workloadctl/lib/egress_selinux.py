@@ -16,6 +16,8 @@ Installed to /usr/libexec/workloadctl/egress_selinux.py.
 
 import os
 
+from vm_defs import VM_SOCKET_DIR
+
 
 # QEMU runs as svirt_t (alias qemu_t), the domain the shipped policy already
 # maintains for a hypervisor process hosting an untrusted guest. We deliberately
@@ -55,6 +57,23 @@ VM_INSPECT_SELINUX_MODULE = "workload-inspect"
 VM_INSPECT_SELINUX_CIL = "/usr/share/workloadctl/workload-inspect.cil"
 VM_RESOLVE_SELINUX_MODULE = "workload-resolve"
 VM_RESOLVE_SELINUX_CIL = "/usr/share/workloadctl/workload-resolve.cil"
+
+# --- The label the QMP socket directory has to carry ---
+#
+# The type VM_SOCKET_DIR must carry, and the fcontext pattern the RPM's %post
+# registers to give it that type. A confined QEMU cannot create a socket under
+# /run's default var_run_t, so without this the guest dies before it binds QMP
+# and the only symptom is a timeout that names nothing SELinux.
+#
+# Two spellings, both needed. svirt_var_run_t is an ALIAS: it is what the rule
+# is written with (and what the policy and every doc call it), but the kernel
+# stores the real name, so getfattr, `ls -Z` and matchpathcon all report
+# qemu_var_run_t. A label comparison that knows only one of them is wrong half
+# the time, which is why `diagnose`'s socket-label check accepts either.
+VM_SOCKET_SELINUX_TYPE = "svirt_var_run_t"
+VM_SOCKET_SELINUX_TYPE_REAL = "qemu_var_run_t"
+VM_SOCKET_FCONTEXT_PATTERN = f"{VM_SOCKET_DIR}(/.*)?"
+
 
 # The transition needs a wrapper, and only a wrapper. `SELinuxContext=` in the
 # unit does NOT work: systemd execs from init_t and the policy has no

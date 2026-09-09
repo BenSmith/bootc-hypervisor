@@ -139,6 +139,8 @@ from egress_ca import (LeafRefused, VM_CA_BACKDATE_SECONDS,
                        vm_ca_openssl_argv, vm_ca_subject, vm_denial_dir,
                        vm_leaf_dir, vm_leaf_openssl_argv, vm_leaf_san,
                        vm_pki_fcontext_patterns)
+from egress_selinux import (VM_SOCKET_FCONTEXT_PATTERN, VM_SOCKET_SELINUX_TYPE,
+                            VM_SOCKET_SELINUX_TYPE_REAL)
 from vm_defs import (OVMF_CODE_CANDIDATES,
                      OVMF_VARS_CANDIDATES, SEED_PROVIDES_CHOICES,
                      SEED_PROVIDES_RETIRED, SeedContractError,
@@ -149,8 +151,7 @@ from vm_defs import (OVMF_CODE_CANDIDATES,
                      VM_REBOOT_EXIT_CODE, VM_REGISTRATION_DOMAIN_PARENTS,
                      VM_SEED_CONTRACT_EXIT,
                      VM_SIDECAR_SLICE, VM_SOCKET_DIR,
-                     VM_SOCKET_FCONTEXT_PATTERN, VM_SOCKET_SELINUX_TYPE,
-                     VM_SOCKET_SELINUX_TYPE_REAL, VM_TLS_UNBUILT, find_ovmf_code, find_ovmf_vars, parse_memory_mib,
+                     VM_TLS_UNBUILT, find_ovmf_code, find_ovmf_vars, parse_memory_mib,
                      parse_vm_port, vm_allowed_hosts, vm_guest_agent_socket,
                      vm_mac_address, vm_mac_collisions, vm_runtime_dir)
 
