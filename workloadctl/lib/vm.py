@@ -75,19 +75,25 @@ from netfilter_state import (CONNTRACK_COUNT_PATH, CONNTRACK_MAX_PATH,
                              nft_drop_counter, nft_element_counter,
                              nft_set_elements, vm_owned_elements)
 
+# The nftables vocabulary, re-exported on the same contract.
+from nft_constants import (FamilyPair, NFT_BIN, NFT_MAP_INSPECT4,
+                           NFT_MAP_INSPECT6, NFT_PAIR_ALLOW,
+                           NFT_PAIR_INSPECT_DST, NFT_PAIR_INSPECT_LIVE,
+                           NFT_PAIR_INSPECT_MAP, NFT_PAIR_INSPECT_SELF,
+                           NFT_PAIR_INTERNAL, NFT_PAIR_INTERNAL_OK,
+                           NFT_PROXY_SKELETON, NFT_PROXY_TABLE, NFT_SET_ALLOW4,
+                           NFT_SET_ALLOW6, NFT_SET_EGRESS_CG, NFT_SETS,
+                           NFT_SET_FILTERED, NFT_SET_INSPECT_CG,
+                           NFT_SET_INSPECT_DST, NFT_SET_INSPECT_DST6,
+                           NFT_SET_INSPECT_LIVE, NFT_SET_INSPECT_LIVE6,
+                           NFT_SET_INSPECT_SELF, NFT_SET_INSPECT_SELF6,
+                           NFT_SET_INTERNAL4, NFT_SET_INTERNAL6,
+                           NFT_SET_INTERNAL_OK4, NFT_SET_INTERNAL_OK6,
+                           NFT_SKELETON, NFT_TABLE, _both_families,
+                           _split_by_family)
+
 # The VM layer's vocabulary, re-exported on the same contract.
-from vm_defs import (FamilyPair, NFT_BIN, NFT_MAP_INSPECT4,
-                     NFT_MAP_INSPECT6, NFT_PAIR_ALLOW, NFT_PAIR_INSPECT_DST,
-                     NFT_PAIR_INSPECT_LIVE, NFT_PAIR_INSPECT_MAP,
-                     NFT_PAIR_INSPECT_SELF, NFT_PAIR_INTERNAL,
-                     NFT_PAIR_INTERNAL_OK, NFT_PROXY_SKELETON, NFT_PROXY_TABLE,
-                     NFT_SET_ALLOW4, NFT_SET_ALLOW6, NFT_SET_EGRESS_CG,
-                     NFT_SET_FILTERED, NFT_SET_INSPECT_CG, NFT_SET_INSPECT_DST,
-                     NFT_SET_INSPECT_DST6, NFT_SET_INSPECT_LIVE,
-                     NFT_SET_INSPECT_LIVE6, NFT_SET_INSPECT_SELF,
-                     NFT_SET_INSPECT_SELF6, NFT_SET_INTERNAL4,
-                     NFT_SET_INTERNAL6, NFT_SET_INTERNAL_OK4,
-                     NFT_SET_INTERNAL_OK6, NFT_TABLE, OVMF_CODE_CANDIDATES,
+from vm_defs import (OVMF_CODE_CANDIDATES,
                      OVMF_VARS_CANDIDATES, SEED_PROVIDES_CHOICES,
                      SEED_PROVIDES_RETIRED, SeedContractError,
                      VM_CA_ENV_VARS,
@@ -100,8 +106,7 @@ from vm_defs import (FamilyPair, NFT_BIN, NFT_MAP_INSPECT4,
                      VM_SIDECAR_SLICE, VM_SOCKET_DIR,
                      VM_SOCKET_FCONTEXT_PATTERN, VM_SOCKET_SELINUX_TYPE,
                      VM_SOCKET_SELINUX_TYPE_REAL, VM_TLS_DEFAULT, VM_TLS_MODES,
-                     VM_TLS_UNBUILT, _both_families, _split_by_family,
-                     find_ovmf_code, find_ovmf_vars, parse_memory_mib,
+                     VM_TLS_UNBUILT, find_ovmf_code, find_ovmf_vars, parse_memory_mib,
                      parse_vm_port, vm_allowed_hosts, vm_guest_agent_socket,
                      vm_hostname_control_character, vm_hostname_match,
                      vm_mac_address, vm_mac_collisions, vm_normalise_hostname,
@@ -147,9 +152,6 @@ from broker_config import (VM_BROKER_BIN, VM_BROKER_CONFIG_NAME,
                            vm_uses_credentials)
 
 
-NFT_SKELETON = "/usr/share/workloadctl/workload-filter.nft"
-
-
 def vm_filter_elements(uid: int, allow: list[str],
                        resolved=None) -> dict[str, list[str]]:
     """Map set name -> element expressions for one workload.
@@ -190,9 +192,6 @@ def vm_filter_elements(uid: int, allow: list[str],
             allowed.append((addr, f"{uid} . {addr} . {entry.port}"))
     return {NFT_SET_FILTERED: [str(uid)],
             **_split_by_family(NFT_PAIR_ALLOW, allowed)}
-
-
-NFT_SETS = (NFT_SET_FILTERED, NFT_SET_ALLOW4, NFT_SET_ALLOW6)
 
 
 # --- The inspector's policy document (§7.7.1, §13) ---

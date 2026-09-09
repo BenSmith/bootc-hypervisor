@@ -20,8 +20,9 @@ import json
 import subprocess
 
 from helper_main import log, run
-from vm import (NFT_BIN, NFT_SET_INTERNAL_OK4, NFT_SET_INTERNAL_OK6, NFT_SETS,
-                NFT_TABLE, vm_filter_delete_command,
+from nft_constants import (NFT_BIN, NFT_SET_INTERNAL_OK4,
+                           NFT_SET_INTERNAL_OK6, NFT_SETS, NFT_TABLE)
+from vm import (vm_filter_delete_command,
                 vm_inspect_link_address_commands,
                 vm_inspect_link_delete_commands,
                 vm_internal_ok_delete_commands, vm_internal_ok_list_commands,
