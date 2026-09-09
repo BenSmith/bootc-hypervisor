@@ -39,7 +39,7 @@ from egress_policy import (
     VM_INSPECT_DIGEST_KEY, VM_INSPECT_DIGEST_SHORT, vm_inspect_digest_short,
     vm_inspect_policy_digest, vm_inspect_policy_text,
 )
-from vm import VM_CA_EXPIRY_WARN_DAYS
+from egress_ca import VM_CA_EXPIRY_WARN_DAYS
 
 from tests.test_vm_inspect_listener import _mod
 

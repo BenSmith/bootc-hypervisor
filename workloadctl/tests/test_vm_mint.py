@@ -29,7 +29,8 @@ from tests import REPO_ROOT
 
 def _rmtree(path):
     shutil.rmtree(path, ignore_errors=True)
-from vm import LeafRefused, vm_ca_openssl_argv, vm_leaf_openssl_argv, vm_leaf_san
+from egress_ca import (LeafRefused, vm_ca_openssl_argv, vm_leaf_openssl_argv,
+                       vm_leaf_san)
 
 
 def _mint_ca(state_dir: Path, name="wl-test") -> None:

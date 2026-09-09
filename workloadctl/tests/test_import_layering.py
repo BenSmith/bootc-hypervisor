@@ -60,15 +60,15 @@ ABOVE_THE_PLANE = frozenset({"vm", "workload_lib"})
 # What the tree does today, and nothing more. Empty is the goal; see B3.
 UPWARD_EDGES = {
     # The cycle itself: workload_lib is above the plane and reaches back into
-    # the substrate facade from four function bodies.
-    ("workload_lib", "vm"): 4,
+    # the substrate facade from three function bodies. It was four until
+    # VM_RESERVED_GUEST_ENV moved down to egress_ca beside the CA variables it
+    # is derived from.
+    ("workload_lib", "vm"): 3,
     # CREDSTORE_DIR, fetched lazily inside the credential path helper. The
     # module-level half of this edge died when the container parse functions
     # moved down to config_parser.
     ("broker_config", "workload_lib"): 1,
     ("broker_config", "cmd_secret"): 1,
-    # egress_mint reaches the facade for the names it mints against.
-    ("egress_mint", "vm"): 1,
 }
 
 

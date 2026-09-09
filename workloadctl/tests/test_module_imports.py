@@ -53,7 +53,7 @@ RE_EXPORTS = {
     "vm": ("workload_addr", "egress_selinux", "vm_ptp",
             "netfilter_state", "vm_defs",
             "vm_network_config",
-            "egress_policy",
+            "egress_policy", "egress_ca",
             "broker_config"),
 }
 

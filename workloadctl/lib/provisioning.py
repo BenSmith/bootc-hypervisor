@@ -44,7 +44,8 @@ from workloadctl_core import (
     UsageError, WorkloadConfig, WorkloadManager, WorkloadUserNotFound,
 )
 from substrate import LifecycleError
-from vm import VM_SEED_CONTRACT_EXIT, vm_pki_fcontext_patterns
+from egress_ca import vm_pki_fcontext_patterns
+from vm import VM_SEED_CONTRACT_EXIT
 
 
 REQUIRED_EXECUTABLES = ["podman", "systemctl", "loginctl", "systemd-sysusers", "restorecon", "semodule"]

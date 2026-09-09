@@ -363,25 +363,3 @@ def vm_runtime_dir(name: str) -> str:
     return f"{VM_SOCKET_DIR}/{name}"
 
 
-# The environment variables that point a guest's HTTP clients at that bundle.
-# Five, because there is no single one: OpenSSL reads SSL_CERT_FILE, Node reads
-# NODE_EXTRA_CA_CERTS, python-requests reads REQUESTS_CA_BUNDLE, git reads
-# GIT_SSL_CAINFO and pip reads PIP_CERT. A guest missing any one of them fails
-# only in that ecosystem, which is the hardest kind of failure to attribute.
-VM_CA_ENV_VARS = (
-    "SSL_CERT_FILE",
-    "NODE_EXTRA_CA_CERTS",
-    "REQUESTS_CA_BUNDLE",
-    "GIT_SSL_CAINFO",
-    "PIP_CERT",
-)
-
-
-# The guest variables workloadctl seeds itself, and therefore the ones a
-# credential's `env` may not be. Derived from the producers rather than listed,
-# so a sixth CA variable cannot leave this behind: the failure a stale copy
-# produces is a silent overwrite in the seed, not an error anywhere.
-#
-# No broker variable is reserved, because nothing seeds one -- the guest is
-# never told a broker address (ADR 007 decision 6).
-VM_RESERVED_GUEST_ENV = frozenset(VM_CA_ENV_VARS)

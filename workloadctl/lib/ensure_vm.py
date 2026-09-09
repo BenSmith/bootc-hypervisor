@@ -32,11 +32,14 @@ from workload_lib import (
     workload_state_dir, replace_file_atomically,
 )
 from egress_policy import vm_uses_inspect
+from egress_ca import (
+    VM_CA_BUNDLE_AVAILABLE, VM_CA_BUNDLE_PATH, VM_CA_ENV_VARS, vm_ca_env,
+    vm_ca_cert_path,
+)
 from vm import (
     VM_SOCKET_DIR, VM_DEFAULT_GUEST_USER, VM_GUEST_HOME_BASE, VM_GUEST_UID,
-    VM_CA_BUNDLE_AVAILABLE, VM_CA_BUNDLE_PATH, VM_CA_ENV_VARS,
     VM_HOME_SELINUX_CONTEXT, VM_HOME_SELINUX_TYPES, SeedContractError,
-    find_ovmf_vars, vm_ca_env, vm_ca_cert_path, vm_credential_env,
+    find_ovmf_vars, vm_credential_env,
     vm_ptp_kvm_runcmd_lines, vm_ptp_kvm_seed_files, )
 from vm_provision import (
     MAX_HEAL_ATTEMPTS, PROVISION_UNVERIFIED, heal_attempts,

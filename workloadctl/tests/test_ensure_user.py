@@ -811,7 +811,7 @@ class TestBuildCloudInitIsoTemplateMode(unittest.TestCase):
         result; it did, at column 0, in a document cloud-init can no longer
         parse at all.
         """
-        from vm import vm_ca_cert_path
+        from egress_ca import vm_ca_cert_path
         # `workload_state_dir` is mocked to self.home for the duration of the
         # build, so this is where _read_vm_egress_ca will look.
         cert = vm_ca_cert_path(self.home)

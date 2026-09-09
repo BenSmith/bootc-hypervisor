@@ -174,7 +174,7 @@ class TestTheGuestIsToldNothing(unittest.TestCase):
     """
 
     def test_vm_ca_env_writes_no_proxy_variable(self):
-        from vm import vm_ca_env
+        from egress_ca import vm_ca_env
         env = vm_ca_env({"vm": {"network": {"egress": "filtered",
                                             "hosts": ["example.com"]}}})
         for var in RETIRED_ENV_VARS:

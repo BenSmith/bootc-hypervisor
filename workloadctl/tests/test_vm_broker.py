@@ -28,10 +28,10 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from egress_ca import VM_CA_ENV_VARS
+from egress_ca import VM_RESERVED_GUEST_ENV
 from vm import (
-    UID_MIN, VM_BROKER_BIN, VM_BROKER_INSTANCE_PORT, VM_CA_ENV_VARS,
-    VM_RESERVED_GUEST_ENV,
-    render_vm_broker_config, vm_broker_config_path, vm_broker_credential,
+    UID_MIN, VM_BROKER_BIN, VM_BROKER_INSTANCE_PORT, render_vm_broker_config, vm_broker_config_path, vm_broker_credential,
     vm_broker_hosts, vm_broker_listen_address, vm_broker_upstream_addresses,
     VM_BROKER_DEFAULT_AUTH_FORMAT, VM_BROKER_DEFAULT_AUTH_HEADER,
     validate_vm_network, vm_credential_entries, vm_credential_env,

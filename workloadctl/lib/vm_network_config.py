@@ -36,10 +36,10 @@ from egress_policy import (VM_INSPECT_ORIG_CLEARTEXT, VM_INSPECT_ORIG_TLS,
 from workload_addr import (VM_INSPECT_ADDR6_PREFIX, VM_INSPECT_NETWORK,
                            VM_RESOLVE_POLICY_FILE, VM_RESOLVE_TTL,
                            vm_inspect_address, vm_reserved_range)
+from egress_ca import VM_RESERVED_GUEST_ENV
 from vm_defs import (SEED_PROVIDES_CHOICES, SEED_PROVIDES_RETIRED,
                      VM_EGRESS_DEFAULT, VM_EGRESS_MODES,
-                     VM_REGISTRATION_DOMAIN_PARENTS, VM_RESERVED_GUEST_ENV,
-                     VM_SOCKET_DIR, VM_TLS_UNBUILT, parse_memory_mib, parse_vm_port,
+                     VM_REGISTRATION_DOMAIN_PARENTS, VM_SOCKET_DIR, VM_TLS_UNBUILT, parse_memory_mib, parse_vm_port,
                      vm_allowed_hosts)
 
 

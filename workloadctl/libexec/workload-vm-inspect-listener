@@ -132,8 +132,8 @@ from egress_policy import (
     vm_inspect_policy_path, vm_inspect_record_path, vm_inspect_status_path,
     vm_normalise_hostname, VmPolicyEntry, vm_policy_governs,
 )
+from egress_ca import LeafRefused, vm_ca_cert_path, vm_ca_key_path
 from vm import (
-    LeafRefused, vm_ca_cert_path, vm_ca_key_path,
     VM_BROKER_INSTANCE_PORT, vm_broker_listen_address,
 )
 from vm_clock import vm_resync_guest_clock_if_skewed

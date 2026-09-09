@@ -1413,7 +1413,7 @@ def validate_container_network(net: dict, config: dict | None = None) -> list[st
     from egress_policy import (
         VM_POLICY_METHODS, VM_POLICY_METHODS_REFUSED, vm_hostname_match,
     )
-    from vm import VM_RESERVED_GUEST_ENV
+    from egress_ca import VM_RESERVED_GUEST_ENV
 
     errors: list[str] = []
     if not isinstance(net, dict):

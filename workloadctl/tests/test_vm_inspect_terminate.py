@@ -38,9 +38,8 @@ from pathlib import Path
 
 from tests import load_script
 from egress_policy import VM_INSPECT_PORT_TLS
-from vm import (
-    vm_ca_cert_path, vm_ca_key_path, vm_ca_openssl_argv,
-    vm_leaf_openssl_argv,
+from egress_ca import (
+    vm_ca_cert_path, vm_ca_key_path, vm_ca_openssl_argv, vm_leaf_openssl_argv,
 )
 
 _MOD = None

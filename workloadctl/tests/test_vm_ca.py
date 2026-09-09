@@ -19,9 +19,9 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from vm import (VM_CA_BACKDATE_SECONDS, VM_CA_CERT_NAME, VM_CA_KEY_NAME,
-                VM_CA_VALIDITY_DAYS, vm_ca_cert_path, vm_ca_dir,
-                vm_ca_key_path, vm_ca_openssl_argv, vm_ca_subject)
+from egress_ca import (VM_CA_BACKDATE_SECONDS, VM_CA_CERT_NAME, VM_CA_KEY_NAME,
+                       VM_CA_VALIDITY_DAYS, vm_ca_cert_path, vm_ca_dir,
+                       vm_ca_key_path, vm_ca_openssl_argv, vm_ca_subject)
 
 
 # `lib/` reaches sys.path via tests/__init__, so this import follows it.
@@ -313,7 +313,7 @@ class TestTheCaReachesTheSeed(unittest.TestCase):
             mounts=[], has_data_disk=False, **kw)
 
     def test_the_bundle_is_written_where_the_env_vars_point(self):
-        from vm import VM_CA_BUNDLE_PATH
+        from egress_ca import VM_CA_BUNDLE_PATH
         out = self._render(ca_cert=self.PEM)
         self.assertIn(f"  - path: {VM_CA_BUNDLE_PATH}", out)
         self.assertIn("-----BEGIN CERTIFICATE-----", out)
