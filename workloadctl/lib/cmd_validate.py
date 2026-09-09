@@ -22,8 +22,9 @@ from workload_lib import (
 )
 from provisioning import shadowed_filecon_paths
 from egress_policy import vm_internal_hosts, vm_uses_inspect
+from broker_config import vm_credential_entries
 from vm import (
-    parse_memory_mib, vm_credential_entries, vm_internal_reserved_reason, vm_internal_resolve, vm_mac_address,
+    parse_memory_mib, vm_internal_reserved_reason, vm_internal_resolve, vm_mac_address,
     vm_mac_collisions, )
 from validation import (
     collect_config_warnings,

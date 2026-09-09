@@ -79,7 +79,7 @@ def normalise_policy_list(value, *, upper: bool = False) -> tuple | None:
     """One `methods` or `paths` value as a tuple, or None where it was absent.
 
     None and () are different answers and the caller depends on it; see
-    VmPolicyEntry (lib/vm.py) and ContainerPolicyEntry below.
+    egress_policy.VmPolicyEntry and ContainerPolicyEntry below.
     """
     if value is None:
         return None
@@ -507,9 +507,10 @@ def validate_host_pattern(pattern, *, allow_key: str,
 #
 # [network.policy] / [network.credential], parsed BY the shared loops above
 # and for the same reason as [[vm.network.policy]] / [[vm.network.credential]]
-# in lib/vm.py: shape-tolerant here, with real validation living in a separate
-# validate_* function (not yet written -- there is no container inspector to
-# validate against yet). Deliberately its own small NamedTuple pair rather
+# in lib/egress_policy.py and lib/broker_config.py: shape-tolerant here, with
+# real validation living in a separate validate_* function (not yet written --
+# there is no container inspector to validate against yet). Deliberately its
+# own small NamedTuple pair rather
 # than reuse of VmPolicyEntry/VmCredential: those are keyed on `[vm.network]`
 # specifically, and container topology has no `[vm]` section to key off of.
 # Widening them instead would put a substrate branch inside a pair of
@@ -541,7 +542,7 @@ def container_policy_entries(net: dict) -> list[ContainerPolicyEntry]:
 
 class ContainerCredential(NamedTuple):
     """One [[network.credential]] block, normalised. Same shape as
-    VmCredential (lib/vm.py) and for the same reasons -- see that class's
+    broker_config.VmCredential and for the same reasons -- see that class's
     docstring for why `auth_header`/`auth_format` are optional and live here
     rather than on the policy entry."""
 
@@ -635,9 +636,9 @@ def container_runs_on_host_network(config: dict) -> bool:
 def container_uses_inspect(config: dict) -> bool:
     """Whether this workload's egress is redirected into an inspector.
 
-    Mirrors ``vm_uses_inspect()`` (lib/vm.py) for the container substrate: the
-    single source of the predicate (D2 in the container egress-parity build
-    spec). ``ContainerSubstrate.uses_inspect()`` delegates here rather than
+    Mirrors ``vm_uses_inspect()`` (lib/egress_policy.py) for the container
+    substrate: the single source of the predicate (D2 in the container
+    egress-parity build spec). ``ContainerSubstrate.uses_inspect()`` delegates here rather than
     restating the logic, and ``get_enabled_workloads()``
     (libexec/workload-exporter) calls it directly on the raw parsed TOML --
     it reads config off disk and cannot build a WorkloadConfig/Substrate.
@@ -697,8 +698,9 @@ def _validate_container_host_pattern(pattern) -> list[str]:
 def container_allow_resolve(entry: ContainerAllowEntry) -> list:
     """Resolve one [[network.allow]] entry to concrete addresses.
 
-    Mirrors vm_allow_resolve (lib/vm.py), adapted to ContainerAllowEntry's
-    separate `address`/`host` fields. An address entry is returned as-is; a
+    Mirrors vm_allow_resolve (lib/vm_network_config.py), adapted to
+    ContainerAllowEntry's separate `address`/`host` fields. An address entry is
+    returned as-is; a
     host entry is resolved here, once, at arm time. Not tolerant: an
     unresolvable name must arm nothing, and arming nothing silently is worse
     than failing loudly -- the workload then meets the default deny on that

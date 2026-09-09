@@ -10,6 +10,12 @@ It could not be split until `[vm.network]` parsing moved to
 vm_network_config: the renderer sat ABOVE the parsers it calls, so lifting it
 out on its own would have needed an import back into vm, which is the cycle.
 
+`VmCredential` and its parse live here rather than with the rest of
+`[vm.network]` because every field on a credential decides something about the
+broker instance and nothing else. `validate_vm_network` reads them from the
+rung above, which is the direction that works; the renderer reading the type
+from the rung above was the direction that did not.
+
 Nothing here imports vm; vm imports this and re-exports every public name, so
 no caller changed.
 
@@ -20,14 +26,15 @@ import ipaddress
 import json
 import socket
 from pathlib import Path
+from typing import NamedTuple
 
 from config_parser import (container_credential_entries,
-                           container_policy_entries, container_uses_inspect)
+                           container_policy_entries, container_uses_inspect,
+                           parse_credential_entries)
 from workload_addr import (IP_BIN, VM_ADVERTISED_IFACE,
                            vm_broker_listen_address, vm_inspect_address)
 from egress_policy import vm_uses_inspect
 from egress_policy import vm_policy_entries
-from vm_network_config import vm_credential_entries
 
 
 # The program the generated unit runs. One instance per workload, generated;
@@ -72,6 +79,69 @@ def vm_broker_config_dir(name: str) -> Path:
 
 def vm_broker_config_path(name: str) -> Path:
     return vm_broker_config_dir(name) / VM_BROKER_CONFIG_NAME
+
+
+# --- The credential table, and the blocks that name one ---
+#
+# The type and its parse live here rather than beside the rest of `[vm.network]`
+# because a credential is a property of the broker instance and of nothing else:
+# every field on it decides what material that instance loads, what the guest is
+# seeded with instead, and how the header is spelled. `validate_vm_network`
+# reads them from a rung above, which is the right direction; the renderer
+# reading them from a rung above would have been the cycle.
+
+class VmCredential(NamedTuple):
+    """One [[vm.network.credential]] block, normalised.
+
+    `placeholder` and `env` are properties OF THE CREDENTIAL, not of the policy
+    entry that selects it, and that is the whole reason this table exists rather
+    than two more keys on the entry. Stated on the entry, each would need an
+    "entries naming the same credential must agree" rule, and there would be two
+    of them; stated here, each is stated once and the rule is unwritable.
+
+    `name` is the credstore name, and `env` is the guest variable the placeholder
+    is seeded into. They are separate keys on purpose: collapsing them would bind
+    the sealed material's path to a provider-owned string, so a provider renaming
+    its variable would force a re-seal.
+
+    `auth_header` and `auth_format` are the provider's HTTP convention, and they
+    are here rather than on the policy entry for the same reason: a credential
+    is minted for one provider, and `docs/agent-broker.toml.example` already
+    documents them per provider beside the key. Both are OPTIONAL and default to
+    the broker's own (`x-api-key`, `{secret}`), which is the Anthropic
+    convention -- so a workload that says nothing gets exactly what it got
+    before these keys existed.
+
+    THEY EXIST BECAUSE THE GENERATOR DROPPED THEM. ADR 007 names the profile as
+    `(upstream, credential, auth_header, auth_format)` and lists "one profile
+    per sandbox" as the limit this rung removes; the first render emitted the
+    first two and defaulted the rest, so every workload got `x-api-key` and any
+    provider wanting `Authorization: Bearer` answered 401 on a request this
+    layer considered fully authorised. The hand-written host-wide config could
+    express it and the generated one could not, which made the new shape a
+    regression for a whole class of provider with no key to fix it with.
+
+    NOTHING HERE TRAVELS ON THE WIRE AS A SELECTOR. The inspector sends no name
+    and no credential hint; the broker's whole dispatch key is (uid, Host), per
+    ADR 007 decision 9. These fields decide which material a generated broker
+    instance loads, what the guest is seeded with, and how the broker spells the
+    header it attaches -- and nothing else.
+    """
+
+    name: str
+    placeholder: str
+    env: str
+    auth_header: str | None = None
+    auth_format: str | None = None
+
+
+def vm_credential_entries(net: dict) -> list[VmCredential]:
+    """The [[vm.network.credential]] blocks, normalised, in file order.
+
+    Shape-tolerant for the reason vm_policy_entries is: validate_vm_network owns
+    the shape and the boot generator skips a workload that does not validate.
+    """
+    return parse_credential_entries(net, VmCredential)
 
 
 def vm_uses_credentials(config: dict) -> bool:
@@ -122,8 +192,6 @@ def vm_broker_credential(name: str, credential: str) -> tuple[Path, str]:
     from workload_lib import CREDSTORE_DIR
     path, seal = credential_path(Path(CREDSTORE_DIR), f"broker/{name}/{credential}")
     return path, seal
-
-
 
 
 def vm_credential_env(config: dict) -> dict[str, str]:

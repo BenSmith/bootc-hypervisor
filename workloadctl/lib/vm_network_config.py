@@ -25,8 +25,8 @@ from typing import NamedTuple
 
 from config_parser import (BROKER_DEFAULT_AUTH_FORMAT,
                            BROKER_DEFAULT_AUTH_HEADER,
-                           parse_credential_entries, parse_volume_spec,
-                           patterns_overlap, validate_credential_entries,
+                           parse_volume_spec, patterns_overlap,
+                           validate_credential_entries,
                            validate_host_pattern)
 from egress_policy import (VM_INSPECT_ORIG_CLEARTEXT, VM_INSPECT_ORIG_TLS,
                            VM_POLICY_METHODS, VM_POLICY_METHODS_REFUSED,
@@ -37,6 +37,7 @@ from workload_addr import (VM_INSPECT_ADDR6_PREFIX, VM_INSPECT_NETWORK,
                            VM_RESOLVE_POLICY_FILE, VM_RESOLVE_TTL,
                            vm_inspect_address, vm_reserved_range)
 from egress_ca import VM_RESERVED_GUEST_ENV
+from broker_config import VmCredential
 from vm_defs import (SEED_PROVIDES_CHOICES, SEED_PROVIDES_RETIRED,
                      VM_EGRESS_DEFAULT, VM_EGRESS_MODES,
                      VM_REGISTRATION_DOMAIN_PARENTS, VM_SOCKET_DIR, VM_TLS_UNBUILT, parse_memory_mib, parse_vm_port,
@@ -366,60 +367,6 @@ def vm_resolve_policy(net: dict, uid: int, resolved=None) -> dict:
         "hosts": vm_allowed_hosts(net),
         "policy": [e.host for e in vm_policy_entries(net)],
     }
-
-
-class VmCredential(NamedTuple):
-    """One [[vm.network.credential]] block, normalised.
-
-    `placeholder` and `env` are properties OF THE CREDENTIAL, not of the policy
-    entry that selects it, and that is the whole reason this table exists rather
-    than two more keys on the entry. Stated on the entry, each would need an
-    "entries naming the same credential must agree" rule, and there would be two
-    of them; stated here, each is stated once and the rule is unwritable.
-
-    `name` is the credstore name, and `env` is the guest variable the placeholder
-    is seeded into. They are separate keys on purpose: collapsing them would bind
-    the sealed material's path to a provider-owned string, so a provider renaming
-    its variable would force a re-seal.
-
-    `auth_header` and `auth_format` are the provider's HTTP convention, and they
-    are here rather than on the policy entry for the same reason: a credential
-    is minted for one provider, and `docs/agent-broker.toml.example` already
-    documents them per provider beside the key. Both are OPTIONAL and default to
-    the broker's own (`x-api-key`, `{secret}`), which is the Anthropic
-    convention -- so a workload that says nothing gets exactly what it got
-    before these keys existed.
-
-    THEY EXIST BECAUSE THE GENERATOR DROPPED THEM. ADR 007 names the profile as
-    `(upstream, credential, auth_header, auth_format)` and lists "one profile
-    per sandbox" as the limit this rung removes; the first render emitted the
-    first two and defaulted the rest, so every workload got `x-api-key` and any
-    provider wanting `Authorization: Bearer` answered 401 on a request this
-    layer considered fully authorised. The hand-written host-wide config could
-    express it and the generated one could not, which made the new shape a
-    regression for a whole class of provider with no key to fix it with.
-
-    NOTHING HERE TRAVELS ON THE WIRE AS A SELECTOR. The inspector sends no name
-    and no credential hint; the broker's whole dispatch key is (uid, Host), per
-    ADR 007 decision 9. These fields decide which material a generated broker
-    instance loads, what the guest is seeded with, and how the broker spells the
-    header it attaches -- and nothing else.
-    """
-
-    name: str
-    placeholder: str
-    env: str
-    auth_header: str | None = None
-    auth_format: str | None = None
-
-
-def vm_credential_entries(net: dict) -> list[VmCredential]:
-    """The [[vm.network.credential]] blocks, normalised, in file order.
-
-    Shape-tolerant for the reason vm_policy_entries is: validate_vm_network owns
-    the shape and the boot generator skips a workload that does not validate.
-    """
-    return parse_credential_entries(net, VmCredential)
 
 
 def vm_policy_permits(host: str, method: str, path: str, entries) -> bool:

@@ -3844,7 +3844,7 @@ class TestRung6CredentialSchema(unittest.TestCase):
         """Both readers run at VM start, where raising turns a typo into a
         workload that does not boot -- long after the error was reportable."""
         from egress_policy import vm_policy_entries
-        from vm import vm_credential_entries
+        from broker_config import vm_credential_entries
         self.assertEqual(vm_credential_entries({"credential": "not a list"}), [])
         self.assertEqual(vm_credential_entries({}), [])
         self.assertEqual(
