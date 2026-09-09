@@ -7,9 +7,10 @@ on which. The intended direction is
     config_parser -> shared plane -> workload_lib -> substrate modules -> CLI
 
 and the plane is the half that has to stay clean: a module below the line that
-imports something above it is a cycle, and a cycle here is not hypothetical --
-`workload_lib` reaches `vm` from inside four function bodies right now, which
-is exactly how it stayed invisible.
+imports something above it is a cycle, and a cycle here was not hypothetical --
+`workload_lib` reached `vm` from inside four function bodies, which is exactly
+how it stayed invisible. `UPWARD_EDGES` is empty now; this file's job from here
+is keeping it that way.
 
 **A deferred import is invisible to every other gate in this suite.**
 `test_module_imports.py` imports each module alone in a fresh interpreter,
@@ -26,14 +27,13 @@ and no one can tell.
 Hence this test walks function and class bodies too, and asserts on the edges
 rather than on whether anything blows up.
 
-The known violations are listed in `UPWARD_EDGES` with exact counts, and the
-assertion is set equality, not "no new modules". Two consequences, both
-intended: a fifth `workload_lib` -> `vm` import fails here even though that
-pair is already listed, and REMOVING one fails too. The second is the point --
-this table is a countdown. B3 of the shared-plane extraction is finished when
-`UPWARD_EDGES` is empty, and every entry that disappears has to be deleted
-from this table by the commit that fixed it, so the table cannot quietly
-describe a tree that has moved on.
+Any surviving violation would be listed in `UPWARD_EDGES` with an exact count,
+and the assertion is set equality, not "no new modules". Two consequences, both
+intended: a second import of an already-listed pair fails here, and REMOVING
+one fails too, so an entry has to be deleted by the commit that fixed it and
+the table cannot quietly describe a tree that has moved on. The table is empty,
+which is B3's exit condition -- the equality is what keeps it empty rather than
+letting the next deferred import re-open the cycle unremarked.
 """
 
 import ast
@@ -58,16 +58,21 @@ PLANE = frozenset({
 # Everything the plane may not import. `cmd_*` is matched by prefix below.
 ABOVE_THE_PLANE = frozenset({"vm", "workload_lib"})
 
-# What the tree does today, and nothing more. Empty is the goal; see B3.
-UPWARD_EDGES = {
-    # The cycle itself, and now all that is left of the table: workload_lib is
-    # above the plane and reaches back into the substrate facade from three
-    # function bodies. It was four until VM_RESERVED_GUEST_ENV moved down to
-    # egress_ca beside the CA variables it is derived from. The broker's two
-    # went when the credstore path and the credential name grammar moved down
-    # to secrets_template -- the seal name has one caller that is not the CLI.
-    ("workload_lib", "vm"): 3,
-}
+UPWARD_EDGES = {}
+"""Empty, and it stays that way.
+
+It held three `workload_lib` -> `vm` imports until the shared plane existed to
+import instead: `vm_uses_credentials`/`container_uses_credentials` now come
+from `broker_config`, the nft set and table names from `nft_constants`, and
+`vm_allow_reserved_reason` from `vm_network_config` -- which `workload_lib` is
+allowed to name, because a substrate module is above it, not below.
+
+`workload_lib` still has exactly one deferred import of ours, `from
+workloadctl_core import WorkloadUserNotFound`. That one is not a layering
+defect and is not counted here: `workloadctl_core` is above `workload_lib` by
+construction and imports it, so the cycle is real and the deferral is the fix
+rather than the symptom.
+"""
 
 
 def _lib_module_names():
@@ -170,16 +175,14 @@ class TestTheSharedPlaneDoesNotReachUpward(unittest.TestCase):
             "an upward import in UPWARD_EDGES is gone (good) -- delete it from "
             f"the table in the same commit: {sorted(gone)}")
 
-    def test_the_cycle_is_still_the_one_this_table_describes(self):
-        """B3's exit condition, written so that reaching it fails loudly.
+    def test_the_table_is_empty(self):
+        """Stated on its own so the milestone is an assertion, not an absence.
 
-        When `workload_lib` no longer imports `vm` from anywhere, this test
-        fails and is deleted along with the entry -- rather than the suite
-        going quiet about a milestone.
+        `test_upward_edges_match_the_table_exactly` passes vacuously against an
+        empty table and an empty tree alike; this one fails the moment someone
+        re-populates `UPWARD_EDGES` instead of fixing what it would describe.
         """
-        self.assertIn(("workload_lib", "vm"), UPWARD_EDGES,
-                      "the workload_lib -> vm cycle is broken: delete this "
-                      "test and the UPWARD_EDGES entry")
+        self.assertEqual(UPWARD_EDGES, {})
 
 
 if __name__ == "__main__":

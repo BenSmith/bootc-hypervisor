@@ -33,6 +33,24 @@ from config_parser import (
     workload_root_dir,
 )
 
+# The shared plane, and the two substrate modules whose names the container
+# half of this file needs. Every one of these was a deferred import inside a
+# function body until the extraction finished, for one reason: each name was
+# reached through `vm`, and `vm` imports this module. Nothing here imports it
+# back now, so the imports say where they are at the top of the file like every
+# other import in the tree -- which is also the only form the layering test can
+# read as a claim about direction.
+from egress_ca import VM_RESERVED_GUEST_ENV
+from egress_policy import (
+    VM_POLICY_METHODS, VM_POLICY_METHODS_REFUSED, vm_hostname_match,
+    vm_uses_inspect, vm_uses_resolve,
+)
+from nft_constants import (
+    NFT_BIN, NFT_SET_ALLOW4, NFT_SET_ALLOW6, NFT_SET_FILTERED, NFT_TABLE,
+)
+from broker_config import container_uses_credentials, vm_uses_credentials
+from vm_network_config import vm_allow_reserved_reason
+
 
 # --- Constants ---
 
@@ -893,11 +911,9 @@ def workload_run_files(config) -> list[WorkloadRunFile]:
     reconstructed, so it is omitted rather than raising.
     """
     # Lazy import: workloadctl_core imports this module, so a top-level import
-    # would be circular.
+    # would be circular. It is the last one in this file -- the rest became
+    # module-level once the shared plane stopped living inside `vm`.
     from workloadctl_core import WorkloadUserNotFound
-    from egress_policy import vm_uses_inspect, vm_uses_resolve
-    from vm import (  # same circularity: vm imports this module
-        container_uses_credentials, vm_uses_credentials, )
 
     run = RUN_SYSTEMD_SYSTEM
     env = workload_env_dir()
@@ -1402,13 +1418,6 @@ def validate_container_network(net: dict, config: dict | None = None) -> list[st
     never reads. Passed by the one production caller
     (validation.validate_workload_config); absent means "assume it is
     honoured", which is the conservative reading."""
-    # Lazy import: vm.py imports this module, so a top-level import here
-    # would be circular (same pattern as workload_run_files() above).
-    from egress_policy import (
-        VM_POLICY_METHODS, VM_POLICY_METHODS_REFUSED, vm_hostname_match,
-    )
-    from egress_ca import VM_RESERVED_GUEST_ENV
-
     errors: list[str] = []
     if not isinstance(net, dict):
         return ["[network] must be a table"]
@@ -1867,14 +1876,13 @@ def container_allow_resolved(allow: list) -> list:
 def container_filter_elements(uid: int, allow: list, resolved=None) -> dict:
     """Map set name -> element expressions for one container workload.
 
-    Mirrors vm_filter_elements (lib/vm.py), but built from
-    ContainerAllowEntry rather than VmAllowEntry. Reuses the VM module's set
-    names and reserved-range check (NFT_SET_FILTERED/ALLOW4/ALLOW6,
-    vm_allow_reserved_reason): both substrates share the one filter table
-    (D3), so a container's would-be element in another workload's listener
-    range is refused by the identical rule a VM's is.
+    Mirrors vm_filter_elements, but built from ContainerAllowEntry rather
+    than VmAllowEntry. Reuses the shared set names and the reserved-range
+    check (nft_constants.NFT_SET_FILTERED/ALLOW4/ALLOW6,
+    vm_network_config.vm_allow_reserved_reason): both substrates share the one
+    filter table (D3), so a container's would-be element in another workload's
+    listener range is refused by the identical rule a VM's is.
     """
-    from vm import NFT_SET_ALLOW4, NFT_SET_ALLOW6, NFT_SET_FILTERED, vm_allow_reserved_reason
     if resolved is None:
         resolved = container_allow_resolved(allow)
     elements: dict[str, list[str]] = {NFT_SET_FILTERED: [str(uid)]}
@@ -1898,7 +1906,6 @@ def container_filter_elements(uid: int, allow: list, resolved=None) -> dict:
 def container_filter_commands(uid: int, allow: list, action: str, resolved=None) -> list:
     """argv lists that arm ('add') or disarm ('delete') one container
     workload's allowlist elements. Mirrors vm_filter_commands."""
-    from vm import NFT_BIN, NFT_TABLE
     if action not in ("add", "delete"):
         raise ValueError(f"action must be 'add' or 'delete', got {action!r}")
     commands = []
