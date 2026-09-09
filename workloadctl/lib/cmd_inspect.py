@@ -9,13 +9,13 @@ import json
 import subprocess
 
 import deployment
+from config_parser import workload_root_dir
 from workload_lib import (
     HOST_USERNS_OPT_IN,
     units_outdated,
     units_from_other_build,
     WORKLOADCTL_VERSION,
     workload_config_dir,
-    workload_root_dir,
     workload_service_units,
 )
 from validation import uses_host_userns

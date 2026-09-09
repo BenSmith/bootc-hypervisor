@@ -36,7 +36,8 @@ from tests import REPO_ROOT as ROOT, script_env
 GENERATOR = ROOT / "generators" / "workload-generate"
 WORKLOADS_DIR = ROOT / "workloads"
 
-from workload_lib import infer_workload_mode, normalize_containers  # noqa: E402
+from config_parser import infer_workload_mode
+from workload_lib import normalize_containers  # noqa: E402
 
 
 def expected_units(stem: str, toml_text: str) -> list[str]:

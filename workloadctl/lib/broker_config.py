@@ -21,8 +21,8 @@ import json
 import socket
 from pathlib import Path
 
-from workload_lib import (container_credential_entries,
-                          container_policy_entries, container_uses_inspect)
+from config_parser import (container_credential_entries,
+                           container_policy_entries, container_uses_inspect)
 from workload_addr import vm_broker_listen_address, vm_inspect_address
 from vm_defs import IP_BIN, VM_ADVERTISED_IFACE, vm_uses_inspect
 from vm_network_config import vm_credential_entries, vm_policy_entries

@@ -12,11 +12,8 @@ import subprocess
 import sys
 
 from cli_log import emit_result, error, info
-from workload_lib import (
-    workload_config_path,
-    workload_enabled_marker,
-    workload_root_dir,
-)
+from config_parser import workload_root_dir
+from workload_lib import workload_config_path, workload_enabled_marker
 from workloadctl_core import WorkloadConfig, WorkloadManager, require_root
 from substrate import LifecycleError
 from provisioning import (

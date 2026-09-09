@@ -14,9 +14,10 @@ import pwd
 import sys
 from pathlib import Path
 
+from config_parser import WORKLOADS_BASE, container_uses_inspect
 from workload_lib import (
-    WORKLOADS_BASE, load_workload_config, workload_config_path,
-    workload_username, infer_workload_kind, container_uses_inspect,
+    load_workload_config, workload_config_path,
+    workload_username, infer_workload_kind,
 )
 from vm import (
     VM_SEED_CONTRACT_EXIT, SeedContractError, vm_uses_inspect,

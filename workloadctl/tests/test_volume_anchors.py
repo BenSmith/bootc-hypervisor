@@ -20,6 +20,7 @@ from tests import REPO_ROOT as ROOT, script_env
 GENERATOR = ROOT / "generators" / "workload-generate"
 WORKLOADS_DIR = ROOT / "workloads"
 
+import config_parser  # noqa: E402
 from workload_lib import expand_volume_path, workload_state_dir  # noqa: E402
 
 
@@ -224,7 +225,7 @@ class TestPreflightDataAnchoring(unittest.TestCase):
         toml_dir.mkdir(exist_ok=True)
         (toml_dir / "wltest").mkdir(exist_ok=True)
         (toml_dir / "wltest" / "workload.toml").write_text(toml_text)
-        with mock.patch.object(workload_lib, "WORKLOADS_BASE", base), \
+        with mock.patch.object(config_parser, "WORKLOADS_BASE", base), \
              mock.patch.object(workload_lib, "WORKLOAD_CONFIG_DIR", toml_dir):
             config = core.WorkloadConfig("wltest")
             provisioning.preflight_checks(config)

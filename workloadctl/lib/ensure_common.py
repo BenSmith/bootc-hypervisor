@@ -31,9 +31,9 @@ import subprocess
 import time
 
 import deployment
+from config_parser import workload_root_dir
 from workload_lib import (
-    workload_state_dir, workload_data_dir, workload_root_dir,
-    workload_env_dir,
+    workload_state_dir, workload_data_dir, workload_env_dir,
 )
 from vm import (
     VM_SOCKET_DIR, vm_ca_cert_path, vm_ca_dir, vm_denial_dir, vm_leaf_dir,

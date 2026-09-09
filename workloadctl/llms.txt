@@ -456,12 +456,13 @@ lib/backup.py                      # capture() implementation shared by both sub
 lib/podman.py                      # Typed Podman wrapper (JSON output, PodmanError, root/user modes)
 lib/qmp.py                         # QMP client
 lib/workloadctl_core.py            # WorkloadConfig / WorkloadManager (TOML loading, paths, lifecycle field)
-lib/workload_lib.py                # Shared library (config parsing, UID allocation, paths, subid math)
+lib/config_parser.py               # The TOML grammar both substrates read (hostname patterns, policy/credential blocks, volumes)
+lib/workload_lib.py                # Shared library (UID allocation, paths, subid math)
 lib/vm.py                          # VM constants and derivations (addresses, planes, unit names)
 lib/vm_provision.py                # VM disk/seed provisioning
-lib/vm_status.py                   # VM state derivation
+lib/egress_status.py               # Egress inspector state derivation (both substrates)
 lib/vm_metrics.py                  # VM metric collectors (QMP balloon/vCPU, qemu cgroup) shared by the exporter and `stats`
-lib/vm_mint.py                     # Per-workload egress CA and leaf minting
+lib/egress_mint.py                 # Per-workload egress CA and leaf minting
 lib/vm_clock.py                    # Host-side guest clock resync on mint cache miss
 lib/vm_inspect_figures.py          # FIGURES table: the single producer behind doctor and the exporter
 lib/pcap.py                        # Capture planning (JSON plan shared with the helper)

@@ -20,11 +20,13 @@ from dataclasses import dataclass
 from functools import cached_property
 from pathlib import Path
 
+from config_parser import (
+    workload_root_dir, container_credential_entries, container_uses_inspect,
+)
 from workload_lib import (
-    GENERATED_BY, workload_root_dir, workload_state_dir, expand_volume_path,
+    GENERATED_BY, workload_state_dir, expand_volume_path,
     expand_workload_tokens, dq, uq, selinux_type_name,
     container_ca_delivery, container_ca_mount_path,
-    container_credential_entries, container_uses_inspect,
 )
 from vm import (
     container_uses_credentials, VM_CA_ENV_VARS, VM_CA_BUNDLE_PATH,

@@ -26,10 +26,10 @@ import subprocess
 import uuid
 from pathlib import Path, PurePosixPath
 
+from config_parser import parse_volume_spec, workload_root_dir
 from workload_lib import (
     WORKLOAD_CONFIG_DIR, expand_volume_path, virtiofs_tags,
-    parse_volume_spec, workload_state_dir, workload_root_dir,
-    replace_file_atomically,
+    workload_state_dir, replace_file_atomically,
 )
 from vm import (
     VM_SOCKET_DIR, VM_DEFAULT_GUEST_USER, VM_GUEST_HOME_BASE, VM_GUEST_UID,

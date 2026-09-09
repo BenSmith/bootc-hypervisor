@@ -18,11 +18,12 @@ import subprocess
 import sys
 import time
 
+from config_parser import (
+    ContainerAllowEntry, container_allow_entries, container_allow_resolve,
+    container_uses_inspect, workload_root_dir, WORKLOADS_BASE,
+)
 from workload_lib import (
-    ContainerAllowEntry,
-    container_allow_entries, container_allow_resolve,
     container_effective_tls_mode,
-    container_uses_inspect,
     derived_subid_range,
     expand_volume_path,
     HOST_USERNS_OPT_IN,
@@ -37,10 +38,8 @@ from workload_lib import (
     units_from_other_build,
     workload_data_dir,
     workload_env_dir,
-    workload_root_dir,
     workload_state_dir,
     WORKLOADCTL_VERSION,
-    WORKLOADS_BASE,
 )
 from provisioning import (
     vm_fcontext_pattern,

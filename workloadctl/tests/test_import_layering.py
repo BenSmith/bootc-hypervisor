@@ -62,12 +62,13 @@ UPWARD_EDGES = {
     # The cycle itself: workload_lib is above the plane and reaches back into
     # the substrate facade from four function bodies.
     ("workload_lib", "vm"): 4,
-    # Four parsing constants that belong in workload_addr and currently live
-    # in workload_lib; this edge dies when they move.
+    # UID_MIN/UID_MAX, the uid-range bounds every derived address is checked
+    # against; they belong here and this edge dies when they move.
     ("workload_addr", "workload_lib"): 1,
-    # CREDSTORE_DIR (module level and again lazily) plus the credential path
-    # helper, which lives in the CLI layer.
-    ("broker_config", "workload_lib"): 2,
+    # CREDSTORE_DIR, fetched lazily inside the credential path helper. The
+    # module-level half of this edge died when the container parse functions
+    # moved down to config_parser.
+    ("broker_config", "workload_lib"): 1,
     ("broker_config", "cmd_secret"): 1,
     # egress_mint reaches the facade for the names it mints against.
     ("egress_mint", "vm"): 1,

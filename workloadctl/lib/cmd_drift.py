@@ -21,10 +21,10 @@ from vm import (
     vm_inspect_policy_text,
     vm_uses_inspect,
 )
+from config_parser import container_uses_inspect
 from workload_lib import (
     GENERATED_BY_RE,
     container_inspect_policy_text,
-    container_uses_inspect,
     RUN_TREE_SCANS,
     workload_config_dir,
     workload_config_path,

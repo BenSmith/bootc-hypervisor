@@ -16,6 +16,7 @@ from pathlib import Path
 from unittest import mock
 
 
+import config_parser
 import workload_lib               # noqa: E402
 import vm                          # noqa: E402
 import workloadctl_core as core  # noqa: E402
@@ -609,7 +610,7 @@ class WorkloadConfigMiscPropsTest(WorkloadConfigTestBase):
     def test_mode_property(self):
         cfg = self._config("modecfg", '[workload]\nname = "modecfg"\n\n'
                                        '[container]\nimage = "x"\n')
-        self.assertEqual(cfg.mode, workload_lib.infer_workload_mode(cfg.config))
+        self.assertEqual(cfg.mode, config_parser.infer_workload_mode(cfg.config))
 
 
 # ---------------------------------------------------------------------------

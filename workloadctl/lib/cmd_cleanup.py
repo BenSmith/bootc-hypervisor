@@ -22,13 +22,13 @@ import sys
 import tomllib
 
 import deployment
+from config_parser import WORKLOADS_BASE
 from workload_lib import (
     iter_workloads,
     remove_subid_entries,
     selinux_module_name,
     subid_files_with_entries,
     USERNAME_PREFIX,
-    WORKLOADS_BASE,
     workload_username,
 )
 from workloadctl_core import WorkloadManager, require_root

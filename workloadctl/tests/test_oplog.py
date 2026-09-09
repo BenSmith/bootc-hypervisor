@@ -23,6 +23,7 @@ from unittest import mock
 
 import cli_log
 import oplog
+import config_parser
 import workload_lib
 
 
@@ -35,7 +36,7 @@ class _Base(unittest.TestCase):
         self.base.mkdir()
         self.etc.mkdir()
         self.enterContext(
-            mock.patch.object(workload_lib, "WORKLOADS_BASE", self.base))
+            mock.patch.object(config_parser, "WORKLOADS_BASE", self.base))
         self.enterContext(
             mock.patch.object(workload_lib, "WORKLOAD_CONFIG_DIR", self.etc))
         # workload_config_dir() prefers the env var over the module attr, so an

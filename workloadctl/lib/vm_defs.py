@@ -26,7 +26,7 @@ import re
 from pathlib import Path
 from typing import NamedTuple
 
-from workload_lib import normalise_hostname
+from config_parser import normalise_hostname
 from workload_addr import VmInspectAddress  # noqa: F401  (FamilyPair annotation)
 
 

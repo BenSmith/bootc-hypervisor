@@ -20,10 +20,10 @@ import sys
 import tomllib
 
 from validation import validate_workload_name
+from config_parser import infer_workload_mode
 from workload_lib import (
     expand_volume_path,
     infer_workload_kind,
-    infer_workload_mode,
     iter_workloads,
     normalize_containers,
     WORKLOAD_BUNDLES_DIR,

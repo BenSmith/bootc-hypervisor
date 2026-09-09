@@ -22,6 +22,7 @@ import cli_log
 import cmd_enable
 import cmd_lifecycle
 import cmd_update
+import config_parser
 import workload_lib
 from substrate import NotApplicable, ProvisionFailed
 
@@ -305,7 +306,7 @@ class QuietTest(unittest.TestCase):
             with ExitStack() as st:
                 p = st.enter_context
                 p(mock.patch.object(workload_lib, "WORKLOAD_CONFIG_DIR", cfg_dir))
-                p(mock.patch.object(workload_lib, "WORKLOADS_BASE", Path(base)))
+                p(mock.patch.object(config_parser, "WORKLOADS_BASE", Path(base)))
                 p(mock.patch.object(cmd_enable, "require_root", lambda: None))
                 p(mock.patch.object(cmd_enable.subprocess, "run", side_effect=fake_run))
                 p(mock.patch.object(cmd_enable, "preflight_checks", return_value=True))

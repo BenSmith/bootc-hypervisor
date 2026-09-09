@@ -27,8 +27,8 @@ import tempfile
 from typing import NamedTuple
 
 from cli_log import error, info, warn
+from config_parser import container_uses_inspect, workload_root_dir
 from workload_lib import (
-    container_uses_inspect,
     selinux_module_name,
     selinux_type_name,
     workload_config_dir,
@@ -38,7 +38,6 @@ from workload_lib import (
     WORKLOAD_BUNDLES_DIR,
     NAME_PATTERN,
     RUN_SYSTEMD_SYSTEM,
-    workload_root_dir,
 )
 from podman import Podman
 from workloadctl_core import (

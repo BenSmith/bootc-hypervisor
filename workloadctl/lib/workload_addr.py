@@ -21,8 +21,8 @@ Installed to /usr/libexec/workloadctl/workload_addr.py.
 import ipaddress
 from typing import NamedTuple
 
-from workload_lib import (INSPECT_ORIG_CLEARTEXT, INSPECT_ORIG_TLS, UID_MAX,
-                          UID_MIN)
+from config_parser import INSPECT_ORIG_CLEARTEXT, INSPECT_ORIG_TLS
+from workload_lib import UID_MAX, UID_MIN
 
 
 # --- Uid-derived values ---

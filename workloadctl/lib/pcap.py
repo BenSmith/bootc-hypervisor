@@ -26,7 +26,8 @@ import struct
 from dataclasses import dataclass, field
 
 from vm import NFT_BIN, NFT_TABLE, vm_nflog_group, vm_uses_inspect
-from workload_lib import UID_MIN, container_uses_inspect
+from config_parser import container_uses_inspect
+from workload_lib import UID_MIN
 
 
 # --- what a vantage is ---

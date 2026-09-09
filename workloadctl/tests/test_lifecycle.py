@@ -30,6 +30,7 @@ from subprocess import CompletedProcess
 from unittest.mock import MagicMock, patch
 
 import substrate_container
+import config_parser
 import workload_lib
 import workloadctl_core
 from workloadctl_core import WorkloadConfig
@@ -1037,7 +1038,7 @@ class TestPreflightChecks(unittest.TestCase):
                     f'[{{ path = "./cfg.conf", hint = "{hint}" }}]\n'
                 )
                 with patch.object(workload_lib, 'WORKLOAD_CONFIG_DIR', p):
-                    with patch.object(workload_lib, 'WORKLOADS_BASE', Path(wl_base)):
+                    with patch.object(config_parser, 'WORKLOADS_BASE', Path(wl_base)):
                         cfg = WorkloadConfig('test-wl')
                         with patch.object(provisioning.shutil, 'which', self._patched_which()):
                             with patch.object(provisioning.Podman, 'for_root') as for_root:
@@ -1807,7 +1808,7 @@ class TestCmdEnable(unittest.TestCase):
             (p / 'test-wl').mkdir()
             (p / 'test-wl' / 'workload.toml').write_text(_CONTAINER_TOML)
             with patch.object(workload_lib, 'WORKLOAD_CONFIG_DIR', p):
-                with patch.object(workload_lib, 'WORKLOADS_BASE', Path(wl_base)):
+                with patch.object(config_parser, 'WORKLOADS_BASE', Path(wl_base)):
                     with _RootBypass():
                         manager = MagicMock()
                         with patch.object(cmd_enable.subprocess, 'run', return_value=MagicMock(returncode=0)):
@@ -1829,7 +1830,7 @@ class TestCmdEnable(unittest.TestCase):
                     return MagicMock(returncode=1)
                 return MagicMock(returncode=0)
             with patch.object(workload_lib, 'WORKLOAD_CONFIG_DIR', p):
-                with patch.object(workload_lib, 'WORKLOADS_BASE', Path(wl_base)):
+                with patch.object(config_parser, 'WORKLOADS_BASE', Path(wl_base)):
                     with _RootBypass():
                         manager = MagicMock()
                         with patch.object(cmd_enable.subprocess, 'run', side_effect=fake_run):
@@ -1862,7 +1863,7 @@ class TestCmdEnable(unittest.TestCase):
             (p / 'test-wl').mkdir()
             (p / 'test-wl' / 'workload.toml').write_text(_CONTAINER_TOML)
             with patch.object(workload_lib, 'WORKLOAD_CONFIG_DIR', p):
-                with patch.object(workload_lib, 'WORKLOADS_BASE', Path(wl_base)):
+                with patch.object(config_parser, 'WORKLOADS_BASE', Path(wl_base)):
                     with _RootBypass():
                         manager = MagicMock()
                         with patch.object(cmd_enable.subprocess, 'run', return_value=MagicMock(returncode=0)):
@@ -1885,7 +1886,7 @@ class TestCmdEnable(unittest.TestCase):
             (p / 'test-vm').mkdir()
             (p / 'test-vm' / 'workload.toml').write_text(_VM_TOML)
             with patch.object(workload_lib, 'WORKLOAD_CONFIG_DIR', p):
-                with patch.object(workload_lib, 'WORKLOADS_BASE', Path(wl_base)):
+                with patch.object(config_parser, 'WORKLOADS_BASE', Path(wl_base)):
                     with _RootBypass():
                         manager = MagicMock()
                         with patch.object(cmd_enable.subprocess, 'run', return_value=MagicMock(returncode=0)):

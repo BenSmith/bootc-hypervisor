@@ -20,15 +20,15 @@ import time
 from pathlib import Path
 from typing import NamedTuple
 
-from workload_lib import (BROKER_DEFAULT_AUTH_FORMAT,
-                          BROKER_DEFAULT_AUTH_HEADER, INSPECT_ORIG_CLEARTEXT,
-                          INSPECT_ORIG_TLS, UID_MAX,
-                          UID_MIN, container_credential_entries,
-                          container_policy_entries, container_uses_inspect,
-                          normalise_hostname, parse_credential_entries,
-                          parse_policy_entries, parse_volume_spec,
-                          patterns_overlap, validate_credential_entries,
-                          validate_host_pattern, workload_root_dir)
+from config_parser import (BROKER_DEFAULT_AUTH_FORMAT,
+                           BROKER_DEFAULT_AUTH_HEADER, INSPECT_ORIG_CLEARTEXT,
+                           INSPECT_ORIG_TLS, container_credential_entries,
+                           container_policy_entries, container_uses_inspect,
+                           normalise_hostname, parse_credential_entries,
+                           parse_policy_entries, parse_volume_spec,
+                           patterns_overlap, validate_credential_entries,
+                           validate_host_pattern, workload_root_dir)
+from workload_lib import UID_MAX, UID_MIN
 
 # The uid-derived layer, re-exported so every existing `from vm import ...`
 # keeps working. workload_addr does not import vm, and must not: it is the bottom of

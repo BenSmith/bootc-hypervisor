@@ -27,9 +27,10 @@ import os
 import sys
 from pathlib import Path
 
+from config_parser import workload_root_dir
 from workload_lib import (GENERATED_BY, GENERATOR_OWNED_DIRECTIVES,
                           RUN_SYSTEMD_SYSTEM, render_sysusers_config,
-                          workload_root_dir, workload_run_files,
+                          workload_run_files,
                           workload_state_dir)
 from unit_file import Unit
 

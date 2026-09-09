@@ -17,9 +17,10 @@ Installed to /usr/libexec/workloadctl/gen_vm.py.
 """
 
 
+from config_parser import parse_volume_spec
 from workload_lib import (
     GENERATED_BY, workload_state_dir, workload_data_dir, expand_volume_path,
-    dq, uq, virtiofs_tags, parse_volume_spec, systemd_escape_path,
+    dq, uq, virtiofs_tags, systemd_escape_path,
 )
 from vm import (
     VM_MGMT_SSH_PORT, VM_REBOOT_EXIT_CODE, VM_GUEST_UID,

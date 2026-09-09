@@ -52,7 +52,8 @@ import os
 import pwd
 from pathlib import Path
 
-from workload_lib import workload_config_path, workload_root_dir
+from config_parser import workload_root_dir
+from workload_lib import workload_config_path
 
 
 # The same channel cli_log warns on, reached by logger name rather than by

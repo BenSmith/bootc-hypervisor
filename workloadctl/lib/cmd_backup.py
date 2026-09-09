@@ -13,11 +13,11 @@ import tarfile
 import tempfile
 import tomllib
 
+from config_parser import WORKLOADS_BASE
 from workload_lib import (
     CREDSTORE_DIR,
     mount_points,
     workload_config_path,
-    WORKLOADS_BASE,
     workload_data_dir,
     workload_service_name,
 )

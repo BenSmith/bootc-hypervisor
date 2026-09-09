@@ -63,9 +63,10 @@ from vm import (
     vm_internal_ok_commands,
 )
 from egress_status import clear_status
+from config_parser import container_uses_inspect
 from workload_lib import (
     container_inspect_policy_text, container_internal_entries,
-    container_internal_resolve, container_uses_inspect, load_workload_config,
+    container_internal_resolve, load_workload_config,
 )
 
 

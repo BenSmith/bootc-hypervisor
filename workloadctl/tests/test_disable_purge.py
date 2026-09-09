@@ -14,6 +14,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 
+import config_parser
 import workload_lib
 import cmd_disable
 import substrate_container
@@ -257,7 +258,7 @@ class TestPurgeBestEffort(unittest.TestCase):
             args = SimpleNamespace(workload='pp', purge=True)
             exit_code = None
             with patch.object(cmd_disable, 'require_root', lambda: None), \
-                 patch.object(workload_lib, 'WORKLOADS_BASE', base), \
+                 patch.object(config_parser, 'WORKLOADS_BASE', base), \
                  patch.object(cmd_disable.subprocess, 'run', MagicMock()), \
                  patch.object(cmd_disable.time, 'sleep', lambda *_: None), \
                  patch.object(cmd_disable, '_stop_user_manager', MagicMock()), \

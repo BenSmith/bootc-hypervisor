@@ -13,10 +13,9 @@ from pathlib import Path
 import sys
 from typing import NoReturn
 
+from config_parser import container_credential_entries, container_uses_inspect
 from workload_lib import (
-    container_credential_entries,
     container_internal_entries,
-    container_uses_inspect,
     CREDSTORE_DIR,
     expand_volume_path,
     GENERATOR_OWNED_DIRECTIVES,

@@ -12,6 +12,7 @@ Installed to /usr/libexec/workloadctl/validation.py.
 
 import re
 
+from config_parser import infer_workload_mode
 from workload_lib import (
     MAX_CONTAINER_NAME_LENGTH,
     CONTAINER_NAME_PATTERN,
@@ -22,7 +23,6 @@ from workload_lib import (
     WORKLOAD_TOKEN_PATTERN,
     _LIFTED_CONTAINER_KEYS,
     infer_workload_kind,
-    infer_workload_mode,
     normalize_containers,
     validate_container_network,
 )

@@ -33,9 +33,9 @@ from substrate import (
     service_active,
     systemctl_or_raise,
 )
+from config_parser import container_uses_inspect
 from workload_lib import (
     RUN_SYSTEMD_SYSTEM,
-    container_uses_inspect,
     remove_subid_entries,
     subid_files_with_entries,
     workload_service_units,

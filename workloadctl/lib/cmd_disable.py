@@ -16,11 +16,8 @@ import sys
 import time
 
 from cli_log import emit_result, error, info, json_enabled
-from workload_lib import (
-    workload_enabled_marker,
-    workload_root_dir,
-    workload_run_files,
-)
+from config_parser import workload_root_dir
+from workload_lib import workload_enabled_marker, workload_run_files
 from substrate import get_substrate
 from vm import vm_inspect_record_dir
 from workloadctl_core import (

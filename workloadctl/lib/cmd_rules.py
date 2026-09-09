@@ -50,8 +50,8 @@ from pathlib import Path
 
 import cli_log
 from cmd_validate import load_config_or_exit
-from workload_lib import (container_inspect_policy,
-                          container_uses_inspect)
+from config_parser import container_uses_inspect
+from workload_lib import container_inspect_policy
 from vm import (
     VM_TLS_DEFAULT,
     VM_TLS_MODES,

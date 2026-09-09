@@ -24,6 +24,7 @@ from pathlib import Path
 from unittest import mock
 
 
+import config_parser
 import workload_lib          # noqa: E402
 import cmd_create           # noqa: E402
 import cmd_diagnose         # noqa: E402
@@ -1955,7 +1956,7 @@ class DiagnoseMcsLabelTest(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(self.enterContext(tempfile.TemporaryDirectory()))
         self.enterContext(mock.patch.object(
-            workload_lib, "WORKLOADS_BASE", self.tmp))
+            config_parser, "WORKLOADS_BASE", self.tmp))
         (self.tmp / "app" / "data").mkdir(parents=True)
         self.config = mock.Mock()
         self.config.name = "app"
