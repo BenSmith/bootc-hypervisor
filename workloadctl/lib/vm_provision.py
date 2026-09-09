@@ -52,7 +52,8 @@ import subprocess
 import time
 from pathlib import Path
 
-from vm import VM_DEFAULT_GUEST_USER, VM_MGMT_SSH_PORT, vm_management_address
+from vm_defs import VM_DEFAULT_GUEST_USER
+from workload_addr import VM_MGMT_SSH_PORT, vm_management_address
 from workload_lib import (load_workload_config, workload_state_dir,
                           workload_username)
 

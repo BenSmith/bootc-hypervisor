@@ -43,7 +43,7 @@ import sys
 
 sys.dont_write_bytecode = True
 
-from vm import (
+from broker_config import (
     container_uses_credentials, render_container_broker_config,
     render_vm_broker_config, vm_broker_config_path, vm_uses_credentials,
 )

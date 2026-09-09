@@ -27,17 +27,21 @@ from egress_policy import (
     vm_uses_resolve, vm_inspect_logs_directory,
 )
 from egress_ca import vm_denial_dir, vm_leaf_dir
-from vm import (
-    VM_MGMT_SSH_PORT, VM_REBOOT_EXIT_CODE, VM_GUEST_UID,
-    VM_GUEST_AGENT_PORT, VM_SIDECAR_SLICE, VM_INSPECT_LISTENER_BIN,
-    vm_mac_address,
-    vm_management_address, parse_vm_port, find_ovmf_code, parse_memory_mib,
-    vm_inspect_address, vm_inspect_cgroup_command,
-    vm_inspect_cgroup_filter_command, VM_SOCKET_DIR,
-    VM_RESOLVE_LISTENER_BIN, VM_RESOLVE_PORT, vm_resolve_address,
+from vm import vm_inspect_cgroup_command, vm_inspect_cgroup_filter_command
+from broker_config import (
     VM_BROKER_BIN, vm_uses_credentials, vm_broker_config_path,
     vm_broker_credential, vm_broker_hosts, vm_broker_runtime_directory,
     vm_broker_upstream_addresses, vm_host_resolver_addresses,
+)
+from vm_defs import (
+    VM_REBOOT_EXIT_CODE, VM_GUEST_UID, VM_GUEST_AGENT_PORT, VM_SIDECAR_SLICE,
+    vm_mac_address, parse_vm_port, find_ovmf_code, parse_memory_mib,
+    VM_SOCKET_DIR,
+)
+from workload_addr import (
+    VM_MGMT_SSH_PORT, VM_INSPECT_LISTENER_BIN, vm_management_address,
+    vm_inspect_address, VM_RESOLVE_LISTENER_BIN, VM_RESOLVE_PORT,
+    vm_resolve_address,
 )
 from unit_file import Unit
 from gen_common import (

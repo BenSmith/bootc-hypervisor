@@ -36,11 +36,13 @@ from egress_ca import (
     VM_CA_BUNDLE_AVAILABLE, VM_CA_BUNDLE_PATH, VM_CA_ENV_VARS, vm_ca_env,
     vm_ca_cert_path,
 )
-from vm import (
+from broker_config import vm_credential_env
+from vm_defs import (
     VM_SOCKET_DIR, VM_DEFAULT_GUEST_USER, VM_GUEST_HOME_BASE, VM_GUEST_UID,
     VM_HOME_SELINUX_CONTEXT, VM_HOME_SELINUX_TYPES, SeedContractError,
-    find_ovmf_vars, vm_credential_env,
-    vm_ptp_kvm_runcmd_lines, vm_ptp_kvm_seed_files, )
+    find_ovmf_vars,
+)
+from vm_ptp import vm_ptp_kvm_runcmd_lines, vm_ptp_kvm_seed_files
 from vm_provision import (
     MAX_HEAL_ATTEMPTS, PROVISION_UNVERIFIED, heal_attempts,
     read_provision_marker, should_heal, write_provision_marker,

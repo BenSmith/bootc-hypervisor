@@ -58,10 +58,9 @@ from pcap import (
     nflog_group, pcap_delete_command, pcap_first_timestamp, pcap_packet_count,
     pcap_rule_commands, pcap_shift_timestamps, tcpdump_argv,
 )
-from vm import (
-    NFT_BIN, NFT_TABLE, NFT_SKELETON, VM_MGMT_SSH_PORT, VM_SOCKET_DIR,
-    vm_management_address,
-)
+from nft_constants import NFT_BIN, NFT_TABLE, NFT_SKELETON
+from vm_defs import VM_SOCKET_DIR
+from workload_addr import VM_MGMT_SSH_PORT, vm_management_address
 from qmp import QMPClient
 from podman import Podman
 from workload_lib import workload_home_dir

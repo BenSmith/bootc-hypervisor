@@ -109,11 +109,11 @@ from egress_policy import (
     vm_inspect_status_path, vm_uses_inspect,
 )
 from vm import (
-    NFT_BIN, NFT_PROXY_SKELETON, NFT_SKELETON,
-    ensure_advertised_interface, vm_inspect_element_commands,
-    vm_internal_ok_commands, vm_internal_resolve,
-    vm_broker_listen_address, vm_uses_credentials,
+    vm_inspect_element_commands, vm_internal_ok_commands, vm_internal_resolve,
 )
+from broker_config import vm_uses_credentials
+from nft_constants import NFT_BIN, NFT_PROXY_SKELETON, NFT_SKELETON
+from workload_addr import ensure_advertised_interface, vm_broker_listen_address
 from egress_status import clear_status
 from workload_lib import load_workload_config
 

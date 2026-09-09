@@ -45,7 +45,7 @@ sys.dont_write_bytecode = True
 
 from helper_main import log, run, run_helper, up_down_main
 from nft import purge_uid_elements
-from vm import NFT_BIN, NFT_SKELETON
+from nft_constants import NFT_BIN, NFT_SKELETON
 from config_parser import container_allow_entries, container_uses_inspect
 from workload_lib import (
     container_allow_resolved, container_filter_commands,

@@ -59,28 +59,30 @@ from egress_policy import (
 )
 from egress_ca import VM_CA_EXPIRY_WARN_DAYS, vm_ca_cert_path
 from egress_selinux import (
-    VM_SOCKET_FCONTEXT_PATTERN, VM_SOCKET_SELINUX_TYPE,
-    VM_SOCKET_SELINUX_TYPE_REAL,
+    VM_INSPECT_SELINUX_CIL, VM_INSPECT_SELINUX_MODULE, VM_QEMU_TYPE,
+    VM_RESOLVE_SELINUX_CIL, VM_RESOLVE_SELINUX_MODULE, VM_RUNCON_BIN,
+    VM_SELINUX_CIL, VM_SELINUX_MODULE, VM_SOCKET_FCONTEXT_PATTERN,
+    VM_SOCKET_SELINUX_TYPE, VM_SOCKET_SELINUX_TYPE_REAL, selinux_enabled,
 )
-from vm import (
+from broker_config import vm_broker_hosts
+from netfilter_state import (
+    CONNTRACK_PRESSURE, conntrack_occupancy, nft_drop_counter,
+    nft_element_counter, nft_set_elements, vm_owned_elements,
+)
+from nft_constants import (
     NFT_BIN, NFT_SET_ALLOW4, NFT_SET_ALLOW6, NFT_SET_FILTERED,
-    NFT_SET_INTERNAL4, NFT_SET_INTERNAL6, NFT_TABLE,
-    VM_EGRESS_DEFAULT, VM_MGMT_SSH_PORT, VM_QEMU_TYPE, VM_RUNCON_BIN,
-    VM_SOCKET_DIR, VM_SELINUX_CIL, VM_SELINUX_MODULE,
-    VM_INSPECT_SELINUX_CIL, VM_INSPECT_SELINUX_MODULE,
-    VM_RESOLVE_SELINUX_CIL, VM_RESOLVE_SELINUX_MODULE,
-    CONNTRACK_PRESSURE,
-    conntrack_occupancy,
-    nft_drop_counter, nft_element_counter,
-    nft_set_elements, selinux_enabled, vm_management_address, vm_nflog_group,
-    vm_owned_elements,
-    NFT_PROXY_TABLE,
+    NFT_SET_INTERNAL4, NFT_SET_INTERNAL6, NFT_TABLE, NFT_PROXY_TABLE,
     NFT_MAP_INSPECT4, NFT_MAP_INSPECT6, NFT_SET_INSPECT_SELF,
     NFT_SET_INSPECT_SELF6, NFT_SET_INSPECT_DST, NFT_SET_INSPECT_DST6,
     NFT_SET_INSPECT_LIVE, NFT_SET_INSPECT_LIVE6,
-    vm_inspect_address, VM_RESOLVE_PORT, vm_resolve_address, vm_resolve_policy_path,
-    vm_broker_hosts,
-    parse_vm_allow, vm_allow_resolve,
+)
+from vm_defs import VM_EGRESS_DEFAULT, VM_SOCKET_DIR
+from vm_network_config import (
+    vm_resolve_policy_path, parse_vm_allow, vm_allow_resolve,
+)
+from workload_addr import (
+    VM_MGMT_SSH_PORT, vm_management_address, vm_nflog_group,
+    vm_inspect_address, VM_RESOLVE_PORT, vm_resolve_address,
 )
 from egress_mint import pem_fingerprint
 from egress_status import OTHER_KEY

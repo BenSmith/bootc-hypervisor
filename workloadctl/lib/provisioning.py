@@ -45,7 +45,7 @@ from workloadctl_core import (
 )
 from substrate import LifecycleError
 from egress_ca import vm_pki_fcontext_patterns
-from vm import VM_SEED_CONTRACT_EXIT
+from vm_defs import VM_SEED_CONTRACT_EXIT
 
 
 REQUIRED_EXECUTABLES = ["podman", "systemctl", "loginctl", "systemd-sysusers", "restorecon", "semodule"]

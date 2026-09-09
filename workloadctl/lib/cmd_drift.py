@@ -18,7 +18,7 @@ from pathlib import Path
 from egress_policy import (
     VM_INSPECT_POLICY_FILE, vm_inspect_policy_text, vm_uses_inspect,
 )
-from vm import VM_SOCKET_DIR
+from vm_defs import VM_SOCKET_DIR
 from config_parser import container_uses_inspect
 from workload_lib import (
     GENERATED_BY_RE,

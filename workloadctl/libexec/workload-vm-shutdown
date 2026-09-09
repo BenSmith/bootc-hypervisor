@@ -23,7 +23,7 @@ import time
 
 sys.dont_write_bytecode = True
 
-from vm import VM_SOCKET_DIR
+from vm_defs import VM_SOCKET_DIR
 from qmp import QMPClient
 
 DEFAULT_TIMEOUT = 80.0

@@ -21,7 +21,7 @@ from qmp import QMPClient
 from secrets_template import auto_detect_credentials, CREDSTORE_DIR
 from service_runtime import restart_workload_service
 from substrate import BackupError
-from vm import VM_SOCKET_DIR
+from vm_defs import VM_SOCKET_DIR
 from vm_clock import CLOCK_RESYNCED, vm_resync_guest_clock_if_skewed
 from workload_lib import mount_points, workload_config_path
 

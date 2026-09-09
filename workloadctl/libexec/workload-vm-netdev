@@ -135,7 +135,7 @@ from pathlib import Path
 sys.dont_write_bytecode = True
 
 from egress_policy import vm_uses_resolve
-from vm import vm_resolve_address
+from workload_addr import vm_resolve_address
 from workload_lib import load_workload_config, workload_env_dir
 
 RESOLV_CONF = Path("/etc/resolv.conf")

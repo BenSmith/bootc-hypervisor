@@ -26,9 +26,9 @@ import struct
 from dataclasses import dataclass, field
 
 from egress_policy import vm_uses_inspect
-from vm import NFT_BIN, NFT_TABLE, vm_nflog_group
+from nft_constants import NFT_BIN, NFT_TABLE
 from config_parser import container_uses_inspect
-from workload_addr import UID_MIN
+from workload_addr import UID_MIN, vm_nflog_group
 
 
 # --- what a vantage is ---

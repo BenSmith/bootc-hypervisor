@@ -22,11 +22,11 @@ import subprocess
 from helper_main import log, run
 from nft_constants import (NFT_BIN, NFT_SET_INTERNAL_OK4,
                            NFT_SET_INTERNAL_OK6, NFT_SETS, NFT_TABLE)
-from vm import (vm_filter_delete_command,
-                vm_inspect_link_address_commands,
-                vm_inspect_link_delete_commands,
-                vm_internal_ok_delete_commands, vm_internal_ok_list_commands,
-                vm_internal_ok_uid_elements, vm_owned_elements)
+from vm import (vm_filter_delete_command, vm_internal_ok_delete_commands,
+                vm_internal_ok_list_commands, vm_internal_ok_uid_elements)
+from broker_config import (vm_inspect_link_address_commands,
+                           vm_inspect_link_delete_commands)
+from netfilter_state import vm_owned_elements
 
 
 def nft_json(*args, timeout: int = 10):

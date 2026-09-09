@@ -56,12 +56,10 @@ from helper_main import log, run, run_helper, up_down_main
 from nft import (add_listener_addresses, purge_internal_exemptions,
                  remove_listener_addresses)
 from egress_policy import vm_inspect_policy_path, vm_inspect_status_path
-from vm import (
-    NFT_BIN, NFT_PROXY_SKELETON, NFT_SKELETON,
-    container_uses_credentials, ensure_advertised_interface,
-    vm_broker_listen_address, vm_inspect_element_commands,
-    vm_internal_ok_commands,
-)
+from vm import vm_inspect_element_commands, vm_internal_ok_commands
+from broker_config import container_uses_credentials
+from nft_constants import NFT_BIN, NFT_PROXY_SKELETON, NFT_SKELETON
+from workload_addr import ensure_advertised_interface, vm_broker_listen_address
 from egress_status import clear_status
 from config_parser import container_uses_inspect
 from workload_lib import (

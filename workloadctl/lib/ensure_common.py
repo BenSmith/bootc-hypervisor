@@ -39,7 +39,7 @@ from egress_ca import (
     vm_ca_cert_path, vm_ca_dir, vm_denial_dir, vm_leaf_dir, vm_ca_key_path,
     vm_ca_openssl_argv,
 )
-from vm import VM_SOCKET_DIR
+from vm_defs import VM_SOCKET_DIR
 
 def log(msg):
     """Print to stdout (captured by systemd journal)."""

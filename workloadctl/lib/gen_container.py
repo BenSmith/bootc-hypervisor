@@ -29,7 +29,7 @@ from workload_lib import (
     container_ca_delivery, container_ca_mount_path,
 )
 from egress_ca import VM_CA_ENV_VARS, VM_CA_BUNDLE_PATH, vm_ca_cert_path
-from vm import container_uses_credentials
+from broker_config import container_uses_credentials
 from secrets_template import (
     SECRET_PATTERN, auto_detect_credentials, validate_env_key,
 )

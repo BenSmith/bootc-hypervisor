@@ -26,7 +26,7 @@ from workload_lib import (
     normalize_containers,
     validate_container_network,
 )
-from vm import validate_vm_config, vm_network_warnings
+from vm_network_config import validate_vm_config, vm_network_warnings
 
 
 def validate_container_name(name: str):

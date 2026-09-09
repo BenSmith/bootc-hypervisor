@@ -65,7 +65,7 @@ import random
 import time
 
 from qmp import QMPClient
-from vm import vm_guest_agent_socket
+from vm_defs import vm_guest_agent_socket
 
 # How long to wait for qemu-guest-agent to answer. Every VM is wired with the
 # agent channel, but a guest that hasn't installed or started qemu-ga never

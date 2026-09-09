@@ -67,7 +67,7 @@ try:
         WORKLOAD_CONFIG_DIR, ENABLED_MARKER_NAME, iter_workloads,
         workload_username, normalize_containers, infer_workload_kind, claim_uid, subid_lock,
     )
-    from vm import (
+    from broker_config import (
         container_broker_hosts, container_broker_upstream_addresses,
         container_uses_credentials,
     )
