@@ -21,11 +21,10 @@ from workload_lib import (
     GENERATOR_OWNED_DIRECTIVES,
 )
 from provisioning import shadowed_filecon_paths
+from egress_policy import vm_internal_hosts, vm_uses_inspect
 from vm import (
-    parse_memory_mib, vm_credential_entries, vm_internal_hosts,
-    vm_internal_reserved_reason, vm_internal_resolve, vm_mac_address,
-    vm_mac_collisions, vm_uses_inspect,
-)
+    parse_memory_mib, vm_credential_entries, vm_internal_reserved_reason, vm_internal_resolve, vm_mac_address,
+    vm_mac_collisions, )
 from validation import (
     collect_config_warnings,
     validate_workload_config,

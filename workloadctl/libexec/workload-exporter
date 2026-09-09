@@ -36,7 +36,7 @@ from podman import Podman
 from config_parser import container_uses_inspect, workload_root_dir
 from workload_lib import ENABLED_MARKER_NAME, iter_workloads, normalize_containers, workload_container_name, workload_podman_container_name, workload_service_name, workload_username
 from vm_metrics import find_vm_cgroup, get_vm_qmp_metrics, systemd_show
-from vm import vm_uses_inspect
+from egress_policy import vm_uses_inspect
 from vm_inspect_figures import (
     FIGURES,
     drop_reasons,

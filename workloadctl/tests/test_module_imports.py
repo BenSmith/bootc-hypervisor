@@ -39,6 +39,7 @@ import ast
 import importlib
 import subprocess
 import sys
+import types
 import unittest
 from pathlib import Path
 
@@ -52,6 +53,7 @@ RE_EXPORTS = {
     "vm": ("workload_addr", "egress_selinux", "vm_ptp",
             "netfilter_state", "vm_defs",
             "vm_network_config",
+            "egress_policy",
             "broker_config"),
 }
 
@@ -107,6 +109,7 @@ class TestASplitModuleStillAnswersForItsParts(unittest.TestCase):
                 public = sorted(
                     name for name, value in vars(module).items()
                     if not name.startswith("__")
+                    and not isinstance(value, types.ModuleType)
                     and getattr(value, "__module__", part) == part)
                 missing = [n for n in public if not hasattr(parent, n)]
                 with self.subTest(original=original, part=part):
@@ -124,6 +127,7 @@ class TestASplitModuleStillAnswersForItsParts(unittest.TestCase):
                 module = importlib.import_module(part)
                 public = [n for n, v in vars(module).items()
                           if not n.startswith("__")
+                          and not isinstance(v, types.ModuleType)
                           and getattr(v, "__module__", part) == part]
                 with self.subTest(part=part):
                     self.assertGreater(len(public), 5, public)

@@ -18,7 +18,6 @@ no caller changed.
 Installed to /usr/libexec/workloadctl/vm_network_config.py.
 """
 
-import fnmatch
 import ipaddress
 import re
 import socket
@@ -26,20 +25,22 @@ from typing import NamedTuple
 
 from config_parser import (BROKER_DEFAULT_AUTH_FORMAT,
                            BROKER_DEFAULT_AUTH_HEADER,
-                           parse_credential_entries, parse_policy_entries,
-                           parse_volume_spec, patterns_overlap,
-                           validate_credential_entries, validate_host_pattern)
+                           parse_credential_entries, parse_volume_spec,
+                           patterns_overlap, validate_credential_entries,
+                           validate_host_pattern)
+from egress_policy import (VM_INSPECT_ORIG_CLEARTEXT, VM_INSPECT_ORIG_TLS,
+                           VM_POLICY_METHODS, VM_POLICY_METHODS_REFUSED,
+                           VM_TLS_DEFAULT, VM_TLS_MODES, VmPolicyEntry,
+                           vm_hostname_match, vm_normalise_hostname,
+                           vm_policy_entries, vm_policy_governs)
 from workload_addr import (VM_INSPECT_ADDR6_PREFIX, VM_INSPECT_NETWORK,
-                           VM_INSPECT_ORIG_CLEARTEXT, VM_INSPECT_ORIG_TLS,
                            VM_RESOLVE_POLICY_FILE, VM_RESOLVE_TTL,
                            vm_inspect_address, vm_reserved_range)
 from vm_defs import (SEED_PROVIDES_CHOICES, SEED_PROVIDES_RETIRED,
                      VM_EGRESS_DEFAULT, VM_EGRESS_MODES,
                      VM_REGISTRATION_DOMAIN_PARENTS, VM_RESERVED_GUEST_ENV,
-                     VM_SOCKET_DIR, VM_TLS_DEFAULT, VM_TLS_MODES,
-                     VM_TLS_UNBUILT, parse_memory_mib, parse_vm_port,
-                     vm_allowed_hosts, vm_hostname_match, vm_normalise_hostname,
-                     vm_uses_inspect)
+                     VM_SOCKET_DIR, VM_TLS_UNBUILT, parse_memory_mib, parse_vm_port,
+                     vm_allowed_hosts)
 
 
 # --- `allow`: the address-scoped bypass, now a table with a reason ---
@@ -297,31 +298,9 @@ def vm_allow_resolved(allow):
     return out
 
 
-
-
 def vm_resolve_policy_path(name: str) -> str:
     """Where one workload's responder reads its answers from."""
     return f"{VM_SOCKET_DIR}/{name}/{VM_RESOLVE_POLICY_FILE}"
-
-
-def vm_uses_resolve(config: dict) -> bool:
-    """Whether this workload gets a synthesising responder.
-
-    Everything vm_uses_inspect requires (a VM, not bridged, filtered) plus
-    `resolver` not being "none". One knob, one meaning, in both places: a
-    responder under `egress = "open"` would answer every name with an inspector
-    address that nothing redirects to, and one under `resolver = "none"` would
-    be a nameserver for a guest that asked for no nameserver -- and passt is
-    told about it in the same breath, so a disagreement here is a guest pointed
-    at a port with nothing behind it.
-    """
-    # VM-only, and not an omission: a container resolves through the
-    # host/podman resolver rather than a per-workload nameserver, so there is
-    # no container analogue to extend this to.
-    if not vm_uses_inspect(config):
-        return False
-    net = (config.get("vm", {}) or {}).get("network", {}) or {}
-    return net.get("resolver", "host") != "none"
 
 
 def vm_resolve_policy(net: dict, uid: int, resolved=None) -> dict:
@@ -389,78 +368,6 @@ def vm_resolve_policy(net: dict, uid: int, resolved=None) -> dict:
     }
 
 
-
-# The HTTP methods a [[vm.network.policy]] entry may name. Registered tokens
-# only (IANA HTTP Method Registry), because §3 requires a method that is not one
-# to be an ERROR rather than a rule that can never match: `["FETCH"]` and
-# `["GET "]` are both far likelier to be a typo that silently denies than an
-# intent, and a denial nobody can see is the failure this layer exists to
-# prevent.
-#
-# CONNECT and PRI are registered and are deliberately NOT here. The inspector is
-# transparent -- it is reached by a redirect, never by a proxy request -- so a
-# guest has no CONNECT to send it and an entry permitting one describes a
-# request that cannot arrive. PRI is the HTTP/2 connection preface's method,
-# which is refused on a terminated host and checked as a preface on an `http2`
-# one; permitting it by name would read as a way to allow h2 through `policy`,
-# which is exactly the thing `http2` carries a written reason for.
-VM_POLICY_METHODS = frozenset((
-    "ACL", "BASELINE-CONTROL", "BIND", "CHECKIN", "CHECKOUT", "COPY", "DELETE",
-    "GET", "HEAD", "LABEL", "LINK", "LOCK", "MERGE", "MKACTIVITY",
-    "MKCALENDAR", "MKCOL", "MKREDIRECTREF", "MKWORKSPACE", "MOVE", "OPTIONS",
-    "ORDERPATCH", "PATCH", "POST", "PROPFIND", "PROPPATCH", "PUT", "REBIND",
-    "REPORT", "SEARCH", "TRACE", "UNBIND", "UNCHECKOUT", "UNLINK", "UNLOCK",
-    "UPDATE", "UPDATEREDIRECTREF", "VERSION-CONTROL",
-))
-
-VM_POLICY_METHODS_REFUSED = {
-    "CONNECT": "the inspector is transparent and is never sent a CONNECT; a "
-               "guest reaches it by a redirect it cannot see",
-    "PRI": "PRI is the HTTP/2 connection preface's method; h2 on a host is "
-           "[[vm.network.http2]], which carries a written reason",
-}
-
-
-class VmPolicyEntry(NamedTuple):
-    """One [[vm.network.policy]] entry, normalised.
-
-    `methods` and `paths` are `None` where the key was absent, NOT an empty
-    tuple, and the difference is the whole of §3's widening trap: absent means
-    "any", empty would mean "none". Collapsing the two makes a single-entry
-    host with no `paths` deny everything instead of permitting everything --
-    the failure in the safe direction, which is why it survives review.
-    """
-
-    host: str
-    methods: tuple | None
-    paths: tuple | None
-    credential: str | None = None
-
-    def permits(self, method: str, path: str) -> bool:
-        """Whether this entry permits one method on one path.
-
-        `methods` and `paths` inside one entry are a CROSS PRODUCT: two of each
-        permit all four combinations. An absent key is "any", per the shorthand
-        §3 keeps for the single-entry case.
-        """
-        if self.methods is not None and method.upper() not in self.methods:
-            return False
-        if self.paths is not None and not any(
-                fnmatch.fnmatchcase(path, pattern) for pattern in self.paths):
-            return False
-        return True
-
-
-def vm_policy_entries(net: dict) -> list[VmPolicyEntry]:
-    """The [[vm.network.policy]] entries, normalised, in file order.
-
-    Shape-tolerant for the reason vm_internal_hosts is: validate_vm_network
-    owns the shape and the boot generator skips a workload that does not
-    validate.
-    """
-    return parse_policy_entries(net, VmPolicyEntry)
-
-
 class VmCredential(NamedTuple):
     """One [[vm.network.credential]] block, normalised.
 
@@ -513,26 +420,6 @@ def vm_credential_entries(net: dict) -> list[VmCredential]:
     the shape and the boot generator skips a workload that does not validate.
     """
     return parse_credential_entries(net, VmCredential)
-
-
-def vm_policy_governs(host: str, entries) -> list[VmPolicyEntry]:
-    """The entries governing one hostname, which may be none.
-
-    §3's composition rule lives here and is the thing to get right: a host with
-    any matching entry is governed by THOSE ENTRIES ALONE, and `hosts` is not
-    consulted for it. The careless reading -- a `hosts` entry is a `policy`
-    entry with no keys, so union them -- silently destroys the feature: one
-    wildcard written for an unrelated reason contributes "any method, any path"
-    to every host it happens to cover, and the diff that introduced it looks
-    like it ADDED access rather than removing a restriction.
-
-    Host patterns union among themselves, so `*.example.com` and
-    `api.example.com` both govern `api.example.com` and neither overrides the
-    other. That is the apex trap's sibling, and it is why `diagnose` will have
-    to print the EFFECTIVE rules per host rather than the file's entries --
-    owed, not built, so do not cite it to an operator as though it were.
-    """
-    return [e for e in entries if vm_hostname_match(host, (e.host,))]
 
 
 def vm_policy_permits(host: str, method: str, path: str, entries) -> bool:
@@ -1546,7 +1433,6 @@ def vm_network_warnings(net: dict) -> list[str]:
                 f"exists to remove.")
 
     return warnings
-
 
 
 def validate_vm_network(net: dict) -> list[str]:

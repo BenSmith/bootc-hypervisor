@@ -19,9 +19,9 @@ from workload_lib import (
     load_workload_config, workload_config_path,
     workload_username, infer_workload_kind,
 )
+from egress_policy import vm_uses_inspect
 from vm import (
-    VM_SEED_CONTRACT_EXIT, SeedContractError, vm_uses_inspect,
-)
+    VM_SEED_CONTRACT_EXIT, SeedContractError, )
 import ensure_common
 from ensure_common import (
     warn_if_stale_home, setup_home_directory, record_deployment_provenance,

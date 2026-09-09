@@ -43,11 +43,8 @@ import json
 from dataclasses import dataclass
 from typing import Callable
 
-from vm import (
-    VM_INSPECT_DIGEST_KEY,
-    vm_inspect_status_path,
-    vm_resolve_status_path,
-)
+from egress_policy import VM_INSPECT_DIGEST_KEY, vm_inspect_status_path
+from vm import vm_resolve_status_path
 
 # Group keys. A group is present or absent as a whole, because what makes it
 # absent is one missing block in the document rather than one missing counter.

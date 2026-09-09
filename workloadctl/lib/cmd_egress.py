@@ -60,16 +60,11 @@ from pathlib import Path
 import cli_log
 from cmd_validate import load_config_or_exit
 from substrate import get_substrate
-from vm import (
-    VM_INSPECT_LOG_ID_FIELD,
-    VM_INSPECT_LOG_REQ_FIELD,
-    VM_INSPECT_RECORD_DECISIONS,
-    VM_INSPECT_RECORD_MODES,
-    VM_INSPECT_RECORD_PLANES,
-    VM_INSPECT_RECORD_REASONS,
-    vm_hostname_match,
-    vm_inspect_record_dir,
-    vm_inspect_record_path,
+from egress_policy import (
+    VM_INSPECT_LOG_ID_FIELD, VM_INSPECT_LOG_REQ_FIELD,
+    VM_INSPECT_RECORD_DECISIONS, VM_INSPECT_RECORD_MODES,
+    VM_INSPECT_RECORD_PLANES, VM_INSPECT_RECORD_REASONS, vm_hostname_match,
+    vm_inspect_record_dir, vm_inspect_record_path,
 )
 
 LINES_DEFAULT = 50

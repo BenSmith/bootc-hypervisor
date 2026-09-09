@@ -11,22 +11,23 @@ the builder's own output.
 import unittest
 from pathlib import Path
 
+from egress_policy import (
+    VM_INSPECT_ORIG_CLEARTEXT, VM_INSPECT_ORIG_TLS, VM_INSPECT_PORT_CLEARTEXT,
+    VM_INSPECT_PORT_TLS, vm_inspect_policy, vm_inspect_policy_path,
+    VM_TLS_DEFAULT, vm_http2_hosts, vm_policy_entries, vm_policy_governs,
+)
 from vm import (
     IP_BIN, NFT_BIN, NFT_MAP_INSPECT4, NFT_MAP_INSPECT6, NFT_PROXY_TABLE,
     NFT_SET_INSPECT_CG, NFT_SET_INSPECT_DST,
     NFT_SET_INSPECT_DST6, NFT_SET_INSPECT_SELF, NFT_SET_INSPECT_SELF6,
     NFT_SET_INSPECT_LIVE, NFT_SET_INSPECT_LIVE6,
-    NFT_SET_EGRESS_CG, NFT_TABLE, VM_INSPECT_ORIG_CLEARTEXT,
-    VM_INSPECT_ORIG_TLS, VM_INSPECT_PORT_CLEARTEXT, VM_INSPECT_PORT_TLS,
-    VM_ADVERTISED_IFACE, vm_inspect_cgroup, vm_inspect_cgroup_command,
+    NFT_SET_EGRESS_CG, NFT_TABLE, VM_ADVERTISED_IFACE, vm_inspect_cgroup, vm_inspect_cgroup_command,
     vm_inspect_cgroup_filter_command, vm_inspect_dst_elements,
     vm_inspect_element_commands, vm_inspect_link_address_commands,
     vm_inspect_link_delete_commands, vm_inspect_map_elements,
     vm_inspect_live_elements,
-    vm_inspect_policy, vm_inspect_policy_path, vm_inspect_self_elements,
-    vm_allowed_hosts, vm_runtime_dir, VM_TLS_DEFAULT,
-    vm_http2_hosts, vm_policy_entries, vm_policy_governs,
-    vm_policy_permits,
+    vm_inspect_self_elements,
+    vm_allowed_hosts, vm_runtime_dir, vm_policy_permits,
 )
 
 ROOT = Path(__file__).resolve().parent.parent

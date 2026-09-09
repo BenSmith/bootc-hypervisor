@@ -49,6 +49,14 @@ from provisioning import (
 )
 from validation import uses_host_userns
 from nft import nft_json
+from egress_policy import (
+    VM_INSPECT_DIGEST_KEY, vm_inspect_policy_digest, vm_inspect_policy_path,
+    vm_inspect_digest_short, VM_INSPECT_DIGEST_SHORT,
+    VM_INSPECT_PORT_CLEARTEXT, VM_INSPECT_PORT_TLS, VM_INSPECT_ORIG_CLEARTEXT,
+    VM_INSPECT_ORIG_TLS, VM_TLS_DEFAULT, vm_uses_inspect, VM_DROP_MISDIRECTED,
+    VM_DROP_MISDIRECTED_LISTED, VM_DROP_BROKER_UNREACHABLE, VM_DROP_NOT_HTTP,
+    VM_DROP_NOT_HTTP_POLICY, vm_uses_resolve,
+)
 from vm import (
     NFT_BIN, NFT_SET_ALLOW4, NFT_SET_ALLOW6, NFT_SET_FILTERED,
     NFT_SET_INTERNAL4, NFT_SET_INTERNAL6, NFT_TABLE,
@@ -66,18 +74,8 @@ from vm import (
     NFT_MAP_INSPECT4, NFT_MAP_INSPECT6, NFT_SET_INSPECT_SELF,
     NFT_SET_INSPECT_SELF6, NFT_SET_INSPECT_DST, NFT_SET_INSPECT_DST6,
     NFT_SET_INSPECT_LIVE, NFT_SET_INSPECT_LIVE6,
-    VM_INSPECT_DIGEST_KEY, vm_inspect_policy_digest,
     VM_CA_EXPIRY_WARN_DAYS, vm_ca_cert_path,
-    vm_inspect_policy_path, vm_inspect_digest_short, VM_INSPECT_DIGEST_SHORT,
-    VM_INSPECT_PORT_CLEARTEXT,
-    VM_INSPECT_PORT_TLS, VM_INSPECT_ORIG_CLEARTEXT, VM_INSPECT_ORIG_TLS,
-    VM_TLS_DEFAULT,
-    vm_inspect_address, vm_uses_inspect,
-    VM_DROP_MISDIRECTED, VM_DROP_MISDIRECTED_LISTED,
-    VM_DROP_BROKER_UNREACHABLE,
-    VM_DROP_NOT_HTTP, VM_DROP_NOT_HTTP_POLICY,
-    VM_RESOLVE_PORT, vm_resolve_address, vm_resolve_policy_path,
-    vm_uses_resolve,
+    vm_inspect_address, VM_RESOLVE_PORT, vm_resolve_address, vm_resolve_policy_path,
     vm_broker_hosts,
     parse_vm_allow, vm_allow_resolve,
 )

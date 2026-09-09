@@ -28,13 +28,13 @@ import unittest
 from unittest import mock
 from pathlib import Path
 
+from egress_policy import vm_uses_resolve
 from vm import (
     UID_MAX, UID_MIN, VM_MGMT_NETWORK, VM_SIDECAR_SLICE, VM_RESOLVE_ADDR_BASE,
     VM_RESOLVE_LISTENER_BIN, VM_RESOLVE_POLICY_FILE, VM_RESOLVE_PORT,
     VM_RESOLVE_TTL, vm_allow_resolved, vm_filter_elements, vm_inspect_address,
     vm_management_address, vm_reserved_range, vm_resolve_address,
-    vm_resolve_policy, vm_resolve_policy_path, vm_uses_resolve,
-)
+    vm_resolve_policy, vm_resolve_policy_path, )
 
 UID = 10004  # the worked example the rest of the inspect tests use
 

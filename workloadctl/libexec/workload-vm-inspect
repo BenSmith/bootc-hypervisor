@@ -104,12 +104,14 @@ sys.dont_write_bytecode = True
 from helper_main import log, run, run_helper, up_down_main
 from nft import (add_listener_addresses, purge_internal_exemptions,
                  remove_listener_addresses)
+from egress_policy import (
+    vm_inspect_policy_path, vm_inspect_policy_text, vm_internal_hosts,
+    vm_inspect_status_path, vm_uses_inspect,
+)
 from vm import (
     NFT_BIN, NFT_PROXY_SKELETON, NFT_SKELETON,
     ensure_advertised_interface, vm_inspect_element_commands,
-    vm_inspect_policy_path, vm_inspect_policy_text,
-    vm_internal_hosts, vm_internal_ok_commands, vm_internal_resolve,
-    vm_inspect_status_path, vm_uses_inspect,
+    vm_internal_ok_commands, vm_internal_resolve,
     vm_broker_listen_address, vm_uses_credentials,
 )
 from egress_status import clear_status

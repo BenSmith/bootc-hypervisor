@@ -901,10 +901,9 @@ def workload_run_files(config) -> list[WorkloadRunFile]:
     # Lazy import: workloadctl_core imports this module, so a top-level import
     # would be circular.
     from workloadctl_core import WorkloadUserNotFound
+    from egress_policy import vm_uses_inspect, vm_uses_resolve
     from vm import (  # same circularity: vm imports this module
-        container_uses_credentials, vm_uses_credentials, vm_uses_inspect,
-        vm_uses_resolve,
-    )
+        container_uses_credentials, vm_uses_credentials, )
 
     run = RUN_SYSTEMD_SYSTEM
     env = workload_env_dir()
@@ -1411,10 +1410,10 @@ def validate_container_network(net: dict, config: dict | None = None) -> list[st
     honoured", which is the conservative reading."""
     # Lazy import: vm.py imports this module, so a top-level import here
     # would be circular (same pattern as workload_run_files() above).
-    from vm import (
-        VM_POLICY_METHODS, VM_POLICY_METHODS_REFUSED, VM_RESERVED_GUEST_ENV,
-        vm_hostname_match,
+    from egress_policy import (
+        VM_POLICY_METHODS, VM_POLICY_METHODS_REFUSED, vm_hostname_match,
     )
+    from vm import VM_RESERVED_GUEST_ENV
 
     errors: list[str] = []
     if not isinstance(net, dict):

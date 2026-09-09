@@ -48,12 +48,12 @@ from collections import OrderedDict
 from pathlib import Path
 from typing import NamedTuple
 
+from egress_policy import vm_normalise_hostname
 from vm import (
     LeafRefused, VM_DENIAL_DIR_NAME, VM_LEAF_DIR_NAME,
     VM_LEAF_RENEW_WITHIN_SECONDS, VM_LEAF_VALIDITY_DAYS,
     vm_ca_cert_path, vm_ca_key_path, vm_leaf_openssl_argv,
-    vm_normalise_hostname,
-)
+    )
 from vm_clock import CLOCK_FAILED, CLOCK_RESYNCED, CLOCK_UNAVAILABLE
 
 # Which clock_check outcomes get a counter, and which counter each lands in.

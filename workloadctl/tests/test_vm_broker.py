@@ -612,12 +612,12 @@ import socket
 import threading
 import time
 
-from vm import (
-    VM_BROKER_INSTANCE_PORT, VM_DROP_BROKER_UNREACHABLE,
-    VM_DROP_UNREACHABLE, VM_INSPECT_RECORD_FIELDS,
-    VmPolicyEntry, vm_broker_listen_address, vm_inspect_policy,
-    vm_inspect_policy_text,
+from egress_policy import (
+    VM_DROP_BROKER_UNREACHABLE, VM_DROP_UNREACHABLE, VM_INSPECT_RECORD_FIELDS,
+    VmPolicyEntry, vm_inspect_policy, vm_inspect_policy_text,
 )
+from vm import (
+    VM_BROKER_INSTANCE_PORT, vm_broker_listen_address, )
 import vm_inspect_figures
 
 LISTENER = Path(__file__).resolve().parent.parent / "libexec" / "workload-vm-inspect-listener"
@@ -1094,7 +1094,7 @@ class TestTheReasonIsPinnedAcrossTheTwoHalves(unittest.TestCase):
                          listener_mod().DROP_BROKER_UNREACHABLE)
 
     def test_egress_can_filter_on_it(self):
-        from vm import VM_INSPECT_RECORD_REASONS
+        from egress_policy import VM_INSPECT_RECORD_REASONS
         self.assertIn(VM_DROP_BROKER_UNREACHABLE, VM_INSPECT_RECORD_REASONS)
         self.assertIn(VM_DROP_BROKER_UNREACHABLE, listener_mod().DROP_REASONS)
 

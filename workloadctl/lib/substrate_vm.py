@@ -36,6 +36,7 @@ from substrate import (
     service_active,
     systemctl_or_raise,
 )
+from egress_policy import vm_uses_inspect
 from vm import (
     VM_MGMT_SSH_PORT,
     VM_SOCKET_DIR,
@@ -43,8 +44,7 @@ from vm import (
     vm_guest_agent_socket,
     vm_mac_address,
     vm_management_address,
-    vm_uses_inspect,
-)
+    )
 from vm_clock import GUEST_AGENT_TIMEOUT, guest_agent_sync
 from vm_metrics import get_vm_qmp_metrics
 from workload_lib import workload_service_units

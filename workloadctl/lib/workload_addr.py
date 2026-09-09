@@ -21,8 +21,6 @@ Installed to /usr/libexec/workloadctl/workload_addr.py.
 import ipaddress
 from typing import NamedTuple
 
-from config_parser import INSPECT_ORIG_CLEARTEXT, INSPECT_ORIG_TLS
-
 
 # The uid range every derivation below is bounded by. Reserved for workload
 # users; the subordinate-id math in workload_lib is keyed on the same window.
@@ -163,24 +161,6 @@ VM_RESERVATION_INSPECT6 = RangeReservation(
 VM_UID_INSPECT = UidDerived("inspector address", VM_INSPECT_ADDR_BASE,
                             VM_RESERVATION_INSPECT4, VM_RESERVATION_INSPECT6)
 
-# The two listener ports, selected by the redirected connection's ORIGINAL port
-# via the DNAT map rather than recovered by the inspector: a guest dial to 80
-# lands here cleartext (the Host header carries the name) and one to 443 here
-# under TLS (the SNI in the ClientHello). The socket that accepted the
-# connection tells the inspector which it is, so SO_ORIGINAL_DST is not needed.
-VM_INSPECT_PORT_CLEARTEXT = 8080
-VM_INSPECT_PORT_TLS = 8443
-
-# The two ORIGINAL ports the redirect matches and the map keys on: a guest dial
-# to 80 or one to 443. Fixed by the redirect rules in workload-proxy.nft; they
-# never appear in an element value, which is why the constants live beside the
-# listener ports they select.
-#
-# Defined in workload_lib, because the container half of the design redirects
-# the same two ports; re-exported here because every reader -- the listener,
-# cmd_diagnose, the tests -- reaches them as `vm.VM_INSPECT_ORIG_*`.
-VM_INSPECT_ORIG_CLEARTEXT = INSPECT_ORIG_CLEARTEXT
-VM_INSPECT_ORIG_TLS = INSPECT_ORIG_TLS
 
 # The inspector's listener binary, the socket unit's ExecStart. Named here so
 # the unit and the RPM stay one place apart.

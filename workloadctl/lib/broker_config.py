@@ -25,8 +25,9 @@ from config_parser import (container_credential_entries,
                            container_policy_entries, container_uses_inspect)
 from workload_addr import (IP_BIN, VM_ADVERTISED_IFACE,
                            vm_broker_listen_address, vm_inspect_address)
-from vm_defs import vm_uses_inspect
-from vm_network_config import vm_credential_entries, vm_policy_entries
+from egress_policy import vm_uses_inspect
+from egress_policy import vm_policy_entries
+from vm_network_config import vm_credential_entries
 
 
 # The program the generated unit runs. One instance per workload, generated;

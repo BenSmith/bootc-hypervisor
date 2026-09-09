@@ -25,7 +25,8 @@ import shutil
 import struct
 from dataclasses import dataclass, field
 
-from vm import NFT_BIN, NFT_TABLE, vm_nflog_group, vm_uses_inspect
+from egress_policy import vm_uses_inspect
+from vm import NFT_BIN, NFT_TABLE, vm_nflog_group
 from config_parser import container_uses_inspect
 from workload_addr import UID_MIN
 

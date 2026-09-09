@@ -37,8 +37,9 @@ import unittest.mock
 from pathlib import Path
 
 from tests import load_script
+from egress_policy import VM_INSPECT_PORT_TLS
 from vm import (
-    VM_INSPECT_PORT_TLS, vm_ca_cert_path, vm_ca_key_path, vm_ca_openssl_argv,
+    vm_ca_cert_path, vm_ca_key_path, vm_ca_openssl_argv,
     vm_leaf_openssl_argv,
 )
 

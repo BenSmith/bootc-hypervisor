@@ -15,12 +15,10 @@ import tempfile
 import tomllib
 from pathlib import Path
 
-from vm import (
-    VM_INSPECT_POLICY_FILE,
-    VM_SOCKET_DIR,
-    vm_inspect_policy_text,
-    vm_uses_inspect,
+from egress_policy import (
+    VM_INSPECT_POLICY_FILE, vm_inspect_policy_text, vm_uses_inspect,
 )
+from vm import VM_SOCKET_DIR
 from config_parser import container_uses_inspect
 from workload_lib import (
     GENERATED_BY_RE,

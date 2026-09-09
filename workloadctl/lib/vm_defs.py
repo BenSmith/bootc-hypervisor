@@ -19,14 +19,12 @@ no caller changed.
 Installed to /usr/libexec/workloadctl/vm_defs.py.
 """
 
-import fnmatch
 import hashlib
 import ipaddress
 import re
 from pathlib import Path
 from typing import NamedTuple
 
-from config_parser import normalise_hostname
 from workload_addr import VmInspectAddress  # noqa: F401  (FamilyPair annotation)
 
 
@@ -243,39 +241,6 @@ def parse_vm_port(spec: str) -> tuple[str | None, int, int, str]:
 VM_EGRESS_MODES = ("filtered", "open")
 VM_EGRESS_DEFAULT = "filtered"
 
-# What a filtered workload's redirected TLS connections get.
-#
-# `splice` reads the ClientHello's SNI, matches it against `hosts`, and replays
-# those exact bytes upstream. Nothing is decrypted; the guest's handshake is
-# with the origin, and this host never holds a key to it.
-#
-# `inspect` terminates. The inspector completes the guest's handshake itself
-# with a leaf minted by this workload's own CA, opens a separately verified
-# session to the origin, and authorises every REQUEST inside. It is the default
-# because the property the allowlist claims -- that the guest reaches these
-# hosts and no others -- is only true per request under termination: under
-# `splice` a name is checked once, at the front of a connection whose contents
-# nothing can see.
-#
-# THE DEFAULT MOVED, AND IT IS NOT A FREE CHANGE. A terminated guest must trust
-# the workload's CA, which reaches it through the seed, which cloud-init applies
-# once per instance-id. An EXISTING filtered guest does not gain that trust by
-# upgrading the RPM: it gets certificate errors on every HTTPS request until it
-# is re-seeded. `tls = "splice"` is the answer for a guest that cannot be, and
-# is still fully supported -- it is a weaker property, not a deprecated one.
-#
-# IT COSTS A SENTENCE. `splice` here is the widest bypass in this schema: every
-# host, not a named one, and the three narrower hatches beside it (.allow,
-# .internal, .splice, .http2) have each carried a written `reason` since they
-# existed. So this one requires `tls_reason`, for the reason those do -- the
-# person deciding whether a bypass is still needed is not the person who opened
-# it, and "spliced because this guest cannot hold the CA" and "spliced because
-# nobody tried" are the same two words in a config without it. The key is a
-# sibling scalar rather than a table because `tls` is a mode, not a list: a
-# polymorphic `tls` that was sometimes a string and sometimes a table would
-# make the commonest line in the section the one hardest to read.
-VM_TLS_MODES = ("splice", "inspect")
-VM_TLS_DEFAULT = "inspect"
 
 # Modes named but not built, mapped to when they arrive. Empty today, and KEPT
 # empty rather than deleted: the refusal it drives says WHEN a mode lands
@@ -393,102 +358,9 @@ def vm_allowed_hosts(net: dict) -> list[str]:
     return list(hosts) if isinstance(hosts, list) else []
 
 
-def vm_uses_inspect(config: dict) -> bool:
-    """Whether this workload's egress is redirected into an inspector.
-
-    The single source of the predicate that decides whether the inspect
-    socket/service units exist at all: not bridged (a bridged guest has no
-    host socket in its data path, so there is no uid to key the redirect on)
-    and `egress` filtered (an unfiltered VM would be the one the redirect
-    breaks — its dial to a port-443 service it is allowed to reach would be
-    translated into a listener that would refuse it, having no policy naming
-    it). `workload-vm-inspect`'s
-    inspection_applies delegates here rather than re-stating it, so the
-    generator and the helper cannot drift apart.
-
-    A workload with no [vm] section is not a VM and is never inspected. That is
-    tested here rather than left to the callers: every caller happens to be
-    behind a VM-only branch today, so a container config reaching this returned
-    True and nothing noticed. A predicate documented as the single source of a
-    decision has to be right standing alone, or the next caller inherits a bug
-    that reads as correct at its own call site.
-    """
-    if "vm" not in config:
-        return False
-    vm_cfg = config.get("vm", {}) or {}
-    net = vm_cfg.get("network", {}) or {}
-    if not isinstance(net, dict) or net.get("bridge"):
-        return False
-    return net.get("egress", VM_EGRESS_DEFAULT) == "filtered"
-
-
 def vm_runtime_dir(name: str) -> str:
     """Where one instance's config, allowlist, log and pid file live."""
     return f"{VM_SOCKET_DIR}/{name}"
-
-
-# Hostname vocabulary: the one normalisation, the character class that is
-# refused at the parse, and the one comparison. Down here because both
-# substrates and three entrypoints ask the same questions of a name, and a
-# second answer to "what is this name" is a name the guest can spell twice.
-
-# workload_lib.normalise_hostname, under the name the listener, egress_mint and the
-# tests already import. Moved down rather than copied when the container half
-# needed it too: a second normalisation is a second answer to "what is this
-# name", and the guest picks which one it gets by how it spells the host.
-vm_normalise_hostname = normalise_hostname
-
-
-def vm_hostname_control_character(host: str) -> str | None:
-    """The first control character in a name, or None if it carries none.
-
-    A name read off the wire — an SNI, a DNS label — is bytes a guest chose,
-    and both readers of one decode ASCII rather than refusing it: a control
-    character is ASCII. The name then reaches a `print()` whose destination is
-    the journal, where a bare LF ends the record and the rest of the name
-    becomes a SECOND entry, indistinguishable from one this program wrote. A
-    guest that can write `evil.com\\nsplice plane=tls … host=github.com` can
-    forge the evidence an operator reads a decision from. The same name is also
-    carried into the status document that `workloadctl diagnose` renders.
-
-    Refused, not escaped, and refused at the parse — the reason
-    `_reject_controls` in the cleartext plane gives for the same character
-    class: a field with a line ending inside it has no reading both ends share,
-    and rewriting one into something harmless is picking a reading. No name
-    that reaches a decision here needs one, so the parse is where it stops
-    rather than every log site having to remember.
-
-    Returns the character so the caller can name it in ITS own exception type
-    and disposition: an unreadable hello and a malformed query are already
-    counted differently, and a shared raise would flatten them.
-    """
-    for ch in host:
-        if ch < " " or ch == "\x7f":
-            return ch
-    return None
-
-
-def vm_hostname_match(host: str, patterns) -> bool:
-    """Whether a hostname is authorised by a list of fnmatch patterns.
-
-    `fnmatch.fnmatchcase`, not `fnmatch.fnmatch`. The plain form normalises its
-    arguments through os.path.normcase, which is a no-op on Linux and lowercases
-    on other platforms — so it is case-insensitive only by accident of platform,
-    and the operators' patterns were written against fnmatch's case-sensitive
-    behaviour. Both sides are normalised here instead, which is the same answer
-    everywhere.
-
-    The apex trap is preserved, not fixed: `*.example.com` does not authorise
-    `example.com`. That is fnmatch's behaviour, it is what the proxy this
-    replaced did with the same list, and three tracked files document it. A rung that
-    quietly widened it would silently grant every existing config a destination
-    its operator did not write down.
-    """
-    host = vm_normalise_hostname(host)
-    if not host:
-        return False
-    return any(fnmatch.fnmatchcase(host, vm_normalise_hostname(p))
-               for p in patterns)
 
 
 # The environment variables that point a guest's HTTP clients at that bundle.

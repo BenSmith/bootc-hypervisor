@@ -17,7 +17,7 @@ from cmd_diagnose import collect_diagnose_checks
 from cmd_drift import collect_drift, collect_policy_drift
 from cmd_validate import report_config_load_failure
 from substrate import get_substrate
-from vm import vm_inspect_digest_short
+from egress_policy import vm_inspect_digest_short
 from vm_inspect_figures import (
     drop_reasons,
     figure_lines,

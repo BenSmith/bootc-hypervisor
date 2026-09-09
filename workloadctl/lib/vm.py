@@ -10,9 +10,7 @@ Installed to /usr/libexec/workloadctl/vm.py.
 """
 
 import fnmatch
-import hashlib
 import ipaddress
-import json
 import os
 import re
 import socket
@@ -34,14 +32,14 @@ from config_parser import (BROKER_DEFAULT_AUTH_FORMAT,
 # this stack, and an import back up is the cycle test_module_imports.py exists
 # to catch. Listed by name rather than star-imported so that what vm's callers
 # may rely on stays a written-down set.
+from egress_policy import (VM_INSPECT_ORIG_CLEARTEXT, VM_INSPECT_ORIG_TLS,
+                           VM_INSPECT_PORT_CLEARTEXT, VM_INSPECT_PORT_TLS)
 from workload_addr import (IP_BIN, NFLOG_GROUP_BASE, RangeReservation,
                            ReservedRange, UID_MAX, UID_MIN, UidDerived,
                            VM_ADVERTISED_IFACE, VM_BROKER_ADDR_BASE,
                            VM_INSPECT_ADDR6_PREFIX,
                            VM_INSPECT_ADDR_BASE, VM_INSPECT_LISTENER_BIN,
-                           VM_INSPECT_NETWORK, VM_INSPECT_ORIG_CLEARTEXT,
-                           VM_INSPECT_ORIG_TLS, VM_INSPECT_PORT_CLEARTEXT,
-                           VM_INSPECT_PORT_TLS, VM_MGMT_ADDR_BASE, VM_MGMT_NETWORK,
+                           VM_INSPECT_NETWORK, VM_MGMT_ADDR_BASE, VM_MGMT_NETWORK,
                            VM_MGMT_SSH_PORT, VM_RESERVATION_INSPECT4,
                            VM_RESERVATION_INSPECT6, VM_RESERVATION_MGMT,
                            VM_RESERVED_RANGES, VM_RESOLVE_ADDR_BASE,
@@ -92,7 +90,41 @@ from nft_constants import (FamilyPair, NFT_BIN, NFT_MAP_INSPECT4,
                            NFT_SKELETON, NFT_TABLE, _both_families,
                            _split_by_family)
 
-# The VM layer's vocabulary, re-exported on the same contract.
+# The egress policy vocabulary, re-exported on the same contract: the TLS mode,
+# the hostname rules, the parsed policy entries, the inspector's document and
+# the words its per-request record is written in.
+from egress_policy import (VM_DROP_BROKER_UNREACHABLE, VM_DROP_CEILING,
+                           VM_DROP_CLIENT_CERT, VM_DROP_FOREIGN_CALLER,
+                           VM_DROP_INTERNAL, VM_DROP_MINT_FAILED,
+                           VM_DROP_MISDIRECTED, VM_DROP_MISDIRECTED_LISTED,
+                           VM_DROP_NOT_ALLOWLISTED, VM_DROP_NOT_H2,
+                           VM_DROP_NOT_HTTP, VM_DROP_NOT_HTTP_POLICY,
+                           VM_DROP_NOT_PERMITTED, VM_DROP_NO_NAME,
+                           VM_DROP_RELAY_FAILED, VM_DROP_THROTTLED,
+                           VM_DROP_TIMED_OUT, VM_DROP_UNREACHABLE,
+                           VM_DROP_UNREADABLE_REQUEST, VM_DROP_UNVERIFIED,
+                           VM_INSPECT_DIGEST_KEY, VM_INSPECT_DIGEST_SHORT,
+                           VM_INSPECT_LOG_ID_FIELD, VM_INSPECT_LOG_REQ_FIELD,
+                           VM_INSPECT_ORIG_CLEARTEXT, VM_INSPECT_ORIG_TLS,
+                           VM_INSPECT_POLICY_FILE, VM_INSPECT_PORT_CLEARTEXT,
+                           VM_INSPECT_PORT_TLS, VM_INSPECT_RECORD_DECISIONS,
+                           VM_INSPECT_RECORD_FIELDS, VM_INSPECT_RECORD_FILE,
+                           VM_INSPECT_RECORD_MODES, VM_INSPECT_RECORD_PLANES,
+                           VM_INSPECT_RECORD_REASONS, VM_INSPECT_RECORD_ROOT,
+                           VM_INSPECT_STATUS_FILE, VM_LOG_BASE,
+                           VM_POLICY_METHODS, VM_POLICY_METHODS_REFUSED,
+                           VM_TLS_DEFAULT, VM_TLS_MODES, VmPolicyEntry,
+                           _host_reason_hosts,
+                           vm_hostname_control_character, vm_hostname_match,
+                           vm_http2_hosts,
+                           vm_inspect_digest_short, vm_inspect_logs_directory,
+                           vm_inspect_policy, vm_inspect_policy_digest,
+                           vm_inspect_policy_path, vm_inspect_policy_text,
+                           vm_inspect_record_dir, vm_inspect_record_path,
+                           vm_inspect_status_path, vm_internal_hosts,
+                           vm_normalise_hostname, vm_policy_entries,
+                           vm_policy_governs, vm_splice_hosts, vm_uses_inspect,
+                           vm_uses_resolve)
 from vm_defs import (OVMF_CODE_CANDIDATES,
                      OVMF_VARS_CANDIDATES, SEED_PROVIDES_CHOICES,
                      SEED_PROVIDES_RETIRED, SeedContractError,
@@ -105,20 +137,15 @@ from vm_defs import (OVMF_CODE_CANDIDATES,
                      VM_RESERVED_GUEST_ENV, VM_SEED_CONTRACT_EXIT,
                      VM_SIDECAR_SLICE, VM_SOCKET_DIR,
                      VM_SOCKET_FCONTEXT_PATTERN, VM_SOCKET_SELINUX_TYPE,
-                     VM_SOCKET_SELINUX_TYPE_REAL, VM_TLS_DEFAULT, VM_TLS_MODES,
-                     VM_TLS_UNBUILT, find_ovmf_code, find_ovmf_vars, parse_memory_mib,
+                     VM_SOCKET_SELINUX_TYPE_REAL, VM_TLS_UNBUILT, find_ovmf_code, find_ovmf_vars, parse_memory_mib,
                      parse_vm_port, vm_allowed_hosts, vm_guest_agent_socket,
-                     vm_hostname_control_character, vm_hostname_match,
-                     vm_mac_address, vm_mac_collisions, vm_normalise_hostname,
-                     vm_runtime_dir, vm_uses_inspect)
+                     vm_mac_address, vm_mac_collisions, vm_runtime_dir)
 
-# Reading `[vm.network]`, re-exported on the same contract.
 from vm_network_config import (VM_ALLOW_ADDR_RE, VM_ALLOW_NAME_RE,
                                VM_BROKER_DEFAULT_AUTH_FORMAT,
                                VM_BROKER_DEFAULT_AUTH_HEADER,
-                               VM_NETWORK_SCALARS, VM_POLICY_METHODS,
-                               VM_POLICY_METHODS_REFUSED, VmAllowEntry,
-                               VmCredential, VmPolicyEntry, _ALLOW_LABEL,
+                               VM_NETWORK_SCALARS, VmAllowEntry,
+                               VmCredential, _ALLOW_LABEL,
                                _registration_domain_parent,
                                _validate_apex_coverage, _validate_credentials,
                                _validate_egress, _validate_host_reason_entries,
@@ -128,9 +155,8 @@ from vm_network_config import (VM_ALLOW_ADDR_RE, VM_ALLOW_NAME_RE,
                                validate_vm_network, vm_allow_reserved_reason,
                                vm_allow_resolve, vm_allow_resolved,
                                vm_credential_entries, vm_network_warnings,
-                               vm_policy_entries, vm_policy_governs,
                                vm_policy_permits, vm_resolve_policy,
-                               vm_resolve_policy_path, vm_uses_resolve)
+                               vm_resolve_policy_path)
 
 # The generated broker instance, re-exported on the same contract.
 from broker_config import (VM_BROKER_BIN, VM_BROKER_CONFIG_NAME,
@@ -194,261 +220,12 @@ def vm_filter_elements(uid: int, allow: list[str],
             **_split_by_family(NFT_PAIR_ALLOW, allowed)}
 
 
-# --- The inspector's policy document (§7.7.1, §13) ---
-#
-# The listener is socket-activated and long-lived, so it reads its lists once,
-# at start, out of the workload's runtime directory — written at start rather
-# than at generate time for the reason the retired proxy's config was: /run
-# does not exist when the boot generator runs, and writing at start is what
-# makes an edited list take effect on a plain `systemctl restart` with no
-# regeneration. §13 states that recovery property, and the inspect service's
-# PartOf= on the VM is what enforces it; a listener that held its lists in a
-# file written at generate time would keep enforcing the previous boot's policy.
-#
-# JSON rather than a bare line-per-pattern file — the shape the proxy's
-# hosts.allow had — because this document carries a mode as well as a list and
-# will carry more of both.
-VM_INSPECT_POLICY_FILE = "inspect.json"
-
-
-def vm_inspect_policy_path(name: str) -> str:
-    """Where one workload's inspector reads its lists from."""
-    return f"{VM_SOCKET_DIR}/{name}/{VM_INSPECT_POLICY_FILE}"
-
-
-VM_INSPECT_STATUS_FILE = "inspect-status.json"
 VM_RESOLVE_STATUS_FILE = "resolve-status.json"
-
-# The `drop_reasons` keys `workloadctl diagnose` reads back out of the
-# inspector's status document.
-#
-# SECOND DEFINITIONS OF STRINGS THE LISTENER OWNS, and stated here for the
-# reason vm_broker_listen_address's twin is: `libexec/workload-vm-inspect-listener` is an
-# extension-less entrypoint, so nothing in lib/ can import it. A reader either
-# restates the key or matches on a substring -- and a substring is worse, since
-# `not HTTP` is a prefix of `not HTTP (policy entry)` and `host does not match
-# the server name` is a prefix of its allowlisted twin. Both splits exist
-# BECAUSE the two halves need different operator responses, so a reader that
-# merges them by prefix reports the opposite of what the split was for.
-#
-# tests/test_vm_inspect_diagnose.py pins each of these against the listener's
-# own constant. That pin is what makes restating them safe: a rename over there
-# fails a test here, rather than turning a figure into a permanent zero that
-# reads exactly like a refusal that never fired.
-VM_DROP_MISDIRECTED = "host does not match the server name"
-VM_DROP_MISDIRECTED_LISTED = "host does not match the server name (allowlisted)"
-VM_DROP_NOT_HTTP = "not HTTP"
-VM_DROP_NOT_HTTP_POLICY = "not HTTP (policy entry)"
-
-# The two field names that tie one of the inspector's journal lines to the
-# per-request record written beside it. Second definitions for the same reason
-# the four keys above are, and pinned the same way by
-# tests/test_vm_inspect_record.py, which asserts each against the listener's
-# own LOG_ID_FIELD/LOG_REQ_FIELD.
-#
-# `id` is per CONNECTION and `req` is the ordinal within it, so a reader
-# selecting on `id` alone gets every decision taken on one connection in order.
-# Neither can be replaced by `peer=`, which the listener also logs: a source
-# port repeats across the requests on one keep-alive connection and is reused
-# by the kernel after close, so it groups the wrong lines together and splits
-# the right ones apart.
-VM_INSPECT_LOG_ID_FIELD = "id"
-VM_INSPECT_LOG_REQ_FIELD = "req"
-
-# The per-request record's field names, and the vocabularies of two of them.
-# MORE SECOND DEFINITIONS OF LISTENER STRINGS, for the reason the VM_DROP_*
-# keys above are: the record is written by an extension-less entrypoint nothing
-# in lib/ can import, and the reader that renders it lives here. Restating them
-# is safe only because tests/test_vm_inspect_record.py pins each against the
-# listener's own constant -- without that pin a renamed field turns a column
-# into a permanent blank, which reads exactly like a guest that did nothing.
-#
-# `credential` is the NAME of the credstore material the request was brokered
-# with, or null on a request that was not brokered -- never the material, and
-# never an address. It is here because `upstream` is honestly the broker's
-# address on a brokered request: `upstream` is documented as the address
-# actually dialled, and recording the origin there instead would put a second,
-# false definition of "what this request touched" into the one document that
-# exists to be evidence. What makes the honest value readable is
-# this field naming which credential rode along, so `host` says where the
-# request went and `credential` says why `upstream` is a loopback address.
-VM_INSPECT_RECORD_FIELDS = (
-    VM_INSPECT_LOG_ID_FIELD, VM_INSPECT_LOG_REQ_FIELD, "ts", "plane", "mode",
-    "host", "method", "path", "query", "http", "decision", "reason", "status",
-    "upstream", "credential", "duration_ms",
-)
-
-# `forward` and `drop`, the journal's own verbs, and deliberately no third
-# value for "refused with an answer": whether the guest was told is carried
-# exactly by `status` being non-null, and a second spelling of one fact is free
-# to disagree with it.
-VM_INSPECT_RECORD_DECISIONS = ("forward", "drop")
-
-# What the listener was doing with the connection, which is not the question
-# `plane` answers. `splice` and `h2` are the two connection-level records --
-# the paths that carry requests this design never decodes.
-VM_INSPECT_RECORD_MODES = ("forward", "terminate", "splice", "h2")
-
-# The two planes a record can have arrived on, which is the port the guest
-# dialled and not what the listener then did with the connection.
-VM_INSPECT_RECORD_PLANES = ("tls", "cleartext")
-
-# Every value the record's `reason` field can carry -- the listener's own
-# DROP_REASONS, restated whole rather than the four VM_DROP_* keys `diagnose`
-# happened to need.
-#
-# THE WHOLE SET, because `workloadctl egress --reason` validates against it.
-# A closed set is the point: a reason value that matches nothing renders
-# identically to a guest that never hit that refusal, so `--reason
-# "not allowed"` for `not allowlisted` would print an empty report and an
-# operator would conclude the denial never happened. Validated, it is an
-# argparse error naming the valid values instead.
-#
-# This matters more since the guest-facing refusal body was made generic: the
-# guest is told nothing about WHY, so `reason` here is the only place a
-# not-allowlisted denial is distinguishable from a not-permitted one.
-#
-# tests/test_cmd_egress.py pins this against the listener's DROP_REASONS in both
-# directions -- a reason the listener writes and this omits is a filter that
-# cannot select a real refusal, and one this carries that the listener never
-# writes is a filter that always returns nothing.
-VM_DROP_NOT_ALLOWLISTED = "not allowlisted"
-VM_DROP_NO_NAME = "no readable name"
-VM_DROP_UNREADABLE_REQUEST = "unreadable request"
-VM_DROP_UNREACHABLE = "upstream unreachable"
-VM_DROP_INTERNAL = "internal destination"
-VM_DROP_CEILING = "connection ceiling reached"
-# Connection-level like the ceiling, and refused before any byte is read: the
-# caller's uid is not this workload's. The listener identifies callers through
-# lib/peer_identity.py; `workload_filter` is the primary control and this is
-# the layer behind it.
-VM_DROP_FOREIGN_CALLER = "caller is not this workload"
-VM_DROP_RELAY_FAILED = "relay failed"
-VM_DROP_TIMED_OUT = "timed out"
-VM_DROP_UNVERIFIED = "upstream certificate unverified"
-VM_DROP_CLIENT_CERT = "upstream wants a client certificate"
-VM_DROP_THROTTLED = "mint rationed"
-VM_DROP_MINT_FAILED = "could not mint a leaf"
-VM_DROP_NOT_H2 = "not HTTP/2"
-VM_DROP_NOT_PERMITTED = "not permitted by policy"
-# NOT VM_DROP_UNREACHABLE. "the provider is down" and "this workload's
-# credential broker is down" need different operator responses -- the first is
-# somebody else's outage, the second is a unit on this host that failed to
-# start, or an SELinux rule missing from security/workload-inspect.cil, which
-# is the failure that module's own "THE UPSTREAM DIAL" block records as "a
-# policy gap wearing a network error's clothes". Merged into the generic
-# reason, such an AVC is indistinguishable from a provider outage, and
-# `workloadctl egress --reason` -- which validates against this closed set --
-# would have no filter that selects it.
-VM_DROP_BROKER_UNREACHABLE = "credential broker unreachable"
-
-VM_INSPECT_RECORD_REASONS = (
-    VM_DROP_NOT_ALLOWLISTED,
-    VM_DROP_NO_NAME,
-    VM_DROP_UNREADABLE_REQUEST,
-    VM_DROP_UNREACHABLE,
-    VM_DROP_INTERNAL,
-    VM_DROP_CEILING,
-    VM_DROP_FOREIGN_CALLER,
-    VM_DROP_RELAY_FAILED,
-    VM_DROP_TIMED_OUT,
-    VM_DROP_UNVERIFIED,
-    VM_DROP_CLIENT_CERT,
-    VM_DROP_MISDIRECTED,
-    VM_DROP_MISDIRECTED_LISTED,
-    VM_DROP_THROTTLED,
-    VM_DROP_MINT_FAILED,
-    VM_DROP_NOT_HTTP,
-    VM_DROP_NOT_HTTP_POLICY,
-    VM_DROP_NOT_H2,
-    VM_DROP_NOT_PERMITTED,
-    VM_DROP_BROKER_UNREACHABLE,
-)
-
-
-def vm_inspect_status_path(name: str) -> str:
-    """Where one workload's inspector writes its counters.
-
-    Two status files rather than one, and lib/egress_status.py carries the
-    argument: the responder is a separate socket-activated process, and two
-    processes atomically replacing one path leaves only the last writer's
-    figures, silently.
-    """
-    return f"{VM_SOCKET_DIR}/{name}/{VM_INSPECT_STATUS_FILE}"
 
 
 def vm_resolve_status_path(name: str) -> str:
     """Where one workload's responder writes its counters."""
     return f"{VM_SOCKET_DIR}/{name}/{VM_RESOLVE_STATUS_FILE}"
-
-
-# WHERE THE PER-REQUEST RECORD GOES, and why it is not in the journal and not
-# under the workload tree.
-#
-# NOT THE JOURNAL. The inspector's unit sets StandardOutput=journal, so a record
-# written with its ordinary logging lands in a sink readable by root,
-# `systemd-journal` and `adm` -- every sudo-capable login on the host -- rotated
-# by nothing this project owns and forwarded off-box by whatever the host's
-# journald is configured to do. A URL path is evidence of what a sandboxed agent
-# was doing, and a query string can carry a credential outright. The decision
-# lines STAY in the journal, which is the right sink for a message whose job is
-# to tell an operator what to fix; the record is a different document with a
-# different reader. A LogNamespace= was the leading alternative and gives
-# rotation and isolation for free -- but a namespace journal is still readable
-# by `systemd-journal` and `adm`, which is the wrong ACL on a host where sudo
-# does not stay passwordless.
-#
-# NOT THE WORKLOAD TREE either. state/ is svirt_image_t, the label
-# vm_pki_fcontext_patterns() exists to move material OUT of -- an audit record
-# does not belong in the same tree as the guest's disks. data/ is worse: `./`
-# volume anchors resolve into it, so a guest with a virtiofs volume at the data
-# root would read its own audit log.
-#
-# So /var/log, where logrotate is expected to look and where the record survives
-# a rollback of the state tree. The MODES are the access decision:
-#
-#   /var/log/workloadctl/               root:root  0755
-#   /var/log/workloadctl/egress/        root:root  0711
-#   /var/log/workloadctl/egress/<name>/ _wl-<name> 0700
-#   .../requests.log                    _wl-<name> 0600
-#
-# Root and the workload uid, nobody else -- strictly tighter than any journal
-# option. The per-workload directory is owned by the workload rather than by
-# root because the listener recreates the file itself after a rotation (see the
-# logrotate snippet's `nocreate`), and a process running as _wl-<name> cannot
-# create a name in a directory root owns at 0700.
-#
-# egress/ is 0711 and NOT 0700, which is the same distinction: the listener has
-# to traverse it as _wl-<name> to reach its own leaf at all. It was 0700 until
-# a KVM host measured what that costs -- EACCES on every record write, silent,
-# because the write may never raise. The search bit grants no read, so the ACL
-# argument one level up is intact: the directory still cannot be listed.
-VM_INSPECT_RECORD_ROOT = Path("/var/log/workloadctl/egress")
-VM_INSPECT_RECORD_FILE = "requests.log"
-
-# The per-workload directory is a systemd LogsDirectory=, whose names are
-# relative to /var/log. Stated once so the generator and the readers cannot
-# drift: a LogsDirectory= that named a different path than the listener writes
-# to would give the unit a writable directory nobody uses and a write that
-# fails EROFS under ProtectSystem=strict -- which the leaf caches already
-# taught us is swallowed by the per-connection OSError handler and reads as a
-# network fault.
-VM_LOG_BASE = Path("/var/log")
-
-
-def vm_inspect_record_dir(name: str) -> Path:
-    """Where one workload's per-request record lives."""
-    return VM_INSPECT_RECORD_ROOT / name
-
-
-def vm_inspect_record_path(name: str) -> Path:
-    """The record file itself."""
-    return vm_inspect_record_dir(name) / VM_INSPECT_RECORD_FILE
-
-
-def vm_inspect_logs_directory(name: str) -> str:
-    """The LogsDirectory= value for one workload's inspect service."""
-    return str(vm_inspect_record_dir(name).relative_to(VM_LOG_BASE))
 
 
 # The type the record subtree carries, and the pattern the CIL module's own
@@ -463,137 +240,6 @@ def vm_inspect_logs_directory(name: str) -> str:
 # the PKI rules there is nothing per-workload to register or to remove at
 # disable.
 VM_INSPECT_RECORD_SELINUX_TYPE = "wlinspect_log_t"
-
-
-def vm_inspect_policy(net: dict) -> dict:
-    """The inspector's policy document for one workload.
-
-    `hosts` is `[vm.network].hosts` unchanged.
-
-    `internal` is carried and AUTHORISES NOTHING. An `internal` entry names a
-    host that is already on a list (validation refuses one that is not), and it
-    excepts the inspector's *upstream* leg from the internal drop rather than
-    authorising a name. The listener never consults it to admit a connection:
-    the kernel's wl_internal_ok4/6 elements are the one enforcement point, and a
-    second one in userspace could disagree with them while both looked right.
-
-    `splice` is the [[vm.network.splice]] host patterns, and unlike `internal`
-    it DOES decide something: a name it matches is spliced rather than
-    terminated, on a workload whose `tls` is otherwise "inspect". It is carried
-    even when tls is "splice", where it changes nothing, so that the document
-    describes the file rather than the file filtered through the mode -- a
-    listener restarted onto a different `tls` reads a document that already
-    says what the per-host list was.
-
-    `http2` is the [[vm.network.http2]] host patterns. Like `splice` it
-    DECIDES something -- a name it matches is offered h2 on both legs and
-    relayed at frame level rather than parsed -- and like `splice` it is
-    carried even when tls is "splice", so the document describes the file.
-
-    `policy` is the [[vm.network.policy]] entries, normalised. `methods` and
-    `paths` are carried as null where the key was absent rather than as an
-    empty list, because absent means ANY and empty would mean NONE -- and JSON
-    has a word for the difference, so the document should use it rather than
-    make the reader recover it from the schema.
-
-    It is here so that a FAILED upstream dial to a private address can be
-    attributed. An allowlisted name that resolved into private space with no
-    entry is the wildcard trap firing; one WITH an entry is a host that is
-    simply down. Those are the same OSError without this list, and telling them
-    apart is the whole value of the internal-refusal counter.
-
-    `credential` is the credstore NAME of the material a request to this host
-    is brokered with, and it is carried ONLY on the entries that set one --
-    an entry without a credential emits no key at all rather than a null.
-    That sparseness is load-bearing, not tidiness: the document is byte-compared
-    by `collect_policy_drift()` and digested for `diagnose`, so a `"credential":
-    null` on every entry would change the digest of every filtered VM on the
-    fleet and report drift on all of them at upgrade -- which is how a drift
-    signal stops being read. A missing key and a null mean the same thing to the
-    listener (`entry.get("credential")`), so the cheaper side of the trade is
-    the reader's.
-
-    NO ADDRESS is carried with it. The listener derives the broker's address
-    from its own uid, which it already has; putting it here would make the
-    document non-deterministic w.r.t. the TOML and break the byte comparison
-    and the digest. `placeholder` and `env` are not carried either -- they are
-    seed-time and broker-config facts, and the listener decides nothing by them.
-
-    NO `reason` OF ANY KIND IS CARRIED -- not the per-host ones, not
-    `tls_reason`. A reason is written for a person reviewing the config, and
-    the listener decides nothing by it; putting it in the document would give
-    a guest-facing process a field it must never echo and would invite a
-    future reader to treat one as data rather than as prose.
-    """
-    return {
-        "tls": net.get("tls", VM_TLS_DEFAULT),
-        "hosts": vm_allowed_hosts(net),
-        "internal": vm_internal_hosts(net),
-        "splice": vm_splice_hosts(net),
-        "http2": vm_http2_hosts(net),
-        "policy": [
-            {"host": e.host,
-             "methods": None if e.methods is None else list(e.methods),
-             "paths": None if e.paths is None else list(e.paths),
-             **({"credential": e.credential} if e.credential else {})}
-            for e in vm_policy_entries(net)],
-    }
-
-
-def vm_inspect_policy_text(net: dict) -> str:
-    """The policy document as the exact bytes that land on disk.
-
-    THE ONE RENDERER. `write_policy()` in libexec/workload-vm-inspect writes
-    what this returns, and `collect_policy_drift()` compares against it, so the
-    two cannot disagree about a separator, a key order or a trailing newline.
-    A second `json.dumps` with its own arguments would not be a cosmetic
-    duplicate: drift is a byte comparison, so an indent that differed by one
-    would report every inspected workload as drifted forever, which is how a
-    signal stops being read.
-
-    sort_keys because the document has to be a pure function of the TOML and
-    dict order is not; the trailing newline because a text file ends in one and
-    a diff of a file that does not says `\\ No newline at end of file` on
-    every hunk.
-    """
-    return json.dumps(vm_inspect_policy(net), indent=2, sort_keys=True) + "\n"
-
-
-# How much of the digest an operator is shown. Twelve hex characters is enough
-# to tell two documents apart by eye in a diagnostic line and short enough to
-# sit inside one; the full value stays in the status file, where the comparison
-# is actually made.
-VM_INSPECT_DIGEST_SHORT = 12
-
-# The key the listener echoes its loaded document's digest under. Named here
-# rather than spelled at both ends: the writer is the listener and the reader
-# is `diagnose`, and a typo in either would read as "an older listener that
-# does not report a digest", which is the one state the check treats as
-# silence.
-VM_INSPECT_DIGEST_KEY = "policy_digest"
-
-
-def vm_inspect_policy_digest(text: str) -> str:
-    """The digest of one rendered policy document.
-
-    THE ONE PRODUCER, for the same reason vm_inspect_policy_text is: the
-    listener digests the bytes it loaded and `diagnose` digests the bytes on
-    disk, and the two are compared for equality. A hashlib call at each end
-    would be two definitions of that comparison, and the failure mode of a
-    disagreement is not a missed alarm -- it is a PERMANENT one, on every
-    inspected workload on the host, which is how a signal stops being read.
-
-    Over the text rather than over the parsed document, because the text is
-    what both sides have: the listener holds the string it read, and the
-    reader holds the file. Digesting a re-parsed structure would also make the
-    value depend on this Python's dict ordering rather than on the file.
-    """
-    return hashlib.sha256(text.encode()).hexdigest()
-
-
-def vm_inspect_digest_short(digest: str | None) -> str:
-    """A digest as it is shown to a person, or `unknown` for a missing one."""
-    return digest[:VM_INSPECT_DIGEST_SHORT] if digest else "unknown"
 
 
 # --- The transparent redirect's per-workload elements (§7.1, §7.2) ---
@@ -819,85 +465,6 @@ def vm_internal_ok_delete_commands(set_name: str,
         return []
     return [[NFT_BIN, "delete", "element", *NFT_TABLE.split(), set_name,
              "{ " + ", ".join(entries) + " }"]]
-
-
-def vm_internal_hosts(net: dict) -> list[str]:
-    """The host names in [[vm.network.internal]], in file order.
-
-    Shape-tolerant, while vm_internal_resolve two functions down is fatal on
-    the same key at the same moment. The two are not in tension, and the
-    difference is which question is still open at start.
-
-    SHAPE IS ALREADY SETTLED. validate_vm_network refuses a malformed entry --
-    not a table, no `host`, no `reason`, an unknown key, a host on no list --
-    and the boot generator SKIPS a workload whose config does not validate, so
-    it emits no units at all. A malformed entry therefore cannot reach this
-    function on the boot path: there is no VM for it to break. Raising here
-    would restate a verdict already delivered, in a context that can only
-    convert it into a start failure with a worse message.
-
-    RESOLUTION IS NOT SETTLED, AND CANNOT BE. Whether a name answers is a fact
-    about the host and the moment, not about the config -- `validate` warns on
-    it precisely because it cannot decide it. So the check has to happen at
-    start, and its failure is deliberately fatal: an exemption that silently
-    did not arm leaves the guest refused by the very drop the entry existed to
-    except. See workload-vm-inspect's internal_failure for what that failure
-    then has to say for itself.
-
-    So: tolerate what validation owns, fail loudly on what only start can know.
-    """
-    return _host_reason_hosts(net, "internal")
-
-
-def vm_splice_hosts(net: dict) -> list[str]:
-    """The host patterns in [[vm.network.splice]], in file order.
-
-    HLD §11's second escape hatch: one host that must not be terminated,
-    exempted on a plain restart. The third hatch -- `tls = "splice"` for the
-    whole workload -- is a different key and this list is not consulted under
-    it, because there everything is spliced already.
-
-    Shape-tolerant for the reason vm_internal_hosts is: validate_vm_network
-    owns the shape and the boot generator skips a workload that does not
-    validate, so a malformed entry cannot reach here on the boot path.
-    """
-    return _host_reason_hosts(net, "splice")
-
-
-def vm_http2_hosts(net: dict) -> list[str]:
-    """The host patterns in [[vm.network.http2]], in file order.
-
-    HLD §8's narrow opt-in: a host here is offered `h2` on both legs and
-    relayed at the frame level, so its `:authority` goes unread and true
-    fronting stays open on it. Every OTHER terminated host is offered
-    `http/1.1` alone, which is what makes `paths`, `methods` and the
-    Host-binding work without an HPACK decoder anywhere.
-
-    So this is a bypass with a written reason, beside `allow`, `internal` and
-    `splice` -- not a performance flag. What keeps it from meaning EXEMPT is
-    the preface and frame check on the listener's side: a connection here must
-    actually speak h2. Read that half before widening this one.
-
-    Shape-tolerant for the reason vm_internal_hosts is.
-    """
-    return _host_reason_hosts(net, "http2")
-
-
-def _host_reason_hosts(net: dict, key: str) -> list[str]:
-    """The `host` of every well-formed [[vm.network.<key>]] entry, in order.
-
-    One body for `internal`, `splice` and `http2`, which are the same table
-    with the same two keys -- the mirror of _validate_host_reason_entries on
-    the validating side, and shared for the same reason: three copies of this
-    is three chances for one of them to start tolerating a shape the other two
-    refuse, on a path where the difference is silent.
-    """
-    entries = net.get(key, [])
-    if not isinstance(entries, list):
-        return []
-    return [e["host"].strip() for e in entries
-            if isinstance(e, dict) and isinstance(e.get("host"), str)
-            and e["host"].strip()]
 
 
 def vm_internal_resolve(host: str) -> list[ipaddress.IPv4Address | ipaddress.IPv6Address]:
@@ -1323,8 +890,6 @@ def vm_leaf_openssl_argv(name: str, ca_key_path, ca_cert_path,
         "-addext", "subjectKeyIdentifier=hash",
         "-addext", "authorityKeyIdentifier=keyid",
     ]
-
-
 
 
 # --- Writing nft's elements: the filter's add and delete commands ---

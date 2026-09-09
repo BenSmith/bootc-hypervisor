@@ -17,6 +17,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
+from egress_policy import VM_INSPECT_PORT_CLEARTEXT, VM_INSPECT_PORT_TLS
 from vm import (
     NFT_MAP_INSPECT4, NFT_MAP_INSPECT6, NFT_SET_ALLOW4, NFT_SET_ALLOW6,
     NFT_SET_FILTERED, NFT_SET_INSPECT_CG, NFT_SET_INSPECT_DST,
@@ -24,7 +25,6 @@ from vm import (
     NFT_SET_INSPECT_LIVE, NFT_SET_INSPECT_LIVE6,
     NFT_SET_INTERNAL4, NFT_SET_INTERNAL6, NFT_SET_EGRESS_CG, NFT_SKELETON,
     VM_INSPECT_ADDR6_PREFIX, VM_INSPECT_NETWORK,
-    VM_INSPECT_PORT_CLEARTEXT, VM_INSPECT_PORT_TLS,
     CONNTRACK_PRESSURE, conntrack_occupancy,
     nft_drop_counter, nft_element_counter, nft_set_elements,
     parse_vm_allow, vm_allow_reserved_reason, vm_filter_commands,
@@ -2301,7 +2301,7 @@ class TestRung2Schema(unittest.TestCase):
         anything, and the property it gives -- one name checked per connection
         -- is weaker rather than wrong.
         """
-        from vm import VM_TLS_DEFAULT, VM_TLS_MODES
+        from egress_policy import VM_TLS_DEFAULT, VM_TLS_MODES
         self.assertEqual(VM_TLS_DEFAULT, "inspect")
         self.assertIn(VM_TLS_DEFAULT, VM_TLS_MODES)
         self.assertIn("splice", VM_TLS_MODES)
@@ -2632,7 +2632,7 @@ class TestRung2Schema(unittest.TestCase):
     # --- methods and paths ---
 
     def test_a_lowercase_method_is_accepted_and_normalised(self):
-        from vm import vm_policy_entries
+        from egress_policy import vm_policy_entries
         self.assertEqual(self._egress({
             "hosts": ["a.example"],
             "policy": [{"host": "a.example", "methods": ["get"],
@@ -3577,7 +3577,7 @@ class TestInternalOkElements(unittest.TestCase):
         This runs at VM start, where raising on a typo turns it into a workload
         that does not boot -- long after the error was reportable.
         """
-        from vm import vm_internal_hosts
+        from egress_policy import vm_internal_hosts
         self.assertEqual(
             vm_internal_hosts({"internal": [{"host": "git.local", "reason": "r"},
                                             {"reason": "no host"},
@@ -3843,7 +3843,8 @@ class TestRung6CredentialSchema(unittest.TestCase):
     def test_entries_are_read_shape_tolerantly(self):
         """Both readers run at VM start, where raising turns a typo into a
         workload that does not boot -- long after the error was reportable."""
-        from vm import vm_credential_entries, vm_policy_entries
+        from egress_policy import vm_policy_entries
+        from vm import vm_credential_entries
         self.assertEqual(vm_credential_entries({"credential": "not a list"}), [])
         self.assertEqual(vm_credential_entries({}), [])
         self.assertEqual(
@@ -3874,7 +3875,7 @@ class TestRung6PolicyDocument(unittest.TestCase):
                                 "env": "A"}] if credential else []}
 
     def test_an_entry_with_a_credential_carries_its_name(self):
-        from vm import vm_inspect_policy
+        from egress_policy import vm_inspect_policy
         self.assertEqual(vm_inspect_policy(self._net("tok"))["policy"][0]
                          ["credential"], "tok")
 
@@ -3886,13 +3887,13 @@ class TestRung6PolicyDocument(unittest.TestCase):
         digest of EVERY filtered VM on the fleet changes at upgrade, so every
         one of them reports drift and the report stops being read.
         """
-        from vm import vm_inspect_policy
+        from egress_policy import vm_inspect_policy
         self.assertNotIn("credential", vm_inspect_policy(self._net(None))
                          ["policy"][0])
 
     def test_a_credential_free_document_is_byte_identical_across_the_change(self):
         """The concrete form of the rule above, in the bytes drift compares."""
-        from vm import vm_inspect_policy_text
+        from egress_policy import vm_inspect_policy_text
         self.assertEqual(
             vm_inspect_policy_text(self._net(None)),
             '{\n'
@@ -3919,7 +3920,8 @@ class TestRung6PolicyDocument(unittest.TestCase):
     def test_the_digest_moves_for_a_credential_and_not_for_its_absence(self):
         """Asserted in BOTH directions, because only the second half fails if
         the key is emitted unconditionally."""
-        from vm import vm_inspect_policy_digest, vm_inspect_policy_text
+        from egress_policy import (vm_inspect_policy_digest,
+                                   vm_inspect_policy_text)
         bare = vm_inspect_policy_digest(vm_inspect_policy_text(self._net(None)))
         with_cred = vm_inspect_policy_digest(
             vm_inspect_policy_text(self._net("tok")))
@@ -3933,7 +3935,7 @@ class TestRung6PolicyDocument(unittest.TestCase):
         nothing by the other two -- carrying them would make the document
         non-deterministic w.r.t. the TOML or leak the fiction into a file the
         guest-facing process reads."""
-        from vm import vm_inspect_policy_text
+        from egress_policy import vm_inspect_policy_text
         text = vm_inspect_policy_text(self._net("tok"))
         self.assertNotIn("127.129", text)
         self.assertNotIn("placeholder", text)

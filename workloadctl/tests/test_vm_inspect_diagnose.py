@@ -25,9 +25,9 @@ from unittest import mock
 from cmd_diagnose import (
     _binding_fragments, _named_hosts, _not_http_fragments,
 )
-from vm import (
-    VM_DROP_MISDIRECTED, VM_DROP_MISDIRECTED_LISTED,
-    VM_DROP_NOT_HTTP, VM_DROP_NOT_HTTP_POLICY,
+from egress_policy import (
+    VM_DROP_MISDIRECTED, VM_DROP_MISDIRECTED_LISTED, VM_DROP_NOT_HTTP,
+    VM_DROP_NOT_HTTP_POLICY,
 )
 import vm_inspect_figures as figures_mod
 from egress_status import OTHER_KEY

@@ -98,9 +98,11 @@ import time
 
 sys.dont_write_bytecode = True
 
+from egress_policy import (
+    vm_hostname_control_character, vm_hostname_match, vm_normalise_hostname,
+)
 from vm import (
-    VM_RESOLVE_TTL, vm_hostname_control_character, vm_hostname_match,
-    vm_normalise_hostname, vm_resolve_policy_path, vm_resolve_status_path,
+    VM_RESOLVE_TTL, vm_resolve_policy_path, vm_resolve_status_path,
 )
 from sd_listen import NotSocketActivated
 from sd_listen import (

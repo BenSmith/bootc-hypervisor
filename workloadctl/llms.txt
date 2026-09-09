@@ -458,6 +458,7 @@ lib/qmp.py                         # QMP client
 lib/workloadctl_core.py            # WorkloadConfig / WorkloadManager (TOML loading, paths, lifecycle field)
 lib/config_parser.py               # The TOML grammar both substrates read (hostname patterns, policy/credential blocks, volumes)
 lib/workload_lib.py                # Shared library (UID allocation, paths, subid math)
+lib/egress_policy.py               # What a filtered workload may reach: TLS mode, hostname rules, the inspector's document and record vocabulary
 lib/vm.py                          # VM constants and derivations (addresses, planes, unit names)
 lib/vm_provision.py                # VM disk/seed provisioning
 lib/egress_status.py               # Egress inspector state derivation (both substrates)

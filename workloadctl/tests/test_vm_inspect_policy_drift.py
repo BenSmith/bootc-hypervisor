@@ -30,7 +30,7 @@ from pathlib import Path
 from unittest import mock
 
 import cmd_drift  # noqa: E402
-from vm import vm_inspect_policy, vm_inspect_policy_text  # noqa: E402
+from egress_policy import vm_inspect_policy, vm_inspect_policy_text
 from workload_lib import container_inspect_policy_text  # noqa: E402
 
 from tests import load_script

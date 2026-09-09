@@ -42,7 +42,7 @@ from cmd_egress import (
     group_by_connection, group_is_partial, parse_when, read_records,
     resolve_id, resolve_reason, resolve_status, select,
 )
-from vm import (
+from egress_policy import (
     VM_INSPECT_LOG_ID_FIELD, VM_INSPECT_LOG_REQ_FIELD,
     VM_INSPECT_RECORD_DECISIONS, VM_INSPECT_RECORD_FIELDS,
     VM_INSPECT_RECORD_MODES, VM_INSPECT_RECORD_PLANES,

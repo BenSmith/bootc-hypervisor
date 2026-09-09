@@ -27,14 +27,13 @@ import unittest
 import unittest.mock
 from pathlib import Path
 
-from vm import (
+from egress_policy import (
     VM_INSPECT_LOG_ID_FIELD, VM_INSPECT_LOG_REQ_FIELD,
     VM_INSPECT_RECORD_DECISIONS, VM_INSPECT_RECORD_FIELDS,
-    VM_INSPECT_RECORD_MODES,
-    VM_INSPECT_RECORD_FILE, VM_INSPECT_RECORD_ROOT,
-    VM_INSPECT_RECORD_SELINUX_TYPE,
+    VM_INSPECT_RECORD_MODES, VM_INSPECT_RECORD_FILE, VM_INSPECT_RECORD_ROOT,
     vm_inspect_logs_directory, vm_inspect_record_dir, vm_inspect_record_path,
 )
+from vm import VM_INSPECT_RECORD_SELINUX_TYPE
 
 ROOT = Path(__file__).resolve().parent.parent
 
