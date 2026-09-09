@@ -88,7 +88,7 @@ def self_counter():
                             "workload_filter", set_name).stdout)
         script = (
             "import json,sys;sys.path.insert(0,%r);"
-            "from vm import nft_element_counter;"
+            "from netfilter_state import nft_element_counter;"
             "c=nft_element_counter(json.load(sys.stdin),%d);"
             "print(-1 if c is None else c[0])" % (LIBDIR, UID))
         r = run(["python3", "-c", script], input=json.dumps(doc))
