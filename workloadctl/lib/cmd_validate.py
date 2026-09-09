@@ -16,7 +16,6 @@ from typing import NoReturn
 from config_parser import container_credential_entries, container_uses_inspect
 from workload_lib import (
     container_internal_entries,
-    CREDSTORE_DIR,
     expand_volume_path,
     GENERATOR_OWNED_DIRECTIVES,
 )
@@ -31,7 +30,8 @@ from validation import (
     validate_workload_config,
     validate_workload_name,
 )
-from secrets_template import auto_detect_credentials, find_inlined_secrets
+from secrets_template import (auto_detect_credentials, CREDSTORE_DIR,
+                             find_inlined_secrets)
 from workloadctl_core import (
     WorkloadConfig,
     WorkloadManager,

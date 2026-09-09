@@ -22,6 +22,7 @@ from unittest import mock
 
 import workload_lib          # noqa: E402
 import cmd_secret           # noqa: E402
+import secrets_template     # noqa: E402
 
 _REAL_PATH = pathlib.Path
 
@@ -534,14 +535,14 @@ class ScopedCredentialNameTest(SecretTestBase):
         gets a decryption failure rather than the material. A scoped path with
         an unscoped seal name would look right and protect nothing.
         """
-        path, seal = cmd_secret.credential_path(
+        path, seal = secrets_template.credential_path(
             self.cred_dir, "broker/agentvm/github-token")
         self.assertEqual(path,
                          self.cred_dir / "broker" / "agentvm" / "github-token")
         self.assertEqual(seal, "broker-agentvm-github-token")
 
     def test_an_unscoped_name_is_unchanged(self):
-        path, seal = cmd_secret.credential_path(self.cred_dir, "api")
+        path, seal = secrets_template.credential_path(self.cred_dir, "api")
         self.assertEqual(path, self.cred_dir / "api")
         self.assertEqual(seal, "api")
 
@@ -555,7 +556,7 @@ class ScopedCredentialNameTest(SecretTestBase):
                      "/etc/passwd"):
             with self.subTest(name=name):
                 with self.assertRaises(ValueError):
-                    cmd_secret.credential_path(self.cred_dir, name)
+                    secrets_template.credential_path(self.cred_dir, name)
 
     def test_create_seals_under_the_scoped_name(self):
         captured = {}
@@ -690,7 +691,7 @@ class BrokerMaterialIsUnreachableFromWorkloadEnvTest(unittest.TestCase):
         """Two spellings of the subtree -- the CLI's and the one the generated
         unit's LoadCredentialEncrypted= will point at -- would be a broker that
         cannot find material `secret create` reported as written."""
-        self.assertEqual(cmd_secret.CREDENTIAL_SCOPES, ("broker",))
+        self.assertEqual(secrets_template.CREDENTIAL_SCOPES, ("broker",))
 
 
 class PassphraseFileErrorTest(unittest.TestCase):

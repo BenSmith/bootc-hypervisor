@@ -138,12 +138,6 @@ def mount_points(mountinfo: Path | None = None) -> set[Path]:
     return points
 
 
-# systemd-creds credential store. Secrets are created here (`workloadctl secret`),
-# loaded from here by the generator, and decrypted at runtime by
-# workload-ensure-user. Single source of truth so backup/restore/rotate can't
-# drift onto the wrong path (the plain /etc/credstore is only a legacy fallback).
-CREDSTORE_DIR = Path("/etc/credstore.encrypted")
-
 # Shipped bundle control-file tree (Containerfile/build.sh/setup.sh/policy.cil),
 # keyed by `[workload] bundle`. Env-overridable so the control-file resolver can
 # be unit-tested against a temp /usr tree. The operator override leg lives under

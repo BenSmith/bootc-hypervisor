@@ -7,6 +7,13 @@ credentials a config demands. The single-pass, never-re-scan property and the
 `$$` escaping are load-bearing security invariants — read the pattern comments
 before touching them.
 
+It also owns the credstore path and the credential NAME grammar — where a
+credential lives, and what its seal name is. That sits here rather than with
+the `secret` verb because the scoped `broker/<workload>/<name>` form is
+unreachable from workload env only as a joint property of two patterns in this
+file, and because the generator's broker render needs the seal name without
+importing the CLI.
+
 Installed to /usr/libexec/workloadctl/secrets_template.py.
 """
 
@@ -67,6 +74,93 @@ _SUBSTITUTION_PATTERN = re.compile(
 # decrypted secret plaintext is emitted verbatim. Shared by resolve_secret_env_vars
 # (resolve) and auto_detect_credentials (demand) so the two agree exactly.
 _ENV_SECRET_REF = re.compile(r'(\$)?\$\{SECRET:([a-zA-Z0-9_-]+)}')
+
+
+# --- The credential store, and how one credential is named ---
+#
+# Down here beside SECRET_PATTERN rather than up in the CLI's `secret` verb,
+# because the scoped form's unreachability from workload env is a JOINT
+# property of the two grammars and neither file could state it alone. The
+# second reason is direction: the seal-name rule has one caller that is not the
+# CLI -- broker_config, which every generated broker unit's credential id comes
+# out of -- and a library module reaching up into cmd_secret for it was the
+# last of the cycles this split existed to remove.
+
+# systemd-creds credential store. Secrets are created here (`workloadctl
+# secret`), loaded from here by the generator, and decrypted at runtime by
+# workload-ensure-user. Single source of truth so backup/restore/rotate can't
+# drift onto the wrong path (the plain /etc/credstore is only a legacy
+# fallback).
+CREDSTORE_DIR = Path("/etc/credstore.encrypted")
+
+# The one scope below the credstore root, and the only one. Broker material
+# (ADR 007) lives at <credstore>/broker/<workload>/<name>: it is operator-
+# created, encrypted, and has to survive a reboot like everything else here,
+# but it must never be reachable from a workload's environment.
+#
+# THAT UNREACHABILITY IS STRUCTURAL AND COMES FROM ONE CHARACTER, TWICE. `/` is
+# what makes the credential nameable on the CLI, and it is what makes it
+# unnameable from workload env: SECRET_PATTERN above is
+# `\$\{SECRET:([a-zA-Z0-9_-]+)}` and has no `/`, so `${SECRET:broker/x/y}`
+# does not match the pattern at all -- it is not refused by a rule that could
+# be relaxed, it is unrepresentable. A future pass that "tidied" the pattern by
+# adding `/` to that class would open this silently, which is why the test for
+# it asserts against SECRET_PATTERN and the resolver rather than against a
+# validation message.
+CREDENTIAL_SCOPES = ("broker",)
+
+# One path segment. The same class the unscoped form has always enforced, and
+# it is what keeps a scoped name inside its own workload's subtree: no `/`, so
+# no traversal, and no `..`, so nothing to normalise away.
+_SEGMENT_RE = re.compile(r"^[a-zA-Z0-9_-]+$")
+
+
+def credential_path(cred_dir: Path, name: str):
+    """(file, seal_name) for one credential name, scoped or not.
+
+    Two forms:
+
+      `<name>`                     -> <credstore>/<name>, sealed --name=<name>
+      `broker/<workload>/<name>`   -> <credstore>/broker/<workload>/<name>,
+                                      sealed --name=broker-<workload>-<name>
+
+    The seal name matters as much as the path. systemd-creds binds the
+    plaintext to the name it was sealed under, so a generated unit that
+    LoadCredentialEncrypted='s another workload's file gets a decryption
+    failure rather than the material -- the path is not the boundary, the seal
+    name is, and it carries the workload.
+
+    Scoping is a NAME FORM and not a flag, deliberately: every verb takes a
+    name already, so this reaches all seven at once with no new argparse
+    option, no completions change, no docs/cli.md matrix row, and nothing for
+    tests/test_completions.py's one-way blindness (it catches offered-but-unreal
+    flags, never unoffered-but-real ones) to miss.
+
+    Raises ValueError with an operator-readable message.
+    """
+    parts = name.split("/")
+    if len(parts) == 1:
+        if not _SEGMENT_RE.match(name):
+            raise ValueError(
+                "Secret name must contain only letters, numbers, underscore "
+                "and hyphen — or be a scoped name like "
+                "'broker/<workload>/<credential>'")
+        return cred_dir / name, name
+    if parts[0] not in CREDENTIAL_SCOPES:
+        raise ValueError(
+            f"Unknown credential scope {parts[0]!r}; the scoped form is "
+            f"'{CREDENTIAL_SCOPES[0]}/<workload>/<credential>'")
+    if len(parts) != 3:
+        raise ValueError(
+            f"A {parts[0]!r} credential is named "
+            f"'{parts[0]}/<workload>/<credential>' — three segments, got "
+            f"{len(parts)}")
+    if not all(_SEGMENT_RE.match(part) for part in parts):
+        raise ValueError(
+            "Each segment of a scoped name must contain only letters, "
+            "numbers, underscore and hyphen")
+    scope, workload, leaf = parts
+    return cred_dir / scope / workload / leaf, f"{scope}-{workload}-{leaf}"
 
 
 def substitute_template(

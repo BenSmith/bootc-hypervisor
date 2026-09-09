@@ -9,17 +9,18 @@ import hmac
 import json
 import os
 from pathlib import Path
-import re
 import subprocess
 import sys
 import tempfile
 import tomllib
 
-from workload_lib import (
+from workload_lib import iter_workloads
+from secrets_template import (
+    auto_detect_credentials,
+    CREDENTIAL_SCOPES,
+    credential_path,
     CREDSTORE_DIR,
-    iter_workloads,
 )
-from secrets_template import auto_detect_credentials
 from workloadctl_core import (
     WorkloadConfig,
     WorkloadManager,
@@ -195,76 +196,6 @@ def _strip_trailing_newline(text: str) -> str:
     if text.endswith("\n"):
         return text[:-1]
     return text
-
-
-# The one scope below the credstore root, and the only one. Broker material
-# (ADR 007) lives at <credstore>/broker/<workload>/<name>: it is operator-
-# created, encrypted, and has to survive a reboot like everything else here,
-# but it must never be reachable from a workload's environment.
-#
-# THAT UNREACHABILITY IS STRUCTURAL AND COMES FROM ONE CHARACTER, TWICE. `/` is
-# what makes the credential nameable on this CLI, and it is what makes it
-# unnameable from workload env: secrets_template.SECRET_PATTERN is
-# `\$\{SECRET:([a-zA-Z0-9_-]+)}` and has no `/`, so `${SECRET:broker/x/y}`
-# does not match the pattern at all -- it is not refused by a rule that could
-# be relaxed, it is unrepresentable. A future pass that "tidied" the pattern by
-# adding `/` to that class would open this silently, which is why the test for
-# it asserts against SECRET_PATTERN and the resolver rather than against a
-# validation message.
-CREDENTIAL_SCOPES = ("broker",)
-
-# One path segment. The same class the unscoped form has always enforced, and
-# it is what keeps a scoped name inside its own workload's subtree: no `/`, so
-# no traversal, and no `..`, so nothing to normalise away.
-_SEGMENT_RE = re.compile(r"^[a-zA-Z0-9_-]+$")
-
-
-def credential_path(cred_dir: Path, name: str):
-    """(file, seal_name) for one credential name, scoped or not.
-
-    Two forms:
-
-      `<name>`                     -> <credstore>/<name>, sealed --name=<name>
-      `broker/<workload>/<name>`   -> <credstore>/broker/<workload>/<name>,
-                                      sealed --name=broker-<workload>-<name>
-
-    The seal name matters as much as the path. systemd-creds binds the
-    plaintext to the name it was sealed under, so a generated unit that
-    LoadCredentialEncrypted='s another workload's file gets a decryption
-    failure rather than the material -- the path is not the boundary, the seal
-    name is, and it carries the workload.
-
-    Scoping is a NAME FORM and not a flag, deliberately: every verb takes a
-    name already, so this reaches all seven at once with no new argparse
-    option, no completions change, no docs/cli.md matrix row, and nothing for
-    tests/test_completions.py's one-way blindness (it catches offered-but-unreal
-    flags, never unoffered-but-real ones) to miss.
-
-    Raises ValueError with an operator-readable message.
-    """
-    parts = name.split("/")
-    if len(parts) == 1:
-        if not _SEGMENT_RE.match(name):
-            raise ValueError(
-                "Secret name must contain only letters, numbers, underscore "
-                "and hyphen — or be a scoped name like "
-                "'broker/<workload>/<credential>'")
-        return cred_dir / name, name
-    if parts[0] not in CREDENTIAL_SCOPES:
-        raise ValueError(
-            f"Unknown credential scope {parts[0]!r}; the scoped form is "
-            f"'{CREDENTIAL_SCOPES[0]}/<workload>/<credential>'")
-    if len(parts) != 3:
-        raise ValueError(
-            f"A {parts[0]!r} credential is named "
-            f"'{parts[0]}/<workload>/<credential>' — three segments, got "
-            f"{len(parts)}")
-    if not all(_SEGMENT_RE.match(part) for part in parts):
-        raise ValueError(
-            "Each segment of a scoped name must contain only letters, "
-            "numbers, underscore and hyphen")
-    scope, workload, leaf = parts
-    return cred_dir / scope / workload / leaf, f"{scope}-{workload}-{leaf}"
 
 
 def iter_credentials(cred_dir: Path):

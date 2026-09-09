@@ -170,11 +170,11 @@ class TestTheCredentialId(unittest.TestCase):
     systemd-creds binds the id into the blob and verifies it on decrypt, so a
     generated unit pointing at another workload's file -- the path is guessable
     -- fails at start instead of serving that workload's key. Asked of
-    cmd_secret rather than spelled twice.
+    secrets_template rather than spelled twice.
     """
 
-    def test_it_matches_what_cmd_secret_seals_under(self):
-        from cmd_secret import credential_path
+    def test_it_matches_what_the_cli_seals_under(self):
+        from secrets_template import credential_path
         path, cred_id = vm_broker_credential("agent", "example-token")
         expected_path, expected_id = credential_path(
             Path("/etc/credstore.encrypted"), "broker/agent/example-token")

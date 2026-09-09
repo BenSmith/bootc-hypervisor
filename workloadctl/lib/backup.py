@@ -18,12 +18,12 @@ from pathlib import Path
 
 from cli_log import error, info, warn
 from qmp import QMPClient
-from secrets_template import auto_detect_credentials
+from secrets_template import auto_detect_credentials, CREDSTORE_DIR
 from service_runtime import restart_workload_service
 from substrate import BackupError
 from vm import VM_SOCKET_DIR
 from vm_clock import CLOCK_RESYNCED, vm_resync_guest_clock_if_skewed
-from workload_lib import CREDSTORE_DIR, mount_points, workload_config_path
+from workload_lib import mount_points, workload_config_path
 
 
 def backup_vm(config, output: Path, *, quiet: bool) -> int:

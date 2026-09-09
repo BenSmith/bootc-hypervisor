@@ -3045,11 +3045,12 @@ class TestBackupImplAndHelpers(unittest.TestCase):
         # the production default and that all consumers share one constant.
         import cmd_backup
         import cmd_secret
-        self.assertEqual(workload_lib.CREDSTORE_DIR,
+        import secrets_template
+        self.assertEqual(secrets_template.CREDSTORE_DIR,
                          Path('/etc/credstore.encrypted'))
-        self.assertIs(_backup_mod.CREDSTORE_DIR, workload_lib.CREDSTORE_DIR)
-        self.assertIs(cmd_backup.CREDSTORE_DIR, workload_lib.CREDSTORE_DIR)
-        self.assertIs(cmd_secret.CREDSTORE_DIR, workload_lib.CREDSTORE_DIR)
+        self.assertIs(_backup_mod.CREDSTORE_DIR, secrets_template.CREDSTORE_DIR)
+        self.assertIs(cmd_backup.CREDSTORE_DIR, secrets_template.CREDSTORE_DIR)
+        self.assertIs(cmd_secret.CREDSTORE_DIR, secrets_template.CREDSTORE_DIR)
 
     def test_print_backup_size_formats_bytes(self):
         buf = io.StringIO()

@@ -34,6 +34,7 @@ from config_parser import (container_credential_entries,
 from workload_addr import (IP_BIN, VM_ADVERTISED_IFACE,
                            vm_broker_listen_address, vm_inspect_address)
 from egress_policy import vm_uses_inspect
+from secrets_template import credential_path, CREDSTORE_DIR
 from egress_policy import vm_policy_entries
 
 
@@ -173,8 +174,8 @@ def vm_uses_credentials(config: dict) -> bool:
 def vm_broker_credential(name: str, credential: str) -> tuple[Path, str]:
     """(ciphertext path, systemd credential id) for one workload's material.
 
-    Asked of cmd_secret rather than spelled here, because the id is the SEAL
-    NAME and the seal name is not decorative: systemd-creds binds it into the
+    Asked of secrets_template rather than spelled here, because the id is the
+    SEAL NAME and the seal name is not decorative: systemd-creds binds it into the
     blob and verifies it on decrypt, so a generated unit that loaded another
     workload's file -- given the path, which is guessable -- gets a decryption
     failure at start instead of that workload's key. Two implementations of the
@@ -185,11 +186,6 @@ def vm_broker_credential(name: str, credential: str) -> tuple[Path, str]:
     each into $CREDENTIALS_DIRECTORY under exactly this name, and
     render_vm_broker_config writes the same string as `credential =`.
     """
-    # Lazy: cmd_secret imports the CLI core, and this module is imported by the
-    # boot generator, where the import budget is the reason Python is kept out
-    # of generator context in the first place.
-    from cmd_secret import credential_path
-    from workload_lib import CREDSTORE_DIR
     path, seal = credential_path(Path(CREDSTORE_DIR), f"broker/{name}/{credential}")
     return path, seal
 

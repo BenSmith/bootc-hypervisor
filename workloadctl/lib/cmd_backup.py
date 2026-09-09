@@ -14,8 +14,8 @@ import tempfile
 import tomllib
 
 from config_parser import WORKLOADS_BASE
+from secrets_template import CREDSTORE_DIR
 from workload_lib import (
-    CREDSTORE_DIR,
     mount_points,
     workload_config_path,
     workload_data_dir,

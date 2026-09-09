@@ -46,12 +46,13 @@ from tests import REPO_ROOT
 LIB = Path(REPO_ROOT) / "lib"
 
 # The shared plane: modules that must not depend on anything above them.
-# Three do not exist yet -- B2 creates them -- and are listed so that the
-# first commit to add one inherits the rule instead of having to remember it.
+# `secrets_template` was always one in fact -- it imports nothing of ours --
+# and is named here from the commit that gave it a caller below the CLI.
 PLANE = frozenset({
     "workload_addr", "egress_selinux", "egress_status", "egress_mint",
     "broker_config",
     "config_parser", "nft_constants", "egress_ca", "egress_policy",
+    "secrets_template",
 })
 
 # Everything the plane may not import. `cmd_*` is matched by prefix below.
@@ -59,16 +60,13 @@ ABOVE_THE_PLANE = frozenset({"vm", "workload_lib"})
 
 # What the tree does today, and nothing more. Empty is the goal; see B3.
 UPWARD_EDGES = {
-    # The cycle itself: workload_lib is above the plane and reaches back into
-    # the substrate facade from three function bodies. It was four until
-    # VM_RESERVED_GUEST_ENV moved down to egress_ca beside the CA variables it
-    # is derived from.
+    # The cycle itself, and now all that is left of the table: workload_lib is
+    # above the plane and reaches back into the substrate facade from three
+    # function bodies. It was four until VM_RESERVED_GUEST_ENV moved down to
+    # egress_ca beside the CA variables it is derived from. The broker's two
+    # went when the credstore path and the credential name grammar moved down
+    # to secrets_template -- the seal name has one caller that is not the CLI.
     ("workload_lib", "vm"): 3,
-    # CREDSTORE_DIR, fetched lazily inside the credential path helper. The
-    # module-level half of this edge died when the container parse functions
-    # moved down to config_parser.
-    ("broker_config", "workload_lib"): 1,
-    ("broker_config", "cmd_secret"): 1,
 }
 
 
