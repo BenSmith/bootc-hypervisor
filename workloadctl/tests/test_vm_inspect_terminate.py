@@ -222,7 +222,7 @@ class TerminationCase(unittest.TestCase):
                                      self.origin_ca_cert, "origin")
 
     def _minter(self, mod, **kwargs):
-        from vm_mint import Minter
+        from egress_mint import Minter
         kwargs.setdefault("clock_check", lambda: "ok")
         return Minter("demo", self.state, **kwargs)
 
@@ -1901,7 +1901,7 @@ class TestTheCachesCannotEvictALeafInFlight(unittest.TestCase):
     """
 
     def test_every_cache_is_larger_than_the_connection_ceiling(self):
-        from vm_mint import DENIAL_CACHE_MAX, LEAF_CACHE_MAX
+        from egress_mint import DENIAL_CACHE_MAX, LEAF_CACHE_MAX
         mod = _mod()
         for name, size in (("working set", LEAF_CACHE_MAX),
                            ("denial set", DENIAL_CACHE_MAX)):

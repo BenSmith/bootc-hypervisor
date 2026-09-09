@@ -105,7 +105,7 @@ from vm import (
 from sd_listen import NotSocketActivated
 from sd_listen import (
     inherited_listening_sockets as sd_inherited_listening_sockets)
-from vm_status import STATUS_TOP_N, BoundedCounts, write_status
+from egress_status import STATUS_TOP_N, BoundedCounts, write_status
 
 # Header flags and fields, by name rather than by magic number at the use site.
 FLAG_QR = 0x8000

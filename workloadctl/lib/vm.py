@@ -31,34 +31,34 @@ from workload_lib import (BROKER_DEFAULT_AUTH_FORMAT,
                           validate_host_pattern, workload_root_dir)
 
 # The uid-derived layer, re-exported so every existing `from vm import ...`
-# keeps working. vm_addr does not import vm, and must not: it is the bottom of
+# keeps working. workload_addr does not import vm, and must not: it is the bottom of
 # this stack, and an import back up is the cycle test_module_imports.py exists
 # to catch. Listed by name rather than star-imported so that what vm's callers
 # may rely on stays a written-down set.
-from vm_addr import (NFLOG_GROUP_BASE, RangeReservation, ReservedRange,
-                     UidDerived, VM_BROKER_ADDR_BASE, VM_INSPECT_ADDR6_PREFIX,
-                     VM_INSPECT_ADDR_BASE, VM_INSPECT_LISTENER_BIN,
-                     VM_INSPECT_NETWORK, VM_INSPECT_ORIG_CLEARTEXT,
-                     VM_INSPECT_ORIG_TLS, VM_INSPECT_PORT_CLEARTEXT,
-                     VM_INSPECT_PORT_TLS, VM_MGMT_ADDR_BASE, VM_MGMT_NETWORK,
-                     VM_MGMT_SSH_PORT, VM_RESERVATION_INSPECT4,
-                     VM_RESERVATION_INSPECT6, VM_RESERVATION_MGMT,
-                     VM_RESERVED_RANGES, VM_RESOLVE_ADDR_BASE,
-                     VM_RESOLVE_LISTENER_BIN, VM_RESOLVE_POLICY_FILE,
-                     VM_RESOLVE_PORT, VM_RESOLVE_TTL, VM_UID_BROKER,
-                     VM_UID_DERIVED, VM_UID_INSPECT, VM_UID_MGMT, VM_UID_NFLOG,
-                     VM_UID_RESOLVE, VmInspectAddress, _reserved_ranges,
-                     _uid_derived_value, vm_broker_listen_address,
-                     vm_inspect_address, vm_management_address, vm_nflog_group,
-                     vm_reserved_range, vm_resolve_address)
+from workload_addr import (NFLOG_GROUP_BASE, RangeReservation, ReservedRange,
+                           UidDerived, VM_BROKER_ADDR_BASE, VM_INSPECT_ADDR6_PREFIX,
+                           VM_INSPECT_ADDR_BASE, VM_INSPECT_LISTENER_BIN,
+                           VM_INSPECT_NETWORK, VM_INSPECT_ORIG_CLEARTEXT,
+                           VM_INSPECT_ORIG_TLS, VM_INSPECT_PORT_CLEARTEXT,
+                           VM_INSPECT_PORT_TLS, VM_MGMT_ADDR_BASE, VM_MGMT_NETWORK,
+                           VM_MGMT_SSH_PORT, VM_RESERVATION_INSPECT4,
+                           VM_RESERVATION_INSPECT6, VM_RESERVATION_MGMT,
+                           VM_RESERVED_RANGES, VM_RESOLVE_ADDR_BASE,
+                           VM_RESOLVE_LISTENER_BIN, VM_RESOLVE_POLICY_FILE,
+                           VM_RESOLVE_PORT, VM_RESOLVE_TTL, VM_UID_BROKER,
+                           VM_UID_DERIVED, VM_UID_INSPECT, VM_UID_MGMT, VM_UID_NFLOG,
+                           VM_UID_RESOLVE, VmInspectAddress, _reserved_ranges,
+                           _uid_derived_value, vm_broker_listen_address,
+                           vm_inspect_address, vm_management_address, vm_nflog_group,
+                           vm_reserved_range, vm_resolve_address)
 
 # The SELinux confinement layer, re-exported on the same contract.
-from vm_selinux import (SELINUX_ENFORCE_PATH, VM_INSPECT_SELINUX_CIL,
-                        VM_INSPECT_SELINUX_MODULE, VM_QEMU_CONTEXT,
-                        VM_QEMU_TYPE, VM_RESOLVE_SELINUX_CIL,
-                        VM_RESOLVE_SELINUX_MODULE, VM_RUNCON_BIN,
-                        VM_SELINUX_CIL, VM_SELINUX_MODULE, qemu_launch_argv,
-                        selinux_enabled)
+from egress_selinux import (SELINUX_ENFORCE_PATH, VM_INSPECT_SELINUX_CIL,
+                            VM_INSPECT_SELINUX_MODULE, VM_QEMU_CONTEXT,
+                            VM_QEMU_TYPE, VM_RESOLVE_SELINUX_CIL,
+                            VM_RESOLVE_SELINUX_MODULE, VM_RUNCON_BIN,
+                            VM_SELINUX_CIL, VM_SELINUX_MODULE, qemu_launch_argv,
+                            selinux_enabled)
 
 # The guest's paravirtual clock seed, re-exported on the same contract.
 from vm_ptp import (VM_PTP_KVM_CHRONY_MARKER, VM_PTP_KVM_CHRONY_PATH,
@@ -126,24 +126,24 @@ from vm_network_config import (VM_ALLOW_ADDR_RE, VM_ALLOW_NAME_RE,
                                vm_resolve_policy_path, vm_uses_resolve)
 
 # The generated broker instance, re-exported on the same contract.
-from vm_broker_config import (VM_BROKER_BIN, VM_BROKER_CONFIG_NAME,
-                              VM_BROKER_INSTANCE_PORT,
-                              VM_BROKER_RUNTIME_SUBDIR, _credential_named,
-                              _toml_basic_string, broker_upstream_addresses,
-                              container_broker_hosts,
-                              container_broker_upstream_addresses,
-                              container_uses_credentials,
-                              ensure_advertised_interface,
-                              render_broker_config,
-                              render_container_broker_config,
-                              render_vm_broker_config, vm_broker_config_dir,
-                              vm_broker_config_path, vm_broker_credential,
-                              vm_broker_hosts, vm_broker_runtime_directory,
-                              vm_broker_upstream_addresses, vm_credential_env,
-                              vm_host_resolver_addresses,
-                              vm_inspect_link_address_commands,
-                              vm_inspect_link_delete_commands,
-                              vm_uses_credentials)
+from broker_config import (VM_BROKER_BIN, VM_BROKER_CONFIG_NAME,
+                           VM_BROKER_INSTANCE_PORT,
+                           VM_BROKER_RUNTIME_SUBDIR, _credential_named,
+                           _toml_basic_string, broker_upstream_addresses,
+                           container_broker_hosts,
+                           container_broker_upstream_addresses,
+                           container_uses_credentials,
+                           ensure_advertised_interface,
+                           render_broker_config,
+                           render_container_broker_config,
+                           render_vm_broker_config, vm_broker_config_dir,
+                           vm_broker_config_path, vm_broker_credential,
+                           vm_broker_hosts, vm_broker_runtime_directory,
+                           vm_broker_upstream_addresses, vm_credential_env,
+                           vm_host_resolver_addresses,
+                           vm_inspect_link_address_commands,
+                           vm_inspect_link_delete_commands,
+                           vm_uses_credentials)
 
 
 NFT_SKELETON = "/usr/share/workloadctl/workload-filter.nft"
@@ -369,7 +369,7 @@ VM_INSPECT_RECORD_REASONS = (
 def vm_inspect_status_path(name: str) -> str:
     """Where one workload's inspector writes its counters.
 
-    Two status files rather than one, and lib/vm_status.py carries the
+    Two status files rather than one, and lib/egress_status.py carries the
     argument: the responder is a separate socket-activated process, and two
     processes atomically replacing one path leaves only the last writer's
     figures, silently.
@@ -1009,7 +1009,7 @@ VM_CA_KEY_NAME = "egress-ca.key"
 VM_CA_CERT_NAME = "egress-ca.crt"
 
 # The two leaf caches live beside the CA, under the same state directory, and
-# their names are here rather than in vm_mint because the SELinux patterns
+# their names are here rather than in egress_mint because the SELinux patterns
 # below have to name the same three directories the minter creates. A drift
 # between the two spellings is a mislabelled directory, which presents as the
 # inspector failing to mint and not as a naming mistake.

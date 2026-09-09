@@ -49,10 +49,10 @@ LIB = REPO_ROOT / "lib"
 # the original still answers for every public name in each of them, because
 # that is the promise the split made to callers it did not touch.
 RE_EXPORTS = {
-    "vm": ("vm_addr", "vm_selinux", "vm_ptp",
+    "vm": ("workload_addr", "egress_selinux", "vm_ptp",
             "netfilter_state", "vm_defs",
             "vm_network_config",
-            "vm_broker_config"),
+            "broker_config"),
 }
 
 
@@ -127,7 +127,7 @@ class TestASplitModuleStillAnswersForItsParts(unittest.TestCase):
                           and getattr(v, "__module__", part) == part]
                 with self.subTest(part=part):
                     self.assertGreater(len(public), 5, public)
-        self.assertIn("VM_UID_MGMT", dir(importlib.import_module("vm_addr")))
+        self.assertIn("VM_UID_MGMT", dir(importlib.import_module("workload_addr")))
 
 
 class TestNoTestPatchesAReExportedName(unittest.TestCase):

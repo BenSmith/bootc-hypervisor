@@ -30,7 +30,7 @@ from vm import (
     VM_DROP_NOT_HTTP, VM_DROP_NOT_HTTP_POLICY,
 )
 import vm_inspect_figures as figures_mod
-from vm_status import OTHER_KEY
+from egress_status import OTHER_KEY
 
 from tests.test_vm_inspect_listener import _mod
 

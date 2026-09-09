@@ -136,8 +136,8 @@ from vm import (
     VM_BROKER_INSTANCE_PORT, vm_broker_listen_address,
 )
 from vm_clock import vm_resync_guest_clock_if_skewed
-from vm_mint import MintFailed, MintThrottled, Minter
-from vm_status import STATUS_TOP_N, BoundedCounts, write_status
+from egress_mint import MintFailed, MintThrottled, Minter
+from egress_status import STATUS_TOP_N, BoundedCounts, write_status
 from peer_identity import local_endpoints, peer_uid
 from sd_listen import NotSocketActivated
 from sd_listen import (

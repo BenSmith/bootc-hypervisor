@@ -13,7 +13,7 @@ out on its own would have needed an import back into vm, which is the cycle.
 Nothing here imports vm; vm imports this and re-exports every public name, so
 no caller changed.
 
-Installed to /usr/libexec/workloadctl/vm_broker_config.py.
+Installed to /usr/libexec/workloadctl/broker_config.py.
 """
 
 import ipaddress
@@ -23,7 +23,7 @@ from pathlib import Path
 
 from workload_lib import (container_credential_entries,
                           container_policy_entries, container_uses_inspect)
-from vm_addr import vm_broker_listen_address, vm_inspect_address
+from workload_addr import vm_broker_listen_address, vm_inspect_address
 from vm_defs import IP_BIN, VM_ADVERTISED_IFACE, vm_uses_inspect
 from vm_network_config import vm_credential_entries, vm_policy_entries
 

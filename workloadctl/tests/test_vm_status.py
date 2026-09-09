@@ -1,4 +1,4 @@
-"""lib/vm_status.py: the bound on every guest-keyed counter, and the status
+"""lib/egress_status.py: the bound on every guest-keyed counter, and the status
 file both producers replace.
 
 The bound is the test nobody writes and the one that protects the HOST rather
@@ -16,8 +16,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-import vm_status
-from vm_status import (
+import egress_status
+from egress_status import (
     OTHER_KEY, STATUS_TOP_N, BoundedCounts, write_status,
 )
 
@@ -136,24 +136,24 @@ class TestClearStatus(unittest.TestCase):
         """Both producers are socket-activated, so between a VM start and the
         guest's first dial the file on disk is the LAST boot's -- presented,
         with nothing to mark it, as this boot's."""
-        vm_status.write_status(self.path, {"dispositions": {"dropped": 7}})
-        vm_status.clear_status(self.path)
+        egress_status.write_status(self.path, {"dispositions": {"dropped": 7}})
+        egress_status.clear_status(self.path)
         self.assertFalse(os.path.exists(self.path))
 
     def test_it_removes_a_temp_file_left_by_a_killed_writer(self):
         """A SIGKILL between the write and the replace leaves the .tmp, and
         RuntimeDirectoryPreserve keeps it for the life of the host."""
         open(f"{self.path}.tmp", "w").close()
-        vm_status.clear_status(self.path)
+        egress_status.clear_status(self.path)
         self.assertFalse(os.path.exists(f"{self.path}.tmp"))
 
     def test_a_first_start_has_nothing_to_clear_and_that_is_not_an_error(self):
-        vm_status.clear_status(self.path)   # must not raise
+        egress_status.clear_status(self.path)   # must not raise
 
     def test_an_unreachable_path_never_fails_the_arm(self):
         """This runs as an ExecStartPre. A diagnostic that could not be
         cleared must not be the reason a VM does not boot."""
-        vm_status.clear_status(os.path.join(self.dir, "no", "such", "s.json"))
+        egress_status.clear_status(os.path.join(self.dir, "no", "such", "s.json"))
 
 
 if __name__ == "__main__":

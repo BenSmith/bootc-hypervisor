@@ -1,5 +1,5 @@
 """
-vm_mint — minting leaf certificates for a filtered VM's egress inspector.
+egress_mint — minting leaf certificates for a filtered VM's egress inspector.
 
 The back half of bump-then-403. The inspector reads a name out of a ClientHello
 without answering it, decides what the name deserves, and then -- for both

@@ -108,7 +108,7 @@ CLOUD_SHA = "28680fe5b371a5a82ebf43a31926e086a168e59949d03969c5093e7071f90b7f"
 # Spelled out rather than imported, on every other rig's reasoning: a rig that
 # computes both sides from one constant cannot notice them drifting apart, and
 # these five are exactly the values a guest-invisible mechanism is described by.
-UID_MIN = 10000                             # lib/vm_addr.py
+UID_MIN = 10000                             # lib/workload_addr.py
 BROKER_ADDR_BASE = "127.129.0.0"            # VM_BROKER_ADDR_BASE
 BROKER_PORT = 8081                          # VM_BROKER_INSTANCE_PORT
 BROKER_RUNDIR = "/run/workloadctl/broker"   # VM_BROKER_RUNTIME_SUBDIR

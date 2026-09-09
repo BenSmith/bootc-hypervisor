@@ -62,7 +62,7 @@ from vm import (
     vm_inspect_policy_path, vm_inspect_status_path,
     vm_internal_ok_commands,
 )
-from vm_status import clear_status
+from egress_status import clear_status
 from workload_lib import (
     container_inspect_policy_text, container_internal_entries,
     container_internal_resolve, container_uses_inspect, load_workload_config,

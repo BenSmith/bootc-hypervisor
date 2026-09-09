@@ -112,7 +112,7 @@ from vm import (
     vm_inspect_status_path, vm_uses_inspect,
     vm_broker_listen_address, vm_uses_credentials,
 )
-from vm_status import clear_status
+from egress_status import clear_status
 from workload_lib import load_workload_config
 
 
@@ -209,7 +209,7 @@ def up(name: str) -> int:
     # stale one -- but it would fail it on a connection the guest already made.
     write_policy(name)
     # The previous instance's counters, which the RuntimeDirectory preserved
-    # across the restart. See vm_status.clear_status: the inspector is
+    # across the restart. See egress_status.clear_status: the inspector is
     # socket-activated, so without this an operator reading `diagnose` between
     # the VM's start and the guest's first dial sees the last boot's ECH alarms
     # and internal refusals presented as this boot's.

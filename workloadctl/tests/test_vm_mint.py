@@ -23,7 +23,7 @@ import shutil
 
 import vm
 import vm_clock
-import vm_mint
+import egress_mint
 from tests import REPO_ROOT
 
 
@@ -263,7 +263,7 @@ class TestTheTokenBucket(unittest.TestCase):
         self.now += seconds
 
     def _bucket(self, capacity=4, refill=1.0):
-        return vm_mint.TokenBucket(capacity, refill,
+        return egress_mint.TokenBucket(capacity, refill,
                                    clock=self._clock, sleep=self._sleep)
 
     def test_it_starts_full(self):
@@ -315,7 +315,7 @@ class TestTheTokenBucket(unittest.TestCase):
         # Real threads, real lock: the listener is one thread per connection
         # and the bucket is shared, so a check-then-decrement race would hand
         # out more tokens than the capacity under exactly that load.
-        bucket = vm_mint.TokenBucket(50, 0.0)
+        bucket = egress_mint.TokenBucket(50, 0.0)
         taken = []
         lock = threading.Lock()
 
@@ -348,7 +348,7 @@ class _MinterCase(unittest.TestCase):
 
     def minter(self, **kwargs):
         kwargs.setdefault("clock_check", self._clock_check)
-        return vm_mint.Minter("wl-test", self.state, **kwargs)
+        return egress_mint.Minter("wl-test", self.state, **kwargs)
 
 
 class TestMinting(_MinterCase):
@@ -438,7 +438,7 @@ class TestMinting(_MinterCase):
         or a mapping like _CLOCK_STATS puts it. Prose in this module spells
         counter names in backticks, so a comment does not satisfy it.
         """
-        source = (REPO_ROOT / "lib" / "vm_mint.py").read_text()
+        source = (REPO_ROOT / "lib" / "egress_mint.py").read_text()
         head, _, rest = source.partition("self.stats = {")
         declaration, _, tail = rest.partition("}")
         elsewhere = head + tail
@@ -453,7 +453,7 @@ class TestMinting(_MinterCase):
     def test_an_openssl_failure_carries_openssls_words(self):
         failed = subprocess.CompletedProcess([], 1, stdout="", stderr="boom")
         minter = self.minter(runner=lambda *a, **k: failed)
-        with self.assertRaises(vm_mint.MintFailed) as caught:
+        with self.assertRaises(egress_mint.MintFailed) as caught:
             minter.leaf("example.com", denied=False)
         self.assertIn("boom", str(caught.exception))
         self.assertEqual(minter.stats["failed"], 1)
@@ -461,7 +461,7 @@ class TestMinting(_MinterCase):
     def test_a_failed_mint_leaves_nothing_cached(self):
         failed = subprocess.CompletedProcess([], 1, stdout="", stderr="boom")
         minter = self.minter(runner=lambda *a, **k: failed)
-        with self.assertRaises(vm_mint.MintFailed):
+        with self.assertRaises(egress_mint.MintFailed):
             minter.leaf("example.com", denied=False)
         self.assertEqual(len(minter.working_set), 0)
 
@@ -478,8 +478,8 @@ class TestTheTwoCachesCannotEvictEachOther(_MinterCase):
         # The bound is shrunk rather than the flood being run at its real size:
         # these are real openssl mints, and 148 of them would put six seconds
         # on the unit suite to demonstrate a property that eight demonstrate.
-        with mock.patch.object(vm_mint, "DENIAL_CACHE_MAX", 8):
-            minter = self.minter(bucket=vm_mint.TokenBucket(10_000, 0.0))
+        with mock.patch.object(egress_mint, "DENIAL_CACHE_MAX", 8):
+            minter = self.minter(bucket=egress_mint.TokenBucket(10_000, 0.0))
             minter.leaf("real.example", denied=False)
             for i in range(28):
                 minter.leaf(f"invented{i}.example", denied=True)
@@ -499,21 +499,21 @@ class TestTheTwoCachesCannotEvictEachOther(_MinterCase):
         self.assertEqual(minter.stats["mints"], 2)
 
     def test_the_working_set_is_bounded_too(self):
-        cache = vm_mint.LeafCache(3, self.state / "bounded")
+        cache = egress_mint.LeafCache(3, self.state / "bounded")
         for i in range(10):
             path = cache.path_for(f"h{i}.example")
             path.write_text("")
-            cache.put(vm_mint.Leaf(f"h{i}.example", path, time.time() + 1e6))
+            cache.put(egress_mint.Leaf(f"h{i}.example", path, time.time() + 1e6))
         self.assertEqual(len(cache), 3)
 
     def test_eviction_unlinks_the_pem(self):
-        cache = vm_mint.LeafCache(1, self.state / "bounded")
+        cache = egress_mint.LeafCache(1, self.state / "bounded")
         first = cache.path_for("a.example")
         first.write_text("")
-        cache.put(vm_mint.Leaf("a.example", first, time.time() + 1e6))
+        cache.put(egress_mint.Leaf("a.example", first, time.time() + 1e6))
         second = cache.path_for("b.example")
         second.write_text("")
-        cache.put(vm_mint.Leaf("b.example", second, time.time() + 1e6))
+        cache.put(egress_mint.Leaf("b.example", second, time.time() + 1e6))
         self.assertFalse(first.exists())
         self.assertTrue(second.exists())
 
@@ -524,7 +524,7 @@ class TestTheTwoCachesCannotEvictEachOther(_MinterCase):
         directory.mkdir()
         for i in range(20):
             (directory / f"{i:064x}.pem").write_text("")
-        vm_mint.LeafCache(5, directory)
+        egress_mint.LeafCache(5, directory)
         self.assertEqual(len(list(directory.glob("*.pem"))), 5)
 
 
@@ -534,27 +534,27 @@ class TestOverflowDiffersByDisposition(_MinterCase):
 
     def test_a_denial_does_not_wait_on_an_empty_bucket(self):
         slept = []
-        bucket = vm_mint.TokenBucket(1, 0.0, sleep=slept.append)
+        bucket = egress_mint.TokenBucket(1, 0.0, sleep=slept.append)
         minter = self.minter(bucket=bucket)
         minter.leaf("first.example", denied=True)
-        with self.assertRaises(vm_mint.MintThrottled) as caught:
+        with self.assertRaises(egress_mint.MintThrottled) as caught:
             minter.leaf("second.example", denied=True)
         self.assertTrue(caught.exception.denied)
         self.assertEqual(slept, [])
 
     def test_an_allowlisted_name_waits_and_then_fails_distinguishably(self):
         slept = []
-        bucket = vm_mint.TokenBucket(1, 0.0, sleep=slept.append)
+        bucket = egress_mint.TokenBucket(1, 0.0, sleep=slept.append)
         minter = self.minter(bucket=bucket)
         minter.leaf("first.example", denied=False)
-        with self.assertRaises(vm_mint.MintThrottled) as caught:
+        with self.assertRaises(egress_mint.MintThrottled) as caught:
             minter.leaf("second.example", denied=False)
         self.assertFalse(caught.exception.denied)
         self.assertTrue(slept, "an allowlisted mint must wait for a token")
         self.assertEqual(minter.stats["throttled"], 1)
 
     def test_an_allowlisted_name_survives_a_bucket_that_refills_in_time(self):
-        bucket = vm_mint.TokenBucket(1, 1000.0)
+        bucket = egress_mint.TokenBucket(1, 1000.0)
         minter = self.minter(bucket=bucket)
         minter.leaf("first.example", denied=False)
         leaf = minter.leaf("second.example", denied=False)
@@ -563,7 +563,7 @@ class TestOverflowDiffersByDisposition(_MinterCase):
     def test_a_cache_hit_spends_no_token(self):
         # What keeps legitimate traffic out of the bucket entirely: the guest's
         # usual hosts cost one token each ever.
-        bucket = vm_mint.TokenBucket(1, 0.0)
+        bucket = egress_mint.TokenBucket(1, 0.0)
         minter = self.minter(bucket=bucket)
         minter.leaf("example.com", denied=False)
         for _ in range(50):
@@ -609,7 +609,7 @@ class TestTheClockCheckIsNotOptional(unittest.TestCase):
         failure is a guest that reaches its old hosts and no new ones.
         """
         with self.assertRaises(TypeError):
-            vm_mint.Minter("wl-test", "/nonexistent")
+            egress_mint.Minter("wl-test", "/nonexistent")
 
 
 class TestWhatTheMinterReports(_MinterCase):
@@ -730,7 +730,7 @@ class TestAnUnwritableCacheIsAMintFailure(unittest.TestCase):
     """
 
     def _minter(self, state):
-        return vm_mint.Minter("wl", state, clock_check=lambda: vm_clock.CLOCK_OK)
+        return egress_mint.Minter("wl", state, clock_check=lambda: vm_clock.CLOCK_OK)
 
     def _broken_minter(self):
         """A minter whose leaf cache cannot be written by ANY uid."""
@@ -751,7 +751,7 @@ class TestAnUnwritableCacheIsAMintFailure(unittest.TestCase):
         # would be a different failure with a different remedy.
         os.chmod(minter.working_set.directory, 0o500)
         self.addCleanup(os.chmod, minter.working_set.directory, 0o700)
-        with self.assertRaises(vm_mint.MintFailed) as ctx:
+        with self.assertRaises(egress_mint.MintFailed) as ctx:
             minter.leaf("example.com", denied=False)
         said = str(ctx.exception)
         self.assertIn("example.com", said)
@@ -761,7 +761,7 @@ class TestAnUnwritableCacheIsAMintFailure(unittest.TestCase):
 
     def test_an_unwritable_cache_raises_mint_failed(self):
         minter = self._broken_minter()
-        with self.assertRaises(vm_mint.MintFailed) as ctx:
+        with self.assertRaises(egress_mint.MintFailed) as ctx:
             minter.leaf("example.com", denied=False)
         said = str(ctx.exception)
         self.assertIn("example.com", said)
@@ -769,7 +769,7 @@ class TestAnUnwritableCacheIsAMintFailure(unittest.TestCase):
 
     def test_the_failure_is_counted(self):
         minter = self._broken_minter()
-        with self.assertRaises(vm_mint.MintFailed):
+        with self.assertRaises(egress_mint.MintFailed):
             minter.leaf("example.com", denied=False)
         self.assertEqual(minter.snapshot()["failed"], 1)
 
@@ -794,7 +794,7 @@ class TestTheCountersAreWrittenUnderTheLockTheyAreReadWith(unittest.TestCase):
         state = Path(tempfile.mkdtemp())
         self.addCleanup(lambda: shutil.rmtree(state, ignore_errors=True))
         _mint_ca(state)
-        return vm_mint.Minter("wl-test", state, clock_check=lambda: "ok")
+        return egress_mint.Minter("wl-test", state, clock_check=lambda: "ok")
 
     def test_a_bump_waits_for_the_lock(self):
         minter = self._minter()
@@ -834,7 +834,7 @@ class TestTheCountersAreWrittenUnderTheLockTheyAreReadWith(unittest.TestCase):
         lines away. Grepping is the only check that sees that, and it is the
         same shape as the constant-drift assertion in tests/test_vm_broker.py.
         """
-        source = Path(vm_mint.__file__).read_text()
+        source = Path(egress_mint.__file__).read_text()
         writes = [line.strip() for line in source.splitlines()
                   if "self.stats[" in line and "+=" in line]
         self.assertEqual(

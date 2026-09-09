@@ -11,7 +11,7 @@ subject it has largely stopped being about.
 Nothing here imports vm; vm imports this and re-exports every public name, so
 no caller changed.
 
-Installed to /usr/libexec/workloadctl/vm_selinux.py.
+Installed to /usr/libexec/workloadctl/egress_selinux.py.
 """
 
 import os

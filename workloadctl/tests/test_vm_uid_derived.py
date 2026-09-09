@@ -43,7 +43,7 @@ import unittest
 from pathlib import Path
 
 import vm
-import vm_addr
+import workload_addr
 from vm import UID_MAX, UID_MIN, UidDerived, VM_RESERVED_RANGES, VM_UID_DERIVED
 
 LIB = Path(vm.__file__).resolve().parent
@@ -79,11 +79,11 @@ class TestTheTableIsComplete(unittest.TestCase):
         A row outside the table derives fine and is reserved by nothing.
 
         Swept over EVERY lib module, not over vm. This test read `vars(vm)`
-        while the rows lived in vm.py, and the moment they moved to vm_addr.py
+        while the rows lived in vm.py, and the moment they moved to workload_addr.py
         it passed over an orphan row -- vars() sees what a module imported, so
         a row defined in the new module and re-exported from neither the table
         nor vm was invisible to it. Measured, not reasoned: a deliberate
-        orphan was added to vm_addr.py and this class stayed green.
+        orphan was added to workload_addr.py and this class stayed green.
         """
         defined = {}
         for path in sorted(LIB.glob("*.py")):
@@ -108,26 +108,26 @@ class TestTheTableIsComplete(unittest.TestCase):
         """
         modules = [p.stem for p in LIB.glob("*.py")]
         self.assertIn("vm", modules)
-        self.assertIn("vm_addr", modules)
+        self.assertIn("workload_addr", modules)
         self.assertGreater(len(modules), 30, modules)
 
     def test_the_rows_are_defined_where_the_table_is_assembled_from(self):
-        """Every row is defined in vm_addr.py, and none in vm.py.
+        """Every row is defined in workload_addr.py, and none in vm.py.
 
         Not a style rule. vm re-exports them, so `vm.VM_UID_MGMT` resolves
         either way and no import would break -- what breaks is the reader's
         one place to look, and this file's first version proved that a row
         outside the reader's one place is a row outside the table too.
         """
-        source = ast.parse((LIB / "vm_addr.py").read_text())
+        source = ast.parse((LIB / "workload_addr.py").read_text())
         assigned = {t.id for n in ast.walk(source)
                     if isinstance(n, ast.Assign)
                     for t in n.targets if isinstance(t, ast.Name)}
         for row in VM_UID_DERIVED:
             with self.subTest(row=row.noun):
                 names = [n for n in assigned
-                         if getattr(vm_addr, n, None) is row]
-                self.assertTrue(names, f"{row.noun} is not defined in vm_addr.py")
+                         if getattr(workload_addr, n, None) is row]
+                self.assertTrue(names, f"{row.noun} is not defined in workload_addr.py")
 
     def test_every_row_has_a_distinct_noun(self):
         """The noun is the whole of the out-of-range message, so two rows

@@ -28,10 +28,10 @@ from workload_lib import (BROKER_DEFAULT_AUTH_FORMAT, BROKER_DEFAULT_AUTH_HEADER
                           parse_credential_entries, parse_policy_entries,
                           parse_volume_spec, patterns_overlap,
                           validate_credential_entries, validate_host_pattern)
-from vm_addr import (VM_INSPECT_ADDR6_PREFIX, VM_INSPECT_NETWORK,
-                     VM_INSPECT_ORIG_CLEARTEXT, VM_INSPECT_ORIG_TLS,
-                     VM_RESOLVE_POLICY_FILE, VM_RESOLVE_TTL,
-                     vm_inspect_address, vm_reserved_range)
+from workload_addr import (VM_INSPECT_ADDR6_PREFIX, VM_INSPECT_NETWORK,
+                           VM_INSPECT_ORIG_CLEARTEXT, VM_INSPECT_ORIG_TLS,
+                           VM_RESOLVE_POLICY_FILE, VM_RESOLVE_TTL,
+                           vm_inspect_address, vm_reserved_range)
 from vm_defs import (SEED_PROVIDES_CHOICES, SEED_PROVIDES_RETIRED,
                      VM_EGRESS_DEFAULT, VM_EGRESS_MODES,
                      VM_REGISTRATION_DOMAIN_PARENTS, VM_RESERVED_GUEST_ENV,

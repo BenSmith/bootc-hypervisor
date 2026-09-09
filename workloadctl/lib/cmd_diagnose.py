@@ -82,8 +82,8 @@ from vm import (
     vm_broker_hosts,
     parse_vm_allow, vm_allow_resolve,
 )
-from vm_mint import pem_fingerprint
-from vm_status import OTHER_KEY
+from egress_mint import pem_fingerprint
+from egress_status import OTHER_KEY
 from vm_provision import (
     PROVISION_DONE, PROVISION_FAILED, PROVISION_UNVERIFIED,
     MAX_HEAL_ATTEMPTS,
@@ -1608,7 +1608,7 @@ def _inspect_status(name: str) -> dict | None:
     between boot and the guest's first connection.
 
     Malformed JSON lands in the same None. A reader arriving mid-write cannot
-    see a partial file -- vm_status.write_status replaces atomically -- so the
+    see a partial file -- egress_status.write_status replaces atomically -- so the
     only way to get here is a bug in the writer, and the honest report for that
     is silence on this line rather than a traceback over the twenty other
     checks that were about to run.
@@ -2476,7 +2476,7 @@ def _ca_report(status) -> dict:
 def _ca_fingerprint_on_disk(name: str) -> str | None:
     """The fingerprint of this workload's CA as it currently sits on disk.
 
-    vm_mint.pem_fingerprint, which is why that name lost its underscore: the
+    egress_mint.pem_fingerprint, which is why that name lost its underscore: the
     running listener's copy of this figure comes from the same function through
     Minter.ca_identity(), and the two are compared for equality. A second
     implementation of "the fingerprint of a PEM" -- a different digest, a

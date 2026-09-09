@@ -27,7 +27,7 @@ from pathlib import Path
 from typing import NamedTuple
 
 from workload_lib import normalise_hostname
-from vm_addr import VmInspectAddress  # noqa: F401  (FamilyPair annotation)
+from workload_addr import VmInspectAddress  # noqa: F401  (FamilyPair annotation)
 
 
 # Runtime socket directory for VM workloads: /run/workload-vm/{name}/
@@ -586,7 +586,7 @@ def vm_runtime_dir(name: str) -> str:
 # substrates and three entrypoints ask the same questions of a name, and a
 # second answer to "what is this name" is a name the guest can spell twice.
 
-# workload_lib.normalise_hostname, under the name the listener, vm_mint and the
+# workload_lib.normalise_hostname, under the name the listener, egress_mint and the
 # tests already import. Moved down rather than copied when the container half
 # needed it too: a second normalisation is a second answer to "what is this
 # name", and the guest picks which one it gets by how it spells the host.

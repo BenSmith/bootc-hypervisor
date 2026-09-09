@@ -752,7 +752,7 @@ def staleness():
           the CLI may not exec all produce "unreadable", which is also silence.
 
       T7  the fingerprint the minter reports has to equal the one computed off
-          the file. Both come from vm_mint.pem_fingerprint, but only here do
+          the file. Both come from egress_mint.pem_fingerprint, but only here do
           they come from two different PROCESSES reading two different copies
           -- the listener's remembered value against a fresh read.
 

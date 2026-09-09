@@ -43,7 +43,7 @@ class TestFilecon(unittest.TestCase):
         self.assertNotIn("*", filecons[0])
 
     def test_the_filecon_path_is_the_installed_responder(self):
-        """The drift guard: the module and lib/vm_addr.py each name this path, and
+        """The drift guard: the module and lib/workload_addr.py each name this path, and
         a disagreement looks exactly like the domain not being applied -- which
         is indistinguishable from the module not existing, the state this was
         written to end."""

@@ -35,7 +35,7 @@ from vm import (
     vm_allow_resolved, vm_filter_commands, vm_resolve_policy,
     vm_resolve_policy_path, vm_resolve_status_path, vm_uses_resolve,
 )
-from vm_status import clear_status
+from egress_status import clear_status
 from workload_lib import load_workload_config
 
 
@@ -116,7 +116,7 @@ def up(name: str) -> int:
         path = write_resolve_policy(name, net, uid, resolved)
         log(f"  Wrote {path}")
         # The previous instance's query counters, for the reason
-        # vm_status.clear_status gives: the RuntimeDirectory is preserved
+        # egress_status.clear_status gives: the RuntimeDirectory is preserved
         # across a restart and the responder does not start until the guest's
         # first query, so the file on disk until then belongs to the last boot.
         clear_status(vm_resolve_status_path(name))

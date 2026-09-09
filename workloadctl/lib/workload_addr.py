@@ -15,7 +15,7 @@ no caller changed. That direction is the whole point: this module is what the
 rest of the VM code is written against, and an import back up would be the
 cycle tests/test_module_imports.py exists to catch.
 
-Installed to /usr/libexec/workloadctl/vm_addr.py.
+Installed to /usr/libexec/workloadctl/workload_addr.py.
 """
 
 import ipaddress
