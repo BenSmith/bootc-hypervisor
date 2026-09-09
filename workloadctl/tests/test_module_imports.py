@@ -22,40 +22,28 @@ interpreter does. That is the one condition the test suite never reproduces
 and every libexec helper creates on every run.
 
 This matters most when a large module is SPLIT: splitting it and
-re-exporting the moved names from the original -- the pattern 582948a
-established for vm_normalise_hostname -- is exactly the shape that produces a
-cycle, because the new module needs something from the old one and the old one
-now imports the new.
+re-exporting the moved names from the original is exactly the shape that
+produces a cycle, because the new module needs something from the old one and
+the old one now imports the new.
 
-The second class below holds the OTHER half of that pattern. A split keeps
-every caller working by re-exporting the moved names, and the re-export is a
-hand-written list: a name left out of it disappears from the original module's
-surface, and nothing in the suite notices. Measured, not reasoned -- dropping
-VM_UID_MGMT from vm.py's re-export passed all 4,867 tests, and would have
-failed on a host at the first entrypoint importing it by name.
+The second class below holds the OTHER half of that pattern -- the half the
+re-export itself costs, once the split is done and the callers have moved.
 """
 
 import ast
 import importlib
 import subprocess
 import sys
-import types
 import unittest
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 LIB = REPO_ROOT / "lib"
 
-# module that was split -> the modules split out of it. The contract is that
-# the original still answers for every public name in each of them, because
-# that is the promise the split made to callers it did not touch.
-RE_EXPORTS = {
-    "vm": ("workload_addr", "egress_selinux", "vm_ptp",
-            "netfilter_state", "vm_defs",
-            "vm_network_config",
-            "egress_policy", "egress_ca",
-            "broker_config"),
-}
+# Modules that must publish only what they define. `lib/` is flat, so there is
+# no such thing as a private import here: every `from X import name` in one of
+# these is a name its own callers can then read off it.
+NO_RE_EXPORTS = ("vm",)
 
 
 def _lib_modules():
@@ -84,119 +72,98 @@ class TestEveryLibModuleImportsAlone(unittest.TestCase):
         self.assertEqual(failures, [], "\n".join(failures))
 
 
-class TestASplitModuleStillAnswersForItsParts(unittest.TestCase):
-    """Every public name in a split-out module is reachable from the original.
+class TestAFacadeReExportsNothing(unittest.TestCase):
+    """These modules import nothing they do not use, so they publish nothing
+    they do not define.
 
-    Not a style preference. The split's whole claim is that no caller changed,
-    and there are fifteen extensionless entrypoints plus fifty-odd lib modules
-    importing names from vm by name; a name missing from the re-export fails
-    exactly one of them, at import, on a host.
-    """
+    `lib/` is flat, so an import IS a re-export: `from egress_ca import
+    VM_CA_BACKDATE_SECONDS` inside vm.py does not merely make that name
+    available to vm.py, it makes `vm.VM_CA_BACKDATE_SECONDS` answer forever
+    after. vm.py published 299 names it did not define, drawn from eleven
+    modules, and the line count was the least of it. A reader who found `vm.X`
+    had no way to tell which module owned X. `mock.patch("vm.X")` rebound a
+    copy and left the module that actually reads X holding the original --
+    which fails loudly when the patch feeds an assertion and goes silently
+    inert when it was installed to SUPPRESS something. And every subsequent
+    split had to either grow the hand-written list or drop a name from vm's
+    surface, where nothing in the suite would notice: dropping VM_UID_MGMT
+    from it passed all 4,867 tests and would have failed on a host, at the
+    first entrypoint importing it by name.
 
-    def test_the_table_names_modules_that_exist(self):
-        """Guards the guard: a renamed module turns every check below into
-        zero assertions rather than a failure."""
-        for original, parts in RE_EXPORTS.items():
-            self.assertTrue((LIB / f"{original}.py").exists(), original)
-            for part in parts:
-                self.assertTrue((LIB / f"{part}.py").exists(), part)
-
-    def test_every_public_name_is_re_exported(self):
-        for original, parts in RE_EXPORTS.items():
-            parent = importlib.import_module(original)
-            for part in parts:
-                module = importlib.import_module(part)
-                public = sorted(
-                    name for name, value in vars(module).items()
-                    if not name.startswith("__")
-                    and not isinstance(value, types.ModuleType)
-                    and getattr(value, "__module__", part) == part)
-                missing = [n for n in public if not hasattr(parent, n)]
-                with self.subTest(original=original, part=part):
-                    self.assertEqual(
-                        missing, [],
-                        f"{part} defines these and {original} does not "
-                        f"re-export them: {missing}")
-
-    def test_the_sweep_finds_names_to_check(self):
-        """The other half of the guard, on the FILTER rather than the table:
-        a `__module__` test that stopped matching would sweep zero names, in
-        every part at once, and the check above would pass over nothing."""
-        for parts in RE_EXPORTS.values():
-            for part in parts:
-                module = importlib.import_module(part)
-                public = [n for n, v in vars(module).items()
-                          if not n.startswith("__")
-                          and not isinstance(v, types.ModuleType)
-                          and getattr(v, "__module__", part) == part]
-                with self.subTest(part=part):
-                    self.assertGreater(len(public), 5, public)
-        self.assertIn("VM_UID_MGMT", dir(importlib.import_module("workload_addr")))
-
-
-class TestNoTestPatchesAReExportedName(unittest.TestCase):
-    """No test aims a patch at a name its target module only re-exports.
-
-    Found by the split, not reasoned about. `mock.patch("vm.vm_mac_address")`
-    and `mock.patch.object(vm, "VM_TLS_UNBUILT")` both stopped working the
-    moment those names moved down, because `from x import name` copies the
-    binding: rebinding it on the re-exporting module leaves the module that
-    actually reads it holding the original. Both failed loudly here, which is
-    luck -- they patch something the assertion depends on. A patch installed to
-    SUPPRESS something (a network call, a sleep, a subprocess) fails the other
-    way: it goes inert, the real thing runs, and the test still passes.
-
-    So the rule is mechanical: patch the module that defines the name, or the
-    module that reads it -- never the one that re-exports it.
+    So the rule is now mechanical -- a name is imported from the module that
+    defines it -- and what makes the rule keepable is that a re-export is
+    exactly an import the file does not use. What makes it worth checking is
+    that adding one back is a single line which breaks nothing, passes every
+    other test here, and is invisible until the surface has grown again.
     """
 
     @staticmethod
-    def _patch_targets():
-        """(file, line, module, attribute) for every patch of a `<mod>.<attr>`."""
-        found = []
-        for path in sorted((REPO_ROOT / "tests").glob("*.py")):
-            tree = ast.parse(path.read_text())
-            for node in ast.walk(tree):
-                if not isinstance(node, ast.Call):
-                    continue
-                func = node.func
-                name = func.attr if isinstance(func, ast.Attribute) else (
-                    func.id if isinstance(func, ast.Name) else None)
-                if name == "patch" and node.args:
-                    arg = node.args[0]
-                    if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
-                        mod, _, attr = arg.value.rpartition(".")
-                        if mod and "." not in mod:
-                            found.append((path.name, node.lineno, mod, attr))
-                elif name == "object" and isinstance(func, ast.Attribute) \
-                        and len(node.args) >= 2:
-                    target, attr = node.args[0], node.args[1]
-                    if isinstance(target, ast.Name) and isinstance(attr, ast.Constant) \
-                            and isinstance(attr.value, str):
-                        found.append((path.name, node.lineno, target.id, attr.value))
-        return found
+    def _unused_imports(name):
+        """Names `from`-imported by a module and referenced nowhere in it.
 
-    def test_the_scan_finds_patches(self):
-        """Guards the guard: an AST shape that stopped matching passes silently."""
-        self.assertGreater(len(self._patch_targets()), 20)
+        `import x` is left out on purpose: binding a module is not publishing
+        a name, and a dead one is a lint finding rather than a facade. So is
+        `__future__`, whose whole effect is on the compiler.
+        """
+        tree = ast.parse((LIB / f"{name}.py").read_text())
+        imported = {}
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) \
+                    and node.module != "__future__":
+                for alias in node.names:
+                    imported[alias.asname or alias.name] = node.lineno
+        used = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Name):
+                used.add(node.id)
+            elif isinstance(node, ast.Attribute):
+                used.add(node.attr)
+            elif isinstance(node, ast.Constant) and \
+                    isinstance(node.value, str):
+                # __all__ entries and string annotations both read as strings.
+                used.add(node.value)
+        return {n: line for n, line in imported.items() if n not in used}
 
-    def test_no_patch_targets_a_re_exported_name(self):
+    def test_the_modules_exist(self):
+        """Guards the guard: a renamed module makes the check below parse
+        nothing and pass."""
+        for name in NO_RE_EXPORTS:
+            self.assertTrue((LIB / f"{name}.py").exists(), name)
+
+    def test_the_sweep_sees_the_imports(self):
+        """The other half of the guard, on the SCAN rather than the file: an
+        AST shape that stopped matching would find zero imports, and zero
+        imports are trivially all used."""
+        for name in NO_RE_EXPORTS:
+            tree = ast.parse((LIB / f"{name}.py").read_text())
+            names = [a.asname or a.name for node in ast.walk(tree)
+                     if isinstance(node, ast.ImportFrom)
+                     for a in node.names]
+            with self.subTest(module=name):
+                self.assertGreater(len(names), 5, names)
+
+    def test_no_imported_name_is_unused(self):
         offenders = []
-        for original, parts in RE_EXPORTS.items():
-            owned = set()
-            for part in parts:
-                owned |= {n for n, v in vars(importlib.import_module(part)).items()
-                          if not n.startswith("__")
-                          and getattr(v, "__module__", part) == part}
-            for filename, lineno, mod, attr in self._patch_targets():
-                if mod == original and attr in owned:
-                    where = [p for p in parts
-                             if hasattr(importlib.import_module(p), attr)]
-                    offenders.append(
-                        f"{filename}:{lineno} patches {mod}.{attr}, which {mod} "
-                        f"only re-exports; patch {where[0]}.{attr} or the module "
-                        f"that reads it")
+        for name in NO_RE_EXPORTS:
+            for unused, line in sorted(self._unused_imports(name).items()):
+                offenders.append(
+                    f"lib/{name}.py:{line} imports {unused} and never uses "
+                    f"it, so {name}.{unused} is a re-export; import it from "
+                    f"the module that defines it instead")
         self.assertEqual(offenders, [], "\n".join(offenders))
+
+    def test_the_check_would_see_a_re_export(self):
+        """Measured, not reasoned. The scan counts a name used if it appears
+        anywhere -- including in a string, for __all__ and for annotations --
+        so it is loose by construction, and a loose scan that has nothing to
+        find reads exactly like a strict one."""
+        tree = ast.parse("from egress_ca import VM_CA_BACKDATE_SECONDS\n"
+                         "x = 1\n")
+        imported = {a.asname or a.name
+                    for node in ast.walk(tree)
+                    if isinstance(node, ast.ImportFrom) for a in node.names}
+        used = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)}
+        self.assertEqual(imported - used, {"VM_CA_BACKDATE_SECONDS"})
 
 
 class TestASharedModuleIsNotShadowedByItsCaller(unittest.TestCase):

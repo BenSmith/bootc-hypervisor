@@ -225,8 +225,9 @@ Two consequences worth holding onto:
   otherwise dial another workload's inspector and pollute its records.
 - **Two constants must agree** across three files: the broker's
   `listen_address`/`listen_port`, what the generator renders into `broker.toml`,
-  and what the inspector dials (`vm_broker_listen_address` /
-  `VM_BROKER_INSTANCE_PORT` in `lib/vm.py`). A mismatch presents exactly as the
+  and what the inspector dials (`vm_broker_listen_address` in
+  `lib/workload_addr.py`, `VM_BROKER_INSTANCE_PORT` in `lib/broker_config.py`).
+  A mismatch presents exactly as the
   broker being down — connection refused, no log line anywhere.
 
 ---

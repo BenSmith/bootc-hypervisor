@@ -1,194 +1,36 @@
 """
-VM-workload constants, helpers, and schema validation.
+The nftables elements and commands for one VM workload's egress filter.
 
-Everything specific to `[vm]` workloads: the uid-derived passt network identity,
-OVMF firmware discovery, MAC derivation, memory parsing, and the [vm]-section
-validator. Kept separate from the container path so the VM surface is legible
-on its own.
+Every function here answers the same question in a different vocabulary: given
+a workload uid and its policy, which set elements exist, and which `nft` argv
+puts them there or takes them away. The sets themselves, their names and the
+family pairing are nft_constants'; the addresses are workload_addr's; the
+policy words are egress_policy's. This module is only the mapping between them.
+
+It used to be the whole VM surface, and re-exported nine other modules so that
+`from vm import <anything>` kept working. It no longer re-exports anything: a
+name is imported from the module that defines it, and what is left below is
+what vm.py itself defines.
 
 Installed to /usr/libexec/workloadctl/vm.py.
 """
 
-import fnmatch
 import ipaddress
-import os
-import re
 import socket
-from typing import NamedTuple
 
-from config_parser import (BROKER_DEFAULT_AUTH_FORMAT,
-                           BROKER_DEFAULT_AUTH_HEADER, INSPECT_ORIG_CLEARTEXT,
-                           INSPECT_ORIG_TLS, container_credential_entries,
-                           container_policy_entries, container_uses_inspect,
-                           normalise_hostname, parse_credential_entries,
-                           parse_policy_entries, parse_volume_spec,
-                           patterns_overlap, validate_credential_entries,
-                           validate_host_pattern, workload_root_dir)
-
-# The uid-derived layer, re-exported so every existing `from vm import ...`
-# keeps working. workload_addr does not import vm, and must not: it is the bottom of
-# this stack, and an import back up is the cycle test_module_imports.py exists
-# to catch. Listed by name rather than star-imported so that what vm's callers
-# may rely on stays a written-down set.
 from egress_policy import (VM_INSPECT_ORIG_CLEARTEXT, VM_INSPECT_ORIG_TLS,
                            VM_INSPECT_PORT_CLEARTEXT, VM_INSPECT_PORT_TLS)
-from workload_addr import (IP_BIN, NFLOG_GROUP_BASE, RangeReservation,
-                           ReservedRange, UID_MAX, UID_MIN, UidDerived,
-                           VM_ADVERTISED_IFACE, VM_BROKER_ADDR_BASE,
-                           VM_INSPECT_ADDR6_PREFIX,
-                           VM_INSPECT_ADDR_BASE, VM_INSPECT_LISTENER_BIN,
-                           VM_INSPECT_NETWORK, VM_MGMT_ADDR_BASE, VM_MGMT_NETWORK,
-                           VM_MGMT_SSH_PORT, VM_RESERVATION_INSPECT4,
-                           VM_RESERVATION_INSPECT6, VM_RESERVATION_MGMT,
-                           VM_RESERVED_RANGES, VM_RESOLVE_ADDR_BASE,
-                           VM_RESOLVE_LISTENER_BIN, VM_RESOLVE_POLICY_FILE,
-                           VM_RESOLVE_PORT, VM_RESOLVE_TTL, VM_UID_BROKER,
-                           VM_UID_DERIVED, VM_UID_INSPECT, VM_UID_MGMT, VM_UID_NFLOG,
-                           VM_UID_RESOLVE, VmInspectAddress, _reserved_ranges,
-                           _uid_derived_value, ensure_advertised_interface,
-                           vm_broker_listen_address,
-                           vm_inspect_address, vm_management_address, vm_nflog_group,
-                           vm_reserved_range, vm_resolve_address)
-
-# The SELinux confinement layer, re-exported on the same contract.
-from egress_selinux import (SELINUX_ENFORCE_PATH, VM_INSPECT_SELINUX_CIL,
-                            VM_INSPECT_SELINUX_MODULE, VM_QEMU_CONTEXT,
-                            VM_QEMU_TYPE, VM_RESOLVE_SELINUX_CIL,
-                            VM_RESOLVE_SELINUX_MODULE, VM_RUNCON_BIN,
-                            VM_SELINUX_CIL, VM_SELINUX_MODULE, qemu_launch_argv,
-                            selinux_enabled)
-
-# The guest's paravirtual clock seed, re-exported on the same contract.
-from vm_ptp import (VM_PTP_KVM_CHRONY_MARKER, VM_PTP_KVM_CHRONY_PATH,
-                    VM_PTP_KVM_CLOCK_NAME, VM_PTP_KVM_DEVICE,
-                    VM_PTP_KVM_MODULE, VM_PTP_KVM_MODULES_LOAD_PATH,
-                    VM_PTP_KVM_UDEV_RULE_PATH, vm_ptp_kvm_runcmd_lines,
-                    vm_ptp_kvm_seed_files)
-
-# Netfilter readback, re-exported on the same contract.
-from netfilter_state import (CONNTRACK_COUNT_PATH, CONNTRACK_MAX_PATH,
-                             CONNTRACK_PRESSURE, conntrack_occupancy,
-                             nft_drop_counter, nft_element_counter,
-                             nft_set_elements, vm_owned_elements)
-
-# The nftables vocabulary, re-exported on the same contract.
-from nft_constants import (FamilyPair, NFT_BIN, NFT_MAP_INSPECT4,
-                           NFT_MAP_INSPECT6, NFT_PAIR_ALLOW,
-                           NFT_PAIR_INSPECT_DST, NFT_PAIR_INSPECT_LIVE,
-                           NFT_PAIR_INSPECT_MAP, NFT_PAIR_INSPECT_SELF,
-                           NFT_PAIR_INTERNAL, NFT_PAIR_INTERNAL_OK,
-                           NFT_PROXY_SKELETON, NFT_PROXY_TABLE, NFT_SET_ALLOW4,
-                           NFT_SET_ALLOW6, NFT_SET_EGRESS_CG, NFT_SETS,
-                           NFT_SET_FILTERED, NFT_SET_INSPECT_CG,
-                           NFT_SET_INSPECT_DST, NFT_SET_INSPECT_DST6,
-                           NFT_SET_INSPECT_LIVE, NFT_SET_INSPECT_LIVE6,
-                           NFT_SET_INSPECT_SELF, NFT_SET_INSPECT_SELF6,
-                           NFT_SET_INTERNAL4, NFT_SET_INTERNAL6,
-                           NFT_SET_INTERNAL_OK4, NFT_SET_INTERNAL_OK6,
-                           NFT_SKELETON, NFT_TABLE, _both_families,
-                           _split_by_family)
-
-# The egress policy vocabulary, re-exported on the same contract: the TLS mode,
-# the hostname rules, the parsed policy entries, the inspector's document and
-# the words its per-request record is written in.
-from egress_policy import (VM_DROP_BROKER_UNREACHABLE, VM_DROP_CEILING,
-                           VM_DROP_CLIENT_CERT, VM_DROP_FOREIGN_CALLER,
-                           VM_DROP_INTERNAL, VM_DROP_MINT_FAILED,
-                           VM_DROP_MISDIRECTED, VM_DROP_MISDIRECTED_LISTED,
-                           VM_DROP_NOT_ALLOWLISTED, VM_DROP_NOT_H2,
-                           VM_DROP_NOT_HTTP, VM_DROP_NOT_HTTP_POLICY,
-                           VM_DROP_NOT_PERMITTED, VM_DROP_NO_NAME,
-                           VM_DROP_RELAY_FAILED, VM_DROP_THROTTLED,
-                           VM_DROP_TIMED_OUT, VM_DROP_UNREACHABLE,
-                           VM_DROP_UNREADABLE_REQUEST, VM_DROP_UNVERIFIED,
-                           VM_INSPECT_DIGEST_KEY, VM_INSPECT_DIGEST_SHORT,
-                           VM_INSPECT_LOG_ID_FIELD, VM_INSPECT_LOG_REQ_FIELD,
-                           VM_INSPECT_ORIG_CLEARTEXT, VM_INSPECT_ORIG_TLS,
-                           VM_INSPECT_POLICY_FILE, VM_INSPECT_PORT_CLEARTEXT,
-                           VM_INSPECT_PORT_TLS, VM_INSPECT_RECORD_DECISIONS,
-                           VM_INSPECT_RECORD_FIELDS, VM_INSPECT_RECORD_FILE,
-                           VM_INSPECT_RECORD_MODES, VM_INSPECT_RECORD_PLANES,
-                           VM_INSPECT_RECORD_REASONS, VM_INSPECT_RECORD_ROOT,
-                           VM_INSPECT_STATUS_FILE, VM_LOG_BASE,
-                           VM_POLICY_METHODS, VM_POLICY_METHODS_REFUSED,
-                           VM_TLS_DEFAULT, VM_TLS_MODES, VmPolicyEntry,
-                           _host_reason_hosts,
-                           vm_hostname_control_character, vm_hostname_match,
-                           vm_http2_hosts,
-                           vm_inspect_digest_short, vm_inspect_logs_directory,
-                           vm_inspect_policy, vm_inspect_policy_digest,
-                           vm_inspect_policy_path, vm_inspect_policy_text,
-                           vm_inspect_record_dir, vm_inspect_record_path,
-                           vm_inspect_status_path, vm_internal_hosts,
-                           vm_normalise_hostname, vm_policy_entries,
-                           vm_policy_governs, vm_splice_hosts, vm_uses_inspect,
-                           vm_uses_resolve)
-# The per-workload egress CA and the leaves it signs, re-exported on the same
-# contract: the state-directory names, the two openssl argvs, the guest anchor
-# path and the five variables that point the guest's clients at it.
-from egress_ca import (LeafRefused, VM_CA_BACKDATE_SECONDS,
-                       VM_CA_BUNDLE_AVAILABLE, VM_CA_BUNDLE_PATH,
-                       VM_CA_CERT_NAME, VM_CA_DIR_NAME, VM_CA_ENV_VARS,
-                       VM_CA_EXPIRY_WARN_DAYS, VM_CA_KEY_NAME,
-                       VM_CA_SELINUX_TYPE, VM_CA_VALIDITY_DAYS,
-                       VM_DENIAL_DIR_NAME, VM_LEAF_DIR_NAME, VM_LEAF_LABEL_MAX,
-                       VM_LEAF_NAME_MAX, VM_LEAF_RENEW_WITHIN_SECONDS,
-                       VM_LEAF_SELINUX_TYPE, VM_LEAF_VALIDITY_DAYS,
-                       VM_RESERVED_GUEST_ENV, _LEAF_LABEL_CHARS,
-                       vm_ca_cert_path, vm_ca_dir, vm_ca_env, vm_ca_key_path,
-                       vm_ca_openssl_argv, vm_ca_subject, vm_denial_dir,
-                       vm_leaf_dir, vm_leaf_openssl_argv, vm_leaf_san,
-                       vm_pki_fcontext_patterns)
-from egress_selinux import (VM_SOCKET_FCONTEXT_PATTERN, VM_SOCKET_SELINUX_TYPE,
-                            VM_SOCKET_SELINUX_TYPE_REAL)
-from vm_defs import (OVMF_CODE_CANDIDATES,
-                     OVMF_VARS_CANDIDATES, SEED_PROVIDES_CHOICES,
-                     SEED_PROVIDES_RETIRED, SeedContractError,
-                     VM_DEFAULT_GUEST_USER, VM_EGRESS_DEFAULT, VM_EGRESS_MODES,
-                     VM_GUEST_AGENT_PORT, VM_GUEST_HOME_BASE, VM_GUEST_UID,
-                     VM_HOME_SELINUX_CONTEXT, VM_HOME_SELINUX_TYPES,
-                     VM_INTERNAL_PREFIXES4, VM_INTERNAL_PREFIXES6, VM_PORT_RE,
-                     VM_REBOOT_EXIT_CODE, VM_REGISTRATION_DOMAIN_PARENTS,
-                     VM_SEED_CONTRACT_EXIT,
-                     VM_SIDECAR_SLICE, VM_SOCKET_DIR,
-                     VM_TLS_UNBUILT, find_ovmf_code, find_ovmf_vars, parse_memory_mib,
-                     parse_vm_port, vm_allowed_hosts, vm_guest_agent_socket,
-                     vm_mac_address, vm_mac_collisions, vm_runtime_dir)
-
-from vm_network_config import (VM_ALLOW_ADDR_RE, VM_ALLOW_NAME_RE,
-                               VM_BROKER_DEFAULT_AUTH_FORMAT,
-                               VM_BROKER_DEFAULT_AUTH_HEADER,
-                               VM_NETWORK_SCALARS, VmAllowEntry,
-                               _ALLOW_LABEL,
-                               _registration_domain_parent,
-                               _validate_apex_coverage, _validate_credentials,
-                               _validate_egress, _validate_host_reason_entries,
-                               _validate_policy, _validate_policy_methods,
-                               _validate_policy_path, _validate_proxy_host,
-                               parse_vm_allow, validate_vm_config,
-                               validate_vm_network, vm_allow_reserved_reason,
-                               vm_allow_resolve, vm_allow_resolved,
-                               vm_network_warnings,
-                               vm_policy_permits, vm_resolve_policy,
-                               vm_resolve_policy_path)
-
-# The generated broker instance, re-exported on the same contract.
-from broker_config import (_credential_named, _toml_basic_string,
-                           broker_upstream_addresses, container_broker_hosts,
-                           container_broker_upstream_addresses,
-                           container_uses_credentials, render_broker_config,
-                           render_container_broker_config,
-                           render_vm_broker_config, VM_BROKER_BIN,
-                           vm_broker_config_dir, VM_BROKER_CONFIG_NAME,
-                           vm_broker_config_path, vm_broker_credential,
-                           vm_broker_hosts, VM_BROKER_INSTANCE_PORT,
-                           vm_broker_runtime_directory,
-                           VM_BROKER_RUNTIME_SUBDIR,
-                           vm_broker_upstream_addresses, vm_credential_entries,
-                           vm_credential_env, vm_host_resolver_addresses,
-                           vm_inspect_link_address_commands,
-                           vm_inspect_link_delete_commands,
-                           vm_uses_credentials, VmCredential)
+from netfilter_state import nft_set_elements
+from nft_constants import (_both_families, _split_by_family, NFT_BIN,
+                           NFT_PAIR_ALLOW, NFT_PAIR_INSPECT_DST,
+                           NFT_PAIR_INSPECT_LIVE, NFT_PAIR_INSPECT_MAP,
+                           NFT_PAIR_INSPECT_SELF, NFT_PAIR_INTERNAL_OK,
+                           NFT_PROXY_TABLE, NFT_SET_EGRESS_CG,
+                           NFT_SET_FILTERED, NFT_SET_INSPECT_CG, NFT_TABLE)
+from vm_defs import (VM_INTERNAL_PREFIXES4, VM_INTERNAL_PREFIXES6,
+                     VM_SIDECAR_SLICE, VM_SOCKET_DIR)
+from vm_network_config import vm_allow_reserved_reason, vm_allow_resolved
+from workload_addr import vm_inspect_address
 
 
 def vm_filter_elements(uid: int, allow: list[str],

@@ -315,7 +315,7 @@ control of.
 **Two constants must agree**: this program's `listen_address`/`listen_port`
 against what the generator renders and what the inspector dials
 (`vm_broker_listen_address` in `lib/workload_addr.py`, `VM_BROKER_INSTANCE_PORT`
-in `lib/vm.py`). A
+in `lib/broker_config.py`). A
 mismatch presents exactly as the broker being down — connection refused, no log
 line on either side, nothing pointing at the cause. `tests/test_vm_broker.py`
 asserts they agree, which is most of the reason the broker moved into this

@@ -19,7 +19,7 @@ from unittest.mock import patch
 
 import config_parser
 import workload_lib
-import vm
+import vm_network_config
 from config_parser import (
     WORKLOADS_BASE, infer_workload_mode, parse_volume_spec,
     ContainerPolicyEntry, container_policy_entries, ContainerCredential,
@@ -383,7 +383,8 @@ class TestVmNetworkValidation(unittest.TestCase):
                 "vm": {"image": "example/x:latest", "network": network}}
 
     def _net_errors(self, **network):
-        return [e for e in vm.validate_vm_config(self._cfg(**network))
+        return [e for e in
+                vm_network_config.validate_vm_config(self._cfg(**network))
                 if "network" in e]
 
     def test_absent_network_needs_an_egress_decision(self):

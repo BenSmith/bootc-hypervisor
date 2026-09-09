@@ -39,8 +39,8 @@ which is why the validator rejects `egress`, `allow` and `hosts` alongside
 
 ## Enable time: what the validator refuses
 
-`_validate_egress` (`lib/vm.py`) rejects the configurations that would
-misreport confinement:
+`_validate_egress` (`lib/vm_network_config.py`) rejects the configurations
+that would misreport confinement:
 
 | config | why it is refused |
 |---|---|

@@ -73,7 +73,7 @@ The hard-won design rationale lives in `workloadctl/llms.txt` and `workloadctl/d
 ### Code layout (workloadctl/)
 
 - `bin/workloadctl` — the CLI (argparse). One `cmd_<name>(args, manager)` function per subcommand, wired up in `main()`. Mutating commands call `require_root()`.
-- `lib/workload_lib.py` — `WorkloadConfig` / `WorkloadManager`, TOML loading, paths, constants (UID math). VM-specific constants live in `lib/vm.py`.
+- `lib/workload_lib.py` — `WorkloadConfig` / `WorkloadManager`, TOML loading, paths, constants (UID math). VM-specific constants live in `lib/vm_defs.py`, and the uid-derived addresses in `lib/workload_addr.py`.
 - `generators/`, `libexec/` — boot-time and helper scripts (also the `workload-vm-*` VM helpers and `workload-exporter` for Prometheus metrics). `libexec/agent-broker` is the odd one out: a whole standalone program, not a helper — see below.
 - `workloads/<name>/` — the shipped bundles. Each is a directory with `workload.toml` at minimum, plus optional extras it needs: a `Containerfile` for self-built images, `README.md`, `cloud-init/`, additional unit files. `docs/schema-reference.toml` is the annotated full schema.
 - `tests/` — `test_*.py` unittest modules.

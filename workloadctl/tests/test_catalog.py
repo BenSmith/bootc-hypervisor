@@ -17,7 +17,7 @@ from unittest import mock
 
 import workload_lib            # noqa: E402
 import cmd_catalog            # noqa: E402
-import vm                     # noqa: E402
+import vm_defs                # noqa: E402
 from workloadctl_core import WorkloadManager  # noqa: E402
 
 REPO_BUNDLES = Path(__file__).resolve().parent.parent / "workloads"
@@ -264,7 +264,7 @@ class TestVmBaseBundle(CatalogTestBase):
         self.assertTrue(home_lines,
                         "vm-base no longer shows a home-share mount example; "
                         "if that is deliberate, drop this test with it")
-        accepted = "|".join(vm.VM_HOME_SELINUX_TYPES)
+        accepted = "|".join(vm_defs.VM_HOME_SELINUX_TYPES)
         for line in home_lines:
             self.assertRegex(
                 line, rf"context=[\"']?[\w.-]*:[\w.-]*:(?:{accepted}):",
