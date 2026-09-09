@@ -28,15 +28,16 @@ from config_parser import (BROKER_DEFAULT_AUTH_FORMAT,
                            parse_policy_entries, parse_volume_spec,
                            patterns_overlap, validate_credential_entries,
                            validate_host_pattern, workload_root_dir)
-from workload_lib import UID_MAX, UID_MIN
 
 # The uid-derived layer, re-exported so every existing `from vm import ...`
 # keeps working. workload_addr does not import vm, and must not: it is the bottom of
 # this stack, and an import back up is the cycle test_module_imports.py exists
 # to catch. Listed by name rather than star-imported so that what vm's callers
 # may rely on stays a written-down set.
-from workload_addr import (NFLOG_GROUP_BASE, RangeReservation, ReservedRange,
-                           UidDerived, VM_BROKER_ADDR_BASE, VM_INSPECT_ADDR6_PREFIX,
+from workload_addr import (IP_BIN, NFLOG_GROUP_BASE, RangeReservation,
+                           ReservedRange, UID_MAX, UID_MIN, UidDerived,
+                           VM_ADVERTISED_IFACE, VM_BROKER_ADDR_BASE,
+                           VM_INSPECT_ADDR6_PREFIX,
                            VM_INSPECT_ADDR_BASE, VM_INSPECT_LISTENER_BIN,
                            VM_INSPECT_NETWORK, VM_INSPECT_ORIG_CLEARTEXT,
                            VM_INSPECT_ORIG_TLS, VM_INSPECT_PORT_CLEARTEXT,
@@ -48,7 +49,8 @@ from workload_addr import (NFLOG_GROUP_BASE, RangeReservation, ReservedRange,
                            VM_RESOLVE_PORT, VM_RESOLVE_TTL, VM_UID_BROKER,
                            VM_UID_DERIVED, VM_UID_INSPECT, VM_UID_MGMT, VM_UID_NFLOG,
                            VM_UID_RESOLVE, VmInspectAddress, _reserved_ranges,
-                           _uid_derived_value, vm_broker_listen_address,
+                           _uid_derived_value, ensure_advertised_interface,
+                           vm_broker_listen_address,
                            vm_inspect_address, vm_management_address, vm_nflog_group,
                            vm_reserved_range, vm_resolve_address)
 
@@ -74,7 +76,7 @@ from netfilter_state import (CONNTRACK_COUNT_PATH, CONNTRACK_MAX_PATH,
                              nft_set_elements, vm_owned_elements)
 
 # The VM layer's vocabulary, re-exported on the same contract.
-from vm_defs import (FamilyPair, IP_BIN, NFT_BIN, NFT_MAP_INSPECT4,
+from vm_defs import (FamilyPair, NFT_BIN, NFT_MAP_INSPECT4,
                      NFT_MAP_INSPECT6, NFT_PAIR_ALLOW, NFT_PAIR_INSPECT_DST,
                      NFT_PAIR_INSPECT_LIVE, NFT_PAIR_INSPECT_MAP,
                      NFT_PAIR_INSPECT_SELF, NFT_PAIR_INTERNAL,
@@ -88,7 +90,7 @@ from vm_defs import (FamilyPair, IP_BIN, NFT_BIN, NFT_MAP_INSPECT4,
                      NFT_SET_INTERNAL_OK6, NFT_TABLE, OVMF_CODE_CANDIDATES,
                      OVMF_VARS_CANDIDATES, SEED_PROVIDES_CHOICES,
                      SEED_PROVIDES_RETIRED, SeedContractError,
-                     VM_ADVERTISED_IFACE, VM_CA_ENV_VARS,
+                     VM_CA_ENV_VARS,
                      VM_DEFAULT_GUEST_USER, VM_EGRESS_DEFAULT, VM_EGRESS_MODES,
                      VM_GUEST_AGENT_PORT, VM_GUEST_HOME_BASE, VM_GUEST_UID,
                      VM_HOME_SELINUX_CONTEXT, VM_HOME_SELINUX_TYPES,
@@ -133,7 +135,6 @@ from broker_config import (VM_BROKER_BIN, VM_BROKER_CONFIG_NAME,
                            container_broker_hosts,
                            container_broker_upstream_addresses,
                            container_uses_credentials,
-                           ensure_advertised_interface,
                            render_broker_config,
                            render_container_broker_config,
                            render_vm_broker_config, vm_broker_config_dir,

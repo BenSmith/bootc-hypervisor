@@ -34,7 +34,7 @@ from vm import (
     vm_nflog_group,
 )
 import workload_lib
-from workload_lib import UID_MAX, UID_MIN
+from workload_addr import UID_MAX, UID_MIN
 
 
 def _load(path, name):

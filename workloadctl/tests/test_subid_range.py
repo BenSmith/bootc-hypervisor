@@ -42,10 +42,10 @@ from tempfile import TemporaryDirectory
 
 import cmd_diagnose
 import workload_lib
+from workload_addr import UID_MIN
 from workload_lib import (
     SUBID_BASE,
     SUBID_COUNT,
-    UID_MIN,
     derived_subid_range,
     login_defs_subid_window,
 )

@@ -22,7 +22,12 @@ import ipaddress
 from typing import NamedTuple
 
 from config_parser import INSPECT_ORIG_CLEARTEXT, INSPECT_ORIG_TLS
-from workload_lib import UID_MAX, UID_MIN
+
+
+# The uid range every derivation below is bounded by. Reserved for workload
+# users; the subordinate-id math in workload_lib is keyed on the same window.
+UID_MIN = 10000
+UID_MAX = 52948
 
 
 # --- Uid-derived values ---
@@ -498,3 +503,51 @@ def vm_reserved_range(addr: str, port: int | None = None) -> ReservedRange | Non
             continue
         return reserved
     return None
+
+
+# --- The shared dummy link ---
+#
+# Dummy link carrying every per-workload listener address. Host-global and
+# shared, created on demand and never torn down by a workload stop: it is
+# refcount-free because it holds no per-workload state, costs nothing idle,
+# and an orphan is inert.
+#
+# The DEVICE name still reads "workload-proxy" after the proxy it was named for
+# was deleted, and that is deliberate. A link name is an object that exists on
+# running hosts: renaming it would leave the old link in place holding this
+# workload's 127.128.x.y and 198.18.x.y addresses, with the new link claiming
+# the same addresses — two links answering for one address is a routing
+# ambiguity, and it would arrive on upgrade rather than on a fresh install.
+VM_ADVERTISED_IFACE = "workload-proxy"
+
+IP_BIN = "/usr/sbin/ip"
+
+
+def ensure_advertised_interface(run) -> None:
+    """Create the dummy link the inspector's addresses hang on, idempotently.
+
+    THE LINK ONLY. What it carries is each filtered workload's own inspector
+    addresses, put on by vm_inspect_link_address_commands -- so this creates
+    the object those `ip addr add`s need to exist and nothing more. No address
+    of its own: there is no advertised endpoint, and the name is historical,
+    like nftables/workload-proxy.nft's.
+
+    `run(argv)` is injected rather than imported so this module stays free of
+    subprocess; the inspect helper passes its own. libexec entrypoints have no
+    extension, so they are not importable and cannot share one.
+
+    Creation tolerates "already exists" because two VMs starting concurrently
+    race here -- there is no lock and deliberately no owning unit. Anything else
+    is fatal: without the link the inspector's addresses cannot be assigned and
+    the redirect's destination is unroutable, which the guest sees as a
+    connection that fails with no useful diagnostic.
+    """
+    result = run([IP_BIN, "link", "add", VM_ADVERTISED_IFACE, "type", "dummy"])
+    if result.returncode != 0 and "File exists" not in result.stderr:
+        raise RuntimeError(
+            f"could not create {VM_ADVERTISED_IFACE}: {result.stderr.strip()}")
+
+    result = run([IP_BIN, "link", "set", VM_ADVERTISED_IFACE, "up"])
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"could not bring up {VM_ADVERTISED_IFACE}: {result.stderr.strip()}")

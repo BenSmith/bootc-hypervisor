@@ -62,9 +62,6 @@ UPWARD_EDGES = {
     # The cycle itself: workload_lib is above the plane and reaches back into
     # the substrate facade from four function bodies.
     ("workload_lib", "vm"): 4,
-    # UID_MIN/UID_MAX, the uid-range bounds every derived address is checked
-    # against; they belong here and this edge dies when they move.
-    ("workload_addr", "workload_lib"): 1,
     # CREDSTORE_DIR, fetched lazily inside the credential path helper. The
     # module-level half of this edge died when the container parse functions
     # moved down to config_parser.

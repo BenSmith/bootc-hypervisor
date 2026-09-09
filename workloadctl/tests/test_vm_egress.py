@@ -31,7 +31,7 @@ from vm import (
     vm_filter_delete_command, vm_inspect_address, vm_owned_elements,
     vm_resolve_address,
 )
-from workload_lib import UID_MAX, UID_MIN
+from workload_addr import UID_MAX, UID_MIN
 
 
 def allow_entry(address, reason="a test bypass, written down"):

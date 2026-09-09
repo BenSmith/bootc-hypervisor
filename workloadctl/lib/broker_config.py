@@ -23,8 +23,9 @@ from pathlib import Path
 
 from config_parser import (container_credential_entries,
                            container_policy_entries, container_uses_inspect)
-from workload_addr import vm_broker_listen_address, vm_inspect_address
-from vm_defs import IP_BIN, VM_ADVERTISED_IFACE, vm_uses_inspect
+from workload_addr import (IP_BIN, VM_ADVERTISED_IFACE,
+                           vm_broker_listen_address, vm_inspect_address)
+from vm_defs import vm_uses_inspect
 from vm_network_config import vm_credential_entries, vm_policy_entries
 
 
@@ -382,36 +383,6 @@ def vm_host_resolver_addresses(resolv_conf: str = "/etc/resolv.conf") -> list[st
             if addr not in found:
                 found.append(addr)
     return found
-
-
-def ensure_advertised_interface(run) -> None:
-    """Create the dummy link the inspector's addresses hang on, idempotently.
-
-    THE LINK ONLY. What it carries is each filtered workload's own inspector
-    addresses, put on by vm_inspect_link_address_commands -- so this creates
-    the object those `ip addr add`s need to exist and nothing more. No address
-    of its own: there is no advertised endpoint, and the name is historical,
-    like nftables/workload-proxy.nft's.
-
-    `run(argv)` is injected rather than imported so this module stays free of
-    subprocess; the inspect helper passes its own. libexec entrypoints have no
-    extension, so they are not importable and cannot share one.
-
-    Creation tolerates "already exists" because two VMs starting concurrently
-    race here -- there is no lock and deliberately no owning unit. Anything else
-    is fatal: without the link the inspector's addresses cannot be assigned and
-    the redirect's destination is unroutable, which the guest sees as a
-    connection that fails with no useful diagnostic.
-    """
-    result = run([IP_BIN, "link", "add", VM_ADVERTISED_IFACE, "type", "dummy"])
-    if result.returncode != 0 and "File exists" not in result.stderr:
-        raise RuntimeError(
-            f"could not create {VM_ADVERTISED_IFACE}: {result.stderr.strip()}")
-
-    result = run([IP_BIN, "link", "set", VM_ADVERTISED_IFACE, "up"])
-    if result.returncode != 0:
-        raise RuntimeError(
-            f"could not bring up {VM_ADVERTISED_IFACE}: {result.stderr.strip()}")
 
 
 def vm_inspect_link_address_commands(uid: int) -> tuple[list[str], list[str]]:

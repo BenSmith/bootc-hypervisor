@@ -23,6 +23,7 @@ from typing import NamedTuple
 # grammar both substrates read, and imports nothing of ours. These names are
 # used by the code that stayed here; the import is what keeps there being one
 # spelling of each rule rather than two.
+from workload_addr import UID_MAX, UID_MIN
 from config_parser import (
     ContainerCredential, ContainerPolicyEntry,
     _validate_container_host_pattern, container_allow_resolve,
@@ -158,10 +159,6 @@ USERNAME_PREFIX = "_wl-"
 # dissolves the per-workload isolation boundary, so it is refused unless this is
 # set true — an explicit acknowledgement rather than a silently-honoured default.
 HOST_USERNS_OPT_IN = "unsafe_host_userns"
-
-# UID range reserved for workload users.
-UID_MIN = 10000
-UID_MAX = 52948
 
 # Subordinate-id range derivation. The base places every workload range above
 # the window Fedora's own `useradd` allocates subids from (SUB_UID_MAX=600100000

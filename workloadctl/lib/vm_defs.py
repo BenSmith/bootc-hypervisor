@@ -303,7 +303,6 @@ VM_REGISTRATION_DOMAIN_PARENTS = (
 # The uid-keyed egress layer (ADR 006 §4). One table shared by every VM;
 # units manage set *elements* only, never rules.
 NFT_BIN = "/usr/sbin/nft"
-IP_BIN = "/usr/sbin/ip"
 NFT_TABLE = "inet workload_filter"
 NFT_SET_FILTERED = "wl_filtered"
 NFT_SET_ALLOW4 = "wl_allow4"
@@ -489,19 +488,6 @@ class SeedContractError(RuntimeError):
     """A custom [vm.cloud_init].user_data_file does not satisfy a contract the
     built-in seed would have satisfied. The message is written for the operator
     and names the fix."""
-
-# Dummy link carrying the advertised address and every per-workload listener
-# address. Host-global and shared, created on demand and never torn down by a
-# workload stop: it is refcount-free because it holds no per-workload state,
-# costs nothing idle, and an orphan is inert.
-#
-# The DEVICE name still reads "workload-proxy" after the proxy it was named for
-# was deleted, and that is deliberate. A link name is an object that exists on
-# running hosts: renaming it would leave the old link in place holding this
-# workload's 127.128.x.y and 198.18.x.y addresses, with the new link claiming
-# the same addresses — two links answering for one address is a routing
-# ambiguity, and it would arrive on upgrade rather than on a fresh install.
-VM_ADVERTISED_IFACE = "workload-proxy"
 
 # The host-side process that re-originates a workload's egress — the egress
 # inspector, and it alone; the synthesising responder re-originates nothing,
