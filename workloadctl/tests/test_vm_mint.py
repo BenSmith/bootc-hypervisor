@@ -21,7 +21,7 @@ from unittest import mock
 
 import shutil
 
-import vm
+import egress_ca
 import vm_clock
 import egress_mint
 from tests import REPO_ROOT
@@ -36,8 +36,9 @@ from egress_ca import (LeafRefused, vm_ca_openssl_argv, vm_leaf_openssl_argv,
 def _mint_ca(state_dir: Path, name="wl-test") -> None:
     (state_dir / "ca").mkdir(mode=0o700, parents=True, exist_ok=True)
     subprocess.run(
-        vm_ca_openssl_argv(name, vm.vm_ca_key_path(state_dir),
-                           vm.vm_ca_cert_path(state_dir), now=time.time()),
+        vm_ca_openssl_argv(name, egress_ca.vm_ca_key_path(state_dir),
+                           egress_ca.vm_ca_cert_path(state_dir),
+                           now=time.time()),
         capture_output=True, text=True, check=True)
 
 
@@ -122,8 +123,9 @@ class TestTheMintedLeaf(unittest.TestCase):
         cls.leaf_crt = cls.state / "leaf.crt"
         subprocess.run(
             vm_leaf_openssl_argv(
-                "example.com", vm.vm_ca_key_path(cls.state),
-                vm.vm_ca_cert_path(cls.state), cls.leaf_key, cls.leaf_crt,
+                "example.com", egress_ca.vm_ca_key_path(cls.state),
+                egress_ca.vm_ca_cert_path(cls.state),
+                cls.leaf_key, cls.leaf_crt,
                 now=time.time()),
             capture_output=True, text=True, check=True)
 
@@ -165,14 +167,14 @@ class TestTheMintedLeaf(unittest.TestCase):
     def test_not_before_is_backdated_an_hour(self):
         text = _certificate(self.leaf_crt, "-startdate")
         when = ssl.cert_time_to_seconds(text.split("=", 1)[1].strip())
-        self.assertAlmostEqual(time.time() - when, vm.VM_CA_BACKDATE_SECONDS,
-                               delta=120)
+        self.assertAlmostEqual(time.time() - when,
+                               egress_ca.VM_CA_BACKDATE_SECONDS, delta=120)
 
     def test_it_expires_in_thirty_days(self):
         text = _certificate(self.leaf_crt, "-enddate")
         when = ssl.cert_time_to_seconds(text.split("=", 1)[1].strip())
         self.assertAlmostEqual((when - time.time()) / 86400,
-                               vm.VM_LEAF_VALIDITY_DAYS, delta=1)
+                               egress_ca.VM_LEAF_VALIDITY_DAYS, delta=1)
 
     def test_a_real_client_completes_a_real_handshake_against_it(self):
         """The proof the rung actually needs, and the only one that counts.
@@ -186,7 +188,7 @@ class TestTheMintedLeaf(unittest.TestCase):
         server = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         server.load_cert_chain(self.leaf_crt, self.leaf_key)
         client = ssl.create_default_context(
-            cafile=str(vm.vm_ca_cert_path(self.state)))
+            cafile=str(egress_ca.vm_ca_cert_path(self.state)))
 
         listener = socket.socket()
         listener.bind(("127.0.0.1", 0))
@@ -223,7 +225,7 @@ class TestTheMintedLeaf(unittest.TestCase):
         server = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         server.load_cert_chain(self.leaf_crt, self.leaf_key)
         client = ssl.create_default_context(
-            cafile=str(vm.vm_ca_cert_path(self.state)))
+            cafile=str(egress_ca.vm_ca_cert_path(self.state)))
 
         listener = socket.socket()
         listener.bind(("127.0.0.1", 0))
@@ -577,7 +579,7 @@ class TestRenewal(_MinterCase):
     def test_a_leaf_inside_the_renewal_window_is_a_miss(self):
         minter = self.minter()
         first = minter.leaf("example.com", denied=False)
-        later = first.not_after - vm.VM_LEAF_RENEW_WITHIN_SECONDS + 60
+        later = first.not_after - egress_ca.VM_LEAF_RENEW_WITHIN_SECONDS + 60
         with mock.patch.object(minter, "_clock", lambda: later):
             minter.leaf("example.com", denied=False)
         self.assertEqual(minter.stats["mints"], 2)
@@ -585,7 +587,8 @@ class TestRenewal(_MinterCase):
     def test_a_leaf_outside_it_is_a_hit(self):
         minter = self.minter()
         first = minter.leaf("example.com", denied=False)
-        earlier = first.not_after - vm.VM_LEAF_RENEW_WITHIN_SECONDS - 3600
+        earlier = (first.not_after
+                   - egress_ca.VM_LEAF_RENEW_WITHIN_SECONDS - 3600)
         with mock.patch.object(minter, "_clock", lambda: earlier):
             minter.leaf("example.com", denied=False)
         self.assertEqual(minter.stats["mints"], 1)
@@ -674,7 +677,7 @@ class TestWhatTheMinterReports(_MinterCase):
         in the guest, so it has to be spelled the way the tool an operator will
         reach for spells it."""
         minter = self.minter()
-        printed = _certificate(vm.vm_ca_cert_path(self.state),
+        printed = _certificate(egress_ca.vm_ca_cert_path(self.state),
                                "-fingerprint", "-sha256").strip()
         _, _, expected = printed.partition("=")
         self.assertEqual(minter.ca_identity()["sha256"], expected)
@@ -692,12 +695,12 @@ class TestWhatTheMinterReports(_MinterCase):
         syscalls to confirm a constant."""
         minter = self.minter()
         first = minter.ca_identity()
-        vm.vm_ca_cert_path(self.state).unlink()
+        egress_ca.vm_ca_cert_path(self.state).unlink()
         self.assertEqual(minter.ca_identity(), first)
 
     def test_an_unreadable_ca_costs_the_figure_and_not_the_status(self):
         """A status file is never worth a connection."""
-        vm.vm_ca_cert_path(self.state).write_text("not a certificate\n")
+        egress_ca.vm_ca_cert_path(self.state).write_text("not a certificate\n")
         minter = self.minter()
         self.assertEqual(minter.ca_identity(),
                          {"sha256": None, "not_after": None})

@@ -31,11 +31,14 @@ import ipaddress
 import unittest
 from pathlib import Path
 
+import nft_constants
 import vm
-from vm import (FamilyPair, NFT_PAIR_ALLOW, NFT_PAIR_INSPECT_DST,
-                NFT_PAIR_INSPECT_LIVE, NFT_PAIR_INSPECT_MAP,
-                NFT_PAIR_INSPECT_SELF, NFT_PAIR_INTERNAL,
-                NFT_PAIR_INTERNAL_OK, NFT_SET_FILTERED)
+import vm_network_config
+import workload_addr
+from nft_constants import (FamilyPair, NFT_PAIR_ALLOW, NFT_PAIR_INSPECT_DST,
+                           NFT_PAIR_INSPECT_LIVE, NFT_PAIR_INSPECT_MAP,
+                           NFT_PAIR_INSPECT_SELF, NFT_PAIR_INTERNAL,
+                           NFT_PAIR_INTERNAL_OK, NFT_SET_FILTERED)
 
 UID = 10004
 
@@ -51,7 +54,8 @@ DERIVED = (
 
 
 def _entry(port):
-    return vm.VmAllowEntry(address=None, host=None, port=port, reason="test")
+    return vm_network_config.VmAllowEntry(address=None, host=None, port=port,
+                                          reason="test")
 
 
 def _pairs():
@@ -127,7 +131,7 @@ class TestTheDerivedBuildersFillBothHalves(unittest.TestCase):
         An element in the other family's set never matches, and nothing
         anywhere reports a set that is never matched.
         """
-        addr = vm.vm_inspect_address(UID)
+        addr = workload_addr.vm_inspect_address(UID)
         for pair, build in DERIVED:
             elements = build(UID)
             with self.subTest(build=build.__name__):
@@ -171,7 +175,7 @@ class TestSplitByFamily(unittest.TestCase):
     def test_each_address_lands_in_its_own_family(self):
         v4 = ipaddress.ip_address("192.0.2.1")
         v6 = ipaddress.ip_address("2001:db8::1")
-        got = vm._split_by_family(FamilyPair("a4", "a6"),
+        got = nft_constants._split_by_family(FamilyPair("a4", "a6"),
                                   [(v4, "x"), (v6, "y"), (v4, "z")])
         self.assertEqual(got, {"a4": ["x", "z"], "a6": ["y"]})
 
@@ -179,9 +183,12 @@ class TestSplitByFamily(unittest.TestCase):
         """`nft add element ... { }` is an error, not a no-op, so a half with
         nothing in it must not become a command."""
         v4 = ipaddress.ip_address("192.0.2.1")
-        self.assertEqual(vm._split_by_family(FamilyPair("a4", "a6"), [(v4, "x")]),
-                         {"a4": ["x"]})
-        self.assertEqual(vm._split_by_family(FamilyPair("a4", "a6"), []), {})
+        self.assertEqual(
+            nft_constants._split_by_family(FamilyPair("a4", "a6"),
+                                           [(v4, "x")]),
+            {"a4": ["x"]})
+        self.assertEqual(
+            nft_constants._split_by_family(FamilyPair("a4", "a6"), []), {})
 
     def test_the_allowlist_splits_and_keeps_the_family_agnostic_set(self):
         """wl_filtered carries the bare uid and belongs to neither family:
@@ -222,8 +229,10 @@ class TestTheDropRangesArePaired(unittest.TestCase):
         """Nothing in Python arms these -- the skeleton holds the elements --
         but diagnose reads both to tell a loaded guard from an older table,
         and reading one family answers for one family."""
-        self.assertEqual(NFT_PAIR_INTERNAL,
-                         FamilyPair(vm.NFT_SET_INTERNAL4, vm.NFT_SET_INTERNAL6))
+        self.assertEqual(
+            NFT_PAIR_INTERNAL,
+            FamilyPair(nft_constants.NFT_SET_INTERNAL4,
+                       nft_constants.NFT_SET_INTERNAL6))
 
 
 if __name__ == "__main__":

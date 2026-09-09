@@ -198,7 +198,7 @@ class TestTheGuestIsToldNothing(unittest.TestCase):
                 f"the default seed renderer still emits {var}"))
 
     def test_seed_provides_no_longer_accepts_the_proxy_concern(self):
-        from vm import SEED_PROVIDES_CHOICES, SEED_PROVIDES_RETIRED
+        from vm_defs import SEED_PROVIDES_CHOICES, SEED_PROVIDES_RETIRED
         self.assertNotIn("proxy", SEED_PROVIDES_CHOICES)
         self.assertIn("proxy", SEED_PROVIDES_RETIRED)
         # Named, not just refused: a custom seed that declared the old concern

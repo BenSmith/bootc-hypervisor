@@ -18,20 +18,22 @@ from types import SimpleNamespace
 from unittest import mock
 
 from egress_policy import VM_INSPECT_PORT_CLEARTEXT, VM_INSPECT_PORT_TLS
-from vm import (
+from vm import vm_filter_commands, vm_filter_delete_command
+from netfilter_state import (
+    CONNTRACK_PRESSURE, conntrack_occupancy, nft_drop_counter,
+    nft_element_counter, nft_set_elements, vm_owned_elements,
+)
+from nft_constants import (
     NFT_MAP_INSPECT4, NFT_MAP_INSPECT6, NFT_SET_ALLOW4, NFT_SET_ALLOW6,
     NFT_SET_FILTERED, NFT_SET_INSPECT_CG, NFT_SET_INSPECT_DST,
     NFT_SET_INSPECT_DST6, NFT_SET_INSPECT_SELF, NFT_SET_INSPECT_SELF6,
-    NFT_SET_INSPECT_LIVE, NFT_SET_INSPECT_LIVE6,
-    NFT_SET_INTERNAL4, NFT_SET_INTERNAL6, NFT_SET_EGRESS_CG, NFT_SKELETON,
-    VM_INSPECT_ADDR6_PREFIX, VM_INSPECT_NETWORK,
-    CONNTRACK_PRESSURE, conntrack_occupancy,
-    nft_drop_counter, nft_element_counter, nft_set_elements,
-    parse_vm_allow, vm_allow_reserved_reason, vm_filter_commands,
-    vm_filter_delete_command, vm_inspect_address, vm_owned_elements,
-    vm_resolve_address,
+    NFT_SET_INSPECT_LIVE, NFT_SET_INSPECT_LIVE6, NFT_SET_INTERNAL4,
+    NFT_SET_INTERNAL6, NFT_SET_EGRESS_CG, NFT_SKELETON,
 )
-from workload_addr import UID_MAX, UID_MIN
+from vm_network_config import parse_vm_allow, vm_allow_reserved_reason
+from workload_addr import (UID_MAX, UID_MIN, VM_INSPECT_ADDR6_PREFIX,
+                           VM_INSPECT_NETWORK, vm_inspect_address,
+                           vm_resolve_address)
 
 
 def allow_entry(address, reason="a test bypass, written down"):
@@ -429,7 +431,8 @@ class TestInternalDestinationGuard(unittest.TestCase):
         hatch and the drop are the same list twice; this is the second copy.
         """
         import ipaddress
-        from vm import VM_INTERNAL_PREFIXES4, vm_internal_ok_elements
+        from vm import vm_internal_ok_elements
+        from vm_defs import VM_INTERNAL_PREFIXES4
         self.assertIn("192.0.2.0/24", VM_INTERNAL_PREFIXES4)
         self.assertTrue(vm_internal_ok_elements(
             10007, [ipaddress.ip_address("192.0.2.5")]))
@@ -1065,7 +1068,7 @@ class TestFilterHelper(unittest.TestCase):
         cannot query before the VM it comes from is running -- which is after
         this ExecStartPre. Ordering is inherited rather than declared, so the
         thing to assert is that the write happens at all."""
-        from vm import VM_RESOLVE_TTL, vm_inspect_address
+        from workload_addr import VM_RESOLVE_TTL, vm_inspect_address
         self._net(egress="filtered", allow=[])
         self.mod.up("vm1")
         doc = self._resolve_document()
@@ -1909,7 +1912,7 @@ class TestInspectMapKeyShapes(unittest.TestCase):
         # Pins the reason this helper exists at all: if this ever starts
         # returning the uid, the two readers have converged and the extra
         # helper can go.
-        from vm import vm_owned_elements
+        from netfilter_state import vm_owned_elements
         self.assertEqual(
             vm_owned_elements(10001, [[{"concat": [10001, 80]},
                                        {"concat": ["198.18.1.1", 8080]}]]), [])
@@ -2002,7 +2005,7 @@ class TestListenerRangeRefusalReachesBothPaths(unittest.TestCase):
     """
 
     def test_validation_reports_it_as_an_allow_error(self):
-        from vm import _validate_egress
+        from vm_network_config import _validate_egress
         errors = _validate_egress({"egress": "filtered",
                                    "allow": [allow_entry("198.18.1.0:8080")]})
         self.assertTrue(any("listener range" in e for e in errors), errors)
@@ -2256,7 +2259,7 @@ class TestRung2Schema(unittest.TestCase):
     """
 
     def _egress(self, net):
-        from vm import _validate_egress
+        from vm_network_config import _validate_egress
         return _validate_egress(net)
 
     # --- tls ---
@@ -2381,7 +2384,7 @@ class TestRung2Schema(unittest.TestCase):
         operator types beside `tls` in the middle of an incident, so it has to
         be in the set that gets the "move it up" hint rather than a bare
         unknown-key error."""
-        from vm import VM_NETWORK_SCALARS, parse_vm_allow
+        from vm_network_config import VM_NETWORK_SCALARS, parse_vm_allow
         self.assertIn("tls_reason", VM_NETWORK_SCALARS)
         with self.assertRaises(ValueError) as caught:
             parse_vm_allow({"address": "10.0.0.1:22", "reason": "ssh",
@@ -3110,7 +3113,7 @@ class TestRung2Warnings(unittest.TestCase):
     """
 
     def _warn(self, net):
-        from vm import vm_network_warnings
+        from vm_network_config import vm_network_warnings
         return vm_network_warnings(net)
 
     def test_a_registration_domain_wildcard_warns_wherever_it_appears(self):
@@ -3126,7 +3129,7 @@ class TestRung2Warnings(unittest.TestCase):
         A stale copy shipped in an RPM that hard-fails a valid config is worse
         than a line of output -- the operator cannot edit the RPM.
         """
-        from vm import _validate_egress
+        from vm_network_config import _validate_egress
         self.assertEqual(_validate_egress({"hosts": ["*.github.io"]}), [])
 
     def test_a_named_host_under_such_a_parent_does_not_warn(self):
@@ -3222,7 +3225,7 @@ class TestReservedRanges(unittest.TestCase):
     """
 
     def _ports(self, spec):
-        from vm import validate_vm_network
+        from vm_network_config import validate_vm_network
         return [e for e in validate_vm_network({"egress": "open",
                                                 "ports": [spec]})
                 if "ports" in e]
@@ -3235,8 +3238,8 @@ class TestReservedRanges(unittest.TestCase):
         unchecked -- so what is asserted here is the membership of the
         collection the check reads.
         """
-        from vm import (VM_INSPECT_ADDR6_PREFIX, VM_INSPECT_NETWORK,
-                        VM_MGMT_NETWORK, VM_RESERVED_RANGES)
+        from workload_addr import (VM_INSPECT_ADDR6_PREFIX, VM_INSPECT_NETWORK,
+                                   VM_MGMT_NETWORK, VM_RESERVED_RANGES)
         networks = [p.network for p in VM_RESERVED_RANGES]
         self.assertIn(VM_MGMT_NETWORK, networks)
         self.assertIn(VM_INSPECT_NETWORK, networks)
@@ -3267,8 +3270,8 @@ class TestReservedRanges(unittest.TestCase):
         merely stopped checking would be indistinguishable from one that never
         did.
         """
-        from vm import (UID_MAX, UID_MIN, VM_MGMT_NETWORK,
-                        vm_broker_listen_address, vm_reserved_range)
+        from workload_addr import (UID_MAX, UID_MIN, VM_MGMT_NETWORK,
+                                   vm_broker_listen_address, vm_reserved_range)
         for uid in (UID_MIN, UID_MIN + 1, 42000, UID_MAX):
             addr = vm_broker_listen_address(uid)
             with self.subTest(uid=uid):
@@ -3287,7 +3290,7 @@ class TestReservedRanges(unittest.TestCase):
         refuses the address, and that path reads vm_reserved_range through
         parse_vm_port rather than being handed one.
         """
-        from vm import UID_MIN, vm_broker_listen_address
+        from workload_addr import UID_MIN, vm_broker_listen_address
         addr = vm_broker_listen_address(UID_MIN + 7)
         self.assertTrue(self._ports(f"{addr}:8081:80"), addr)
 
@@ -3353,7 +3356,7 @@ class TestReservedRanges(unittest.TestCase):
                 self.assertEqual(self._ports(spec), [])
 
     def test_the_helper_answers_none_off_range_and_the_range_on_it(self):
-        from vm import VM_MGMT_NETWORK, vm_reserved_range
+        from workload_addr import VM_MGMT_NETWORK, vm_reserved_range
         self.assertIsNone(vm_reserved_range("192.168.0.5", 8080))
         self.assertIsNone(vm_reserved_range("not-an-address", 8080))
         self.assertEqual(vm_reserved_range("127.128.0.3", 2222).network,
@@ -3365,7 +3368,7 @@ class TestReservedRanges(unittest.TestCase):
         A comparison that crossed families would raise, or worse, answer False
         for everything and read as a passing test.
         """
-        from vm import vm_reserved_range
+        from workload_addr import vm_reserved_range
         self.assertIsNone(vm_reserved_range("2001:db8::1", 8443))
         self.assertIsNotNone(vm_reserved_range("2001:2::c612:100", 8443))
         self.assertIsNotNone(vm_reserved_range("198.18.1.4", 8443))
@@ -3393,7 +3396,7 @@ class TestInternalOkAccept(unittest.TestCase):
         return matches[0]
 
     def test_the_sets_are_declared(self):
-        from vm import NFT_SET_INTERNAL_OK4, NFT_SET_INTERNAL_OK6
+        from nft_constants import NFT_SET_INTERNAL_OK4, NFT_SET_INTERNAL_OK6
         text = SKELETON.read_text()
         for name in (NFT_SET_INTERNAL_OK4, NFT_SET_INTERNAL_OK6):
             self.assertIn(f"add set inet workload_filter {name} ", text)
@@ -3405,7 +3408,7 @@ class TestInternalOkAccept(unittest.TestCase):
         whose rule drifted to a different name: the skeleton loads, the helper
         arms elements, and the accept never fires.
         """
-        from vm import NFT_SET_INTERNAL_OK4, NFT_SET_INTERNAL_OK6
+        from nft_constants import NFT_SET_INTERNAL_OK4, NFT_SET_INTERNAL_OK6
         for name in (NFT_SET_INTERNAL_OK4, NFT_SET_INTERNAL_OK6):
             self.assertTrue(any(f"@{name}" in r for r in self.rules),
                             f"no rule consults @{name}")
@@ -3420,7 +3423,8 @@ class TestInternalOkAccept(unittest.TestCase):
         address. Dropping the match leaves a rule that still parses, still
         matches, and means something else entirely.
         """
-        from vm import NFT_SET_INTERNAL_OK4, NFT_SET_INTERNAL_OK6, NFT_SET_EGRESS_CG
+        from nft_constants import (NFT_SET_INTERNAL_OK4, NFT_SET_INTERNAL_OK6,
+                                   NFT_SET_EGRESS_CG)
         for name in (NFT_SET_INTERNAL_OK4, NFT_SET_INTERNAL_OK6):
             rule = self.rules[self._index(f"@{name}")]
             self.assertIn(f"socket cgroupv2 level 2 @{NFT_SET_EGRESS_CG}", rule)
@@ -3433,8 +3437,8 @@ class TestInternalOkAccept(unittest.TestCase):
         every other signal -- the set exists, the element is armed, the rule is
         in the chain -- reads exactly as it does when it works.
         """
-        from vm import (NFT_SET_INTERNAL4, NFT_SET_INTERNAL6,
-                        NFT_SET_INTERNAL_OK4, NFT_SET_INTERNAL_OK6)
+        from nft_constants import (NFT_SET_INTERNAL4, NFT_SET_INTERNAL6,
+                                   NFT_SET_INTERNAL_OK4, NFT_SET_INTERNAL_OK6)
         for ok, drop in ((NFT_SET_INTERNAL_OK4, NFT_SET_INTERNAL4),
                          (NFT_SET_INTERNAL_OK6, NFT_SET_INTERNAL6)):
             self.assertLess(self._index(f"@{ok}"), self._index(f"@{drop}"),
@@ -3448,8 +3452,8 @@ class TestInternalOkAccept(unittest.TestCase):
         here makes that refusal wrong in the permissive direction, and nothing
         else would notice.
         """
-        from vm import (NFT_SET_INTERNAL4, NFT_SET_INTERNAL6,
-                        VM_INTERNAL_PREFIXES4, VM_INTERNAL_PREFIXES6)
+        from nft_constants import NFT_SET_INTERNAL4, NFT_SET_INTERNAL6
+        from vm_defs import VM_INTERNAL_PREFIXES4, VM_INTERNAL_PREFIXES6
         text = SKELETON.read_text()
         for set_name, prefixes in ((NFT_SET_INTERNAL4, VM_INTERNAL_PREFIXES4),
                                    (NFT_SET_INTERNAL6, VM_INTERNAL_PREFIXES6)):
@@ -3469,15 +3473,16 @@ class TestInternalOkElements(unittest.TestCase):
         return [ipaddress.ip_address(s) for s in specs]
 
     def test_elements_split_by_family_and_carry_no_port(self):
-        from vm import (NFT_SET_INTERNAL_OK4, NFT_SET_INTERNAL_OK6,
-                        vm_internal_ok_elements)
+        from vm import vm_internal_ok_elements
+        from nft_constants import NFT_SET_INTERNAL_OK4, NFT_SET_INTERNAL_OK6
         elements = vm_internal_ok_elements(
             10001, self._addrs("192.168.0.10", "fd00::10"))
         self.assertEqual(elements[NFT_SET_INTERNAL_OK4], ["10001 . 192.168.0.10"])
         self.assertEqual(elements[NFT_SET_INTERNAL_OK6], ["10001 . fd00::10"])
 
     def test_an_empty_family_produces_no_command(self):
-        from vm import NFT_SET_INTERNAL_OK6, vm_internal_ok_commands
+        from vm import vm_internal_ok_commands
+        from nft_constants import NFT_SET_INTERNAL_OK6
         cmds = vm_internal_ok_commands(10001, self._addrs("192.168.0.10"), "add")
         self.assertEqual(len(cmds), 1)
         self.assertNotIn(NFT_SET_INTERNAL_OK6, cmds[0])
@@ -3553,7 +3558,8 @@ class TestInternalOkElements(unittest.TestCase):
                     vm_internal_ok_uid_elements(10001, payload), [])
 
     def test_the_delete_command_carries_exactly_the_entries_given(self):
-        from vm import (NFT_SET_INTERNAL_OK4, vm_internal_ok_delete_commands)
+        from vm import vm_internal_ok_delete_commands
+        from nft_constants import NFT_SET_INTERNAL_OK4
         cmds = vm_internal_ok_delete_commands(
             NFT_SET_INTERNAL_OK4, ["10001 . 192.168.0.10"])
         self.assertEqual(len(cmds), 1)
@@ -3564,8 +3570,8 @@ class TestInternalOkElements(unittest.TestCase):
             vm_internal_ok_delete_commands(NFT_SET_INTERNAL_OK4, []), [])
 
     def test_the_list_commands_ask_for_json_for_both_families(self):
-        from vm import (NFT_SET_INTERNAL_OK4, NFT_SET_INTERNAL_OK6,
-                        vm_internal_ok_list_commands)
+        from vm import vm_internal_ok_list_commands
+        from nft_constants import NFT_SET_INTERNAL_OK4, NFT_SET_INTERNAL_OK6
         cmds = vm_internal_ok_list_commands()
         self.assertEqual([c[-1] for c in cmds],
                          [NFT_SET_INTERNAL_OK4, NFT_SET_INTERNAL_OK6])
@@ -3616,7 +3622,7 @@ class TestRung6CredentialSchema(unittest.TestCase):
     """
 
     def _egress(self, net):
-        from vm import _validate_egress
+        from vm_network_config import _validate_egress
         return _validate_egress(net)
 
     def _net(self, **over):
@@ -3946,7 +3952,7 @@ class TestRung6BrokerAddress(unittest.TestCase):
     """`vm_broker_listen_address` (D3): per-workload, derived, never shared."""
 
     def test_the_first_workload_lands_on_the_base(self):
-        from vm import UID_MIN, vm_broker_listen_address
+        from workload_addr import UID_MIN, vm_broker_listen_address
         self.assertEqual(vm_broker_listen_address(UID_MIN), "127.129.0.0")
         self.assertEqual(vm_broker_listen_address(UID_MIN + 3), "127.129.0.3")
 
@@ -3956,7 +3962,7 @@ class TestRung6BrokerAddress(unittest.TestCase):
         hole grows back. Asserted as negatives rather than only as a positive,
         because a positive assertion on one uid passes while a constant is
         wrong for the range."""
-        from vm import UID_MAX, UID_MIN, vm_broker_listen_address
+        from workload_addr import UID_MAX, UID_MIN, vm_broker_listen_address
         for uid in (UID_MIN, UID_MIN + 1, 10500, 42000, UID_MAX):
             with self.subTest(uid=uid):
                 addr = vm_broker_listen_address(uid)
@@ -3964,7 +3970,7 @@ class TestRung6BrokerAddress(unittest.TestCase):
                 self.assertNotEqual(addr, "0.0.0.0")
 
     def test_a_uid_outside_the_workload_range_raises(self):
-        from vm import UID_MAX, UID_MIN, vm_broker_listen_address
+        from workload_addr import UID_MAX, UID_MIN, vm_broker_listen_address
         for uid in (UID_MIN - 1, UID_MAX + 1, 0):
             with self.subTest(uid=uid):
                 with self.assertRaises(ValueError):
@@ -3981,8 +3987,8 @@ class TestRung6BrokerAddress(unittest.TestCase):
         unchanged while a third address is added and left unchecked, which is the
         failure TestReservedRanges states in its own docstring.
         """
-        from vm import (UID_MAX, UID_MIN, vm_broker_listen_address,
-                        vm_management_address, vm_resolve_address)
+        from workload_addr import (UID_MAX, UID_MIN, vm_broker_listen_address,
+                                   vm_management_address, vm_resolve_address)
         derived = (vm_management_address, vm_broker_listen_address,
                    vm_resolve_address)
         for uid in (UID_MIN, UID_MIN + 1, 42000, UID_MAX):

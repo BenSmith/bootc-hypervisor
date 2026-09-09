@@ -26,13 +26,15 @@ from cmd_diagnose import (
     INSPECT_ACCEPT_SETS, INSPECT_GUARD_SETS, INSPECT_SELF_SETS,
 )
 from vm import (
-    NFT_SET_INSPECT_DST, NFT_SET_INSPECT_DST6,
-    NFT_SET_INSPECT_SELF, NFT_SET_INSPECT_SELF6,
-    NFT_SET_INSPECT_LIVE, NFT_SET_INSPECT_LIVE6,
-    NFT_TABLE, vm_inspect_address, vm_inspect_dst_elements,
-    vm_inspect_element_commands, vm_inspect_live_elements,
-    vm_inspect_self_elements,
+    vm_inspect_dst_elements, vm_inspect_element_commands,
+    vm_inspect_live_elements, vm_inspect_self_elements,
 )
+from nft_constants import (
+    NFT_SET_INSPECT_DST, NFT_SET_INSPECT_DST6, NFT_SET_INSPECT_SELF,
+    NFT_SET_INSPECT_SELF6, NFT_SET_INSPECT_LIVE, NFT_SET_INSPECT_LIVE6,
+    NFT_TABLE,
+)
+from workload_addr import vm_inspect_address
 
 UID = 10001
 ALL_SETS = INSPECT_ACCEPT_SETS + INSPECT_SELF_SETS + INSPECT_GUARD_SETS

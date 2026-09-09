@@ -12,9 +12,9 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from provisioning import LOCAL_FCONTEXT_ROOTS, shadowed_filecon_paths
-from vm import (
-    VM_QEMU_CONTEXT, VM_QEMU_TYPE, VM_RUNCON_BIN, VM_SELINUX_CIL, VM_SELINUX_MODULE,
-    qemu_launch_argv,
+from egress_selinux import (
+    VM_QEMU_CONTEXT, VM_QEMU_TYPE, VM_RUNCON_BIN, VM_SELINUX_CIL,
+    VM_SELINUX_MODULE, qemu_launch_argv,
 )
 
 ROOT = Path(__file__).resolve().parent.parent

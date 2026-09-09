@@ -15,7 +15,7 @@ import pathlib
 import re
 import unittest
 
-from vm import VM_INSPECT_LISTENER_BIN
+from workload_addr import VM_INSPECT_LISTENER_BIN
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 CIL = ROOT / "security" / "workload-inspect.cil"

@@ -25,16 +25,12 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from vm import (
-    NFLOG_GROUP_BASE,
-    VM_MGMT_SSH_PORT,
-    parse_vm_port,
-    validate_vm_network,
-    vm_management_address,
-    vm_nflog_group,
-)
+from vm_defs import parse_vm_port
+from vm_network_config import validate_vm_network
 import workload_lib
-from workload_addr import UID_MAX, UID_MIN
+from workload_addr import (NFLOG_GROUP_BASE, UID_MAX, UID_MIN,
+                           VM_MGMT_SSH_PORT, vm_management_address,
+                           vm_nflog_group)
 
 
 def _load(path, name):

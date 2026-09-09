@@ -30,14 +30,18 @@ from pathlib import Path
 
 from egress_ca import VM_CA_ENV_VARS
 from egress_ca import VM_RESERVED_GUEST_ENV
-from broker_config import vm_credential_entries
-from vm import (
-    UID_MIN, VM_BROKER_BIN, VM_BROKER_INSTANCE_PORT, render_vm_broker_config, vm_broker_config_path, vm_broker_credential,
-    vm_broker_hosts, vm_broker_listen_address, vm_broker_upstream_addresses,
+from broker_config import (VM_BROKER_BIN, VM_BROKER_INSTANCE_PORT,
+                           render_vm_broker_config, vm_broker_config_path,
+                           vm_broker_credential, vm_broker_hosts,
+                           vm_broker_upstream_addresses, vm_credential_entries,
+                           vm_credential_env, vm_host_resolver_addresses,
+                           vm_uses_credentials)
+from vm import vm_internal_ok_elements
+from vm_network_config import (
     VM_BROKER_DEFAULT_AUTH_FORMAT, VM_BROKER_DEFAULT_AUTH_HEADER,
-    validate_vm_network, vm_credential_env,
-    vm_host_resolver_addresses, vm_internal_ok_elements, vm_uses_credentials,
+    validate_vm_network,
 )
+from workload_addr import UID_MIN, vm_broker_listen_address
 import ipaddress
 import tomllib
 
@@ -617,8 +621,7 @@ from egress_policy import (
     VM_DROP_BROKER_UNREACHABLE, VM_DROP_UNREACHABLE, VM_INSPECT_RECORD_FIELDS,
     VmPolicyEntry, vm_inspect_policy, vm_inspect_policy_text,
 )
-from vm import (
-    VM_BROKER_INSTANCE_PORT, vm_broker_listen_address, )
+from workload_addr import vm_broker_listen_address
 import vm_inspect_figures
 
 LISTENER = Path(__file__).resolve().parent.parent / "libexec" / "workload-vm-inspect-listener"
@@ -1196,7 +1199,7 @@ class TestTheRetiredKeyIsARefusal(unittest.TestCase):
     """
 
     def _errors(self, **net):
-        from vm import validate_vm_network
+        from vm_network_config import validate_vm_network
         return [e for e in validate_vm_network(net) if "broker" in e]
 
     def test_true_is_refused(self):
@@ -1284,7 +1287,7 @@ class TestTheAdvertisedAddressIsNotAdded(unittest.TestCase):
     """
 
     def _argvs(self):
-        from vm import ensure_advertised_interface
+        from workload_addr import ensure_advertised_interface
 
         class Result:
             returncode = 0
@@ -1321,7 +1324,7 @@ class TestTheAdvertisedAddressIsNotAdded(unittest.TestCase):
         """The consequence, and the reason the range moves rather than simply
         losing its exclusion comment: with nothing carrying it, TEST-NET-1 is
         exactly what the internal drop exists to refuse."""
-        from vm import VM_INTERNAL_PREFIXES4
+        from vm_defs import VM_INTERNAL_PREFIXES4
         self.assertIn("192.0.2.0/24", VM_INTERNAL_PREFIXES4)
 
 

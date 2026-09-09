@@ -1907,7 +1907,7 @@ class TestGeneratorVmWorkload(unittest.TestCase):
     def test_guest_agent_socket_path_matches_the_client(self):
         # The generator and the lookup client must agree on the path; nothing
         # but this test connects the two sides.
-        from vm import vm_guest_agent_socket
+        from vm_defs import vm_guest_agent_socket
         self._write_vm_config()
         self._run()
         svc = self._read("workload-fedora-vm.service")

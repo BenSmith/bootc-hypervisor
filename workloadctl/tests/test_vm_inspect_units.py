@@ -22,10 +22,12 @@ from egress_policy import (
     VM_INSPECT_PORT_CLEARTEXT, VM_INSPECT_PORT_TLS, vm_uses_inspect,
 )
 from vm import (
-    NFT_SET_INSPECT_CG, NFT_SET_EGRESS_CG,
-    VM_EGRESS_DEFAULT, VM_SIDECAR_SLICE, VM_INSPECT_LISTENER_BIN, vm_inspect_address,
     vm_inspect_cgroup, vm_inspect_cgroup_command,
-    vm_inspect_cgroup_filter_command, )
+    vm_inspect_cgroup_filter_command,
+)
+from nft_constants import NFT_SET_INSPECT_CG, NFT_SET_EGRESS_CG
+from vm_defs import VM_EGRESS_DEFAULT, VM_SIDECAR_SLICE
+from workload_addr import VM_INSPECT_LISTENER_BIN, vm_inspect_address
 from workload_lib import dq
 
 UID = 10004  # worked example, matching test_vm_inspect.py

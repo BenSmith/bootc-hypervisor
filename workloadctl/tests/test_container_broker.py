@@ -25,13 +25,14 @@ import unittest
 from pathlib import Path
 
 from tests.test_generator import run_generator, write_config
-from vm import (
-    UID_MIN, VM_BROKER_INSTANCE_PORT,
-    container_broker_hosts, container_broker_upstream_addresses,
-    container_uses_credentials, render_container_broker_config,
-    render_vm_broker_config, vm_broker_credential, vm_broker_listen_address,
-    vm_internal_ok_elements,
+from vm import vm_internal_ok_elements
+from broker_config import (
+    VM_BROKER_INSTANCE_PORT, container_broker_hosts,
+    container_broker_upstream_addresses, container_uses_credentials,
+    render_container_broker_config, render_vm_broker_config,
+    vm_broker_credential,
 )
+from workload_addr import UID_MIN, vm_broker_listen_address
 from workload_lib import validate_container_network
 
 import tomllib

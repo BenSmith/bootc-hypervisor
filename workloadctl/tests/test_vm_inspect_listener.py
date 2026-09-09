@@ -25,7 +25,7 @@ from egress_policy import (
     VM_INSPECT_PORT_CLEARTEXT, VM_INSPECT_PORT_TLS, vm_hostname_match,
     vm_inspect_policy,
 )
-from vm import VM_INSPECT_LISTENER_BIN
+from workload_addr import VM_INSPECT_LISTENER_BIN
 
 ROOT = Path(__file__).resolve().parent.parent
 LISTENER_FILE = ROOT / "libexec" / "workload-vm-inspect-listener"

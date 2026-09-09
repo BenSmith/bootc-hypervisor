@@ -44,7 +44,7 @@ from workload_lib import (
     container_internal_resolve, container_inspect_policy,
     container_inspect_policy_text,
 )
-from vm import parse_memory_mib, vm_mac_address, vm_mac_collisions
+from vm_defs import parse_memory_mib, vm_mac_address, vm_mac_collisions
 from validation import (
     validate_workload_name, validate_workload_config,
     valid_userns_mode, collect_config_warnings,

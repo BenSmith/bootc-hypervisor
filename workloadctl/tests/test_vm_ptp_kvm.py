@@ -18,7 +18,7 @@ import re
 import unittest
 
 from tests import REPO_ROOT, load_script
-from vm import (
+from vm_ptp import (
     VM_PTP_KVM_CHRONY_MARKER, VM_PTP_KVM_CHRONY_PATH, VM_PTP_KVM_CLOCK_NAME,
     VM_PTP_KVM_DEVICE, VM_PTP_KVM_MODULE, VM_PTP_KVM_MODULES_LOAD_PATH,
     VM_PTP_KVM_UDEV_RULE_PATH, vm_ptp_kvm_runcmd_lines, vm_ptp_kvm_seed_files,

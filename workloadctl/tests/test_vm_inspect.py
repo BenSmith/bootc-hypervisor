@@ -17,18 +17,23 @@ from egress_policy import (
     VM_TLS_DEFAULT, vm_http2_hosts, vm_policy_entries, vm_policy_governs,
 )
 from vm import (
-    IP_BIN, NFT_BIN, NFT_MAP_INSPECT4, NFT_MAP_INSPECT6, NFT_PROXY_TABLE,
-    NFT_SET_INSPECT_CG, NFT_SET_INSPECT_DST,
-    NFT_SET_INSPECT_DST6, NFT_SET_INSPECT_SELF, NFT_SET_INSPECT_SELF6,
-    NFT_SET_INSPECT_LIVE, NFT_SET_INSPECT_LIVE6,
-    NFT_SET_EGRESS_CG, NFT_TABLE, VM_ADVERTISED_IFACE, vm_inspect_cgroup, vm_inspect_cgroup_command,
+    vm_inspect_cgroup, vm_inspect_cgroup_command,
     vm_inspect_cgroup_filter_command, vm_inspect_dst_elements,
-    vm_inspect_element_commands, vm_inspect_link_address_commands,
-    vm_inspect_link_delete_commands, vm_inspect_map_elements,
-    vm_inspect_live_elements,
-    vm_inspect_self_elements,
-    vm_allowed_hosts, vm_runtime_dir, vm_policy_permits,
+    vm_inspect_element_commands, vm_inspect_map_elements,
+    vm_inspect_live_elements, vm_inspect_self_elements,
 )
+from broker_config import (
+    vm_inspect_link_address_commands, vm_inspect_link_delete_commands,
+)
+from nft_constants import (
+    NFT_BIN, NFT_MAP_INSPECT4, NFT_MAP_INSPECT6, NFT_PROXY_TABLE,
+    NFT_SET_INSPECT_CG, NFT_SET_INSPECT_DST, NFT_SET_INSPECT_DST6,
+    NFT_SET_INSPECT_SELF, NFT_SET_INSPECT_SELF6, NFT_SET_INSPECT_LIVE,
+    NFT_SET_INSPECT_LIVE6, NFT_SET_EGRESS_CG, NFT_TABLE,
+)
+from vm_defs import vm_allowed_hosts, vm_runtime_dir
+from vm_network_config import vm_policy_permits
+from workload_addr import IP_BIN, VM_ADVERTISED_IFACE
 
 ROOT = Path(__file__).resolve().parent.parent
 PROXY_SKELETON_FILE = ROOT / "nftables" / "workload-proxy.nft"
@@ -662,7 +667,7 @@ class TestRuntimeFixture(unittest.TestCase):
     def test_the_fixture_is_a_config_workloadctl_would_accept(self):
         """A fixture that fails `validate` fails at enable, inside the harness
         guest, as a timeout with no useful message."""
-        from vm import validate_vm_network
+        from vm_network_config import validate_vm_network
         self.assertEqual(validate_vm_network(self.net), [])
 
     def test_egress_is_filtered_so_the_redirect_is_armed(self):

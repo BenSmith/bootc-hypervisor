@@ -90,7 +90,7 @@ class TestGeneratedConfigs(unittest.TestCase):
         """The half that catches a retired spelling: parsing is not enough,
         because `allow = ["1.1.1.1:53"]` is perfectly good TOML and a refused
         config all the same."""
-        from vm import _validate_egress
+        from vm_network_config import _validate_egress
         for name, mod, arms in _rigs():
             for arm in arms:
                 with self.subTest(rig=name, arm=_arm_name(arm)):

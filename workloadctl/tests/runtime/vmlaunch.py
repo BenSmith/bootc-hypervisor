@@ -36,7 +36,7 @@ for _p in (str(_HERE), str(_LIB)):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-import vm  # noqa: E402
+import vm_defs
 from vmtarget import VMTarget  # noqa: E402
 
 CACHE_DIR = _HERE / ".cache"
@@ -89,7 +89,7 @@ def missing_prereqs(mode: str) -> list[str]:
         # bootc images are UEFI-only — there is no SeaBIOS fallback in gate (a
         # UEFI disk simply won't boot on SeaBIOS). Missing OVMF is a hard prereq
         # → clean skip, same tier as swtpm-absent.
-        if not (vm.find_ovmf_code() and vm.find_ovmf_vars()):
+        if not (vm_defs.find_ovmf_code() and vm_defs.find_ovmf_vars()):
             missing.append("OVMF (edk2-ovmf)")
     return missing
 
@@ -240,8 +240,8 @@ def _qemu_argv(*, disk, seed, tpm_sock, port, run_dir, mem_mib, vcpus, name,
     # primitive) requires every writable block device to support internal
     # snapshots, and a writable raw pflash aborts it ("does not support
     # snapshots"). qemu-img convert preserves the flash region's virtual size.
-    code = vm.find_ovmf_code()
-    vars_tpl = vm.find_ovmf_vars()
+    code = vm_defs.find_ovmf_code()
+    vars_tpl = vm_defs.find_ovmf_vars()
     if code and vars_tpl:
         nvram = run_dir / "nvram.qcow2"
         subprocess.run(

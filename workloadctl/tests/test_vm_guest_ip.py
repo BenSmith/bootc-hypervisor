@@ -20,7 +20,7 @@ from unittest import mock
 
 
 import substrate_vm as substrate
-from vm import vm_mac_address
+from vm_defs import vm_mac_address
 
 
 def _completed(stdout="", returncode=0):

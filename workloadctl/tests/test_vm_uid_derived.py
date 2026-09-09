@@ -44,7 +44,8 @@ from pathlib import Path
 
 import vm
 import workload_addr
-from vm import UID_MAX, UID_MIN, UidDerived, VM_RESERVED_RANGES, VM_UID_DERIVED
+from workload_addr import (UID_MAX, UID_MIN, UidDerived, VM_RESERVED_RANGES,
+                           VM_UID_DERIVED)
 
 LIB = Path(vm.__file__).resolve().parent
 
@@ -214,22 +215,22 @@ class TestTheReservedListIsDerived(unittest.TestCase):
         the two things a list-reading test cannot tell apart.
         """
         for uid in (UID_MIN, UID_MIN + 3, UID_MAX):
-            for address in (vm.vm_broker_listen_address(uid),
-                            vm.vm_resolve_address(uid),
-                            vm.vm_management_address(uid)):
+            for address in (workload_addr.vm_broker_listen_address(uid),
+                            workload_addr.vm_resolve_address(uid),
+                            workload_addr.vm_management_address(uid)):
                 with self.subTest(address=address):
                     self.assertEqual(
-                        vm.vm_reserved_range(address, 8080).network,
-                        vm.VM_MGMT_NETWORK)
+                        workload_addr.vm_reserved_range(address, 8080).network,
+                        workload_addr.VM_MGMT_NETWORK)
 
 
 class TestTheDerivation(unittest.TestCase):
 
     FUNCTIONS = {
-        "management address": vm.vm_management_address,
-        "broker listen address": vm.vm_broker_listen_address,
-        "responder address": vm.vm_resolve_address,
-        "nflog group": vm.vm_nflog_group,
+        "management address": workload_addr.vm_management_address,
+        "broker listen address": workload_addr.vm_broker_listen_address,
+        "responder address": workload_addr.vm_resolve_address,
+        "nflog group": workload_addr.vm_nflog_group,
     }
 
     def test_each_function_agrees_with_its_row(self):
@@ -247,7 +248,7 @@ class TestTheDerivation(unittest.TestCase):
     def test_the_inspector_row_drives_both_families(self):
         row = {p.noun: p for p in VM_UID_DERIVED}["inspector address"]
         for uid in (UID_MIN, UID_MIN + 3, UID_MAX):
-            address = vm.vm_inspect_address(uid)
+            address = workload_addr.vm_inspect_address(uid)
             self.assertEqual(int(ipaddress.ip_address(address.v4)),
                              row.base + (uid - UID_MIN))
             self.assertEqual(int(ipaddress.ip_address(address.v6))
@@ -262,7 +263,7 @@ class TestTheDerivation(unittest.TestCase):
             for uid in (UID_MIN - 1, UID_MAX + 1, 0, -1):
                 with self.subTest(row=row.noun, uid=uid):
                     with self.assertRaises(ValueError) as caught:
-                        vm._uid_derived_value(row, uid)
+                        workload_addr._uid_derived_value(row, uid)
                     self.assertIn(row.noun, str(caught.exception))
                     self.assertIn(str(uid), str(caught.exception))
 
@@ -271,10 +272,12 @@ class TestTheDerivation(unittest.TestCase):
         workload the allocator can hand out."""
         for row in VM_UID_DERIVED:
             with self.subTest(row=row.noun):
-                self.assertEqual(vm._uid_derived_value(row, UID_MIN),
-                                 row.base)
-                self.assertEqual(vm._uid_derived_value(row, UID_MAX),
-                                 row.base + SPAN)
+                self.assertEqual(
+                    workload_addr._uid_derived_value(row, UID_MIN),
+                    row.base)
+                self.assertEqual(
+                    workload_addr._uid_derived_value(row, UID_MAX),
+                    row.base + SPAN)
 
 
 if __name__ == "__main__":
