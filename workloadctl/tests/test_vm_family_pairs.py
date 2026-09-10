@@ -42,15 +42,47 @@ from nft_constants import (FamilyPair, NFT_PAIR_ALLOW, NFT_PAIR_INSPECT_DST,
 
 UID = 10004
 
-# The four objects derived from a uid alone. Not operator input: there is no
-# such thing as a workload with a v4 inspector and no v6 one, so unlike the
-# allowlist these must fill BOTH halves unconditionally.
-DERIVED = (
-    (NFT_PAIR_INSPECT_MAP, vm.vm_inspect_map_elements),
-    (NFT_PAIR_INSPECT_DST, vm.vm_inspect_dst_elements),
-    (NFT_PAIR_INSPECT_SELF, vm.vm_inspect_self_elements),
-    (NFT_PAIR_INSPECT_LIVE, vm.vm_inspect_live_elements),
-)
+
+def _derived():
+    """The objects derived from a uid alone, DISCOVERED rather than listed.
+
+    Not operator input: there is no such thing as a workload with a v4
+    inspector and no v6 one, so unlike the allowlist these must fill BOTH
+    halves unconditionally.
+
+    This was a hand-written tuple, and that was the one gap in a file built to
+    close exactly this class of gap. Every assertion below iterates it, so a
+    builder added tomorrow and forgotten here would be guarded by none of
+    them -- and what it would be unguarded against is the silent failure in
+    the module docstring: an element in the other family's set matches
+    nothing, and nothing reports a set that never matched. A list of the
+    things to check, maintained by hand, cannot see the thing nobody added.
+
+    So the table IS the call sites: every function in vm.py that calls
+    both_families, paired with the FamilyPair it hands over. Adding a builder
+    enrolls it; it cannot be added and forgotten.
+    """
+    source = ast.parse(Path(vm.__file__).read_text())
+    found = []
+    for node in ast.walk(source):
+        if not isinstance(node, ast.FunctionDef):
+            continue
+        for call in ast.walk(node):
+            if not (isinstance(call, ast.Call)
+                    and isinstance(call.func, ast.Name)
+                    and call.func.id == "both_families"):
+                continue
+            pair = call.args[0]
+            # A builder that computed its pair instead of naming a constant
+            # would defeat the pairing here, so refuse it rather than skip it.
+            assert isinstance(pair, ast.Name), (
+                f"{node.name} does not name its pair directly")
+            found.append((getattr(nft_constants, pair.id),
+                          getattr(vm, node.name)))
+    return tuple(found)
+
+
+DERIVED = _derived()
 
 
 def _entry(port):
@@ -106,6 +138,20 @@ class TestThePairTable(unittest.TestCase):
 
 
 class TestTheDerivedBuildersFillBothHalves(unittest.TestCase):
+
+    def test_the_table_is_every_call_site(self):
+        """The guard on the guard: discovery actually found them.
+
+        An empty or short table makes every other test in this class vacuous
+        while they all report green -- the failure mode a hand-written list
+        has permanently and a bad discovery has once.
+        """
+        self.assertTrue(DERIVED, "no uid-derived builders discovered")
+        calls = Path(vm.__file__).read_text().count("both_families(")
+        self.assertEqual(len(DERIVED), calls)
+        self.assertEqual(len({build for _, build in DERIVED}), len(DERIVED))
+        for pair, _ in DERIVED:
+            self.assertIsInstance(pair, FamilyPair)
 
     def test_each_builder_returns_exactly_its_pair(self):
         for pair, build in DERIVED:
@@ -175,7 +221,7 @@ class TestSplitByFamily(unittest.TestCase):
     def test_each_address_lands_in_its_own_family(self):
         v4 = ipaddress.ip_address("192.0.2.1")
         v6 = ipaddress.ip_address("2001:db8::1")
-        got = nft_constants._split_by_family(FamilyPair("a4", "a6"),
+        got = nft_constants.split_by_family(FamilyPair("a4", "a6"),
                                   [(v4, "x"), (v6, "y"), (v4, "z")])
         self.assertEqual(got, {"a4": ["x", "z"], "a6": ["y"]})
 
@@ -184,11 +230,11 @@ class TestSplitByFamily(unittest.TestCase):
         nothing in it must not become a command."""
         v4 = ipaddress.ip_address("192.0.2.1")
         self.assertEqual(
-            nft_constants._split_by_family(FamilyPair("a4", "a6"),
+            nft_constants.split_by_family(FamilyPair("a4", "a6"),
                                            [(v4, "x")]),
             {"a4": ["x"]})
         self.assertEqual(
-            nft_constants._split_by_family(FamilyPair("a4", "a6"), []), {})
+            nft_constants.split_by_family(FamilyPair("a4", "a6"), []), {})
 
     def test_the_allowlist_splits_and_keeps_the_family_agnostic_set(self):
         """wl_filtered carries the bare uid and belongs to neither family:

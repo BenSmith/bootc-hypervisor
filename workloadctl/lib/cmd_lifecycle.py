@@ -29,7 +29,7 @@ def _gating_units(config):
     return get_substrate(config, None).gating_units()
 
 
-def _effective_state(config):
+def effective_state(config):
     """Return (state, failed_unit) for display. If the main service isn't
     active but a gating unit has failed, report 'failed' and name the culprit
     so the cause isn't buried behind a bland 'inactive'."""

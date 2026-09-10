@@ -910,7 +910,7 @@ def _no_subid_files():
             yield
 
 
-# ── _effective_state ────────────────────────────────────────────────────────
+# ── effective_state ────────────────────────────────────────────────────────
 
 class TestEffectiveState(unittest.TestCase):
     def test_active_main_returns_active(self):
@@ -920,7 +920,7 @@ class TestEffectiveState(unittest.TestCase):
                 r.stdout = "active\n"
                 return r
             with patch.object(cmd_lifecycle.subprocess, 'run', side_effect=fake_run):
-                state, failed = cmd_lifecycle._effective_state(cfg)
+                state, failed = cmd_lifecycle.effective_state(cfg)
             self.assertEqual(state, "active")
             self.assertIsNone(failed)
 
@@ -939,7 +939,7 @@ class TestEffectiveState(unittest.TestCase):
 
             with patch.object(cmd_lifecycle, '_gating_units', return_value=["workload-test-wl-setup.service"]):
                 with patch.object(cmd_lifecycle.subprocess, 'run', side_effect=fake_run):
-                    state, failed = cmd_lifecycle._effective_state(cfg)
+                    state, failed = cmd_lifecycle.effective_state(cfg)
             self.assertEqual(state, "failed")
             self.assertEqual(failed, "workload-test-wl-setup.service")
 
@@ -951,7 +951,7 @@ class TestEffectiveState(unittest.TestCase):
                 return r
             with patch.object(cmd_lifecycle, '_gating_units', return_value=["workload-test-wl-setup.service"]):
                 with patch.object(cmd_lifecycle.subprocess, 'run', side_effect=fake_run):
-                    state, failed = cmd_lifecycle._effective_state(cfg)
+                    state, failed = cmd_lifecycle.effective_state(cfg)
             self.assertEqual(state, "inactive")
             self.assertIsNone(failed)
 

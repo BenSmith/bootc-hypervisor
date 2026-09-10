@@ -21,7 +21,7 @@ import socket
 from egress_policy import (VM_INSPECT_ORIG_CLEARTEXT, VM_INSPECT_ORIG_TLS,
                            VM_INSPECT_PORT_CLEARTEXT, VM_INSPECT_PORT_TLS)
 from netfilter_state import nft_set_elements
-from nft_constants import (_both_families, _split_by_family, NFT_BIN,
+from nft_constants import (both_families, split_by_family, NFT_BIN,
                            NFT_PAIR_ALLOW, NFT_PAIR_INSPECT_DST,
                            NFT_PAIR_INSPECT_LIVE, NFT_PAIR_INSPECT_MAP,
                            NFT_PAIR_INSPECT_SELF, NFT_PAIR_INTERNAL_OK,
@@ -53,7 +53,7 @@ def vm_filter_elements(uid: int, allow: list[str],
     is the family-agnostic question "is this workload under policy at all?",
     and both the ct-mark and the drop are guarded on it.
 
-    The allowlist splits by address family through _split_by_family, which is
+    The allowlist splits by address family through split_by_family, which is
     where the reason for the split is written down.
     """
     if resolved is None:
@@ -72,7 +72,7 @@ def vm_filter_elements(uid: int, allow: list[str],
                 raise ValueError(f"[vm.network].allow: {where}{reserved}")
             allowed.append((addr, f"{uid} . {addr} . {entry.port}"))
     return {NFT_SET_FILTERED: [str(uid)],
-            **_split_by_family(NFT_PAIR_ALLOW, allowed)}
+            **split_by_family(NFT_PAIR_ALLOW, allowed)}
 
 
 VM_RESOLVE_STATUS_FILE = "resolve-status.json"
@@ -121,7 +121,7 @@ def vm_inspect_map_elements(uid: int) -> dict[str, list[str]]:
     literal appears in it. The advertised address that once did is gone with the
     broker redirect that was its last consumer.
     """
-    return _both_families(NFT_PAIR_INSPECT_MAP, vm_inspect_address(uid), lambda a: [
+    return both_families(NFT_PAIR_INSPECT_MAP, vm_inspect_address(uid), lambda a: [
         f"{uid} . {VM_INSPECT_ORIG_CLEARTEXT} : {a} . {VM_INSPECT_PORT_CLEARTEXT}",
         f"{uid} . {VM_INSPECT_ORIG_TLS} : {a} . {VM_INSPECT_PORT_TLS}",
     ])
@@ -135,7 +135,7 @@ def vm_inspect_dst_elements(uid: int) -> dict[str, list[str]]:
     match nothing (measured; §7.2) and the redirected connection would fall
     through to the default drop.
     """
-    return _both_families(NFT_PAIR_INSPECT_DST, vm_inspect_address(uid), lambda a: [
+    return both_families(NFT_PAIR_INSPECT_DST, vm_inspect_address(uid), lambda a: [
         f"{uid} . {a} . {VM_INSPECT_PORT_CLEARTEXT}",
         f"{uid} . {a} . {VM_INSPECT_PORT_TLS}",
     ])
@@ -150,7 +150,7 @@ def vm_inspect_self_elements(uid: int) -> dict[str, list[str]]:
     workload and is armed here, and it is what gives the guard's counter its
     per-workload attribution.
     """
-    return _both_families(NFT_PAIR_INSPECT_SELF, vm_inspect_address(uid),
+    return both_families(NFT_PAIR_INSPECT_SELF, vm_inspect_address(uid),
                           lambda a: [f"{uid} . {a}"])
 
 
@@ -169,7 +169,7 @@ def vm_inspect_live_elements(uid: int) -> dict[str, list[str]]:
     guard's job includes dials to ports nothing serves, and naming 8080/8443
     would let a cross-workload caller walk in on any other port.
     """
-    return _both_families(NFT_PAIR_INSPECT_LIVE, vm_inspect_address(uid),
+    return both_families(NFT_PAIR_INSPECT_LIVE, vm_inspect_address(uid),
                           lambda a: [str(a)])
 
 
@@ -255,7 +255,7 @@ def vm_internal_ok_elements(
         if reserved:
             raise ValueError(f"[vm.network].internal: {reserved}")
         exempt.append((addr, f"{uid} . {addr}"))
-    return _split_by_family(NFT_PAIR_INTERNAL_OK, exempt)
+    return split_by_family(NFT_PAIR_INTERNAL_OK, exempt)
 
 
 def vm_internal_ok_commands(

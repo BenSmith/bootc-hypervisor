@@ -257,7 +257,7 @@ class TestCmdList(unittest.TestCase):
                                  'test-pod': POD_TOML}):
             manager = self._manager(user_exists=True, image_id='deadbeef' * 8)
             buf = io.StringIO()
-            with patch.object(cmd_inspect, '_effective_state',
+            with patch.object(cmd_inspect, 'effective_state',
                                return_value=('running', None)):
                 with patch('sys.stdout', buf):
                     cmd_inspect.cmd_list(_args(json=True, workload=None), manager)
@@ -277,7 +277,7 @@ class TestCmdList(unittest.TestCase):
                 return 'failed', 'workload-setup.service'
 
             buf = io.StringIO()
-            with patch.object(cmd_inspect, '_effective_state', side_effect=fake_state):
+            with patch.object(cmd_inspect, 'effective_state', side_effect=fake_state):
                 with patch.object(WorkloadConfig, 'enabled', new_callable=PropertyMock,
                                    return_value=True):
                     with patch('sys.stdout', buf):

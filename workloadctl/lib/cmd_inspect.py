@@ -26,7 +26,7 @@ from workloadctl_core import (
     WorkloadManager,
     WorkloadUserNotFound,
 )
-from cmd_lifecycle import _effective_state
+from cmd_lifecycle import effective_state
 
 
 # ---------------------------------------------------------------------------
@@ -48,7 +48,7 @@ def cmd_list(args, manager: WorkloadManager):
             # Get runtime state for enabled workloads
             state = None
             if config.enabled:
-                state, _ = _effective_state(config)
+                state, _ = effective_state(config)
 
             # Get image ID if user exists
             image_id = None
@@ -106,10 +106,10 @@ def cmd_list(args, manager: WorkloadManager):
     for config in configs:
         status = "enabled" if config.enabled else "disabled"
 
-        # Get runtime state for enabled workloads. _effective_state surfaces a
+        # Get runtime state for enabled workloads. effective_state surfaces a
         # failed VM setup/build helper as 'failed' instead of a bland 'inactive'.
         if config.enabled:
-            state, failed_unit = _effective_state(config)
+            state, failed_unit = effective_state(config)
             if failed_unit:
                 failed_workloads.append((config.name, failed_unit))
         else:

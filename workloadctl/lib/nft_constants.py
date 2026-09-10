@@ -60,7 +60,7 @@ class FamilyPair(NamedTuple):
         return self.v6 if version == 6 else self.v4
 
 
-def _both_families(pair: FamilyPair, addr: "VmInspectAddress",
+def both_families(pair: FamilyPair, addr: "VmInspectAddress",
                    build) -> dict[str, list[str]]:
     """Both halves of one object, built from this workload's address in each.
 
@@ -72,7 +72,7 @@ def _both_families(pair: FamilyPair, addr: "VmInspectAddress",
     return {pair.v4: build(addr.v4), pair.v6: build(addr.v6)}
 
 
-def _split_by_family(pair: FamilyPair, elements) -> dict[str, list[str]]:
+def split_by_family(pair: FamilyPair, elements) -> dict[str, list[str]]:
     """Bucket (address, element-expression) pairs into their family's half.
 
     Empty halves are dropped rather than emitted, because these objects come
