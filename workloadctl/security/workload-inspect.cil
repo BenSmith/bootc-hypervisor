@@ -205,8 +205,8 @@
 ;
 ; The path is reached by a guest that IGNORES the proxy variables and dials an
 ; allowlisted host directly -- not a corner case but the adversarial case this
-; whole rung exists for, per lib/vm.py: "the drop is what makes the allowlist
-; binding". A cooperating guest proves nothing about it.
+; whole rung exists for: the drop is what makes the allowlist binding. A
+; cooperating guest proves nothing about it.
 ;
 ; WHY IT WAS SILENT, WHICH IS THE PART WORTH REMEMBERING
 ;
@@ -402,8 +402,9 @@
 ; CA is read-only to this domain (an inspector that could rewrite it could
 ; replace the anchor the guest was SEEDED with, which no restart recovers --
 ; only a re-provision), and the leaf caches are read-write because minting into
-; them is the job. lib/vm.py registers the fcontext rules; a filecon here would
-; land in the base file_contexts and be shadowed by file_contexts.local.
+; them is the job. lib/provisioning.py registers the fcontext rules, with the
+; patterns from egress_ca.vm_pki_fcontext_patterns; a filecon here would land
+; in the base file_contexts and be shadowed by file_contexts.local.
 (type wlinspect_ca_t)
 (roletype object_r wlinspect_ca_t)
 (typeattributeset file_type (wlinspect_ca_t))
