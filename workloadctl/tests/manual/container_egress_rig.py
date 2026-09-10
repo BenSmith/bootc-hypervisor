@@ -270,7 +270,7 @@ PROVIDER_PORT = 443     # not configurable: `upstream` is https://<host>
 
 # The broker's address family and port, spelled out rather than imported, for
 # INSPECT_V4_BASE's reason.
-BROKER_V4_BASE = (127, 129, 0, 0)   # VM_BROKER_ADDR_BASE
+BROKER_V4_BASE = (127, 129, 0, 0)   # BROKER_ADDR_BASE
 BROKER_PORT = 8081                  # VM_BROKER_INSTANCE_PORT
 
 # The header a generated instance uses when the workload names no convention.
@@ -321,7 +321,7 @@ KNOWN_AVC = re.compile(r"scontext=\S*wlinspect_t\S*.*tcontext=\S*init_t\S*"
 # the slow case and was measured at ~1.7s.
 REDIAL_BUDGET = 8.0
 
-# UID_MIN and VM_INSPECT_ADDR_BASE, re-derived rather than imported. A rig that
+# UID_MIN and INSPECT_ADDR_BASE, re-derived rather than imported. A rig that
 # computes both sides of a comparison from the one constant the product uses
 # cannot notice the constant changing -- same reasoning as input_chain_rig.py's
 # spelled-out addresses, adapted because the uid here is allocated at enable
@@ -912,14 +912,14 @@ def workload_uid(name):
 
 
 def inspector_v4(uid):
-    """vm_inspect_address(uid).v4, re-derived. See INSPECT_V4_BASE."""
+    """inspect_address(uid).v4, re-derived. See INSPECT_V4_BASE."""
     a, b, c, d = INSPECT_V4_BASE
     n = (a << 24 | b << 16 | c << 8 | d) + (uid - UID_MIN)
     return ".".join(str((n >> s) & 0xFF) for s in (24, 16, 8, 0))
 
 
 def broker_v4(uid):
-    """vm_broker_listen_address(uid), re-derived. See INSPECT_V4_BASE."""
+    """broker_listen_address(uid), re-derived. See INSPECT_V4_BASE."""
     a, b, c, d = BROKER_V4_BASE
     n = (a << 24 | b << 16 | c << 8 | d) + (uid - UID_MIN)
     return ".".join(str((n >> s) & 0xFF) for s in (24, 16, 8, 0))

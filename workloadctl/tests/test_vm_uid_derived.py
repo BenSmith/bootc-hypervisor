@@ -17,7 +17,7 @@ all -- which is how `ports = ["198.18.1.4:8443:22"]` once validated and
 cross-workload denial of service on a security control, or one workload
 receiving another's intercepted traffic, with nothing logged for either.
 
-So VM_RESERVED_RANGES is DERIVED from VM_UID_DERIVED rather than written beside
+So RESERVED_RANGES is DERIVED from UID_DERIVED rather than written beside
 it, and these are the properties that derivation is supposed to buy:
 
   * every row that is an address names a reservation;
@@ -44,8 +44,8 @@ from pathlib import Path
 
 import vm
 import workload_addr
-from workload_addr import (UID_MAX, UID_MIN, UidDerived, VM_RESERVED_RANGES,
-                           VM_UID_DERIVED)
+from workload_addr import (UID_MAX, UID_MIN, UidDerived, RESERVED_RANGES,
+                           UID_DERIVED)
 
 LIB = Path(vm.__file__).resolve().parent
 
@@ -72,7 +72,7 @@ class TestTheTableIsComplete(unittest.TestCase):
     def test_the_table_was_found(self):
         """Guards the guard: an empty table passes every parametrised row
         below without running a single assertion."""
-        self.assertGreaterEqual(len(VM_UID_DERIVED), 5, VM_UID_DERIVED)
+        self.assertGreaterEqual(len(UID_DERIVED), 5, UID_DERIVED)
 
     def test_no_row_is_defined_and_left_out(self):
         """The rows sit beside the constants they derive from, so the tuple is
@@ -95,10 +95,10 @@ class TestTheTableIsComplete(unittest.TestCase):
                 if isinstance(value, UidDerived):
                     defined.setdefault(value, f"{path.name}:{name}")
         orphans = sorted(where for row, where in defined.items()
-                         if row not in VM_UID_DERIVED)
+                         if row not in UID_DERIVED)
         self.assertEqual(orphans, [],
                          f"UidDerived(s) defined in lib/ but absent from "
-                         f"VM_UID_DERIVED: {orphans}")
+                         f"UID_DERIVED: {orphans}")
 
     def test_the_sweep_reaches_more_than_one_module(self):
         """Guards the guard above, whose whole failure was reading one module.
@@ -115,7 +115,7 @@ class TestTheTableIsComplete(unittest.TestCase):
     def test_the_rows_are_defined_where_the_table_is_assembled_from(self):
         """Every row is defined in workload_addr.py, and none in vm.py.
 
-        Not a style rule. vm re-exports them, so `vm.VM_UID_MGMT` resolves
+        Not a style rule. vm re-exports them, so `vm.UID_MGMT` resolves
         either way and no import would break -- what breaks is the reader's
         one place to look, and this file's first version proved that a row
         outside the reader's one place is a row outside the table too.
@@ -124,7 +124,7 @@ class TestTheTableIsComplete(unittest.TestCase):
         assigned = {t.id for n in ast.walk(source)
                     if isinstance(n, ast.Assign)
                     for t in n.targets if isinstance(t, ast.Name)}
-        for row in VM_UID_DERIVED:
+        for row in UID_DERIVED:
             with self.subTest(row=row.noun):
                 names = [n for n in assigned
                          if getattr(workload_addr, n, None) is row]
@@ -133,7 +133,7 @@ class TestTheTableIsComplete(unittest.TestCase):
     def test_every_row_has_a_distinct_noun(self):
         """The noun is the whole of the out-of-range message, so two rows
         sharing one make the error name the wrong row."""
-        nouns = [p.noun for p in VM_UID_DERIVED]
+        nouns = [p.noun for p in UID_DERIVED]
         self.assertEqual(sorted(nouns), sorted(set(nouns)))
 
 
@@ -142,7 +142,7 @@ class TestEveryAddressIsReserved(unittest.TestCase):
     def test_every_address_row_names_a_reservation(self):
         """The nflog group is the one row that legitimately names none -- a
         group is not an address, so there is nothing `ports` could bind."""
-        unreserved = [p.noun for p in VM_UID_DERIVED
+        unreserved = [p.noun for p in UID_DERIVED
                       if p.reservation is None and p.reservation6 is None]
         self.assertEqual(unreserved, ["nflog group"], unreserved)
 
@@ -150,7 +150,7 @@ class TestEveryAddressIsReserved(unittest.TestCase):
         """Not just the base. A reservation that covers the first workload and
         not the 42,949th is a guard that passes on every host with few
         workloads and fails on the one that has many."""
-        for row in VM_UID_DERIVED:
+        for row in UID_DERIVED:
             for reservation, first, last in _addresses(row):
                 with self.subTest(row=row.noun, family=first.version):
                     self.assertIn(first, reservation.network)
@@ -160,7 +160,7 @@ class TestEveryAddressIsReserved(unittest.TestCase):
         """Two rows sharing an address is one workload's broker answering
         where another workload's sshd belongs, decided by start order."""
         seen = []
-        for row in VM_UID_DERIVED:
+        for row in UID_DERIVED:
             for _, first, last in _addresses(row):
                 for other_noun, other_first, other_last in seen:
                     if first.version != other_first.version:
@@ -173,7 +173,7 @@ class TestEveryAddressIsReserved(unittest.TestCase):
                 seen.append((row.noun, first, last))
 
     def test_no_row_straddles_a_family(self):
-        for row in VM_UID_DERIVED:
+        for row in UID_DERIVED:
             if row.reservation is not None:
                 self.assertEqual(row.reservation.network.version, 4,
                                  row.noun)
@@ -184,7 +184,7 @@ class TestEveryAddressIsReserved(unittest.TestCase):
     def test_a_row_in_both_families_carries_the_same_number(self):
         """The v6 address is the v4 OR-ed into the prefix, which is what makes
         an address in a log or an .nft element say which workload it is."""
-        for row in VM_UID_DERIVED:
+        for row in UID_DERIVED:
             if row.reservation6 is None:
                 continue
             v4, v6 = (a for _, a, _ in _addresses(row))
@@ -194,19 +194,19 @@ class TestEveryAddressIsReserved(unittest.TestCase):
 class TestTheReservedListIsDerived(unittest.TestCase):
 
     def test_it_holds_every_reservation_the_rows_name(self):
-        named = {r for p in VM_UID_DERIVED
+        named = {r for p in UID_DERIVED
                  for r in (p.reservation, p.reservation6) if r}
-        self.assertEqual({p.network for p in VM_RESERVED_RANGES},
+        self.assertEqual({p.network for p in RESERVED_RANGES},
                          {r.network for r in named})
 
     def test_a_shared_reservation_appears_once(self):
         """Three rows hang off the /9. The management addresses state it;
         the broker and the responder inherit it."""
-        networks = [p.network for p in VM_RESERVED_RANGES]
+        networks = [p.network for p in RESERVED_RANGES]
         self.assertEqual(len(networks), len(set(networks)), networks)
 
     def test_both_families_are_present(self):
-        versions = {p.network.version for p in VM_RESERVED_RANGES}
+        versions = {p.network.version for p in RESERVED_RANGES}
         self.assertEqual(versions, {4, 6})
 
     def test_the_loopback_rows_are_covered_without_entries_of_their_own(self):
@@ -215,26 +215,26 @@ class TestTheReservedListIsDerived(unittest.TestCase):
         the two things a list-reading test cannot tell apart.
         """
         for uid in (UID_MIN, UID_MIN + 3, UID_MAX):
-            for address in (workload_addr.vm_broker_listen_address(uid),
-                            workload_addr.vm_resolve_address(uid),
-                            workload_addr.vm_management_address(uid)):
+            for address in (workload_addr.broker_listen_address(uid),
+                            workload_addr.resolve_address(uid),
+                            workload_addr.management_address(uid)):
                 with self.subTest(address=address):
                     self.assertEqual(
-                        workload_addr.vm_reserved_range(address, 8080).network,
-                        workload_addr.VM_MGMT_NETWORK)
+                        workload_addr.reserved_range(address, 8080).network,
+                        workload_addr.MGMT_NETWORK)
 
 
 class TestTheDerivation(unittest.TestCase):
 
     FUNCTIONS = {
-        "management address": workload_addr.vm_management_address,
-        "broker listen address": workload_addr.vm_broker_listen_address,
-        "responder address": workload_addr.vm_resolve_address,
-        "nflog group": workload_addr.vm_nflog_group,
+        "management address": workload_addr.management_address,
+        "broker listen address": workload_addr.broker_listen_address,
+        "responder address": workload_addr.resolve_address,
+        "nflog group": workload_addr.nflog_group,
     }
 
     def test_each_function_agrees_with_its_row(self):
-        by_noun = {p.noun: p for p in VM_UID_DERIVED}
+        by_noun = {p.noun: p for p in UID_DERIVED}
         for noun, function in self.FUNCTIONS.items():
             row = by_noun[noun]
             for uid in (UID_MIN, UID_MIN + 3, UID_MAX):
@@ -246,9 +246,9 @@ class TestTheDerivation(unittest.TestCase):
                     self.assertEqual(got, expected)
 
     def test_the_inspector_row_drives_both_families(self):
-        row = {p.noun: p for p in VM_UID_DERIVED}["inspector address"]
+        row = {p.noun: p for p in UID_DERIVED}["inspector address"]
         for uid in (UID_MIN, UID_MIN + 3, UID_MAX):
-            address = workload_addr.vm_inspect_address(uid)
+            address = workload_addr.inspect_address(uid)
             self.assertEqual(int(ipaddress.ip_address(address.v4)),
                              row.base + (uid - UID_MIN))
             self.assertEqual(int(ipaddress.ip_address(address.v6))
@@ -259,7 +259,7 @@ class TestTheDerivation(unittest.TestCase):
         """One raise for five rows, so this is the only place it is checked
         -- and an unchecked offset does not fail, it lands the caller on a
         row belonging to nobody."""
-        for row in VM_UID_DERIVED:
+        for row in UID_DERIVED:
             for uid in (UID_MIN - 1, UID_MAX + 1, 0, -1):
                 with self.subTest(row=row.noun, uid=uid):
                     with self.assertRaises(ValueError) as caught:
@@ -270,7 +270,7 @@ class TestTheDerivation(unittest.TestCase):
     def test_the_bounds_are_inclusive_at_both_ends(self):
         """UID_MAX is allocatable, so a `>=` here would strand the last
         workload the allocator can hand out."""
-        for row in VM_UID_DERIVED:
+        for row in UID_DERIVED:
             with self.subTest(row=row.noun):
                 self.assertEqual(
                     workload_addr._uid_derived_value(row, UID_MIN),

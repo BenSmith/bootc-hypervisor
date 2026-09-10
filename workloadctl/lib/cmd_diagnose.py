@@ -81,8 +81,8 @@ from vm_network_config import (
     vm_resolve_policy_path, parse_vm_allow, vm_allow_resolve,
 )
 from workload_addr import (
-    VM_MGMT_SSH_PORT, vm_management_address, vm_nflog_group,
-    vm_inspect_address, VM_RESOLVE_PORT, vm_resolve_address,
+    MGMT_SSH_PORT, management_address, nflog_group,
+    inspect_address, RESOLVE_PORT, resolve_address,
 )
 from egress_mint import pem_fingerprint
 from egress_status import OTHER_KEY
@@ -690,8 +690,8 @@ def vm_network_check(config) -> tuple[str, bool, str]:
 
     return ("vm_network", True,
             f"VM uses passt (uid {uid} is its network identity) — "
-            f"ssh {vm_management_address(uid)}:{VM_MGMT_SSH_PORT}, "
-            f"capture with 'tcpdump -i nflog:{vm_nflog_group(uid)}'")
+            f"ssh {management_address(uid)}:{MGMT_SSH_PORT}, "
+            f"capture with 'tcpdump -i nflog:{nflog_group(uid)}'")
 
 
 # The read-only half of what the arming helpers use to write the same state.
@@ -2051,7 +2051,7 @@ def vm_inspect_check(config, *, elements4=PROBE, elements6=PROBE,
                     f"under a running listener; restart the {noun}: "
                     f"systemctl restart workload-{config.name}.service")
 
-    addr = vm_inspect_address(uid)
+    addr = inspect_address(uid)
     tail = ""
     if v6_route is PROBE:
         v6_route = _host_has_v6_route()
@@ -2291,8 +2291,8 @@ def vm_resolve_check(config, *, socket_active=PROBE, policy_present=PROBE,
                 f"noticed yet. The document is written by this VM's own "
                 f"prestart: systemctl restart workload-{name}.service")
 
-    address = vm_resolve_address(uid)
-    told = f"synthesising responder on {address}:{VM_RESOLVE_PORT}, " \
+    address = resolve_address(uid)
+    told = f"synthesising responder on {address}:{RESOLVE_PORT}, " \
            f"{unit} listening, answers from {path}"
 
     # Gated on the VM being up, like the other VM-runtime observations here:
@@ -2412,7 +2412,7 @@ def _inspect_filter_sets(uid: int) -> dict:
     # this uid", and these elements name no uid at all -- run over them it
     # returns empty for a correctly armed workload, i.e. it would report the
     # guard missing on every host.
-    addr = vm_inspect_address(uid)
+    addr = inspect_address(uid)
     for set_name, want in zip(INSPECT_GUARD_SETS, (str(addr.v4), str(addr.v6))):
         found, elements = _named_set_elements(payload, set_name)
         out[set_name] = (any(want == e or want in str(e) for e in elements)

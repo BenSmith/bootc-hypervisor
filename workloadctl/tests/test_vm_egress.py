@@ -31,9 +31,9 @@ from nft_constants import (
     NFT_SET_INTERNAL6, NFT_SET_EGRESS_CG, NFT_SKELETON,
 )
 from vm_network_config import parse_vm_allow, vm_allow_reserved_reason
-from workload_addr import (UID_MAX, UID_MIN, VM_INSPECT_ADDR6_PREFIX,
-                           VM_INSPECT_NETWORK, vm_inspect_address,
-                           vm_resolve_address)
+from workload_addr import (UID_MAX, UID_MIN, INSPECT_ADDR6_PREFIX,
+                           INSPECT_NETWORK, inspect_address,
+                           resolve_address)
 
 
 def allow_entry(address, reason="a test bypass, written down"):
@@ -867,37 +867,37 @@ class TestInspectorAddresses(unittest.TestCase):
     """
 
     def test_v4_addresses_are_spelled_out(self):
-        self.assertEqual(vm_inspect_address(10000).v4, "198.18.1.0")
-        self.assertEqual(vm_inspect_address(10004).v4, "198.18.1.4")
-        self.assertEqual(vm_inspect_address(10005).v4, "198.18.1.5")
-        self.assertEqual(vm_inspect_address(UID_MAX).v4, "198.18.168.196")
+        self.assertEqual(inspect_address(10000).v4, "198.18.1.0")
+        self.assertEqual(inspect_address(10004).v4, "198.18.1.4")
+        self.assertEqual(inspect_address(10005).v4, "198.18.1.5")
+        self.assertEqual(inspect_address(UID_MAX).v4, "198.18.168.196")
 
     def test_v6_twin_embeds_the_v4(self):
         # 2001:2::198.18.1.4 is a legal literal spelling the same address
         # 2001:2::c612:104; the kernel prints the canonical form, so the value
         # is asserted against that, and the readability is a property of what
         # we write, not of the output.
-        self.assertEqual(vm_inspect_address(10000).v6, "2001:2::c612:100")
-        self.assertEqual(vm_inspect_address(10004).v6, "2001:2::c612:104")
+        self.assertEqual(inspect_address(10000).v6, "2001:2::c612:100")
+        self.assertEqual(inspect_address(10004).v6, "2001:2::c612:104")
         self.assertEqual(
             str(ipaddress.IPv6Address("2001:2::198.18.1.4")),
-            vm_inspect_address(10004).v6)
+            inspect_address(10004).v6)
 
     def test_the_first_workload_is_not_on_the_range_network_address(self):
         # A bare offset would put the first workload allocated on any host on
         # 198.18.0.0, the range's own network address — the value everything
         # else defaults to. The base is 198.18.1.0 so it is not.
-        self.assertNotEqual(vm_inspect_address(UID_MIN).v4, "198.18.0.0")
+        self.assertNotEqual(inspect_address(UID_MIN).v4, "198.18.0.0")
 
     def test_the_whole_uid_range_fits_its_targets(self):
-        v4, v6 = vm_inspect_address(UID_MAX)
-        self.assertIn(ipaddress.ip_address(v4), VM_INSPECT_NETWORK)
-        self.assertIn(ipaddress.ip_address(v6), VM_INSPECT_ADDR6_PREFIX)
+        v4, v6 = inspect_address(UID_MAX)
+        self.assertIn(ipaddress.ip_address(v4), INSPECT_NETWORK)
+        self.assertIn(ipaddress.ip_address(v6), INSPECT_ADDR6_PREFIX)
 
     def test_out_of_range_uids_raise_rather_than_wrap(self):
         for uid in (0, 999, UID_MIN - 1, UID_MAX + 1):
             with self.assertRaises(ValueError):
-                vm_inspect_address(uid)
+                inspect_address(uid)
 
     def test_listener_ports_are_unprivileged(self):
         # The inspector binds as the workload user, not root, so both ports
@@ -1068,13 +1068,13 @@ class TestFilterHelper(unittest.TestCase):
         cannot query before the VM it comes from is running -- which is after
         this ExecStartPre. Ordering is inherited rather than declared, so the
         thing to assert is that the write happens at all."""
-        from workload_addr import VM_RESOLVE_TTL, vm_inspect_address
+        from workload_addr import RESOLVE_TTL, inspect_address
         self._net(egress="filtered", allow=[])
         self.mod.up("vm1")
         doc = self._resolve_document()
-        self.assertEqual(doc["address"], vm_inspect_address(10001).v4)
-        self.assertEqual(doc["address6"], vm_inspect_address(10001).v6)
-        self.assertEqual(doc["ttl"], VM_RESOLVE_TTL)
+        self.assertEqual(doc["address"], inspect_address(10001).v4)
+        self.assertEqual(doc["address6"], inspect_address(10001).v6)
+        self.assertEqual(doc["ttl"], RESOLVE_TTL)
 
     def test_the_document_is_readable_only_by_the_workload(self):
         """0640 with the workload's group, like the inspector's policy: the
@@ -1790,7 +1790,7 @@ class TestResolveDiagnose(unittest.TestCase):
         self.assertFalse(passed)
         self.assertIn("never told to ask it", msg)
         self.assertIn("dhcp-dns=off", msg)
-        self.assertIn(str(vm_resolve_address(10001)), msg)
+        self.assertIn(str(resolve_address(10001)), msg)
         self.assertIn("IPv4 default route", msg)
 
     def test_a_fragment_naming_another_address_fails(self):
@@ -1799,13 +1799,13 @@ class TestResolveDiagnose(unittest.TestCase):
         different config, and the guest is asking a responder that is not
         this workload's."""
         _, passed, msg = self._run(
-            netdev_dns=self._fragment(vm_resolve_address(10002)))
+            netdev_dns=self._fragment(resolve_address(10002)))
         self.assertFalse(passed)
         self.assertIn("never told to ask it", msg)
 
     def test_a_fragment_naming_this_responder_passes(self):
         _, passed, msg = self._run(
-            netdev_dns=self._fragment(vm_resolve_address(10001)))
+            netdev_dns=self._fragment(resolve_address(10001)))
         self.assertTrue(passed)
         self.assertIn("advertised to the guest", msg)
 
@@ -1931,13 +1931,13 @@ class TestAllowMayNotNameTheListenerRange(unittest.TestCase):
     """
 
     def test_a_v4_listener_address_is_refused(self):
-        addr = vm_inspect_address(10000)
+        addr = inspect_address(10000)
         with self.assertRaises(ValueError) as caught:
             parse_vm_allow(allow_entry(f"{addr.v4}:8080"))
         self.assertIn("listener range", str(caught.exception))
 
     def test_a_v6_listener_address_is_refused(self):
-        addr = vm_inspect_address(10000)
+        addr = inspect_address(10000)
         with self.assertRaises(ValueError) as caught:
             parse_vm_allow(allow_entry(f"[{addr.v6}]:8443"))
         self.assertIn("listener range", str(caught.exception))
@@ -3216,7 +3216,7 @@ class TestAllowNameResolution(unittest.TestCase):
 class TestReservedRanges(unittest.TestCase):
     """`ports` may not bind any range this design owns (T2).
 
-    The check was one `in VM_MGMT_NETWORK` with a docstring committing to v4,
+    The check was one `in MGMT_NETWORK` with a docstring committing to v4,
     written when there was one range and it was v4. Two listener ranges arrived
     and one of them is v6, so `198.18.1.4:8443:22` validated and 2001:2::/48
     was not checked at all -- and either gap produces a cross-workload denial
@@ -3238,12 +3238,12 @@ class TestReservedRanges(unittest.TestCase):
         unchecked -- so what is asserted here is the membership of the
         collection the check reads.
         """
-        from workload_addr import (VM_INSPECT_ADDR6_PREFIX, VM_INSPECT_NETWORK,
-                                   VM_MGMT_NETWORK, VM_RESERVED_RANGES)
-        networks = [p.network for p in VM_RESERVED_RANGES]
-        self.assertIn(VM_MGMT_NETWORK, networks)
-        self.assertIn(VM_INSPECT_NETWORK, networks)
-        self.assertIn(VM_INSPECT_ADDR6_PREFIX, networks)
+        from workload_addr import (INSPECT_ADDR6_PREFIX, INSPECT_NETWORK,
+                                   MGMT_NETWORK, RESERVED_RANGES)
+        networks = [p.network for p in RESERVED_RANGES]
+        self.assertIn(MGMT_NETWORK, networks)
+        self.assertIn(INSPECT_NETWORK, networks)
+        self.assertIn(INSPECT_ADDR6_PREFIX, networks)
         self.assertTrue(any(n.version == 6 for n in networks),
                         "a v6 range exists and must be one of these")
         # Every entry now owns a whole range on every port. The one
@@ -3251,7 +3251,7 @@ class TestReservedRanges(unittest.TestCase):
         # died with the host-wide listener -- a new port-scoped entry means
         # something is again reserving a single socket on an address operators
         # publish on, which is the shape that needed its own written entry.
-        self.assertEqual([p.what for p in VM_RESERVED_RANGES
+        self.assertEqual([p.what for p in RESERVED_RANGES
                           if p.port is not None], [])
 
     def test_the_broker_range_is_inherited_from_the_nine(self):
@@ -3260,38 +3260,38 @@ class TestReservedRanges(unittest.TestCase):
         It had an entry of its own while there was one host-wide listener on
         127.0.0.1:8081 -- an address operators publish on freely, so the
         reservation had to be port-scoped and had to be written down. ADR 007
-        gives every workload its own listener at VM_BROKER_ADDR_BASE, which is
-        inside VM_MGMT_NETWORK (127.128.0.0/9), so `ports` cannot bind there for
+        gives every workload its own listener at BROKER_ADDR_BASE, which is
+        inside MGMT_NETWORK (127.128.0.0/9), so `ports` cannot bind there for
         the same reason it cannot bind the responder.
 
-        Asserted through vm_reserved_range rather than by reading the list,
+        Asserted through reserved_range rather than by reading the list,
         because "the entry is gone" and "the reservation is gone" are the two
         outcomes of that deletion and only one of them is correct. A test that
         merely stopped checking would be indistinguishable from one that never
         did.
         """
-        from workload_addr import (UID_MAX, UID_MIN, VM_MGMT_NETWORK,
-                                   vm_broker_listen_address, vm_reserved_range)
+        from workload_addr import (UID_MAX, UID_MIN, MGMT_NETWORK,
+                                   broker_listen_address, reserved_range)
         for uid in (UID_MIN, UID_MIN + 1, 42000, UID_MAX):
-            addr = vm_broker_listen_address(uid)
+            addr = broker_listen_address(uid)
             with self.subTest(uid=uid):
-                self.assertIn(ipaddress.ip_address(addr), VM_MGMT_NETWORK)
+                self.assertIn(ipaddress.ip_address(addr), MGMT_NETWORK)
                 # Every port, not the one the listener uses: the range owns the
                 # address, so a `ports` entry naming any port on it is refused.
                 for port in (80, 8081, 65535):
-                    found = vm_reserved_range(addr, port)
+                    found = reserved_range(addr, port)
                     self.assertIsNotNone(found, (addr, port))
-                    self.assertEqual(found.network, VM_MGMT_NETWORK)
+                    self.assertEqual(found.network, MGMT_NETWORK)
 
     def test_a_broker_address_is_refused_by_ports(self):
         """The end-to-end form of the rule above, through validation.
 
         The inheritance argument is only worth anything if `ports` actually
-        refuses the address, and that path reads vm_reserved_range through
+        refuses the address, and that path reads reserved_range through
         parse_vm_port rather than being handed one.
         """
-        from workload_addr import UID_MIN, vm_broker_listen_address
-        addr = vm_broker_listen_address(UID_MIN + 7)
+        from workload_addr import UID_MIN, broker_listen_address
+        addr = broker_listen_address(UID_MIN + 7)
         self.assertTrue(self._ports(f"{addr}:8081:80"), addr)
 
     def test_each_range_is_refused(self):
@@ -3300,7 +3300,7 @@ class TestReservedRanges(unittest.TestCase):
                      "[2001:2::c612:100]:8443:22",
                      # The broker range, reached through the /9 rather than
                      # through an entry of its own -- 127.129.0.7 is
-                     # vm_broker_listen_address(UID_MIN + 7).
+                     # broker_listen_address(UID_MIN + 7).
                      "127.129.0.7:8081:80"):
             with self.subTest(spec=spec):
                 self.assertTrue(self._ports(spec), spec)
@@ -3356,11 +3356,11 @@ class TestReservedRanges(unittest.TestCase):
                 self.assertEqual(self._ports(spec), [])
 
     def test_the_helper_answers_none_off_range_and_the_range_on_it(self):
-        from workload_addr import VM_MGMT_NETWORK, vm_reserved_range
-        self.assertIsNone(vm_reserved_range("192.168.0.5", 8080))
-        self.assertIsNone(vm_reserved_range("not-an-address", 8080))
-        self.assertEqual(vm_reserved_range("127.128.0.3", 2222).network,
-                         VM_MGMT_NETWORK)
+        from workload_addr import MGMT_NETWORK, reserved_range
+        self.assertIsNone(reserved_range("192.168.0.5", 8080))
+        self.assertIsNone(reserved_range("not-an-address", 8080))
+        self.assertEqual(reserved_range("127.128.0.3", 2222).network,
+                         MGMT_NETWORK)
 
     def test_a_v4_range_never_matches_a_v6_address_and_back(self):
         """Each family is judged against its own range.
@@ -3368,10 +3368,10 @@ class TestReservedRanges(unittest.TestCase):
         A comparison that crossed families would raise, or worse, answer False
         for everything and read as a passing test.
         """
-        from workload_addr import vm_reserved_range
-        self.assertIsNone(vm_reserved_range("2001:db8::1", 8443))
-        self.assertIsNotNone(vm_reserved_range("2001:2::c612:100", 8443))
-        self.assertIsNotNone(vm_reserved_range("198.18.1.4", 8443))
+        from workload_addr import reserved_range
+        self.assertIsNone(reserved_range("2001:db8::1", 8443))
+        self.assertIsNotNone(reserved_range("2001:2::c612:100", 8443))
+        self.assertIsNotNone(reserved_range("198.18.1.4", 8443))
 
 
 class TestInternalOkAccept(unittest.TestCase):
@@ -3949,12 +3949,12 @@ class TestRung6PolicyDocument(unittest.TestCase):
 
 
 class TestRung6BrokerAddress(unittest.TestCase):
-    """`vm_broker_listen_address` (D3): per-workload, derived, never shared."""
+    """`broker_listen_address` (D3): per-workload, derived, never shared."""
 
     def test_the_first_workload_lands_on_the_base(self):
-        from workload_addr import UID_MIN, vm_broker_listen_address
-        self.assertEqual(vm_broker_listen_address(UID_MIN), "127.129.0.0")
-        self.assertEqual(vm_broker_listen_address(UID_MIN + 3), "127.129.0.3")
+        from workload_addr import UID_MIN, broker_listen_address
+        self.assertEqual(broker_listen_address(UID_MIN), "127.129.0.0")
+        self.assertEqual(broker_listen_address(UID_MIN + 3), "127.129.0.3")
 
     def test_it_is_never_the_two_addresses_that_reopen_the_hole(self):
         """Both wrong values put one workload's broker where every other
@@ -3962,19 +3962,19 @@ class TestRung6BrokerAddress(unittest.TestCase):
         hole grows back. Asserted as negatives rather than only as a positive,
         because a positive assertion on one uid passes while a constant is
         wrong for the range."""
-        from workload_addr import UID_MAX, UID_MIN, vm_broker_listen_address
+        from workload_addr import UID_MAX, UID_MIN, broker_listen_address
         for uid in (UID_MIN, UID_MIN + 1, 10500, 42000, UID_MAX):
             with self.subTest(uid=uid):
-                addr = vm_broker_listen_address(uid)
+                addr = broker_listen_address(uid)
                 self.assertNotEqual(addr, "127.0.0.1")
                 self.assertNotEqual(addr, "0.0.0.0")
 
     def test_a_uid_outside_the_workload_range_raises(self):
-        from workload_addr import UID_MAX, UID_MIN, vm_broker_listen_address
+        from workload_addr import UID_MAX, UID_MIN, broker_listen_address
         for uid in (UID_MIN - 1, UID_MAX + 1, 0):
             with self.subTest(uid=uid):
                 with self.assertRaises(ValueError):
-                    vm_broker_listen_address(uid)
+                    broker_listen_address(uid)
 
     def test_the_three_uid_derived_addresses_never_overlap(self):
         """Three-way, over the COLLECTION, not over a chosen pair.
@@ -3987,10 +3987,10 @@ class TestRung6BrokerAddress(unittest.TestCase):
         unchanged while a third address is added and left unchecked, which is the
         failure TestReservedRanges states in its own docstring.
         """
-        from workload_addr import (UID_MAX, UID_MIN, vm_broker_listen_address,
-                                   vm_management_address, vm_resolve_address)
-        derived = (vm_management_address, vm_broker_listen_address,
-                   vm_resolve_address)
+        from workload_addr import (UID_MAX, UID_MIN, broker_listen_address,
+                                   management_address, resolve_address)
+        derived = (management_address, broker_listen_address,
+                   resolve_address)
         for uid in (UID_MIN, UID_MIN + 1, 42000, UID_MAX):
             with self.subTest(uid=uid):
                 got = [f(uid) for f in derived]

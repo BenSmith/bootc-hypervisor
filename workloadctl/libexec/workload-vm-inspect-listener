@@ -134,7 +134,7 @@ from egress_policy import (
 )
 from egress_ca import LeafRefused, ca_cert_path, ca_key_path
 from broker_config import VM_BROKER_INSTANCE_PORT
-from workload_addr import vm_broker_listen_address
+from workload_addr import broker_listen_address
 from vm_clock import resync_guest_clock_if_skewed
 from egress_mint import MintFailed, MintThrottled, Minter
 from egress_status import STATUS_TOP_N, BoundedCounts, write_status
@@ -4190,7 +4190,7 @@ class Listener:
         the broker's dispatch key.
 
         A uid outside the workload range raises ValueError from
-        vm_broker_listen_address, and it is converted to OSError so it lands in
+        broker_listen_address, and it is converted to OSError so it lands in
         the caller's broker arm as a legible refusal. That is not a theoretical
         case: it is what a listener started by hand, outside its unit, would
         hit, and a bare ValueError there kills the connection thread with a
@@ -4199,7 +4199,7 @@ class Listener:
         addr = self._broker_address
         if addr is None:
             try:
-                addr = vm_broker_listen_address(os.getuid())
+                addr = broker_listen_address(os.getuid())
             except ValueError as exc:
                 raise OSError(str(exc)) from exc
             self._broker_address = addr

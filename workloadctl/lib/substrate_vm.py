@@ -40,7 +40,7 @@ from egress_policy import vm_uses_inspect
 from vm_defs import (
     VM_SOCKET_DIR, parse_memory_mib, vm_guest_agent_socket, vm_mac_address,
 )
-from workload_addr import VM_MGMT_SSH_PORT, vm_management_address
+from workload_addr import MGMT_SSH_PORT, management_address
 from vm_clock import GUEST_AGENT_TIMEOUT, guest_agent_sync
 from vm_metrics import get_vm_qmp_metrics
 from workload_lib import workload_service_units
@@ -76,7 +76,7 @@ def _vm_ssh_endpoint(config) -> tuple[str, int] | None:
             uid = config.uid
         except (WorkloadUserNotFound, ValueError):
             return None
-        return (vm_management_address(uid), VM_MGMT_SSH_PORT)
+        return (management_address(uid), MGMT_SSH_PORT)
     guest_ip = _vm_guest_ip(config.name, config.vm_bridge)
     return (guest_ip, 22) if guest_ip else None
 

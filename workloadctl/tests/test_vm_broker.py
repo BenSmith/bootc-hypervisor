@@ -41,7 +41,7 @@ from vm_network_config import (
     VM_BROKER_DEFAULT_AUTH_FORMAT, VM_BROKER_DEFAULT_AUTH_HEADER,
     validate_vm_network,
 )
-from workload_addr import UID_MIN, vm_broker_listen_address
+from workload_addr import UID_MIN, broker_listen_address
 import ipaddress
 import tomllib
 
@@ -109,7 +109,7 @@ class TestTheGeneratedConfig(unittest.TestCase):
     def test_the_listen_address_is_the_uid_derived_one(self):
         cfg = tomllib.loads(self.render())
         self.assertEqual(cfg["listen_address"],
-                         vm_broker_listen_address(UID_MIN + 5))
+                         broker_listen_address(UID_MIN + 5))
 
     def test_the_listen_address_is_never_localhost_or_the_world(self):
         for uid in (UID_MIN, UID_MIN + 1, UID_MIN + 300):
@@ -551,7 +551,7 @@ class TestTheHelperWritesTheConfig(unittest.TestCase):
     def test_it_writes_the_rendered_config(self):
         self.assertEqual(self.write(cred_config()), 0)
         self.assertEqual(tomllib.loads(self.path.read_text())["listen_address"],
-                         vm_broker_listen_address(UID_MIN + 5))
+                         broker_listen_address(UID_MIN + 5))
 
     def test_the_file_is_readable_by_nobody_else(self):
         self.write(cred_config())
@@ -621,7 +621,7 @@ from egress_policy import (
     VM_DROP_BROKER_UNREACHABLE, VM_DROP_UNREACHABLE, VM_INSPECT_RECORD_FIELDS,
     VmPolicyEntry, vm_inspect_policy, vm_inspect_policy_text,
 )
-from workload_addr import vm_broker_listen_address
+from workload_addr import broker_listen_address
 import vm_inspect_figures
 
 LISTENER = Path(__file__).resolve().parent.parent / "libexec" / "workload-vm-inspect-listener"
@@ -646,9 +646,9 @@ _UNAUTHORIZED = b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\n\r\n"
 
 # The address this workload's broker would answer on. Injected rather than
 # derived from os.getuid(), because the suite does not run as _wl-<name> and
-# vm_broker_listen_address refuses a uid outside the workload range -- see
+# broker_listen_address refuses a uid outside the workload range -- see
 # TestTheBrokerAddressComesFromTheUid for the derivation itself.
-BROKER_ADDR = vm_broker_listen_address(10007)
+BROKER_ADDR = broker_listen_address(10007)
 
 
 def _pump(sock, buf):
@@ -1399,7 +1399,7 @@ class TestTheBrokerAddressIsExemptedFromTheInternalDrop(unittest.TestCase):
         the exemption below would be dead code and this whole class would be
         asserting a no-op -- so the range membership is asserted rather than
         assumed."""
-        addr = ipaddress.ip_address(vm_broker_listen_address(UID_MIN + 7))
+        addr = ipaddress.ip_address(broker_listen_address(UID_MIN + 7))
         armed = vm_internal_ok_elements(UID_MIN + 7, [addr])
         self.assertTrue(
             any(entries for entries in armed.values()),
@@ -1412,14 +1412,14 @@ class TestTheBrokerAddressIsExemptedFromTheInternalDrop(unittest.TestCase):
         behind it is a hole with nothing on the other side."""
         up = self._up()
         self.assertIn("vm_uses_credentials", up)
-        self.assertIn("vm_broker_listen_address(uid)", up)
+        self.assertIn("broker_listen_address(uid)", up)
         # Appended to the list the exemptions are built from, and BEFORE the
         # commands are generated -- after them it would be armed by nothing.
-        self.assertLess(up.index("vm_broker_listen_address(uid)"),
+        self.assertLess(up.index("broker_listen_address(uid)"),
                         up.index('vm_internal_ok_commands(uid, addresses, "add")'))
         # And purged with the rest, so dropping the last credential removes it.
         self.assertLess(up.index("purge_internal_exemptions(uid, name)"),
-                        up.index("vm_broker_listen_address(uid)"))
+                        up.index("broker_listen_address(uid)"))
 
 
 def _cred_net(policy, credential):

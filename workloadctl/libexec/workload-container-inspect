@@ -59,7 +59,7 @@ from egress_policy import vm_inspect_policy_path, vm_inspect_status_path
 from vm import vm_inspect_element_commands, vm_internal_ok_commands
 from broker_config import container_uses_credentials
 from nft_constants import NFT_BIN, NFT_PROXY_SKELETON, NFT_SKELETON
-from workload_addr import ensure_advertised_interface, vm_broker_listen_address
+from workload_addr import ensure_advertised_interface, broker_listen_address
 from egress_status import clear_status
 from config_parser import container_uses_inspect
 from workload_lib import (
@@ -158,7 +158,7 @@ def up(name: str) -> int:
             raise ValueError(internal_failure(name, host, e)) from None
     # THE BROKER'S OWN ADDRESS IS AN INTERNAL DESTINATION (P2-5), and without
     # this element the brokered path cannot work at all -- the same defect the
-    # VM side was fixed for, one substrate over. `vm_broker_listen_address` is
+    # VM side was fixed for, one substrate over. `broker_listen_address` is
     # 127.129.x.y, inside 127.0.0.0/8 and therefore inside wl_internal4, and
     # the drop keyed on this workload's cgroup sits ABOVE the `oif lo accept`,
     # so the inspector's dial to its own broker is dropped by the rule that
@@ -172,7 +172,7 @@ def up(name: str) -> int:
     # gains no exemption; purged by uid with the rest, so dropping the last
     # credential removes it.
     if container_uses_credentials(config):
-        addresses.append(ipaddress.ip_address(vm_broker_listen_address(uid)))
+        addresses.append(ipaddress.ip_address(broker_listen_address(uid)))
     try:
         add_commands = vm_internal_ok_commands(uid, addresses, "add")
     except ValueError as e:

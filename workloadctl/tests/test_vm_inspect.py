@@ -33,7 +33,7 @@ from nft_constants import (
 )
 from vm_defs import vm_allowed_hosts, vm_runtime_dir
 from vm_network_config import vm_policy_permits
-from workload_addr import IP_BIN, VM_ADVERTISED_IFACE
+from workload_addr import IP_BIN, ADVERTISED_IFACE
 
 ROOT = Path(__file__).resolve().parent.parent
 PROXY_SKELETON_FILE = ROOT / "nftables" / "workload-proxy.nft"
@@ -287,9 +287,9 @@ class TestLinkAddressCommands(unittest.TestCase):
     def test_the_addresses_are_host_global_host_local(self):
         v4, v6 = vm_inspect_link_address_commands(10004)
         self.assertEqual(v4, [IP_BIN, "addr", "add", "198.18.1.4/32",
-                              "dev", VM_ADVERTISED_IFACE])
+                              "dev", ADVERTISED_IFACE])
         self.assertEqual(v6, [IP_BIN, "addr", "add", "2001:2::c612:104/128",
-                              "dev", VM_ADVERTISED_IFACE, "nodad"])
+                              "dev", ADVERTISED_IFACE, "nodad"])
 
     def test_nodad_is_on_v6_only(self):
         """A dummy link runs no DAD (measured 2026-08-19), so the flag
@@ -305,9 +305,9 @@ class TestLinkAddressCommands(unittest.TestCase):
         # Same address, same dev, the verb flipped: a delete that named a
         # different prefix would leave the add's address on the link.
         self.assertEqual(v4_del, [IP_BIN, "addr", "del", "198.18.1.4/32",
-                                  "dev", VM_ADVERTISED_IFACE])
+                                  "dev", ADVERTISED_IFACE])
         self.assertEqual(v6_del, [IP_BIN, "addr", "del", "2001:2::c612:104/128",
-                                  "dev", VM_ADVERTISED_IFACE])
+                                  "dev", ADVERTISED_IFACE])
 
 
 class TestHelperArmsBothTables(unittest.TestCase):

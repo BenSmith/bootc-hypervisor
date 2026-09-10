@@ -47,10 +47,10 @@ SKELETON = "/usr/share/workloadctl/workload-filter.nft"
 # Spelled out rather than imported, on inspect_rig.py's reasoning: a rig that
 # computes both sides from one constant cannot notice them drifting apart.
 UID = 10000
-V4 = "198.18.1.0"          # vm_inspect_address(10000).v4
+V4 = "198.18.1.0"          # inspect_address(10000).v4
 V6 = "2001:2::c612:100"    # ...v6
 PORT = 8080                # VM_INSPECT_PORT_CLEARTEXT
-GROUP = 1000               # vm_nflog_group(10000)
+GROUP = 1000               # nflog_group(10000)
 SNAPLEN = 1500
 
 results = []

@@ -29,8 +29,8 @@ from vm_defs import parse_vm_port
 from vm_network_config import validate_vm_network
 import workload_lib
 from workload_addr import (NFLOG_GROUP_BASE, UID_MAX, UID_MIN,
-                           VM_MGMT_SSH_PORT, vm_management_address,
-                           vm_nflog_group)
+                           MGMT_SSH_PORT, management_address,
+                           nflog_group)
 
 
 def _load(path, name):
@@ -46,16 +46,16 @@ class TestUidDerivedValues(unittest.TestCase):
     """The uid is the network identity; everything else falls out of it."""
 
     def test_management_addresses_are_spelled_out(self):
-        self.assertEqual(vm_management_address(10000), "127.128.0.0")
-        self.assertEqual(vm_management_address(10003), "127.128.0.3")
-        self.assertEqual(vm_management_address(10256), "127.128.1.0")
-        self.assertEqual(vm_management_address(UID_MAX), "127.128.167.196")
+        self.assertEqual(management_address(10000), "127.128.0.0")
+        self.assertEqual(management_address(10003), "127.128.0.3")
+        self.assertEqual(management_address(10256), "127.128.1.0")
+        self.assertEqual(management_address(UID_MAX), "127.128.167.196")
 
     def test_nflog_groups_are_the_offset_from_a_base(self):
         self.assertEqual(NFLOG_GROUP_BASE, 1000)
-        self.assertEqual(vm_nflog_group(10000), 1000)
-        self.assertEqual(vm_nflog_group(10003), 1003)
-        self.assertEqual(vm_nflog_group(UID_MAX), 43948)
+        self.assertEqual(nflog_group(10000), 1000)
+        self.assertEqual(nflog_group(10003), 1003)
+        self.assertEqual(nflog_group(UID_MAX), 43948)
 
     def test_no_workload_lands_on_a_conventional_group(self):
         # Group 0 is iptables' --nflog-group default and what stock ulogd
@@ -63,7 +63,7 @@ class TestUidDerivedValues(unittest.TestCase):
         # allocated on any host onto the most contended group there is. The
         # two consumers then see each other's packets, silently and in both
         # directions. 1 and 2 appear in ulogd's shipped examples.
-        self.assertNotIn(vm_nflog_group(UID_MIN), (0, 1, 2))
+        self.assertNotIn(nflog_group(UID_MIN), (0, 1, 2))
 
     def test_the_whole_uid_range_fits_its_targets(self):
         # 42,949 workloads must fit inside 127.128.0.0/9 and the 16-bit nflog
@@ -71,8 +71,8 @@ class TestUidDerivedValues(unittest.TestCase):
         # two and the one that would fail silently — a group number above 65535
         # would be truncated by the kernel, so two workloads would share a
         # capture.
-        self.assertLess(vm_nflog_group(UID_MAX), 65536)
-        self.assertTrue(vm_management_address(UID_MAX).startswith("127."))
+        self.assertLess(nflog_group(UID_MAX), 65536)
+        self.assertTrue(management_address(UID_MAX).startswith("127."))
 
     def test_the_first_and_last_addresses_are_actually_bindable(self):
         # uid 10000 -> 127.128.0.0, which is the first workload on any fresh
@@ -83,7 +83,7 @@ class TestUidDerivedValues(unittest.TestCase):
         # Every other test here asserts the string, which would not have caught
         # an address that could not be bound.
         for uid in (UID_MIN, UID_MIN + 255, UID_MIN + 256, UID_MAX):
-            address = vm_management_address(uid)
+            address = management_address(uid)
             sock = socket.socket()
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             try:
@@ -99,7 +99,7 @@ class TestUidDerivedValues(unittest.TestCase):
         # 127.0.1.1 is conventionally the system hostname in Debian's
         # /etc/hosts. Nothing in the range may collide with it.
         self.assertNotIn("127.0.1.1",
-                         {vm_management_address(u)
+                         {management_address(u)
                           for u in (UID_MIN, UID_MIN + 1, UID_MIN + 257)})
 
     def test_out_of_range_uids_raise_rather_than_wrap(self):
@@ -107,15 +107,15 @@ class TestUidDerivedValues(unittest.TestCase):
         # workload's address and capture group.
         for uid in (0, 999, UID_MIN - 1, UID_MAX + 1):
             with self.assertRaises(ValueError):
-                vm_management_address(uid)
+                management_address(uid)
             with self.assertRaises(ValueError):
-                vm_nflog_group(uid)
+                nflog_group(uid)
 
     def test_management_port_is_unprivileged(self):
         # passt binds this as the workload user, not as root, so it has to stay
         # above net.ipv4.ip_unprivileged_port_start (1024 by default). This is
         # why it is 2222 and not 22.
-        self.assertGreater(VM_MGMT_SSH_PORT, 1024)
+        self.assertGreater(MGMT_SSH_PORT, 1024)
 
 
 class TestPortSpecs(unittest.TestCase):

@@ -34,7 +34,7 @@ from nft_constants import (
     NFT_SET_INSPECT_SELF6, NFT_SET_INSPECT_LIVE, NFT_SET_INSPECT_LIVE6,
     NFT_TABLE,
 )
-from workload_addr import vm_inspect_address
+from workload_addr import inspect_address
 
 UID = 10001
 ALL_SETS = INSPECT_ACCEPT_SETS + INSPECT_SELF_SETS + INSPECT_GUARD_SETS
@@ -199,7 +199,7 @@ class TestTheReadCostsOneExec(unittest.TestCase):
         # gave them all the uid shape would let a reader that used
         # owned_elements on the guard sets pass here and report every real
         # host's guard as missing.
-        addr = vm_inspect_address(uid)
+        addr = inspect_address(uid)
         by_family = {NFT_SET_INSPECT_LIVE: str(addr.v4),
                      NFT_SET_INSPECT_LIVE6: str(addr.v6)}
         sets = [{"set": {"name": name,
@@ -239,7 +239,7 @@ class TestTheReadCostsOneExec(unittest.TestCase):
 
     def test_a_set_present_without_this_uid_is_the_failure_not_silence(self):
         """`uid + 7` moves the accept and self elements off this uid and, via
-        vm_inspect_address, the guard elements off this uid's inspector
+        inspect_address, the guard elements off this uid's inspector
         address -- so all six read as armed-for-somebody-else, which is the
         failure, not the silence."""
         payload = self._table(names=ALL_SETS, uid=UID + 7)

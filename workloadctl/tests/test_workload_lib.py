@@ -2906,7 +2906,7 @@ class TestContainerFilterElements(unittest.TestCase):
         self.assertNotIn("wl_allow6", elements)
 
     def test_filter_elements_refuses_listener_range(self):
-        # 198.18.0.0/16 is VM_INSPECT_NETWORK -- another workload's listener
+        # 198.18.0.0/16 is INSPECT_NETWORK -- another workload's listener
         # plane, never a legitimate allow destination (mirrors
         # vm_allow_reserved_reason's VM-side refusal).
         allow = [ContainerAllowEntry(host=None, address="198.18.1.5", port=443,

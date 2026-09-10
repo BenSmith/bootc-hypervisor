@@ -28,7 +28,7 @@ from dataclasses import dataclass, field
 from egress_policy import vm_uses_inspect
 from nft_constants import NFT_BIN, NFT_TABLE
 from config_parser import container_uses_inspect
-from workload_addr import UID_MIN, vm_nflog_group
+from workload_addr import UID_MIN, nflog_group
 
 
 # --- what a vantage is ---
@@ -326,10 +326,6 @@ CT_MARK_UID_MASK = 0x3FFFFFFF
 PCAP_OUTPUT_CHAIN = "pcap_output"
 PCAP_INPUT_CHAIN = "pcap_input"
 PCAP_CHAINS = (PCAP_OUTPUT_CHAIN, PCAP_INPUT_CHAIN)
-
-
-def nflog_group(uid: int) -> int:
-    return vm_nflog_group(uid)
 
 
 def log_rule_packets(payload, group: int | None = None) -> int:

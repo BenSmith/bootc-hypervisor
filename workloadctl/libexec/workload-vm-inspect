@@ -113,7 +113,7 @@ from vm import (
 )
 from broker_config import vm_uses_credentials
 from nft_constants import NFT_BIN, NFT_PROXY_SKELETON, NFT_SKELETON
-from workload_addr import ensure_advertised_interface, vm_broker_listen_address
+from workload_addr import ensure_advertised_interface, broker_listen_address
 from egress_status import clear_status
 from workload_lib import load_workload_config
 
@@ -258,7 +258,7 @@ def up(name: str) -> int:
         except ValueError as e:
             raise ValueError(internal_failure(name, host, e)) from None
     # THE BROKER'S OWN ADDRESS IS AN INTERNAL DESTINATION, and without this
-    # element the brokered path cannot work at all. `vm_broker_listen_address`
+    # element the brokered path cannot work at all. `broker_listen_address`
     # is 127.129.x.y, which is inside 127.0.0.0/8 and therefore inside
     # wl_internal4 -- and the drop keyed on this workload's cgroup sits ABOVE
     # the `oif lo accept`, so the inspector's dial to its own broker is dropped
@@ -276,7 +276,7 @@ def up(name: str) -> int:
     # alone, derived from its uid, and its own broker is the only thing bound
     # there.
     if vm_uses_credentials({"vm": {"network": net}}):
-        addresses.append(ipaddress.ip_address(vm_broker_listen_address(uid)))
+        addresses.append(ipaddress.ip_address(broker_listen_address(uid)))
     try:
         add_commands = vm_internal_ok_commands(uid, addresses, "add")
     except ValueError as e:

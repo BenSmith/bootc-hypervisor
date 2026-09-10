@@ -57,7 +57,7 @@ NS = "wlsd"
 # Spelled out rather than imported, on input_chain_rig.py's reasoning: a rig
 # that computes both sides from one constant cannot notice them drifting apart.
 UID = 10000
-V4 = "198.18.1.0"          # vm_inspect_address(10000).v4
+V4 = "198.18.1.0"          # inspect_address(10000).v4
 V6 = "2001:2::c612:100"    # ...v6
 SERVED = 8080              # VM_INSPECT_PORT_CLEARTEXT -- in the accept set
 UNSERVED = 2222            # the wrong-port dial: nothing serves it

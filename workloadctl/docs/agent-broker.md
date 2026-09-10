@@ -283,7 +283,7 @@ What the host must provide, and what a request actually traverses.
 `[[vm.network.credential]]` or a container's `[[network.credential]]`; one
 mechanism, described below in the VM's terms — gets a
 `workload-<name>-broker.service` written by the boot generator:
-`DynamicUser=yes`, bound to `vm_broker_listen_address(uid)` — `127.129.0.0` plus
+`DynamicUser=yes`, bound to `broker_listen_address(uid)` — `127.129.0.0` plus
 the workload's offset from `UID_MIN`, port 8081 — with a `broker.toml`
 regenerated into `/run` at every start by `workload-vm-broker config <name>`.
 Its only caller is that workload's own egress inspector.
@@ -314,7 +314,7 @@ control of.
 
 **Two constants must agree**: this program's `listen_address`/`listen_port`
 against what the generator renders and what the inspector dials
-(`vm_broker_listen_address` in `lib/workload_addr.py`, `VM_BROKER_INSTANCE_PORT`
+(`broker_listen_address` in `lib/workload_addr.py`, `VM_BROKER_INSTANCE_PORT`
 in `lib/broker_config.py`). A
 mismatch presents exactly as the broker being down — connection refused, no log
 line on either side, nothing pointing at the cause. `tests/test_vm_broker.py`

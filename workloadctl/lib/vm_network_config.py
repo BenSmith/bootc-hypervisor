@@ -33,9 +33,9 @@ from egress_policy import (VM_INSPECT_ORIG_CLEARTEXT, VM_INSPECT_ORIG_TLS,
                            VM_TLS_DEFAULT, VM_TLS_MODES, VmPolicyEntry,
                            vm_hostname_match, vm_normalise_hostname,
                            vm_policy_entries, vm_policy_governs)
-from workload_addr import (VM_INSPECT_ADDR6_PREFIX, VM_INSPECT_NETWORK,
-                           VM_RESOLVE_POLICY_FILE, VM_RESOLVE_TTL,
-                           vm_inspect_address, vm_reserved_range)
+from workload_addr import (INSPECT_ADDR6_PREFIX, INSPECT_NETWORK,
+                           RESOLVE_POLICY_FILE, RESOLVE_TTL,
+                           inspect_address, reserved_range)
 from egress_ca import RESERVED_GUEST_ENV
 from broker_config import VmCredential
 from vm_defs import (SEED_PROVIDES_CHOICES, SEED_PROVIDES_RETIRED,
@@ -112,9 +112,9 @@ def vm_allow_reserved_reason(
     is the one clients try first.
     """
     if isinstance(addr, ipaddress.IPv4Address):
-        network = VM_INSPECT_NETWORK
+        network = INSPECT_NETWORK
     else:
-        network = VM_INSPECT_ADDR6_PREFIX
+        network = INSPECT_ADDR6_PREFIX
     if addr not in network:
         return None
     return (f"{addr} is inside {network}, the egress inspector's own listener "
@@ -301,7 +301,7 @@ def vm_allow_resolved(allow):
 
 def vm_resolve_policy_path(name: str) -> str:
     """Where one workload's responder reads its answers from."""
-    return f"{VM_SOCKET_DIR}/{name}/{VM_RESOLVE_POLICY_FILE}"
+    return f"{VM_SOCKET_DIR}/{name}/{RESOLVE_POLICY_FILE}"
 
 
 def vm_resolve_policy(net: dict, uid: int, resolved=None) -> dict:
@@ -344,7 +344,7 @@ def vm_resolve_policy(net: dict, uid: int, resolved=None) -> dict:
     merged into `hosts` because the document describes the FILE, and the two
     keys are two different statements about a name.
     """
-    inspect = vm_inspect_address(uid)
+    inspect = inspect_address(uid)
     if resolved is None:
         resolved = vm_allow_resolved(net.get("allow", []) or [])
     static: dict[str, list[str]] = {}
@@ -362,7 +362,7 @@ def vm_resolve_policy(net: dict, uid: int, resolved=None) -> dict:
     return {
         "address": inspect.v4,
         "address6": inspect.v6,
-        "ttl": VM_RESOLVE_TTL,
+        "ttl": RESOLVE_TTL,
         "static": static,
         "hosts": vm_allowed_hosts(net),
         "policy": [e.host for e in vm_policy_entries(net)],
@@ -1422,7 +1422,7 @@ def validate_vm_network(net: dict) -> list[str]:
             except ValueError as e:
                 errors.append(f"[vm.network].ports: {e}")
                 continue
-            reserved = vm_reserved_range(bind_addr, host_port) if bind_addr else None
+            reserved = reserved_range(bind_addr, host_port) if bind_addr else None
             if reserved:
                 # The remedy follows its shape: a range-scoped reservation is
                 # not somewhere to publish at all, while a port-scoped one is a

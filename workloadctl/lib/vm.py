@@ -30,7 +30,7 @@ from nft_constants import (both_families, split_by_family, NFT_BIN,
 from vm_defs import (VM_INTERNAL_PREFIXES4, VM_INTERNAL_PREFIXES6,
                      VM_SIDECAR_SLICE, VM_SOCKET_DIR)
 from vm_network_config import vm_allow_reserved_reason, vm_allow_resolved
-from workload_addr import vm_inspect_address
+from workload_addr import inspect_address
 
 
 def vm_filter_elements(uid: int, allow: list[str],
@@ -121,7 +121,7 @@ def vm_inspect_map_elements(uid: int) -> dict[str, list[str]]:
     literal appears in it. The advertised address that once did is gone with the
     broker redirect that was its last consumer.
     """
-    return both_families(NFT_PAIR_INSPECT_MAP, vm_inspect_address(uid), lambda a: [
+    return both_families(NFT_PAIR_INSPECT_MAP, inspect_address(uid), lambda a: [
         f"{uid} . {VM_INSPECT_ORIG_CLEARTEXT} : {a} . {VM_INSPECT_PORT_CLEARTEXT}",
         f"{uid} . {VM_INSPECT_ORIG_TLS} : {a} . {VM_INSPECT_PORT_TLS}",
     ])
@@ -135,7 +135,7 @@ def vm_inspect_dst_elements(uid: int) -> dict[str, list[str]]:
     match nothing (measured; §7.2) and the redirected connection would fall
     through to the default drop.
     """
-    return both_families(NFT_PAIR_INSPECT_DST, vm_inspect_address(uid), lambda a: [
+    return both_families(NFT_PAIR_INSPECT_DST, inspect_address(uid), lambda a: [
         f"{uid} . {a} . {VM_INSPECT_PORT_CLEARTEXT}",
         f"{uid} . {a} . {VM_INSPECT_PORT_TLS}",
     ])
@@ -150,7 +150,7 @@ def vm_inspect_self_elements(uid: int) -> dict[str, list[str]]:
     workload and is armed here, and it is what gives the guard's counter its
     per-workload attribution.
     """
-    return both_families(NFT_PAIR_INSPECT_SELF, vm_inspect_address(uid),
+    return both_families(NFT_PAIR_INSPECT_SELF, inspect_address(uid),
                           lambda a: [f"{uid} . {a}"])
 
 
@@ -169,7 +169,7 @@ def vm_inspect_live_elements(uid: int) -> dict[str, list[str]]:
     guard's job includes dials to ports nothing serves, and naming 8080/8443
     would let a cross-workload caller walk in on any other port.
     """
-    return both_families(NFT_PAIR_INSPECT_LIVE, vm_inspect_address(uid),
+    return both_families(NFT_PAIR_INSPECT_LIVE, inspect_address(uid),
                           lambda a: [str(a)])
 
 

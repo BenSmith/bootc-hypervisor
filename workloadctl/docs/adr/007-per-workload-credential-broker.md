@@ -110,7 +110,7 @@ than only requests to one endpoint.
 
 6. **The guest's route to the broker is deleted, not policed.** Each instance
    listens on a uid-derived loopback address — the same offset arithmetic
-   `vm_management_address()` uses, in a disjoint range — and the inspector dials it
+   `management_address()` uses, in a disjoint range — and the inspector dials it
    directly. The advertised endpoint, the `wl_broker_dest` map and the
    `inet workload_broker` table go with it. A guest cannot reach a `127.x` address
    at all: that range is its *own* loopback, so the packet never leaves its stack.

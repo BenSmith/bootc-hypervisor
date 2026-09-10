@@ -86,7 +86,7 @@ class TestAFacadeReExportsNothing(unittest.TestCase):
     which fails loudly when the patch feeds an assertion and goes silently
     inert when it was installed to SUPPRESS something. And every subsequent
     split had to either grow the hand-written list or drop a name from vm's
-    surface, where nothing in the suite would notice: dropping VM_UID_MGMT
+    surface, where nothing in the suite would notice: dropping UID_MGMT
     from it passed all 4,867 tests and would have failed on a host, at the
     first entrypoint importing it by name.
 

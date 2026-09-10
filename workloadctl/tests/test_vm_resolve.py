@@ -35,10 +35,10 @@ from vm_network_config import (
     vm_allow_resolved, vm_resolve_policy, vm_resolve_policy_path,
 )
 from workload_addr import (
-    UID_MAX, UID_MIN, VM_MGMT_NETWORK, VM_RESOLVE_ADDR_BASE,
-    VM_RESOLVE_LISTENER_BIN, VM_RESOLVE_POLICY_FILE, VM_RESOLVE_PORT,
-    VM_RESOLVE_TTL, vm_inspect_address, vm_management_address,
-    vm_reserved_range, vm_resolve_address,
+    UID_MAX, UID_MIN, MGMT_NETWORK, RESOLVE_ADDR_BASE,
+    VM_RESOLVE_LISTENER_BIN, RESOLVE_POLICY_FILE, RESOLVE_PORT,
+    RESOLVE_TTL, inspect_address, management_address,
+    reserved_range, resolve_address,
 )
 
 UID = 10004  # the worked example the rest of the inspect tests use
@@ -158,16 +158,16 @@ class TestAddress(unittest.TestCase):
     """The uid-derived responder address, and the reservation it inherits."""
 
     def test_the_offset_is_the_uid_offset(self):
-        self.assertEqual(vm_resolve_address(UID_MIN), "127.130.0.0")
-        self.assertEqual(vm_resolve_address(UID_MIN + 3), "127.130.0.3")
-        self.assertEqual(vm_resolve_address(UID),
+        self.assertEqual(resolve_address(UID_MIN), "127.130.0.0")
+        self.assertEqual(resolve_address(UID_MIN + 3), "127.130.0.3")
+        self.assertEqual(resolve_address(UID),
                          str(ipaddress.IPv4Address(
-                             VM_RESOLVE_ADDR_BASE + (UID - UID_MIN))))
+                             RESOLVE_ADDR_BASE + (UID - UID_MIN))))
 
     def test_a_uid_outside_the_workload_range_is_refused(self):
         for uid in (UID_MIN - 1, UID_MAX + 1, 0):
             with self.assertRaises(ValueError):
-                vm_resolve_address(uid)
+                resolve_address(uid)
 
     def test_the_whole_range_stays_inside_the_management_reservation(self):
         """Why there is no new ReservedRange for the responder.
@@ -179,22 +179,22 @@ class TestAddress(unittest.TestCase):
         with nothing logged either way.
         """
         for uid in (UID_MIN, UID, UID_MAX):
-            addr = ipaddress.IPv4Address(vm_resolve_address(uid))
-            self.assertIn(addr, VM_MGMT_NETWORK, uid)
+            addr = ipaddress.IPv4Address(resolve_address(uid))
+            self.assertIn(addr, MGMT_NETWORK, uid)
 
     def test_ports_cannot_bind_a_responder_address(self):
         """The reservation, exercised through the check `ports` actually uses
         rather than asserted about the network object."""
         self.assertIsNotNone(
-            vm_reserved_range(vm_resolve_address(UID), VM_RESOLVE_PORT))
+            reserved_range(resolve_address(UID), RESOLVE_PORT))
 
     def test_it_does_not_collide_with_the_management_address(self):
         """Same arithmetic, different base. A shared base would put the
         responder on the management address at a different port, which is a
         second service inside a range documented as never configurable."""
         for uid in (UID_MIN, UID, UID_MAX):
-            self.assertNotEqual(vm_resolve_address(uid),
-                                vm_management_address(uid))
+            self.assertNotEqual(resolve_address(uid),
+                                management_address(uid))
 
     def test_the_address_is_loopback(self):
         """Not the 198.18.0.0/16 advertised link. 127/8 is unreachable from the
@@ -202,7 +202,7 @@ class TestAddress(unittest.TestCase):
         responder -- an address the guest could dial directly is a nameserver
         every other workload on the host can query too."""
         self.assertTrue(
-            ipaddress.IPv4Address(vm_resolve_address(UID)).is_loopback)
+            ipaddress.IPv4Address(resolve_address(UID)).is_loopback)
 
 
 class TestPredicate(unittest.TestCase):
@@ -238,12 +238,12 @@ class TestPolicyDocument(unittest.TestCase):
 
     def test_the_synthesised_addresses_are_the_inspectors(self):
         doc = vm_resolve_policy({}, UID)
-        inspect = vm_inspect_address(UID)
+        inspect = inspect_address(UID)
         self.assertEqual(doc["address"], inspect.v4)
         self.assertEqual(doc["address6"], inspect.v6)
 
     def test_the_ttl_is_the_stated_constant(self):
-        self.assertEqual(vm_resolve_policy({}, UID)["ttl"], VM_RESOLVE_TTL)
+        self.assertEqual(vm_resolve_policy({}, UID)["ttl"], RESOLVE_TTL)
 
     def test_the_ttl_is_pinned_to_a_number_and_not_to_itself(self):
         """The literal, because every other assertion about the TTL reads the
@@ -258,8 +258,8 @@ class TestPolicyDocument(unittest.TestCase):
         below the ceiling stubs clamp cached TTLs to, which is what keeps the
         stated constant and the constant in effect the same value.
         """
-        self.assertEqual(VM_RESOLVE_TTL, 3600)
-        self.assertGreaterEqual(VM_RESOLVE_TTL, 3600)
+        self.assertEqual(RESOLVE_TTL, 3600)
+        self.assertGreaterEqual(RESOLVE_TTL, 3600)
 
     def test_the_policy_host_patterns_are_carried(self):
         """Carried for the same COUNTING reason `hosts` is, and beside it
@@ -351,7 +351,7 @@ class TestPolicyDocument(unittest.TestCase):
 
     def test_the_policy_path_is_beside_the_inspectors(self):
         path = vm_resolve_policy_path("web")
-        self.assertTrue(path.endswith(f"/web/{VM_RESOLVE_POLICY_FILE}"), path)
+        self.assertTrue(path.endswith(f"/web/{RESOLVE_POLICY_FILE}"), path)
 
 
 def _entry(host, port):
@@ -366,7 +366,7 @@ class TestSynthesis(unittest.TestCase):
     def setUpClass(cls):
         cls.mod = _module()
         cls.policy = _policy(cls.mod)
-        cls.inspect = vm_inspect_address(UID)
+        cls.inspect = inspect_address(UID)
 
     def answer(self, *args, **kwargs):
         return Reply(self.mod.build_answer(query(*args, **kwargs), self.policy))
@@ -391,7 +391,7 @@ class TestSynthesis(unittest.TestCase):
     def test_the_ttl_on_the_wire_is_the_stated_constant(self):
         _rtype, _rclass, ttl, _rdata = self.answer("example.com",
                                                    TYPE_A).records[0]
-        self.assertEqual(ttl, VM_RESOLVE_TTL)
+        self.assertEqual(ttl, RESOLVE_TTL)
 
     def test_the_id_and_question_are_echoed(self):
         raw = self.mod.build_answer(query("example.com", TYPE_A, ident=0xBEEF),
@@ -478,7 +478,7 @@ class TestStaticMap(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.mod = _module()
-        cls.inspect = vm_inspect_address(UID)
+        cls.inspect = inspect_address(UID)
         cls.policy = _policy(cls.mod, static={
             "git.local": ["192.0.2.9"],
             "dual.local": ["192.0.2.10", "2001:db8::10"],
@@ -535,7 +535,7 @@ class TestEdns(unittest.TestCase):
     def setUpClass(cls):
         cls.mod = _module()
         cls.policy = _policy(cls.mod)
-        cls.inspect = vm_inspect_address(UID)
+        cls.inspect = inspect_address(UID)
 
     def test_an_opt_query_is_answered(self):
         reply = Reply(self.mod.build_answer(
@@ -914,7 +914,7 @@ class TestOnTheWire(unittest.TestCase):
     def setUpClass(cls):
         cls.mod = _module()
         cls.policy = _policy(cls.mod, static={"git.local": ["192.0.2.9"]})
-        cls.inspect = vm_inspect_address(UID)
+        cls.inspect = inspect_address(UID)
 
     def test_a_udp_query_is_answered_to_the_sender(self):
         server = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -1295,14 +1295,14 @@ class TestGeneratedUnits(unittest.TestCase):
         cls.socket_unit = cls.gen.generate_vm_resolve_socket(
             config, "_wl-web", UID)
         cls.service = cls.gen.generate_vm_resolve_service(config, "_wl-web")
-        cls.address = vm_resolve_address(UID)
+        cls.address = resolve_address(UID)
 
     def test_both_transports_are_bound(self):
         """UDP alone leaves a client that opened TCP for its own reasons
         hanging, with nothing to diagnose from."""
-        self.assertIn(f"ListenDatagram={self.address}:{VM_RESOLVE_PORT}",
+        self.assertIn(f"ListenDatagram={self.address}:{RESOLVE_PORT}",
                       self.socket_unit.splitlines())
-        self.assertIn(f"ListenStream={self.address}:{VM_RESOLVE_PORT}",
+        self.assertIn(f"ListenStream={self.address}:{RESOLVE_PORT}",
                       self.socket_unit.splitlines())
 
     def test_the_socket_has_no_address_add(self):

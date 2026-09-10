@@ -53,7 +53,7 @@ import time
 from pathlib import Path
 
 from vm_defs import VM_DEFAULT_GUEST_USER
-from workload_addr import VM_MGMT_SSH_PORT, vm_management_address
+from workload_addr import MGMT_SSH_PORT, management_address
 from workload_lib import (load_workload_config, workload_state_dir,
                           workload_username)
 
@@ -328,7 +328,7 @@ def _vm_probe_target(name: str) -> tuple[str, Path, str, int] | None:
     bridge = (vm_cfg.get("network") or {}).get("bridge")
     if not bridge:
         return (guest_user, workload_state_dir(name),
-                vm_management_address(uid), VM_MGMT_SSH_PORT)
+                management_address(uid), MGMT_SSH_PORT)
 
     from substrate_vm import _vm_guest_addresses
     addresses = _vm_guest_addresses(name, bridge)

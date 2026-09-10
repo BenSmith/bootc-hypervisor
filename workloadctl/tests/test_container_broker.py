@@ -32,7 +32,7 @@ from broker_config import (
     render_container_broker_config, render_vm_broker_config,
     vm_broker_credential,
 )
-from workload_addr import UID_MIN, vm_broker_listen_address
+from workload_addr import UID_MIN, broker_listen_address
 from workload_lib import validate_container_network
 
 import tomllib
@@ -209,7 +209,7 @@ class TestTheRenderIsTheVmRender(unittest.TestCase):
     def test_it_parses_and_carries_the_uid_derived_address(self):
         uid = UID_MIN + 3
         doc = tomllib.loads(render_container_broker_config(cred_config(), uid))
-        self.assertEqual(doc["listen_address"], vm_broker_listen_address(uid))
+        self.assertEqual(doc["listen_address"], broker_listen_address(uid))
         self.assertEqual(doc["listen_port"], VM_BROKER_INSTANCE_PORT)
         self.assertNotEqual(doc["listen_address"], "127.0.0.1")
 
@@ -454,7 +454,7 @@ class TestTheGeneratedUnit(unittest.TestCase):
         pointed at another workload's, so the address must appear in the
         broker's own unit and nowhere the workload reads."""
         self._generate("capp", SINGLE)
-        addr = vm_broker_listen_address(
+        addr = broker_listen_address(
             int([l for l in (Path(self.sysusers_dir) / "workload-capp.conf")
                  .read_text().split("\n") if l.startswith("u ")][0].split()[2]))
         service = (Path(self.services_dir)
@@ -610,7 +610,7 @@ class TestTheInternalCarveOut(unittest.TestCase):
         """The premise. If the broker's address were not in the internal set
         the exemption would be dead code and this class would assert a
         no-op."""
-        addr = ipaddress.ip_address(vm_broker_listen_address(UID_MIN + 7))
+        addr = ipaddress.ip_address(broker_listen_address(UID_MIN + 7))
         armed = vm_internal_ok_elements(UID_MIN + 7, [addr])
         self.assertTrue(any(entries for entries in armed.values()),
                         f"{addr} is not in wl_internal4")
@@ -618,11 +618,11 @@ class TestTheInternalCarveOut(unittest.TestCase):
     def test_it_is_armed_only_for_a_workload_that_has_a_broker(self):
         up = self._up()
         self.assertIn("container_uses_credentials(config)", up)
-        self.assertIn("vm_broker_listen_address(uid)", up)
+        self.assertIn("broker_listen_address(uid)", up)
 
     def test_it_is_appended_before_the_commands_are_built(self):
         up = self._up()
-        self.assertLess(up.index("vm_broker_listen_address(uid)"),
+        self.assertLess(up.index("broker_listen_address(uid)"),
                         up.index('vm_internal_ok_commands(uid, addresses, "add")'),
                         "appended after the commands, it is armed by nothing")
 
@@ -631,7 +631,7 @@ class TestTheInternalCarveOut(unittest.TestCase):
         leaving one open with nothing behind it."""
         up = self._up()
         self.assertLess(up.index("purge_internal_exemptions(uid, name)"),
-                        up.index("vm_broker_listen_address(uid)"))
+                        up.index("broker_listen_address(uid)"))
 
 
 if __name__ == "__main__":

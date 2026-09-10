@@ -109,7 +109,7 @@ CLOUD_SHA = "28680fe5b371a5a82ebf43a31926e086a168e59949d03969c5093e7071f90b7f"
 # computes both sides from one constant cannot notice them drifting apart, and
 # these five are exactly the values a guest-invisible mechanism is described by.
 UID_MIN = 10000                             # lib/workload_addr.py
-BROKER_ADDR_BASE = "127.129.0.0"            # VM_BROKER_ADDR_BASE
+BROKER_ADDR_BASE = "127.129.0.0"            # mirrors workload_addr.BROKER_ADDR_BASE
 BROKER_PORT = 8081                          # VM_BROKER_INSTANCE_PORT
 BROKER_RUNDIR = "/run/workloadctl/broker"   # VM_BROKER_RUNTIME_SUBDIR
 BROKER_CONFIG = "broker.toml"               # VM_BROKER_CONFIG_NAME
@@ -271,7 +271,7 @@ def gid_of(name):
 
 
 def broker_address(uid):
-    """vm_broker_listen_address, restated. See the constants block."""
+    """broker_listen_address, restated. See the constants block."""
     return str(ipaddress.ip_address(
         int(ipaddress.ip_address(BROKER_ADDR_BASE)) + uid - UID_MIN))
 

@@ -6,7 +6,7 @@ of these sets and maps is really two. The RULES must be written twice. The
 builders must not be, and when they were, the v6 half went missing in both of
 the ways it can:
 
-  * omitted entirely -- the reserved-range check was `in VM_MGMT_NETWORK` with
+  * omitted entirely -- the reserved-range check was `in MGMT_NETWORK` with
     a docstring committing to v4, so 2001:2::/48 was not checked at all and
     `ports = ["198.18.1.4:8443:22"]` validated (TestReservedRanges);
   * or present and wrong -- an element in the other family's set matches
@@ -177,7 +177,7 @@ class TestTheDerivedBuildersFillBothHalves(unittest.TestCase):
         An element in the other family's set never matches, and nothing
         anywhere reports a set that is never matched.
         """
-        addr = workload_addr.vm_inspect_address(UID)
+        addr = workload_addr.inspect_address(UID)
         for pair, build in DERIVED:
             elements = build(UID)
             with self.subTest(build=build.__name__):

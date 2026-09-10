@@ -39,9 +39,9 @@ from vm_defs import (
     VM_SOCKET_DIR,
 )
 from workload_addr import (
-    VM_MGMT_SSH_PORT, VM_INSPECT_LISTENER_BIN, vm_management_address,
-    vm_inspect_address, VM_RESOLVE_LISTENER_BIN, VM_RESOLVE_PORT,
-    vm_resolve_address,
+    MGMT_SSH_PORT, VM_INSPECT_LISTENER_BIN, management_address,
+    inspect_address, VM_RESOLVE_LISTENER_BIN, RESOLVE_PORT,
+    resolve_address,
 )
 from unit_file import Unit
 from gen_common import (
@@ -338,8 +338,8 @@ def build_passt_netdev(name: str, uid: int, net_cfg: dict, mac: str) -> str:
     # 2. PUBLISHED — declared by the operator, bound where they say, following
     #    the container convention ports = ["8080:80"]. Managed-bridge VMs had no
     #    port publishing at all, so this is new capability, not a migration.
-    mgmt_addr = vm_management_address(uid)
-    tcp_ports = [f"{mgmt_addr}/{VM_MGMT_SSH_PORT}:22"]
+    mgmt_addr = management_address(uid)
+    tcp_ports = [f"{mgmt_addr}/{MGMT_SSH_PORT}:22"]
     udp_ports = []
     for spec in net_cfg.get("ports", []):
         bind_addr, host_port, guest_port, proto = parse_vm_port(spec)
@@ -419,7 +419,7 @@ def generate_vm_inspect_socket(config, user_name: str, uid: int,
     # just written the sysusers config -- so a getpwnam here raises KeyError
     # and takes the whole VM workload down with it. The caller already holds
     # the allocated uid; that is the only value that exists this early.
-    addr = vm_inspect_address(uid)
+    addr = inspect_address(uid)
 
     unit = Unit()
     unit.comment(f"egress inspector socket for {name}")
@@ -465,7 +465,7 @@ def generate_vm_inspect_socket(config, user_name: str, uid: int,
     sock.add("ExecStopPost",
              f"-+/usr/libexec/workloadctl/{arming_helper} down {dq(name)}")
     # Four listener ports, both families, cleartext and TLS. The values come
-    # from the T4 derivation (vm_inspect_address) and the port constants —
+    # from the T4 derivation (inspect_address) and the port constants —
     # never a literal. The v6 form brackets the address so it is not parsed as
     # the scope-id separator.
     sock.add("ListenStream", f"{addr.v4}:{VM_INSPECT_PORT_CLEARTEXT}")
@@ -745,7 +745,7 @@ def generate_vm_resolve_socket(config, user_name: str, uid: int) -> str:
     # The uid is passed in, never looked up, for the reason
     # generate_vm_inspect_socket gives: on a first enable this runs before
     # systemd-sysusers has created _wl-<name>.
-    address = vm_resolve_address(uid)
+    address = resolve_address(uid)
 
     unit = Unit()
     unit.comment(f"synthesising DNS responder socket for {name}")
@@ -772,8 +772,8 @@ def generate_vm_resolve_socket(config, user_name: str, uid: int) -> str:
     # plane on `lo` would not be a substitute anyway -- the shipped `oif lo
     # accept` would make it reachable from every workload on the host, which is
     # the one property 127/8's unreachability from the guest is providing.
-    sock.add("ListenDatagram", f"{address}:{VM_RESOLVE_PORT}")
-    sock.add("ListenStream", f"{address}:{VM_RESOLVE_PORT}")
+    sock.add("ListenDatagram", f"{address}:{RESOLVE_PORT}")
+    sock.add("ListenStream", f"{address}:{RESOLVE_PORT}")
     # One long-lived process, not one per connection -- and with Accept=no the
     # trigger limit below is the meaningful knob. Set explicitly.
     sock.set("Accept", "no")

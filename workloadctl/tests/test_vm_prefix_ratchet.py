@@ -62,22 +62,35 @@ def _defined():
     of any module's vocabulary, and an underscore name is already spelled as
     something no other module should be reading.
     """
-    found = set()
+    return {symbol for symbols in _defined_by_kind().values()
+            for symbol in symbols}
+
+
+def _defined_by_kind():
+    """The same sweep, kept split by the AST node each name came from.
+
+    Split because the guard below has to show that BOTH arms of the walk are
+    live, and naming an example symbol to prove it is a citation that this
+    very campaign keeps deleting -- the first rename of the named symbol
+    turned that guard red for a reason that had nothing to do with discovery.
+    A kind is a property of the sweep; a symbol is a fact about today's tree.
+    """
+    found = {"def": set(), "assign": set()}
     for path in sorted(LIB.glob("*.py")):
         for node in ast.parse(path.read_text()).body:
-            names = []
+            names, kind = [], "def"
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef,
                                  ast.ClassDef)):
                 names = [node.name]
             elif isinstance(node, ast.Assign):
-                names = [t.id for t in node.targets
-                         if isinstance(t, ast.Name)]
+                names, kind = [t.id for t in node.targets
+                               if isinstance(t, ast.Name)], "assign"
             elif isinstance(node, ast.AnnAssign) and \
                     isinstance(node.target, ast.Name):
-                names = [node.target.id]
+                names, kind = [node.target.id], "assign"
             for name in names:
                 if not name.startswith("_") and name.startswith(PREFIXES):
-                    found.add(f"{path.stem}.{name}")
+                    found[kind].add(f"{path.stem}.{name}")
     return found
 
 
@@ -126,9 +139,10 @@ class TestTheTableIsReadable(unittest.TestCase):
         """Measured, not reasoned: a sweep that quietly stopped seeing
         assignments would drop every constant while still reading green on
         the functions."""
-        found = _defined()
-        self.assertIn("vm_defs.VM_SOCKET_DIR", found)          # Assign
-        self.assertIn("workload_addr.vm_inspect_address", found)  # FunctionDef
+        by_kind = _defined_by_kind()
+        self.assertTrue(by_kind["assign"], "the Assign arm found nothing")
+        self.assertTrue(by_kind["def"], "the FunctionDef arm found nothing")
+        self.assertEqual(by_kind["assign"] & by_kind["def"], set())
 
 
 class TestTheClassificationIsComplete(unittest.TestCase):

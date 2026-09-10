@@ -27,7 +27,7 @@ from vm import (
 )
 from nft_constants import NFT_SET_INSPECT_CG, NFT_SET_EGRESS_CG
 from vm_defs import VM_EGRESS_DEFAULT, VM_SIDECAR_SLICE
-from workload_addr import VM_INSPECT_LISTENER_BIN, vm_inspect_address
+from workload_addr import VM_INSPECT_LISTENER_BIN, inspect_address
 from workload_lib import dq
 
 UID = 10004  # worked example, matching test_vm_inspect.py
@@ -87,7 +87,7 @@ class TestGeneratedSocket(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.gen = importlib.import_module("gen_vm")
-        cls.addr = vm_inspect_address(UID)
+        cls.addr = inspect_address(UID)
         # The uid is a parameter, not a lookup. It used to be mocked here --
         # which is precisely what hid the defect the mock was standing in for:
         # on a first enable the user does not exist yet, and a real getpwnam
@@ -202,7 +202,7 @@ class TestGenerationPredatesTheUser(unittest.TestCase):
                     "getpwnam(): name not found: '_wl-web'")):
             gen = importlib.import_module("gen_vm")
             unit = gen.generate_vm_inspect_socket(_config({}), "_wl-web", UID)
-        addr = vm_inspect_address(UID)
+        addr = inspect_address(UID)
         self.assertIn(str(addr.v4), unit)
 
 

@@ -31,8 +31,8 @@ from typing import NamedTuple
 from config_parser import (container_credential_entries,
                            container_policy_entries, container_uses_inspect,
                            parse_credential_entries)
-from workload_addr import (IP_BIN, VM_ADVERTISED_IFACE,
-                           vm_broker_listen_address, vm_inspect_address)
+from workload_addr import (IP_BIN, ADVERTISED_IFACE,
+                           broker_listen_address, inspect_address)
 from egress_policy import vm_uses_inspect
 from secrets_template import credential_path, CREDSTORE_DIR
 from egress_policy import vm_policy_entries
@@ -44,7 +44,7 @@ VM_BROKER_BIN = "/usr/libexec/workloadctl/agent-broker"
 
 # The port every instance listens on. One value for all of them is safe here and
 # is not for the address: each instance binds an address of its own
-# (vm_broker_listen_address), so two instances on the same port never collide,
+# (broker_listen_address), so two instances on the same port never collide,
 # and the inspector derives BOTH halves from the workload uid it already holds.
 VM_BROKER_INSTANCE_PORT = 8081
 
@@ -316,7 +316,7 @@ def render_broker_config(name: str, uid: int, hosts, credentials) -> str:
         "# this file is a pure function of the workload's egress tables and",
         "# is rewritten from them at every start of the broker unit.",
         "",
-        f"listen_address = {_toml_basic_string(vm_broker_listen_address(uid))}",
+        f"listen_address = {_toml_basic_string(broker_listen_address(uid))}",
         f"listen_port = {VM_BROKER_INSTANCE_PORT}",
     ]
     # ONE TABLE PER HOST, not per policy entry, and the difference is a file
@@ -465,9 +465,9 @@ def vm_inspect_link_address_commands(uid: int) -> tuple[list[str], list[str]]:
     tentative through the router-solicitation window and the inspector's first
     connection on that family would time out.
     """
-    addr = vm_inspect_address(uid)
-    v4 = [IP_BIN, "addr", "add", f"{addr.v4}/32", "dev", VM_ADVERTISED_IFACE]
-    v6 = [IP_BIN, "addr", "add", f"{addr.v6}/128", "dev", VM_ADVERTISED_IFACE,
+    addr = inspect_address(uid)
+    v4 = [IP_BIN, "addr", "add", f"{addr.v4}/32", "dev", ADVERTISED_IFACE]
+    v6 = [IP_BIN, "addr", "add", f"{addr.v6}/128", "dev", ADVERTISED_IFACE,
           "nodad"]
     return v4, v6
 
@@ -480,7 +480,7 @@ def vm_inspect_link_delete_commands(uid: int) -> tuple[list[str], list[str]]:
     inspector that is supposed to be running, and a stopped workload leaving
     its listener address behind is exactly what `diagnose` cannot explain.
     """
-    addr = vm_inspect_address(uid)
-    v4 = [IP_BIN, "addr", "del", f"{addr.v4}/32", "dev", VM_ADVERTISED_IFACE]
-    v6 = [IP_BIN, "addr", "del", f"{addr.v6}/128", "dev", VM_ADVERTISED_IFACE]
+    addr = inspect_address(uid)
+    v4 = [IP_BIN, "addr", "del", f"{addr.v4}/32", "dev", ADVERTISED_IFACE]
+    v6 = [IP_BIN, "addr", "del", f"{addr.v6}/128", "dev", ADVERTISED_IFACE]
     return v4, v6

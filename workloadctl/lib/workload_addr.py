@@ -53,7 +53,7 @@ UID_MAX = 52948
 # fail-at-bind path reports it as the address being missing) or workload B
 # receiving workload A's intercepted traffic. Start order decides which, and
 # nothing is logged for either. With the derivations as rows,
-# VM_RESERVED_RANGES is DERIVED from them: a row whose reservation is one
+# RESERVED_RANGES is DERIVED from them: a row whose reservation is one
 # already listed adds nothing, and a row outside every listed range cannot be
 # added without naming the reservation that covers it.
 
@@ -117,19 +117,19 @@ def _uid_derived_value(derived: UidDerived, uid: int) -> int:
 # 198.18.0.0/16 (RFC 2544 benchmarking space, not routable), with an IPv6 twin
 # in 2001:2::/48 (RFC 5180, the exact v6 counterpart). The address is on a
 # dummy link and therefore local, so no sysctl is involved. The offset
-# arithmetic is the same vm_management_address uses against 127.128.0.0.
+# arithmetic is the same management_address uses against 127.128.0.0.
 #
 # The base is 198.18.1.0 rather than 198.18.0.0 for the reason NFLOG_GROUP_BASE
 # is 1000 rather than 0: a bare offset lands the *first* workload allocated on
 # any host on the range's own network address, which is the value everything
 # else defaults to. Harmless while each address is a /32 and a latent
 # confusion the day anyone assigns or matches the range as a /16.
-VM_INSPECT_ADDR_BASE = 0xC6120100  # 198.18.1.0
+INSPECT_ADDR_BASE = 0xC6120100  # 198.18.1.0
 
 # The whole reservation, not just the allocated part — the range the filter's
 # guards name. 42,949 workloads fit inside the /16's 65,536, so uniqueness is
-# inherited from the uid allocator exactly as vm_management_address's is.
-VM_INSPECT_NETWORK = ipaddress.ip_network("198.18.0.0/16")
+# inherited from the uid allocator exactly as management_address's is.
+INSPECT_NETWORK = ipaddress.ip_network("198.18.0.0/16")
 
 # The v6 twin's prefix. The v4 address is embedded in its low 32 bits, so one
 # derivation feeds both families and the two listener addresses carry the same
@@ -138,18 +138,18 @@ VM_INSPECT_NETWORK = ipaddress.ip_network("198.18.0.0/16")
 # No base/reservation split here the way the v4 side has: the v6 is derived by
 # OR-ing the v4 into this prefix, so it inherits both the base offset and the
 # whole-range boundary from the v4 and one prefix plays both roles.
-VM_INSPECT_ADDR6_PREFIX = ipaddress.ip_network("2001:2::/48")
+INSPECT_ADDR6_PREFIX = ipaddress.ip_network("2001:2::/48")
 
-VM_RESERVATION_INSPECT4 = RangeReservation(
-    VM_INSPECT_NETWORK, None,
+RESERVATION_INSPECT4 = RangeReservation(
+    INSPECT_NETWORK, None,
     "the egress inspector's IPv4 listener range. Every filtered VM's "
     "redirected 80 and 443 land on an address in it, so publishing here "
     "either takes the bind another workload's inspector needs — which fails "
     "as the address being missing, not as a conflict — or hands this guest "
     "another workload's intercepted traffic")
 
-VM_RESERVATION_INSPECT6 = RangeReservation(
-    VM_INSPECT_ADDR6_PREFIX, None,
+RESERVATION_INSPECT6 = RangeReservation(
+    INSPECT_ADDR6_PREFIX, None,
     "the egress inspector's IPv6 listener range, the v6 twin of "
     "198.18.0.0/16 carrying the same numbers. Refusing one family and not the "
     "other refuses half of every address, and the half left open is the one "
@@ -158,8 +158,8 @@ VM_RESERVATION_INSPECT6 = RangeReservation(
 # Both families on ONE row, because there is one derivation: the v6 address is
 # the v4 OR-ed into the prefix, so a reservation for one family and not the
 # other is not a narrower guard, it is half a guard.
-VM_UID_INSPECT = UidDerived("inspector address", VM_INSPECT_ADDR_BASE,
-                            VM_RESERVATION_INSPECT4, VM_RESERVATION_INSPECT6)
+UID_INSPECT = UidDerived("inspector address", INSPECT_ADDR_BASE,
+                            RESERVATION_INSPECT4, RESERVATION_INSPECT6)
 
 
 # The inspector's listener binary, the socket unit's ExecStart. Named here so
@@ -185,7 +185,7 @@ VM_INSPECT_LISTENER_BIN = "/usr/libexec/workloadctl/workload-vm-inspect-listener
 # which Debian conventionally puts in /etc/hosts for the system hostname.
 # UID_MIN..UID_MAX is 10000-52948 = 42,949 values, comfortably inside both
 # 127.128.0.0/9 and the 16-bit nflog group space.
-VM_MGMT_ADDR_BASE = 0x7F800000  # 127.128.0.0
+MGMT_ADDR_BASE = 0x7F800000  # 127.128.0.0
 
 # The whole reservation, not just the allocated part. `ports` may otherwise name
 # any bind address, and one naming another workload's management address has
@@ -200,45 +200,45 @@ VM_MGMT_ADDR_BASE = 0x7F800000  # 127.128.0.0
 # own, so a narrowing pass that "tidied" this to 127.128.0.0/16 would take the
 # reservation away from the broker at 127.129.0.0 and the responder at
 # 127.130.0.0 at once. An address OUTSIDE this range needs a RangeReservation of
-# its own -- which VM_RESERVED_RANGES then picks up by derivation, not by
+# its own -- which RESERVED_RANGES then picks up by derivation, not by
 # anyone remembering to list it.
-VM_MGMT_NETWORK = ipaddress.ip_network("127.128.0.0/9")
+MGMT_NETWORK = ipaddress.ip_network("127.128.0.0/9")
 
 # The one reservation every loopback address names. The broker and the
 # synthesising responder hang off the same /9 at their own bases, so each is
 # covered by naming this rather than by an entry of its own -- which is the
 # whole reason the /9 is wider than the /16 the management addresses occupy.
-VM_RESERVATION_MGMT = RangeReservation(
-    VM_MGMT_NETWORK, None,
+RESERVATION_MGMT = RangeReservation(
+    MGMT_NETWORK, None,
     "the per-workload management addresses `workloadctl exec` and `shell` "
     "reach a guest's sshd on. Publishing here puts a guest port where another "
     "workload's management listener belongs, and start order decides which of "
     "two gets the bind")
 
-VM_UID_MGMT = UidDerived("management address", VM_MGMT_ADDR_BASE,
-                         VM_RESERVATION_MGMT)
+UID_MGMT = UidDerived("management address", MGMT_ADDR_BASE,
+                         RESERVATION_MGMT)
 
 # Port passt forwards to the guest's sshd for `workloadctl exec` / `shell`.
 # Fixed, never configurable, and bound only on the workload's own management
 # address. It must stay above net.ipv4.ip_unprivileged_port_start (1024 by
 # default) because passt binds it as the workload user, not as root — which is
 # why this is 2222 and not 22.
-VM_MGMT_SSH_PORT = 2222
+MGMT_SSH_PORT = 2222
 
 # Base of the per-workload nflog group range, for the same reason the management
 # addresses start at 127.128.0.0 rather than 127.0.0.0: a bare `uid - UID_MIN`
 # lands the first workload on group 0, which is the netfilter default. See
-# vm_nflog_group. 1000 + 42,948 = 43,948, inside the 16-bit group space.
+# nflog_group. 1000 + 42,948 = 43,948, inside the 16-bit group space.
 NFLOG_GROUP_BASE = 1000
 
 # No reservation: a group is not an address, so there is nothing `ports` could
 # bind into. The only row in the table for which that is true.
-VM_UID_NFLOG = UidDerived("nflog group", NFLOG_GROUP_BASE)
-def vm_management_address(uid: int) -> str:
+UID_NFLOG = UidDerived("nflog group", NFLOG_GROUP_BASE)
+def management_address(uid: int) -> str:
     """The workload's own loopback address for management inbound.
 
     `workloadctl exec`/`shell` reach the guest's sshd here, on
-    VM_MGMT_SSH_PORT. Never routable, never configurable, and distinct from
+    MGMT_SSH_PORT. Never routable, never configurable, and distinct from
     declared published ports ([vm.network].ports), which the operator binds
     where they choose — the two were conflated in early drafts and are
     genuinely different (ADR 006).
@@ -247,7 +247,7 @@ def vm_management_address(uid: int) -> str:
     no registry, no allocation step, and no collision. uid 10000 -> 127.128.0.0,
     uid 10003 -> 127.128.0.3.
     """
-    return str(ipaddress.IPv4Address(_uid_derived_value(VM_UID_MGMT, uid)))
+    return str(ipaddress.IPv4Address(_uid_derived_value(UID_MGMT, uid)))
 
 
 class VmInspectAddress(NamedTuple):
@@ -259,11 +259,11 @@ class VmInspectAddress(NamedTuple):
     v6: str
 
 
-def vm_inspect_address(uid: int) -> VmInspectAddress:
+def inspect_address(uid: int) -> VmInspectAddress:
     """The inspector's listening addresses, (IPv4, IPv6), for this workload.
 
     The transparent redirect rewrites a guest dial to 80 or 443 onto these. They
-    are not loopback (unlike vm_management_address): the inspector binds them on
+    are not loopback (unlike management_address): the inspector binds them on
     the shared `workload-proxy` dummy link, in 198.18.0.0/16 and 2001:2::/48,
     because guest traffic re-originated by passt toward a remote address cannot
     be DNATed to 127/8 without a host-wide sysctl. The v6 twin embeds the v4
@@ -273,16 +273,16 @@ def vm_inspect_address(uid: int) -> VmInspectAddress:
     no registry, no allocation step, and no collision. uid 10000 -> 198.18.1.0 /
     2001:2::c612:100.
     """
-    v4 = ipaddress.IPv4Address(_uid_derived_value(VM_UID_INSPECT, uid))
+    v4 = ipaddress.IPv4Address(_uid_derived_value(UID_INSPECT, uid))
     v6 = ipaddress.IPv6Address(
-        int(VM_INSPECT_ADDR6_PREFIX.network_address) | int(v4))
+        int(INSPECT_ADDR6_PREFIX.network_address) | int(v4))
     return VmInspectAddress(str(v4), str(v6))
 
 
-def vm_nflog_group(uid: int) -> int:
+def nflog_group(uid: int) -> int:
     """The workload's nflog group, for per-workload host-side packet capture.
 
-    Same derivation and same guarantee as vm_management_address — the offset
+    Same derivation and same guarantee as management_address — the offset
     into the workload uid range — but offset by a base, for the reason that one
     starts at 127.128.0.0 rather than at 127.0.0.0.
 
@@ -301,7 +301,7 @@ def vm_nflog_group(uid: int) -> int:
     21,587 to spare, and nothing else changes: the value is still a pure
     function of the uid, with no registry and no allocation step.
     """
-    return _uid_derived_value(VM_UID_NFLOG, uid)
+    return _uid_derived_value(UID_NFLOG, uid)
 # --- The credential broker endpoint ---
 #
 # There is no advertised endpoint and no host-side service: ADR 007 decision 6
@@ -315,9 +315,9 @@ def vm_nflog_group(uid: int) -> int:
 # pointed at somebody else's.
 
 # Base of the per-workload broker listener addresses (ADR 007). 127.129.0.0, by
-# the same offset arithmetic vm_management_address uses against 127.128.0.0 and
+# the same offset arithmetic management_address uses against 127.128.0.0 and
 # the responder uses against 127.130.0.0 -- and, like the responder, deliberately
-# inside VM_MGMT_NETWORK (127.128.0.0/9), which is why there is no ReservedRange
+# inside MGMT_NETWORK (127.128.0.0/9), which is why there is no ReservedRange
 # of its own: the /9 was cut wide precisely so the ranges hung on loopback after
 # the management one would inherit the reservation, and `ports` already cannot
 # bind here.
@@ -327,13 +327,13 @@ def vm_nflog_group(uid: int) -> int:
 # socket every workload can reach; here each instance answers on an address
 # only its own inspector is told about, so a second
 # workload dialling it reaches its OWN loopback and finds nothing.
-VM_BROKER_ADDR_BASE = 0x7F810000  # 127.129.0.0
+BROKER_ADDR_BASE = 0x7F810000  # 127.129.0.0
 
-VM_UID_BROKER = UidDerived("broker listen address", VM_BROKER_ADDR_BASE,
-                           VM_RESERVATION_MGMT)
+UID_BROKER = UidDerived("broker listen address", BROKER_ADDR_BASE,
+                           RESERVATION_MGMT)
 
 
-def vm_broker_listen_address(uid: int) -> str:
+def broker_listen_address(uid: int) -> str:
     """The workload's own loopback address for its credential broker instance.
 
     Derived from the uid, so uniqueness is inherited from the uid allocator:
@@ -345,7 +345,7 @@ def vm_broker_listen_address(uid: int) -> str:
     decision 6 closes grows back -- so the render gate asserts those two
     negatives explicitly rather than only asserting the positive.
     """
-    return str(ipaddress.IPv4Address(_uid_derived_value(VM_UID_BROKER, uid)))
+    return str(ipaddress.IPv4Address(_uid_derived_value(UID_BROKER, uid)))
 # --- §9: the synthesising responder ---
 #
 # The guest's only nameserver. Every A/AAAA, for any name, is answered with this
@@ -355,8 +355,8 @@ def vm_broker_listen_address(uid: int) -> str:
 # anyone ever "adds a fallback".
 #
 # Base of the per-workload responder addresses. 127.130.0.0, by the same offset
-# arithmetic vm_management_address uses against 127.128.0.0 -- and deliberately
-# inside VM_MGMT_NETWORK (127.128.0.0/9), which is why there is no new
+# arithmetic management_address uses against 127.128.0.0 -- and deliberately
+# inside MGMT_NETWORK (127.128.0.0/9), which is why there is no new
 # ReservedRange for it: the /9 was cut wide precisely so the ranges hung on
 # loopback after the management one would inherit the reservation rather than
 # each need their own. `ports` already cannot bind here.
@@ -367,15 +367,15 @@ def vm_broker_listen_address(uid: int) -> str:
 # the guest's own 127/8 is its own), so the ONLY path to it is passt's
 # --dns-forward interception. A responder on a reachable address is a resolver
 # every other workload on the host can query.
-VM_RESOLVE_ADDR_BASE = 0x7F820000  # 127.130.0.0
+RESOLVE_ADDR_BASE = 0x7F820000  # 127.130.0.0
 
-VM_UID_RESOLVE = UidDerived("responder address", VM_RESOLVE_ADDR_BASE,
-                            VM_RESERVATION_MGMT)
+UID_RESOLVE = UidDerived("responder address", RESOLVE_ADDR_BASE,
+                            RESERVATION_MGMT)
 
 # Port 53, on the workload's own address. Fixed and never configurable, for the
 # reason the management SSH port is: it is not a service an operator publishes,
 # it is where passt is told to forward.
-VM_RESOLVE_PORT = 53
+RESOLVE_PORT = 53
 
 # The one stated TTL. Long, because the inspector's address never moves: there
 # is no upstream truth for a short TTL to track, and a long one collapses a
@@ -384,13 +384,13 @@ VM_RESOLVE_PORT = 53
 # Not a library default, and not "as large as the field allows" either: a TTL
 # past a stub's own cache ceiling is silently clamped, and a stated constant
 # that is not the constant in effect is worse than a smaller one that is.
-VM_RESOLVE_TTL = 3600
+RESOLVE_TTL = 3600
 
-VM_RESOLVE_POLICY_FILE = "resolve.json"
+RESOLVE_POLICY_FILE = "resolve.json"
 VM_RESOLVE_LISTENER_BIN = "/usr/libexec/workloadctl/workload-vm-resolve"
 
 
-def vm_resolve_address(uid: int) -> str:
+def resolve_address(uid: int) -> str:
     """The workload's own loopback address for its synthesising responder.
 
     Derived from the uid, so uniqueness is inherited from the uid allocator:
@@ -404,28 +404,28 @@ def vm_resolve_address(uid: int) -> str:
     address whose absence the inspector's fail-at-bind argument would then
     appear to depend on.
     """
-    return str(ipaddress.IPv4Address(_uid_derived_value(VM_UID_RESOLVE, uid)))
+    return str(ipaddress.IPv4Address(_uid_derived_value(UID_RESOLVE, uid)))
 
 # Every uid-derived value this design allocates. Assembled here rather than
 # inline because the rows sit beside the constants they derive from, in the
 # sections that own them; test_vm_uid_derived.py refuses a UidDerived defined in
 # this module and left out of this tuple, which is the one way a row can go
 # missing.
-VM_UID_DERIVED = (
-    VM_UID_MGMT,
-    VM_UID_BROKER,
-    VM_UID_RESOLVE,
-    VM_UID_INSPECT,
-    VM_UID_NFLOG,
+UID_DERIVED = (
+    UID_MGMT,
+    UID_BROKER,
+    UID_RESOLVE,
+    UID_INSPECT,
+    UID_NFLOG,
 )
 
 
 class ReservedRange(NamedTuple):
     """One host-side range a [vm.network].ports entry may not bind into.
 
-    The shape vm_reserved_range answers in, kept distinct from
+    The shape reserved_range answers in, kept distinct from
     RangeReservation because a caller wants the range that refused it and not
-    the bookkeeping in VM_UID_DERIVED that produced the range.
+    the bookkeeping in UID_DERIVED that produced the range.
     """
     network: ipaddress.IPv4Network | ipaddress.IPv6Network
     port: int | None
@@ -433,7 +433,7 @@ class ReservedRange(NamedTuple):
 
 
 def _reserved_ranges() -> tuple[ReservedRange, ...]:
-    """The ranges VM_UID_DERIVED names, deduplicated, in table order.
+    """The ranges UID_DERIVED names, deduplicated, in table order.
 
     DERIVED, NOT LISTED, and that is the whole of this. A hand-written list is
     a second place to remember: the v6 listener range went unchecked in exactly
@@ -448,7 +448,7 @@ def _reserved_ranges() -> tuple[ReservedRange, ...]:
     address would need a uid this list does not have.
     """
     seen, ranges = [], []
-    for derived in VM_UID_DERIVED:
+    for derived in UID_DERIVED:
         for reservation in (derived.reservation, derived.reservation6):
             if reservation is None or reservation in seen:
                 continue
@@ -458,13 +458,13 @@ def _reserved_ranges() -> tuple[ReservedRange, ...]:
     return tuple(ranges)
 
 
-VM_RESERVED_RANGES = _reserved_ranges()
+RESERVED_RANGES = _reserved_ranges()
 
 
-def vm_reserved_range(addr: str, port: int | None = None) -> ReservedRange | None:
+def reserved_range(addr: str, port: int | None = None) -> ReservedRange | None:
     """The reserved range this bind address and port fall in, or None.
 
-    Both families, read off VM_RESERVED_RANGES rather than spelled out here,
+    Both families, read off RESERVED_RANGES rather than spelled out here,
     so a range added there is checked here without anyone remembering to.
 
     An unparseable address answers None: parse_vm_port has already rejected
@@ -474,7 +474,7 @@ def vm_reserved_range(addr: str, port: int | None = None) -> ReservedRange | Non
         address = ipaddress.ip_address(addr)
     except (ValueError, TypeError):
         return None
-    for reserved in VM_RESERVED_RANGES:
+    for reserved in RESERVED_RANGES:
         if address.version != reserved.network.version:
             continue
         if address not in reserved.network:
@@ -498,7 +498,7 @@ def vm_reserved_range(addr: str, port: int | None = None) -> ReservedRange | Non
 # workload's 127.128.x.y and 198.18.x.y addresses, with the new link claiming
 # the same addresses — two links answering for one address is a routing
 # ambiguity, and it would arrive on upgrade rather than on a fresh install.
-VM_ADVERTISED_IFACE = "workload-proxy"
+ADVERTISED_IFACE = "workload-proxy"
 
 IP_BIN = "/usr/sbin/ip"
 
@@ -522,12 +522,12 @@ def ensure_advertised_interface(run) -> None:
     the redirect's destination is unroutable, which the guest sees as a
     connection that fails with no useful diagnostic.
     """
-    result = run([IP_BIN, "link", "add", VM_ADVERTISED_IFACE, "type", "dummy"])
+    result = run([IP_BIN, "link", "add", ADVERTISED_IFACE, "type", "dummy"])
     if result.returncode != 0 and "File exists" not in result.stderr:
         raise RuntimeError(
-            f"could not create {VM_ADVERTISED_IFACE}: {result.stderr.strip()}")
+            f"could not create {ADVERTISED_IFACE}: {result.stderr.strip()}")
 
-    result = run([IP_BIN, "link", "set", VM_ADVERTISED_IFACE, "up"])
+    result = run([IP_BIN, "link", "set", ADVERTISED_IFACE, "up"])
     if result.returncode != 0:
         raise RuntimeError(
-            f"could not bring up {VM_ADVERTISED_IFACE}: {result.stderr.strip()}")
+            f"could not bring up {ADVERTISED_IFACE}: {result.stderr.strip()}")

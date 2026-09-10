@@ -329,7 +329,7 @@ VM_INSPECT_STATUS_FILE = "inspect-status.json"
 # inspector's status document.
 #
 # SECOND DEFINITIONS OF STRINGS THE LISTENER OWNS, and stated here for the
-# reason vm_broker_listen_address's twin is: `libexec/workload-vm-inspect-listener` is an
+# reason broker_listen_address's twin is: `libexec/workload-vm-inspect-listener` is an
 # extension-less entrypoint, so nothing in lib/ can import it. A reader either
 # restates the key or matches on a substring -- and a substring is worse, since
 # `not HTTP` is a prefix of `not HTTP (policy entry)` and `host does not match

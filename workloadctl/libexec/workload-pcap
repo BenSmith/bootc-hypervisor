@@ -55,12 +55,12 @@ from nft import nft_chain
 from pcap import (
     PCAP_CHAINS, VANTAGE_GUEST, VANTAGE_HOST, PcapFormatError, filter_dump_id,
     filter_dump_object, guest_staging_path, log_rule_handles, log_rule_packets,
-    nflog_group, pcap_delete_command, pcap_first_timestamp, pcap_packet_count,
+    pcap_delete_command, pcap_first_timestamp, pcap_packet_count,
     pcap_rule_commands, pcap_shift_timestamps, tcpdump_argv,
 )
 from nft_constants import NFT_BIN, NFT_TABLE, NFT_SKELETON
 from vm_defs import VM_SOCKET_DIR
-from workload_addr import VM_MGMT_SSH_PORT, vm_management_address
+from workload_addr import MGMT_SSH_PORT, management_address, nflog_group
 from qmp import QMPClient
 from podman import Podman
 from workload_lib import workload_home_dir
@@ -353,10 +353,10 @@ def emit_probe(uid: int) -> float:
     yields a usable reference.
     """
     import socket
-    address = vm_management_address(uid)
+    address = management_address(uid)
     stamp = time.time()
     try:
-        with socket.create_connection((address, VM_MGMT_SSH_PORT), timeout=2):
+        with socket.create_connection((address, MGMT_SSH_PORT), timeout=2):
             pass
     except OSError:
         pass
