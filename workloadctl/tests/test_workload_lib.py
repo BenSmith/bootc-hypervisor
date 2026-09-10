@@ -44,7 +44,7 @@ from workload_lib import (
     container_internal_resolve, container_inspect_policy,
     container_inspect_policy_text,
 )
-from vm_defs import parse_memory_mib, vm_mac_address, vm_mac_collisions
+from vm_defs import parse_memory_mib, mac_address, mac_collisions
 from validation import (
     validate_workload_name, validate_workload_config,
     valid_userns_mode, collect_config_warnings,
@@ -874,15 +874,15 @@ class TestSystemdEscapePath(unittest.TestCase):
 class TestVmMacAddress(unittest.TestCase):
     def test_locally_administered_unicast(self):
         # Bit 1 of the first byte = locally administered; bit 0 = unicast (0).
-        mac = vm_mac_address("fedora-vm")
+        mac = mac_address("fedora-vm")
         first = int(mac.split(":")[0], 16)
         self.assertEqual(first & 0x03, 0x02)
 
     def test_stable_for_same_name(self):
-        self.assertEqual(vm_mac_address("a"), vm_mac_address("a"))
+        self.assertEqual(mac_address("a"), mac_address("a"))
 
     def test_differs_by_name(self):
-        self.assertNotEqual(vm_mac_address("a"), vm_mac_address("b"))
+        self.assertNotEqual(mac_address("a"), mac_address("b"))
 
 
 class TestValidateVmConfig(unittest.TestCase):
@@ -1874,10 +1874,10 @@ class TestHostUsernsGate(unittest.TestCase):
 class TestVmMacCollisions(unittest.TestCase):
     def test_no_collision_for_distinct_names(self):
         # Real derived MACs differ for these names.
-        self.assertEqual(vm_mac_collisions("git", ["forge", "build"]), [])
+        self.assertEqual(mac_collisions("git", ["forge", "build"]), [])
 
     def test_excludes_self(self):
-        self.assertEqual(vm_mac_collisions("git", ["git"]), [])
+        self.assertEqual(mac_collisions("git", ["git"]), [])
 
     def test_detects_collision(self):
         # Force two names onto one MAC to exercise the detection path without
@@ -1885,11 +1885,11 @@ class TestVmMacCollisions(unittest.TestCase):
         fixed = "02:00:00:00:00:01"
         collide = {"git", "forge"}
         # Patched on vm_defs, not on vm. vm re-exports the name, but
-        # vm_mac_collisions resolves it in the module that DEFINES it, so a
+        # mac_collisions resolves it in the module that DEFINES it, so a
         # patch aimed at the re-export binds a copy nothing calls.
-        with patch("vm_defs.vm_mac_address",
+        with patch("vm_defs.mac_address",
                    side_effect=lambda n: fixed if n in collide else f"02:00:00:00:00:{ord(n[0]):02x}"):
-            self.assertEqual(vm_mac_collisions("git", ["forge", "other"]), ["forge"])
+            self.assertEqual(mac_collisions("git", ["forge", "other"]), ["forge"])
 
 
 class TestValidUsernsMode(unittest.TestCase):

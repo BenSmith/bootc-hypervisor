@@ -3090,7 +3090,7 @@ class TestVmGuestIp(unittest.TestCase):
     """
 
     def test_arp_match_on_a_bridge(self):
-        with patch.object(_vm_mod, 'vm_mac_address', return_value='aa:bb:cc:dd:ee:ff'), \
+        with patch.object(_vm_mod, 'mac_address', return_value='aa:bb:cc:dd:ee:ff'), \
              patch.object(_vm_mod, '_vm_guest_agent_addresses', return_value=[]), \
              patch('subprocess.run') as mock_run:
             mock_run.side_effect = [
@@ -3100,7 +3100,7 @@ class TestVmGuestIp(unittest.TestCase):
         self.assertEqual(ip, '192.168.1.9')
 
     def test_arp_no_match_falls_to_mdns(self):
-        with patch.object(_vm_mod, 'vm_mac_address', return_value='aa:bb:cc:dd:ee:ff'), \
+        with patch.object(_vm_mod, 'mac_address', return_value='aa:bb:cc:dd:ee:ff'), \
              patch.object(_vm_mod, '_vm_guest_agent_addresses', return_value=[]), \
              patch('subprocess.run') as mock_run:
             mock_run.side_effect = [
@@ -3111,7 +3111,7 @@ class TestVmGuestIp(unittest.TestCase):
         self.assertEqual(ip, '192.168.1.20')
 
     def test_all_lookups_fail_returns_none(self):
-        with patch.object(_vm_mod, 'vm_mac_address', return_value='aa:bb:cc:dd:ee:ff'), \
+        with patch.object(_vm_mod, 'mac_address', return_value='aa:bb:cc:dd:ee:ff'), \
              patch.object(_vm_mod, '_vm_guest_agent_addresses', return_value=[]), \
              patch('subprocess.run') as mock_run:
             mock_run.side_effect = [

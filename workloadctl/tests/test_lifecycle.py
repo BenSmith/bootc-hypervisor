@@ -1170,7 +1170,7 @@ class TestProvisionUser(unittest.TestCase):
             with patch.object(provisioning.subprocess, 'run') as run_mock:
                 run_mock.side_effect = [
                     MagicMock(returncode=0),  # systemd-sysusers
-                    MagicMock(returncode=provisioning.VM_SEED_CONTRACT_EXIT),
+                    MagicMock(returncode=provisioning.SEED_CONTRACT_EXIT),
                 ]
                 with self.assertRaises(provisioning.UsageError):
                     provisioning.provision_user(cfg)

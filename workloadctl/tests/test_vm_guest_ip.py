@@ -20,7 +20,7 @@ from unittest import mock
 
 
 import substrate_vm as substrate
-from vm_defs import vm_mac_address
+from vm_defs import mac_address
 
 
 def _completed(stdout="", returncode=0):
@@ -43,7 +43,7 @@ class TestVmGuestIpArp(unittest.TestCase):
 
     def setUp(self):
         self.name = "git"
-        self.mac = vm_mac_address(self.name)
+        self.mac = mac_address(self.name)
         self.ip = "192.168.0.157"
         # No managed-bridge marker -> skip lease, go straight to ARP.
         marker = mock.MagicMock()
@@ -112,7 +112,7 @@ class TestVmGuestAgent(unittest.TestCase):
     name = "git"
 
     def setUp(self):
-        self.mac = vm_mac_address(self.name)
+        self.mac = mac_address(self.name)
         # The fall-through cases below assert they reach ARP, so the lease
         # branch has to be closed deterministically. Without this the marker
         # check reads the real /run, and the suite would behave differently on a

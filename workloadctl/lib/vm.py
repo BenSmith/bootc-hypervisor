@@ -27,8 +27,8 @@ from nft_constants import (both_families, split_by_family, NFT_BIN,
                            NFT_PAIR_INSPECT_SELF, NFT_PAIR_INTERNAL_OK,
                            NFT_PROXY_TABLE, NFT_SET_EGRESS_CG,
                            NFT_SET_FILTERED, NFT_SET_INSPECT_CG, NFT_TABLE)
-from vm_defs import (VM_INTERNAL_PREFIXES4, VM_INTERNAL_PREFIXES6,
-                     VM_SIDECAR_SLICE, VM_SOCKET_DIR)
+from vm_defs import (INTERNAL_PREFIXES4, INTERNAL_PREFIXES6,
+                     SIDECAR_SLICE, VM_SOCKET_DIR)
 from vm_network_config import vm_allow_reserved_reason, vm_allow_resolved
 from workload_addr import inspect_address
 
@@ -222,8 +222,8 @@ def internal_reserved_reason(
     the name moves into private space, the drop starts firing, and the element
     that was supposed to cover it is for the old address.
     """
-    prefixes = (VM_INTERNAL_PREFIXES4 if addr.version == 4
-                else VM_INTERNAL_PREFIXES6)
+    prefixes = (INTERNAL_PREFIXES4 if addr.version == 4
+                else INTERNAL_PREFIXES6)
     for prefix in prefixes:
         if addr in ipaddress.ip_network(prefix):
             return None
@@ -363,7 +363,7 @@ def inspect_cgroup(name: str) -> str:
     as a whole line, since a nested slice satisfies a substring match and
     silently deepens this path past `level 2`.
     """
-    return f"{VM_SIDECAR_SLICE}/workload-{name}-inspect.service"
+    return f"{SIDECAR_SLICE}/workload-{name}-inspect.service"
 
 
 def inspect_cgroup_command(name: str, action: str) -> list[str]:

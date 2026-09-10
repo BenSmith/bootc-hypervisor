@@ -33,7 +33,7 @@ from nft import purge_uid_elements
 from egress_policy import uses_resolve
 from vm import vm_filter_commands, vm_resolve_status_path
 from nft_constants import NFT_BIN, NFT_SKELETON
-from vm_defs import VM_EGRESS_DEFAULT
+from vm_defs import EGRESS_DEFAULT
 from vm_network_config import (
     vm_allow_resolved, vm_resolve_policy, vm_resolve_policy_path,
 )
@@ -96,7 +96,7 @@ def up(name: str) -> int:
     if stale:
         log(f"  Cleared {stale} stale element(s) for uid {uid}")
 
-    egress = net.get("egress", VM_EGRESS_DEFAULT)
+    egress = net.get("egress", EGRESS_DEFAULT)
     if egress != "filtered":
         log(f"  egress = {egress!r}: {name} is not filtered")
         return 0

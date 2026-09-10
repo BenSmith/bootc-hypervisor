@@ -31,7 +31,7 @@ from nft_constants import (
     NFT_SET_INSPECT_SELF, NFT_SET_INSPECT_SELF6, NFT_SET_INSPECT_LIVE,
     NFT_SET_INSPECT_LIVE6, NFT_SET_EGRESS_CG, NFT_TABLE,
 )
-from vm_defs import vm_allowed_hosts, vm_runtime_dir
+from vm_defs import vm_allowed_hosts, runtime_dir
 from vm_network_config import vm_policy_permits
 from workload_addr import IP_BIN, ADVERTISED_IFACE
 
@@ -487,7 +487,7 @@ class TestPolicyDocument(unittest.TestCase):
         reason: /run does not exist when the boot generator runs, so writing at
         start is what makes an edited list apply on a plain restart."""
         self.assertEqual(inspect_policy_path("web"),
-                         f"{vm_runtime_dir('web')}/inspect.json")
+                         f"{runtime_dir('web')}/inspect.json")
 
 
 

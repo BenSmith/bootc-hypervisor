@@ -76,7 +76,7 @@ from nft_constants import (
     NFT_SET_INSPECT_SELF6, NFT_SET_INSPECT_DST, NFT_SET_INSPECT_DST6,
     NFT_SET_INSPECT_LIVE, NFT_SET_INSPECT_LIVE6,
 )
-from vm_defs import VM_EGRESS_DEFAULT, VM_SOCKET_DIR
+from vm_defs import EGRESS_DEFAULT, VM_SOCKET_DIR
 from vm_network_config import (
     vm_resolve_policy_path, parse_vm_allow, vm_allow_resolve,
 )
@@ -1089,7 +1089,7 @@ def vm_egress_check(config) -> tuple[str, bool, str] | None:
     """
     if config.vm_bridge is not None:
         return None                      # unfiltered by design; see vm_network
-    egress = (config.vm_network or {}).get("egress", VM_EGRESS_DEFAULT)
+    egress = (config.vm_network or {}).get("egress", EGRESS_DEFAULT)
     try:
         uid = config.uid
     except Exception:

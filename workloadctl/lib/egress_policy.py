@@ -32,7 +32,7 @@ from typing import NamedTuple
 
 from config_parser import (INSPECT_ORIG_CLEARTEXT, INSPECT_ORIG_TLS,
                            normalise_hostname, parse_policy_entries)
-from vm_defs import VM_EGRESS_DEFAULT, VM_SOCKET_DIR, vm_allowed_hosts
+from vm_defs import EGRESS_DEFAULT, VM_SOCKET_DIR, vm_allowed_hosts
 
 
 # --- The two TLS modes, and the hostname rules every list is matched by ---
@@ -97,7 +97,7 @@ def vm_uses_inspect(config: dict) -> bool:
     net = vm_cfg.get("network", {}) or {}
     if not isinstance(net, dict) or net.get("bridge"):
         return False
-    return net.get("egress", VM_EGRESS_DEFAULT) == "filtered"
+    return net.get("egress", EGRESS_DEFAULT) == "filtered"
 
 
 # --- Hostname vocabulary: one normalisation, one refusal, one comparison ---

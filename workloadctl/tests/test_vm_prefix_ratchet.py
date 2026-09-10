@@ -142,7 +142,26 @@ class TestTheTableIsReadable(unittest.TestCase):
         self.assertGreater(len(rename), 10, rename)
 
     def test_discovery_finds_symbols(self):
-        self.assertGreater(len(_defined()), 100)
+        """Non-empty, and a subset of the wider sweep it is a filter on.
+
+        NOT a floor on the count. This was `> 100`, chosen when the table held
+        226 -- and the whole purpose of the table is to drive that number
+        down, so the guard was on a collision course with the work and reached
+        it at 98. A threshold calibrated against a quantity someone is paid to
+        shrink measures the calendar, not the sweep.
+
+        What actually needs guarding is that discovery can still SEE lib/, and
+        the wider sweep answers that without moving: every public top-level
+        name, which the campaign does not reduce. Renaming a symbol moves it
+        from one side of the vm-prefix filter to the other and leaves the
+        total alone.
+        """
+        every = _all_defined_names()
+        self.assertGreater(len(every), 300, len(every))
+        found = _defined()
+        self.assertTrue(found)
+        bare = {s.split(".", 1)[1] for s in found}
+        self.assertTrue(bare <= every, sorted(bare - every))
 
     def test_no_symbol_is_classified_twice(self):
         keep, rename = _table()

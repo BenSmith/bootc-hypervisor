@@ -30,7 +30,7 @@ from pathlib import Path
 
 from egress_policy import uses_resolve
 from vm import vm_filter_elements
-from vm_defs import VM_SIDECAR_SLICE
+from vm_defs import SIDECAR_SLICE
 from vm_network_config import (
     vm_allow_resolved, vm_resolve_policy, vm_resolve_policy_path,
 )
@@ -1474,7 +1474,7 @@ class TestGeneratedUnits(unittest.TestCase):
         self.assertIn("PartOf=workload-web.service", self.service.splitlines())
 
     def test_the_slice_is_pinned(self):
-        self.assertIn(f"Slice={VM_SIDECAR_SLICE}", self.service.splitlines())
+        self.assertIn(f"Slice={SIDECAR_SLICE}", self.service.splitlines())
 
     def test_the_vm_requires_the_responder_socket(self):
         """Requires=, not Wants=. The guest has exactly one nameserver, so a VM

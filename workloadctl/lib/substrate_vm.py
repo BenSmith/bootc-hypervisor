@@ -38,7 +38,7 @@ from substrate import (
 )
 from egress_policy import vm_uses_inspect
 from vm_defs import (
-    VM_SOCKET_DIR, parse_memory_mib, vm_guest_agent_socket, vm_mac_address,
+    VM_SOCKET_DIR, parse_memory_mib, vm_guest_agent_socket, mac_address,
 )
 from workload_addr import MGMT_SSH_PORT, management_address
 from vm_clock import GUEST_AGENT_TIMEOUT, guest_agent_sync
@@ -224,7 +224,7 @@ def _vm_guest_addresses(name: str, bridge: str | None = None) -> list[str]:
     Returns [] when nothing resolves — a runtime condition (not booted yet, no
     agent), not an error.
     """
-    mac = vm_mac_address(name)
+    mac = mac_address(name)
 
     agent = _vm_guest_agent_addresses(name, mac)
     if agent:

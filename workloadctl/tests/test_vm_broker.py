@@ -1324,8 +1324,8 @@ class TestTheAdvertisedAddressIsNotAdded(unittest.TestCase):
         """The consequence, and the reason the range moves rather than simply
         losing its exclusion comment: with nothing carrying it, TEST-NET-1 is
         exactly what the internal drop exists to refuse."""
-        from vm_defs import VM_INTERNAL_PREFIXES4
-        self.assertIn("192.0.2.0/24", VM_INTERNAL_PREFIXES4)
+        from vm_defs import INTERNAL_PREFIXES4
+        self.assertIn("192.0.2.0/24", INTERNAL_PREFIXES4)
 
 
 class TestTheRetiredMechanismLeavesNoSymbols(unittest.TestCase):

@@ -240,7 +240,7 @@ def tls_treatment(view: dict) -> str:
         return "refused — the connection never reaches a TLS treatment"
     if view["tls"] not in TLS_MODES:
         # A mode this report does not know is not "terminated and parsed". The
-        # fall-through below is written for `inspect`, and VM_TLS_UNBUILT exists
+        # fall-through below is written for `inspect`, and TLS_UNBUILT exists
         # precisely because a third mode is expected -- so the default arm would
         # start describing it, wrongly and confidently, the day it lands.
         return (f"unknown — [vm.network].tls = {view['tls']!r} is not a mode "

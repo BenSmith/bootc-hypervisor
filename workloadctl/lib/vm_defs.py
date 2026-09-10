@@ -119,25 +119,25 @@ def vm_guest_agent_socket(name: str) -> Path:
     return VM_SOCKET_DIR / name / "ga.sock"
 
 
-def vm_mac_address(name: str) -> str:
+def mac_address(name: str) -> str:
     """Derive a stable, locally-administered unicast MAC from the workload name."""
     h = hashlib.md5(f"wl-vm-{name}".encode(), usedforsecurity=False).digest()
     first = (h[0] & 0xFE) | 0x02  # locally administered, unicast
     return ":".join(f"{b:02x}" for b in [first, h[1], h[2], h[3], h[4], h[5]])
 
 
-def vm_mac_collisions(name: str, other_names) -> list[str]:
+def mac_collisions(name: str, other_names) -> list[str]:
     """Return the subset of other_names whose derived VM MAC equals name's.
 
-    vm_mac_address hashes the name into a MAC with no allocation registry, so
+    mac_address hashes the name into a MAC with no allocation registry, so
     two distinct names can (rarely) collide. Under passt that is harmless —
     each guest is alone on its own link — but two VMs sharing an
     operator-provided LAN bridge ([vm.network].bridge) are on one segment and
     would fight over one address. This lets `validate` flag it up front.
     """
-    mine = vm_mac_address(name)
+    mine = mac_address(name)
     return sorted(other for other in set(other_names)
-                  if other != name and vm_mac_address(other) == mine)
+                  if other != name and mac_address(other) == mine)
 
 
 def find_ovmf_code() -> str | None:
@@ -190,7 +190,7 @@ def parse_memory_mib(value) -> int:
 # UDP on separate netdev properties), so the generator has to take it apart.
 # The bind-address branch must be a dotted quad or bracketed, never a bare run
 # of digits — otherwise "8080:80" parses as address 8080, port 80.
-VM_PORT_RE = re.compile(
+PORT_RE = re.compile(
     r"^(?:(?P<addr>\[[0-9a-fA-F:]+\]|\d{1,3}(?:\.\d{1,3}){3}):)?"
     r"(?P<host>\d+)"
     r"(?::(?P<guest>\d+))?"
@@ -205,7 +205,7 @@ def parse_vm_port(spec: str) -> tuple[str | None, int, int, str]:
     operator did not pin one, in which case passt binds every address — the
     same meaning `-p 8080:80` has for podman.
     """
-    m = VM_PORT_RE.match(spec.strip())
+    m = PORT_RE.match(spec.strip())
     if not m:
         raise ValueError(
             f"{spec!r} is not a port spec — use '8080:80', '8080', "
@@ -225,8 +225,8 @@ def parse_vm_port(spec: str) -> tuple[str | None, int, int, str]:
     return (addr, host, guest, m.group("proto") or "tcp")
 
 
-VM_EGRESS_MODES = ("filtered", "open")
-VM_EGRESS_DEFAULT = "filtered"
+EGRESS_MODES = ("filtered", "open")
+EGRESS_DEFAULT = "filtered"
 
 
 # Modes named but not built, mapped to when they arrive. Empty today, and KEPT
@@ -237,13 +237,13 @@ VM_EGRESS_DEFAULT = "filtered"
 # from the moment it is written down, not from the moment it works, because a
 # key that accepted the word and quietly did something weaker would be a config
 # claiming a property it does not have.
-VM_TLS_UNBUILT: dict[str, str] = {}
+TLS_UNBUILT: dict[str, str] = {}
 
 # Parents anyone can register a label under, where a wildcard in a host list
 # authorises a name the *guest* chooses. Warning-only, deliberately: the list
 # cannot be exhaustive, and a stale copy shipped in an RPM that hard-fails a
 # valid config is worse than a line of output.
-VM_REGISTRATION_DOMAIN_PARENTS = (
+REGISTRATION_DOMAIN_PARENTS = (
     "github.io", "gitlab.io", "pages.dev", "workers.dev", "netlify.app",
     "vercel.app", "herokuapp.com", "azurewebsites.net", "cloudfront.net",
     "web.app", "firebaseapp.com", "blogspot.com", "wordpress.com",
@@ -260,12 +260,12 @@ VM_REGISTRATION_DOMAIN_PARENTS = (
 # silently making the refusal wrong. Parsing the .nft at runtime was the
 # alternative and it puts a parser on the start path of every VM to answer a
 # question about a constant.
-VM_INTERNAL_PREFIXES4 = (
+INTERNAL_PREFIXES4 = (
     "0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8",
     "169.254.0.0/16", "172.16.0.0/12", "192.0.2.0/24", "192.168.0.0/16",
     "255.255.255.255",
 )
-VM_INTERNAL_PREFIXES6 = (
+INTERNAL_PREFIXES6 = (
     "::/128", "::1/128", "::ffff:0.0.0.0/96", "64:ff9b::/96",
     "64:ff9b:1::/48", "2002::/16", "fc00::/7", "fe80::/10",
 )
@@ -290,7 +290,7 @@ VM_INTERNAL_PREFIXES6 = (
 # 198.18.x.y/32 and 2001:2::/128 inspector addresses and that is its whole job.
 #
 # 192.0.2.0/24 is therefore an ordinary internal-drop range: a documentation
-# range no guest can legitimately want. It must be in VM_INTERNAL_PREFIXES4
+# range no guest can legitimately want. It must be in INTERNAL_PREFIXES4
 # AND in the skeleton, because that list is also what decides whether an
 # operator may write a [[vm.network.internal]] exemption (_internal_refusal).
 # Armed on one side only, a site that genuinely routes TEST-NET-1 internally
@@ -327,7 +327,7 @@ SEED_PROVIDES_RETIRED = {
 # and the helper already said how" from "the helper broke": provisioning maps
 # it to UsageError, which keeps the CLI's bug-report banner — and the traceback
 # it prints — off an error the operator is expected to hit and can fix.
-VM_SEED_CONTRACT_EXIT = 2
+SEED_CONTRACT_EXIT = 2
 
 
 class SeedContractError(RuntimeError):
@@ -337,7 +337,7 @@ class SeedContractError(RuntimeError):
 # The sidecar slice. Pinned rather than taken from [resources].slice so the
 # cgroup path is always exactly two components and the rule's `level 2` is
 # exact. These sidecars are not the payload; resource control belongs on the VM.
-VM_SIDECAR_SLICE = "workloads.slice"
+SIDECAR_SLICE = "workloads.slice"
 
 def vm_allowed_hosts(net: dict) -> list[str]:
     """The hostname allowlist for one workload, or [] if it has none."""
@@ -345,7 +345,7 @@ def vm_allowed_hosts(net: dict) -> list[str]:
     return list(hosts) if isinstance(hosts, list) else []
 
 
-def vm_runtime_dir(name: str) -> str:
+def runtime_dir(name: str) -> str:
     """Where one instance's config, allowlist, log and pid file live."""
     return f"{VM_SOCKET_DIR}/{name}"
 

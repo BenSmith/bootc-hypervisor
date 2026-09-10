@@ -45,7 +45,7 @@ from workloadctl_core import (
 )
 from substrate import LifecycleError
 from egress_ca import pki_fcontext_patterns
-from vm_defs import VM_SEED_CONTRACT_EXIT
+from vm_defs import SEED_CONTRACT_EXIT
 
 
 REQUIRED_EXECUTABLES = ["podman", "systemctl", "loginctl", "systemd-sysusers", "restorecon", "semodule"]
@@ -327,7 +327,7 @@ def provision_user(config: WorkloadConfig):
         ["/usr/libexec/workloadctl/workload-ensure-user", config.name],
         check=False,
     )
-    if result.returncode == VM_SEED_CONTRACT_EXIT:
+    if result.returncode == SEED_CONTRACT_EXIT:
         raise UsageError("")  # message already printed by the helper
     if result.returncode != 0:
         raise subprocess.CalledProcessError(result.returncode, result.args)

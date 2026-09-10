@@ -430,7 +430,7 @@ class UnknownTlsModeTest(unittest.TestCase):
     """A `tls` value this report does not know is not described as `inspect`.
 
     The terminating sentence is the fall-through arm, so an unrecognised mode
-    inherits it silently. VM_TLS_UNBUILT is kept in vm.py precisely because a
+    inherits it silently. TLS_UNBUILT is kept in vm.py precisely because a
     third mode is expected, and the day it lands this report would start
     describing its connections as `terminated and parsed` without a diff.
     """

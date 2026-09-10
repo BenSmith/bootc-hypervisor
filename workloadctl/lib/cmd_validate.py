@@ -23,7 +23,7 @@ from provisioning import shadowed_filecon_paths
 from egress_policy import internal_hosts, vm_uses_inspect
 from broker_config import vm_credential_entries
 from vm import internal_reserved_reason, vm_internal_resolve
-from vm_defs import parse_memory_mib, vm_mac_address, vm_mac_collisions
+from vm_defs import parse_memory_mib, mac_address, mac_collisions
 from validation import (
     collect_config_warnings,
     validate_workload_config,
@@ -548,10 +548,10 @@ def validate_single(config: WorkloadConfig, manager: WorkloadManager, json_mode=
     # Flag it against the current VM fleet so a rename fixes it before deploy.
     if config.config.get("vm"):
         vm_names = [c.name for c in all_configs if c.config.get("vm")]
-        collisions = vm_mac_collisions(config.name, vm_names)
+        collisions = mac_collisions(config.name, vm_names)
         if collisions:
             _warn("vm_mac_collision",
-                  f"VM MAC {vm_mac_address(config.name)} collides with "
+                  f"VM MAC {mac_address(config.name)} collides with "
                   f"workload(s): {', '.join(collisions)}",
                   passed=False,
                   fix="Rename one of the colliding VM workloads.")

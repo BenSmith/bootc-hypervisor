@@ -432,8 +432,8 @@ class TestInternalDestinationGuard(unittest.TestCase):
         """
         import ipaddress
         from vm import internal_ok_elements
-        from vm_defs import VM_INTERNAL_PREFIXES4
-        self.assertIn("192.0.2.0/24", VM_INTERNAL_PREFIXES4)
+        from vm_defs import INTERNAL_PREFIXES4
+        self.assertIn("192.0.2.0/24", INTERNAL_PREFIXES4)
         self.assertTrue(internal_ok_elements(
             10007, [ipaddress.ip_address("192.0.2.5")]))
 
@@ -915,7 +915,7 @@ class TestProxySkeletonNamesAgree(unittest.TestCase):
     leaves the other pointing at a set or map that does not exist — which looks
     exactly like the redirect being off rather than a bug, so the file is read
     and checked against the constants rather than trusted, the way the
-    internal-drop ranges are checked against VM_INTERNAL_PREFIXES4 below.
+    internal-drop ranges are checked against INTERNAL_PREFIXES4 below.
     """
 
     def test_the_skeleton_declares_each_object_with_its_constant_name(self):
@@ -2267,7 +2267,7 @@ class TestRung2Schema(unittest.TestCase):
     def test_an_unbuilt_mode_names_the_rung_rather_than_listing_valid_values(self):
         """The refusal has to say WHEN, not just "no".
 
-        A mode named in VM_TLS_UNBUILT is a word for a PROPERTY that has not
+        A mode named in TLS_UNBUILT is a word for a PROPERTY that has not
         landed. A key that accepted it and did something weaker would be a
         config claiming a property it does not have, and an "unknown value"
         error would read as a typo rather than as work that is coming.
@@ -2284,7 +2284,7 @@ class TestRung2Schema(unittest.TestCase):
         # import name` copies the binding, so rebinding either of the other two
         # leaves the validator looking at the original empty map -- and the
         # assertion below is what says so rather than the test quietly passing.
-        with mock.patch.object(vm_network_config, "VM_TLS_UNBUILT",
+        with mock.patch.object(vm_network_config, "TLS_UNBUILT",
                                {"tunnel": "rung 9, with the thing it needs"}):
             errors = self._egress({"hosts": ["github.com"], "tls": "tunnel"})
         self.assertTrue(errors)
@@ -2717,7 +2717,7 @@ class TestRung2Schema(unittest.TestCase):
         """It was on the entry in the design's §3 draft, and moved.
 
         Named rather than reported as an unknown key, for the reason
-        VM_TLS_UNBUILT gives: an operator who wrote it followed a document that
+        TLS_UNBUILT gives: an operator who wrote it followed a document that
         told them to, so the message says where it went. Asserted on the
         REMEDY -- naming the block -- and not on the fact of an error, because
         a bare "unknown key" passes an "it errors" test while leaving the
@@ -3453,10 +3453,10 @@ class TestInternalOkAccept(unittest.TestCase):
         else would notice.
         """
         from nft_constants import NFT_SET_INTERNAL4, NFT_SET_INTERNAL6
-        from vm_defs import VM_INTERNAL_PREFIXES4, VM_INTERNAL_PREFIXES6
+        from vm_defs import INTERNAL_PREFIXES4, INTERNAL_PREFIXES6
         text = SKELETON.read_text()
-        for set_name, prefixes in ((NFT_SET_INTERNAL4, VM_INTERNAL_PREFIXES4),
-                                   (NFT_SET_INTERNAL6, VM_INTERNAL_PREFIXES6)):
+        for set_name, prefixes in ((NFT_SET_INTERNAL4, INTERNAL_PREFIXES4),
+                                   (NFT_SET_INTERNAL6, INTERNAL_PREFIXES6)):
             line = only(self, [ln for ln in text.splitlines()
                                if ln.startswith(f"add element inet "
                                                 f"workload_filter {set_name}")],

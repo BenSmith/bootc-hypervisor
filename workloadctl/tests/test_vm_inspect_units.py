@@ -26,7 +26,7 @@ from vm import (
     inspect_cgroup_filter_command,
 )
 from nft_constants import NFT_SET_INSPECT_CG, NFT_SET_EGRESS_CG
-from vm_defs import VM_EGRESS_DEFAULT, VM_SIDECAR_SLICE
+from vm_defs import EGRESS_DEFAULT, SIDECAR_SLICE
 from workload_addr import VM_INSPECT_LISTENER_BIN, inspect_address
 from workload_lib import dq
 
@@ -70,9 +70,9 @@ class TestPredicate(unittest.TestCase):
             vm_uses_inspect(net_config(bridge="br0", egress="filtered")))
 
     def test_default_egress_is_filtered(self):
-        """VM_EGRESS_DEFAULT is filtered, so a VM whose network sets no egress
+        """EGRESS_DEFAULT is filtered, so a VM whose network sets no egress
         is inspected — the default-deny posture, not an opt-in."""
-        self.assertEqual(VM_EGRESS_DEFAULT, "filtered")
+        self.assertEqual(EGRESS_DEFAULT, "filtered")
         self.assertTrue(vm_uses_inspect(net_config()))
 
 
@@ -235,14 +235,14 @@ class TestGeneratedService(unittest.TestCase):
         # deepens the path so both `level 2` matches silently stop firing.
         # Found by nesting the slice in the generator and watching the whole
         # suite stay green.
-        self.assertIn(f"Slice={VM_SIDECAR_SLICE}", self.unit.splitlines())
-        self.assertEqual(VM_SIDECAR_SLICE, "workloads.slice")
+        self.assertIn(f"Slice={SIDECAR_SLICE}", self.unit.splitlines())
+        self.assertEqual(SIDECAR_SLICE, "workloads.slice")
         # The element names the cgroup on the pinned slice, two components...
         self.assertEqual(inspect_cgroup("web").count("/"), 1)
         # ...and on the SAME slice the unit pins. Two independent spellings of
         # the path exist -- the unit's Slice= and the element the rule matches
         # -- and a drift between them is a redirect that never returns.
-        self.assertTrue(inspect_cgroup("web").startswith(f"{VM_SIDECAR_SLICE}/"),
+        self.assertTrue(inspect_cgroup("web").startswith(f"{SIDECAR_SLICE}/"),
                         inspect_cgroup("web"))
 
     def test_both_cgroup_elements_are_armed_on_start(self):

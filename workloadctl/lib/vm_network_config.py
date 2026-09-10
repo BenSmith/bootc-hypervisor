@@ -39,8 +39,8 @@ from workload_addr import (INSPECT_ADDR6_PREFIX, INSPECT_NETWORK,
 from egress_ca import RESERVED_GUEST_ENV
 from broker_config import VmCredential
 from vm_defs import (SEED_PROVIDES_CHOICES, SEED_PROVIDES_RETIRED,
-                     VM_EGRESS_DEFAULT, VM_EGRESS_MODES,
-                     VM_REGISTRATION_DOMAIN_PARENTS, VM_SOCKET_DIR, VM_TLS_UNBUILT, parse_memory_mib, parse_vm_port,
+                     EGRESS_DEFAULT, EGRESS_MODES,
+                     REGISTRATION_DOMAIN_PARENTS, VM_SOCKET_DIR, TLS_UNBUILT, parse_memory_mib, parse_vm_port,
                      vm_allowed_hosts)
 
 
@@ -556,7 +556,7 @@ def _validate_policy(net: dict, splice_hosts, http2_hosts, egress: str,
     # `placeholder` was on the entry in the design's §3 draft and moved onto the
     # [[vm.network.credential]] block when the guest variable name had to land
     # somewhere too. Named rather than reported as an unknown key, for the reason
-    # VM_TLS_UNBUILT gives: an operator who wrote it followed a document that
+    # TLS_UNBUILT gives: an operator who wrote it followed a document that
     # said to, and should be told where it went rather than sent hunting for a
     # typo that is not there.
     misplaced = {
@@ -939,12 +939,12 @@ def _validate_egress(net: dict) -> list[str]:
     """
     errors: list[str] = []
 
-    egress = net.get("egress", VM_EGRESS_DEFAULT)
-    if egress not in VM_EGRESS_MODES:
+    egress = net.get("egress", EGRESS_DEFAULT)
+    if egress not in EGRESS_MODES:
         errors.append(
             f"[vm.network].egress must be one of "
-            f"{', '.join(repr(m) for m in VM_EGRESS_MODES)}, got {egress!r}")
-        egress = VM_EGRESS_DEFAULT
+            f"{', '.join(repr(m) for m in EGRESS_MODES)}, got {egress!r}")
+        egress = EGRESS_DEFAULT
 
     allow = net.get("allow", [])
     allow_entries: list[VmAllowEntry] = []
@@ -974,10 +974,10 @@ def _validate_egress(net: dict) -> list[str]:
 
     tls = net.get("tls")
     if tls is not None:
-        if tls in VM_TLS_UNBUILT:
+        if tls in TLS_UNBUILT:
             errors.append(
                 f"[vm.network].tls = {tls!r} is not built yet — it lands in "
-                f"{VM_TLS_UNBUILT[tls]}. Accepting the word now would give "
+                f"{TLS_UNBUILT[tls]}. Accepting the word now would give "
                 f"the connection one of the modes that IS built while the "
                 f"config claimed the property of one that is not, which is the "
                 f"misreported confinement this layer exists to prevent. Use "
@@ -1319,7 +1319,7 @@ def _registration_domain_parent(pattern: str) -> str | None:
     if not pattern.startswith("*."):
         return None
     parent = pattern[2:]
-    return parent if parent in VM_REGISTRATION_DOMAIN_PARENTS else None
+    return parent if parent in REGISTRATION_DOMAIN_PARENTS else None
 
 
 def vm_network_warnings(net: dict) -> list[str]:
@@ -1333,7 +1333,7 @@ def vm_network_warnings(net: dict) -> list[str]:
     warnings: list[str] = []
     if not isinstance(net, dict) or "bridge" in net:
         return warnings
-    egress = net.get("egress", VM_EGRESS_DEFAULT)
+    egress = net.get("egress", EGRESS_DEFAULT)
 
     for key in ("hosts", "internal", "splice", "http2", "policy"):
         entries = net.get(key, [])

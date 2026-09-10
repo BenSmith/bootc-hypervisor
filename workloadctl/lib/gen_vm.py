@@ -34,8 +34,8 @@ from broker_config import (
     vm_broker_upstream_addresses, vm_host_resolver_addresses,
 )
 from vm_defs import (
-    VM_REBOOT_EXIT_CODE, VM_GUEST_UID, VM_GUEST_AGENT_PORT, VM_SIDECAR_SLICE,
-    vm_mac_address, parse_vm_port, find_ovmf_code, parse_memory_mib,
+    VM_REBOOT_EXIT_CODE, VM_GUEST_UID, VM_GUEST_AGENT_PORT, SIDECAR_SLICE,
+    mac_address, parse_vm_port, find_ovmf_code, parse_memory_mib,
     VM_SOCKET_DIR,
 )
 from workload_addr import (
@@ -628,7 +628,7 @@ def generate_vm_inspect_service(config, user_name: str) -> str:
     # dropping the inspector's own traffic (the redirect side into itself, the
     # egress side into the default-deny drop). The inspector is not the
     # payload; resource control belongs on the VM.
-    svc.set("Slice", VM_SIDECAR_SLICE)
+    svc.set("Slice", SIDECAR_SLICE)
     # Arm BOTH cgroup exemptions before the listener starts. `+` runs them as
     # root (nft needs the capability); not `-` — an exemption that failed to
     # install leaves a healthy-looking inspector that reaches nothing or dials
@@ -827,7 +827,7 @@ def generate_vm_resolve_service(config, user_name: str) -> str:
     # components; nothing keys on this unit's cgroup, so the pin here only
     # keeps the responder out of the VM's own resource accounting. Stated so a
     # later reader does not conclude the inspector's pin is decorative.
-    svc.set("Slice", VM_SIDECAR_SLICE)
+    svc.set("Slice", SIDECAR_SLICE)
     # The workload name is an argument, not something the responder derives:
     # it is socket-activated with two identically-named fds, so there is
     # nothing on the socket to recover it from. It is what the responder
@@ -1087,7 +1087,7 @@ def generate_vm_service(config, user_name: str, uid: int, vfs_tags=None) -> str:
     slice_name = config.get("resources", {}).get("slice", "workloads.slice")
 
     ovmf_code = find_ovmf_code() or "/usr/share/edk2/ovmf/OVMF_CODE.fd"
-    mac = vm_mac_address(name)
+    mac = mac_address(name)
 
     # Parse virtiofs volumes — collision-safe tags shared with the sidecar loop,
     # ensure-user, and purge (B3). Computed once by the caller and threaded in.

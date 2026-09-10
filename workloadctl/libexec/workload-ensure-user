@@ -20,7 +20,7 @@ from workload_lib import (
     workload_username, infer_workload_kind,
 )
 from egress_policy import vm_uses_inspect
-from vm_defs import VM_SEED_CONTRACT_EXIT, SeedContractError
+from vm_defs import SEED_CONTRACT_EXIT, SeedContractError
 import ensure_common
 from ensure_common import (
     warn_if_stale_home, setup_home_directory, record_deployment_provenance,
@@ -320,7 +320,7 @@ def _ensure_user(name: str) -> int:
             # The operator's seed is wrong and the message says how to fix it.
             # A distinct exit code keeps the CLI from framing it as a crash.
             ensure_common.log(f"  ERROR: {e}")
-            return VM_SEED_CONTRACT_EXIT
+            return SEED_CONTRACT_EXIT
         except Exception as e:
             ensure_common.log(f"  ERROR: Failed to build cloud-init ISO for {name}: {e}")
             return 1
