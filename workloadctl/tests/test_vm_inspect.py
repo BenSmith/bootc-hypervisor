@@ -17,10 +17,10 @@ from egress_policy import (
     TLS_DEFAULT, http2_hosts, policy_entries, policy_governs,
 )
 from vm import (
-    vm_inspect_cgroup, vm_inspect_cgroup_command,
-    vm_inspect_cgroup_filter_command, vm_inspect_dst_elements,
-    vm_inspect_element_commands, vm_inspect_map_elements,
-    vm_inspect_live_elements, vm_inspect_self_elements,
+    inspect_cgroup, inspect_cgroup_command,
+    inspect_cgroup_filter_command, inspect_dst_elements,
+    inspect_element_commands, inspect_map_elements,
+    inspect_live_elements, inspect_self_elements,
 )
 from broker_config import (
     vm_inspect_link_address_commands, vm_inspect_link_delete_commands,
@@ -75,7 +75,7 @@ class TestMapElements(unittest.TestCase):
 
     def test_the_worked_example_v4(self):
         self.assertEqual(
-            vm_inspect_map_elements(10004)[NFT_MAP_INSPECT4],
+            inspect_map_elements(10004)[NFT_MAP_INSPECT4],
             ["10004 . 80 : 198.18.1.4 . 8080",
              "10004 . 443 : 198.18.1.4 . 8443"])
 
@@ -83,7 +83,7 @@ class TestMapElements(unittest.TestCase):
         # 2001:2::198.18.1.4 is a legal spelling of the v6 twin; the kernel
         # prints the canonical form, which is what the element carries.
         self.assertEqual(
-            vm_inspect_map_elements(10004)[NFT_MAP_INSPECT6],
+            inspect_map_elements(10004)[NFT_MAP_INSPECT6],
             ["10004 . 80 : 2001:2::c612:104 . 8080",
              "10004 . 443 : 2001:2::c612:104 . 8443"])
 
@@ -91,7 +91,7 @@ class TestMapElements(unittest.TestCase):
         """The concatenated key is uid . ORIGINAL port, so the map itself
         selects the listener port and the socket that accepted the
         connection tells the inspector whether it is TLS or cleartext."""
-        elements = vm_inspect_map_elements(10000)
+        elements = inspect_map_elements(10000)
         v4 = {key.split(" : ", 1)[0]: key.split(" : ", 1)[1]
               for key in elements[NFT_MAP_INSPECT4]}
         self.assertEqual(v4["10000 . 80"], "198.18.1.0 . 8080")
@@ -101,7 +101,7 @@ class TestMapElements(unittest.TestCase):
         """The value is where the listener actually is; the advertised
         address appears only in the proxy's map, never here."""
         for family in (NFT_MAP_INSPECT4, NFT_MAP_INSPECT6):
-            for element in vm_inspect_map_elements(10004)[family]:
+            for element in inspect_map_elements(10004)[family]:
                 self.assertNotIn("192.0.2.1", element)
 
 
@@ -110,18 +110,18 @@ class TestDstElements(unittest.TestCase):
 
     def test_the_worked_example(self):
         self.assertEqual(
-            vm_inspect_dst_elements(10004)[NFT_SET_INSPECT_DST],
+            inspect_dst_elements(10004)[NFT_SET_INSPECT_DST],
             ["10004 . 198.18.1.4 . 8080", "10004 . 198.18.1.4 . 8443"])
         self.assertEqual(
-            vm_inspect_dst_elements(10004)[NFT_SET_INSPECT_DST6],
+            inspect_dst_elements(10004)[NFT_SET_INSPECT_DST6],
             ["10004 . 2001:2::c612:104 . 8080", "10004 . 2001:2::c612:104 . 8443"])
 
     def test_the_original_port_never_appears(self):
         """The filter hook runs after dstnat, so the element must name the
         destination as rewritten; a 80 or 443 in here would match nothing and
         the redirected connection would fall through to the default drop."""
-        elements = " ".join(vm_inspect_dst_elements(10004)[NFT_SET_INSPECT_DST]
-                            + vm_inspect_dst_elements(10004)[NFT_SET_INSPECT_DST6])
+        elements = " ".join(inspect_dst_elements(10004)[NFT_SET_INSPECT_DST]
+                            + inspect_dst_elements(10004)[NFT_SET_INSPECT_DST6])
         self.assertNotIn(". 80 ", elements)
         self.assertNotIn(". 443", elements)
 
@@ -131,17 +131,17 @@ class TestSelfElements(unittest.TestCase):
 
     def test_the_worked_example(self):
         self.assertEqual(
-            vm_inspect_self_elements(10004)[NFT_SET_INSPECT_SELF],
+            inspect_self_elements(10004)[NFT_SET_INSPECT_SELF],
             ["10004 . 198.18.1.4"])
         self.assertEqual(
-            vm_inspect_self_elements(10004)[NFT_SET_INSPECT_SELF6],
+            inspect_self_elements(10004)[NFT_SET_INSPECT_SELF6],
             ["10004 . 2001:2::c612:104"])
 
     def test_naming_a_port_would_defeat_the_guard(self):
         """The whole purpose is to catch dials to ports nothing serves; a
         port in the key would make exactly those unmatchable."""
         for family in (NFT_SET_INSPECT_SELF, NFT_SET_INSPECT_SELF6):
-            for element in vm_inspect_self_elements(10004)[family]:
+            for element in inspect_self_elements(10004)[family]:
                 self.assertEqual(element.count(" . "), 1)
 
 
@@ -150,10 +150,10 @@ class TestLiveElements(unittest.TestCase):
 
     def test_the_worked_example(self):
         self.assertEqual(
-            vm_inspect_live_elements(10004)[NFT_SET_INSPECT_LIVE],
+            inspect_live_elements(10004)[NFT_SET_INSPECT_LIVE],
             ["198.18.1.4"])
         self.assertEqual(
-            vm_inspect_live_elements(10004)[NFT_SET_INSPECT_LIVE6],
+            inspect_live_elements(10004)[NFT_SET_INSPECT_LIVE6],
             ["2001:2::c612:104"])
 
     def test_a_uid_in_the_key_would_defeat_the_guard(self):
@@ -162,7 +162,7 @@ class TestLiveElements(unittest.TestCase):
         already says one rule earlier, and every cross-workload dial -- the
         thing the rule exists for -- would miss it."""
         for family in (NFT_SET_INSPECT_LIVE, NFT_SET_INSPECT_LIVE6):
-            for element in vm_inspect_live_elements(10004)[family]:
+            for element in inspect_live_elements(10004)[family]:
                 self.assertNotIn(" . ", element)
                 self.assertNotIn("10004", element)
 
@@ -171,14 +171,14 @@ class TestElementCommands(unittest.TestCase):
     """The eight arming commands: both tables, by their constants."""
 
     def test_eight_argv_two_per_family(self):
-        commands = vm_inspect_element_commands(10004, "add")
+        commands = inspect_element_commands(10004, "add")
         self.assertEqual(len(commands), 8)
         self.assertTrue(all(c[0] == NFT_BIN for c in commands))
 
     def test_every_argv_names_a_constant_not_a_literal(self):
         """A bare literal means a missed constant: the object name in the
         argv must be the very constant the skeleton was tested against."""
-        commands = vm_inspect_element_commands(10004, "add")
+        commands = inspect_element_commands(10004, "add")
         objects = [c[5] for c in commands]
         self.assertEqual(
             objects,
@@ -192,7 +192,7 @@ class TestElementCommands(unittest.TestCase):
         guard sets in inet workload_filter. A helper that arms one table and
         not the other leaves a workload that looks configured and reaches
         nothing."""
-        commands = vm_inspect_element_commands(10004, "add")
+        commands = inspect_element_commands(10004, "add")
         for name in (NFT_MAP_INSPECT4, NFT_MAP_INSPECT6):
             self.assertEqual(argv_of(commands, name)[3:5],
                              NFT_PROXY_TABLE.split())
@@ -203,8 +203,8 @@ class TestElementCommands(unittest.TestCase):
                              NFT_TABLE.split())
 
     def test_arm_and_disarm_differ_only_in_the_action(self):
-        add = vm_inspect_element_commands(10004, "add")
-        delete = vm_inspect_element_commands(10004, "delete")
+        add = inspect_element_commands(10004, "add")
+        delete = inspect_element_commands(10004, "delete")
         self.assertEqual(len(delete), len(add))
         for a, d in zip(add, delete):
             self.assertEqual(a[1], "add")
@@ -213,7 +213,7 @@ class TestElementCommands(unittest.TestCase):
 
     def test_an_unknown_action_raises(self):
         with self.assertRaises(ValueError):
-            vm_inspect_element_commands(10004, "replace")
+            inspect_element_commands(10004, "replace")
 
 
 class TestSkeletonNamesAgree(unittest.TestCase):
@@ -246,7 +246,7 @@ class TestCgroupCommands(unittest.TestCase):
         are table-scoped, so naming the filter table fails only at load time
         with `did you mean set 'wl_egress_cg' in table inet
         'workload_filter'?`."""
-        argv = vm_inspect_cgroup_command("web", "add")
+        argv = inspect_cgroup_command("web", "add")
         self.assertEqual(argv[3:5], NFT_PROXY_TABLE.split())
         self.assertEqual(argv[5], NFT_SET_INSPECT_CG)
 
@@ -254,13 +254,13 @@ class TestCgroupCommands(unittest.TestCase):
         """wl_egress_cg feeds the accept rule in workload-filter.nft; the
         inspector is a filtered uid, so without it its own upstream
         connections hit the default-deny drop and it reaches nothing."""
-        argv = vm_inspect_cgroup_filter_command("web", "add")
+        argv = inspect_cgroup_filter_command("web", "add")
         self.assertEqual(argv[3:5], NFT_TABLE.split())
         self.assertEqual(argv[5], NFT_SET_EGRESS_CG)
 
     def test_the_two_builders_name_opposite_tables(self):
-        proxy_side = vm_inspect_cgroup_command("web", "add")
-        filter_side = vm_inspect_cgroup_filter_command("web", "add")
+        proxy_side = inspect_cgroup_command("web", "add")
+        filter_side = inspect_cgroup_filter_command("web", "add")
         self.assertNotEqual(proxy_side[3:5], filter_side[3:5])
         self.assertNotEqual(proxy_side[5], filter_side[5])
         # The element VALUE is the same cgroup on both sides: one process,
@@ -272,13 +272,13 @@ class TestCgroupCommands(unittest.TestCase):
         # name must match the service unit that actually runs, or the rule is
         # a `return` that matches nothing and the inspector's own egress is
         # dropped.
-        self.assertEqual(vm_inspect_cgroup("web"),
+        self.assertEqual(inspect_cgroup("web"),
                          "workloads.slice/workload-web-inspect.service")
-        argv = vm_inspect_cgroup_command("web", "add")
+        argv = inspect_cgroup_command("web", "add")
         self.assertEqual(argv[6],
                          '{ "workloads.slice/workload-web-inspect.service" }')
         # Two components, so the rule's `level 2` match is exact.
-        self.assertEqual(vm_inspect_cgroup("web").count("/"), 1)
+        self.assertEqual(inspect_cgroup("web").count("/"), 1)
 
 
 class TestLinkAddressCommands(unittest.TestCase):
@@ -331,9 +331,9 @@ class TestHelperArmsBothTables(unittest.TestCase):
         source = (ROOT / "libexec" / "workload-vm-inspect").read_text()
         up = source[source.index("def up("):source.index("def down(")]
         self.assertLess(up.index("NFT_PROXY_SKELETON"),
-                        up.index("vm_inspect_element_commands"))
+                        up.index("inspect_element_commands"))
         self.assertLess(up.index("NFT_SKELETON"),
-                        up.index("vm_inspect_element_commands"))
+                        up.index("inspect_element_commands"))
         self.assertIn("check=True", up)
 
     def test_up_never_arms_the_cgroup_elements(self):
@@ -343,8 +343,8 @@ class TestHelperArmsBothTables(unittest.TestCase):
         that cgroup is not yet the one being armed."""
         source = (ROOT / "libexec" / "workload-vm-inspect").read_text()
         up = source[source.index("def up("):source.index("def down(")]
-        self.assertNotIn("vm_inspect_cgroup_command", up)
-        self.assertNotIn("vm_inspect_cgroup_filter_command", up)
+        self.assertNotIn("inspect_cgroup_command", up)
+        self.assertNotIn("inspect_cgroup_filter_command", up)
 
     def test_up_clears_the_previous_instances_status_file(self):
         """/run/workload-vm/<name> is the VM service's RuntimeDirectory with
@@ -360,7 +360,7 @@ class TestHelperArmsBothTables(unittest.TestCase):
     def test_down_removes_elements_and_addresses_but_not_the_link(self):
         source = (ROOT / "libexec" / "workload-vm-inspect").read_text()
         down = source[source.index("def down("):source.index("def main(")]
-        self.assertIn("vm_inspect_element_commands(uid, \"delete\")", down)
+        self.assertIn("inspect_element_commands(uid, \"delete\")", down)
         self.assertIn("remove_listener_addresses", down)
         # The shared link and the advertised address are never torn down.
         self.assertNotIn('"link", "del"', down)
@@ -374,11 +374,11 @@ class TestHelperArmsBothTables(unittest.TestCase):
         """
         source = (ROOT / "libexec" / "workload-vm-inspect").read_text()
         up = source[source.index("def up("):source.index("def down(")]
-        self.assertIn("vm_internal_ok_commands", up)
+        self.assertIn("internal_ok_commands", up)
         self.assertLess(up.index("NFT_SKELETON"),
-                        up.index("vm_internal_ok_commands"))
+                        up.index("internal_ok_commands"))
         self.assertLess(up.index("purge_internal_exemptions(uid, name)"),
-                        up.index('vm_internal_ok_commands(uid, addresses, "add")'),
+                        up.index('internal_ok_commands(uid, addresses, "add")'),
                         "purge before arming, or an edited config leaves a "
                         "dropped host's element behind")
 
@@ -389,7 +389,7 @@ class TestHelperArmsBothTables(unittest.TestCase):
         asked for."""
         source = (ROOT / "libexec" / "workload-vm-inspect").read_text()
         up = source[source.index("def up("):source.index("def down(")]
-        self.assertNotIn('vm_internal_ok_commands(uid, addresses, "delete")', up)
+        self.assertNotIn('internal_ok_commands(uid, addresses, "delete")', up)
 
     def test_down_clears_the_internal_exemptions_and_tolerates_absence(self):
         """`up` fails loudly, `down` tolerates everything.
@@ -413,7 +413,7 @@ class TestHelperArmsBothTables(unittest.TestCase):
         reboot -- and the next start adds the new address beside it."""
         source = (ROOT / "libexec" / "workload-vm-inspect").read_text()
         down = source[source.index("def down("):source.index("def main(")]
-        self.assertNotIn("vm_internal_resolve", down)
+        self.assertNotIn("internal_resolve", down)
         self.assertNotIn("internal_hosts", down)
 
     def test_up_writes_the_policy_before_it_arms_the_redirect(self):
@@ -426,7 +426,7 @@ class TestHelperArmsBothTables(unittest.TestCase):
         up = source[source.index("def up("):source.index("def down(")]
         self.assertIn("write_policy(name)", up)
         self.assertLess(up.index("write_policy(name)"),
-                        up.index("vm_inspect_element_commands"))
+                        up.index("inspect_element_commands"))
 
     def test_the_policy_is_written_group_readable_and_not_world_readable(self):
         """The listener runs as _wl-<name> and must read it; 0640 rather than
@@ -794,8 +794,8 @@ class TestTheInternalFailureSaysWhatItCosts(unittest.TestCase):
         source = (ROOT / "libexec" / "workload-vm-inspect").read_text()
         up = source[source.index("def up("):source.index("def down(")]
         self.assertEqual(up.count("internal_failure("), 2)
-        self.assertIn("vm_internal_resolve(host)", up)
-        self.assertIn("vm_internal_ok_commands(uid, addresses, \"add\")", up)
+        self.assertIn("internal_resolve(host)", up)
+        self.assertIn("internal_ok_commands(uid, addresses, \"add\")", up)
 
     def test_the_start_still_fails(self):
         """Loud, not lenient. Skipping the host would put the workload up

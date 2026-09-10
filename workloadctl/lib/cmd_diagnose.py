@@ -2357,11 +2357,11 @@ def _inspect_map_elements(map_name):
     return None if payload is None else nft_set_elements(payload)
 
 
-# The four objects vm_inspect_element_commands arms in the FILTER table, which
+# The four objects inspect_element_commands arms in the FILTER table, which
 # nothing here read until rung 5. The two DNAT maps above are only half of the
 # six: the accept sets hold the DNAT-rewritten tuple the filter chain sees, and
 # without one the redirect still happens and the redirected connection is then
-# dropped by the default deny. vm_inspect_element_commands' own docstring names
+# dropped by the default deny. inspect_element_commands' own docstring names
 # that state -- "the redirect without the accept set drops the redirected
 # connection" -- and before this it rendered as `egress inspected on both
 # families`, green, on a guest whose web traffic was dying.
@@ -2387,7 +2387,7 @@ def _inspect_filter_sets(uid: int) -> dict:
     read in one pass and reported as one sentence, and four more injectables
     would make this the widest signature in the file for no gain.
 
-    Membership by UID, not by comparing against vm_inspect_dst_elements()'s
+    Membership by UID, not by comparing against inspect_dst_elements()'s
     exact strings. An exact comparison would be stricter and would also fire on
     any nft version that renders a concatenation differently -- which is not
     hypothetical here: see _map_key_uid, where exactly that mismatch reported a

@@ -33,7 +33,7 @@ from egress_policy import (
     INSPECT_RECORD_MODES, INSPECT_RECORD_FILE, INSPECT_RECORD_ROOT,
     inspect_logs_directory, inspect_record_dir, inspect_record_path,
 )
-from vm import VM_INSPECT_RECORD_SELINUX_TYPE
+from vm import INSPECT_RECORD_SELINUX_TYPE
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -356,11 +356,11 @@ class TestTheSubtreeIsLabelled(unittest.TestCase):
         return (ROOT / "security" / "workload-inspect.cil").read_text()
 
     def test_the_type_is_declared(self):
-        self.assertIn(f"(type {VM_INSPECT_RECORD_SELINUX_TYPE})", self._cil())
+        self.assertIn(f"(type {INSPECT_RECORD_SELINUX_TYPE})", self._cil())
 
     def test_it_is_a_logfile_so_logrotate_needs_no_rule_of_ours(self):
         self.assertIn(
-            f"(typeattributeset logfile ({VM_INSPECT_RECORD_SELINUX_TYPE}))",
+            f"(typeattributeset logfile ({INSPECT_RECORD_SELINUX_TYPE}))",
             self._cil())
 
     def test_the_filecon_covers_every_workload(self):
@@ -372,7 +372,7 @@ class TestTheSubtreeIsLabelled(unittest.TestCase):
         it the unit does not start and the message names the ExecStartPre."""
         self.assertRegex(
             self._cil(),
-            rf"\(allow init_t {VM_INSPECT_RECORD_SELINUX_TYPE} "
+            rf"\(allow init_t {INSPECT_RECORD_SELINUX_TYPE} "
             rf"\(dir \([^)]*mounton")
 
     def test_the_filecon_is_not_shadowed(self):

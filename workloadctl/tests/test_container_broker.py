@@ -25,7 +25,7 @@ import unittest
 from pathlib import Path
 
 from tests.test_generator import run_generator, write_config
-from vm import vm_internal_ok_elements
+from vm import internal_ok_elements
 from broker_config import (
     VM_BROKER_INSTANCE_PORT, container_broker_hosts,
     container_broker_upstream_addresses, container_uses_credentials,
@@ -611,7 +611,7 @@ class TestTheInternalCarveOut(unittest.TestCase):
         the exemption would be dead code and this class would assert a
         no-op."""
         addr = ipaddress.ip_address(broker_listen_address(UID_MIN + 7))
-        armed = vm_internal_ok_elements(UID_MIN + 7, [addr])
+        armed = internal_ok_elements(UID_MIN + 7, [addr])
         self.assertTrue(any(entries for entries in armed.values()),
                         f"{addr} is not in wl_internal4")
 
@@ -623,7 +623,7 @@ class TestTheInternalCarveOut(unittest.TestCase):
     def test_it_is_appended_before_the_commands_are_built(self):
         up = self._up()
         self.assertLess(up.index("broker_listen_address(uid)"),
-                        up.index('vm_internal_ok_commands(uid, addresses, "add")'),
+                        up.index('internal_ok_commands(uid, addresses, "add")'),
                         "appended after the commands, it is armed by nothing")
 
     def test_it_is_purged_with_the_rest(self):

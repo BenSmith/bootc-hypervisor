@@ -239,7 +239,7 @@ class TestSplitByFamily(unittest.TestCase):
     def test_the_allowlist_splits_and_keeps_the_family_agnostic_set(self):
         """wl_filtered carries the bare uid and belongs to neither family:
         "is this workload under policy at all?" has one answer."""
-        elements = vm.vm_filter_elements(
+        elements = vm.filter_elements(
             UID, [], resolved=[
                 (_entry(443), [ipaddress.ip_address("93.184.216.34"),
                                ipaddress.ip_address("2606:2800::1")])])
@@ -248,13 +248,13 @@ class TestSplitByFamily(unittest.TestCase):
         self.assertIn("2606:2800::1", " ".join(elements[NFT_PAIR_ALLOW.v6]))
 
     def test_a_v4_only_allowlist_emits_no_v6_set(self):
-        elements = vm.vm_filter_elements(
+        elements = vm.filter_elements(
             UID, [], resolved=[
                 (_entry(443), [ipaddress.ip_address("93.184.216.34")])])
         self.assertNotIn(NFT_PAIR_ALLOW.v6, elements)
 
     def test_internal_exemptions_split_the_same_way(self):
-        got = vm.vm_internal_ok_elements(
+        got = vm.internal_ok_elements(
             UID, [ipaddress.ip_address("192.168.0.5"),
                   ipaddress.ip_address("fd00::1")])
         self.assertEqual(set(got), {NFT_PAIR_INTERNAL_OK.v4,
@@ -264,7 +264,7 @@ class TestSplitByFamily(unittest.TestCase):
     def test_the_dump_reads_both_exemption_sets(self):
         """The teardown path is the one that reads them back, and a dump of
         one family purges one family."""
-        named = [argv[-1] for argv in vm.vm_internal_ok_list_commands()]
+        named = [argv[-1] for argv in vm.internal_ok_list_commands()]
         self.assertEqual(named, [NFT_PAIR_INTERNAL_OK.v4,
                                  NFT_PAIR_INTERNAL_OK.v6])
 

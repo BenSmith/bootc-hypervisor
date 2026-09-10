@@ -18,7 +18,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 from egress_policy import INSPECT_PORT_CLEARTEXT, INSPECT_PORT_TLS
-from vm import vm_filter_commands, vm_filter_delete_command
+from vm import vm_filter_commands, filter_delete_command
 from netfilter_state import (
     CONNTRACK_PRESSURE, conntrack_occupancy, nft_drop_counter,
     nft_element_counter, nft_set_elements, owned_elements,
@@ -425,16 +425,16 @@ class TestInternalDestinationGuard(unittest.TestCase):
         """The half that makes the inversion safe, per D10.
 
         A site really routing TEST-NET-1 internally needs a
-        [[vm.network.internal]] entry, and vm_internal_ok_elements refuses an
+        [[vm.network.internal]] entry, and internal_ok_elements refuses an
         element that excepts a drop which never fires -- so arming the drop in
         the .nft alone would refuse the guest with no escape hatch. The escape
         hatch and the drop are the same list twice; this is the second copy.
         """
         import ipaddress
-        from vm import vm_internal_ok_elements
+        from vm import internal_ok_elements
         from vm_defs import VM_INTERNAL_PREFIXES4
         self.assertIn("192.0.2.0/24", VM_INTERNAL_PREFIXES4)
-        self.assertTrue(vm_internal_ok_elements(
+        self.assertTrue(internal_ok_elements(
             10007, [ipaddress.ip_address("192.0.2.5")]))
 
     def test_the_drop_only_covers_connections_the_exempt_processes_open(self):
@@ -851,7 +851,7 @@ class TestOwnedElements(unittest.TestCase):
         self.assertEqual(owned_elements(10001, []), [])
 
     def test_delete_command_batches_entries(self):
-        argv = vm_filter_delete_command(
+        argv = filter_delete_command(
             NFT_SET_ALLOW4, ["10001 . 1.1.1.1 . 22", "10001 . 2.2.2.2 . 443"])
         self.assertEqual(argv[1:3], ["delete", "element"])
         self.assertEqual(
@@ -3473,25 +3473,25 @@ class TestInternalOkElements(unittest.TestCase):
         return [ipaddress.ip_address(s) for s in specs]
 
     def test_elements_split_by_family_and_carry_no_port(self):
-        from vm import vm_internal_ok_elements
+        from vm import internal_ok_elements
         from nft_constants import NFT_SET_INTERNAL_OK4, NFT_SET_INTERNAL_OK6
-        elements = vm_internal_ok_elements(
+        elements = internal_ok_elements(
             10001, self._addrs("192.168.0.10", "fd00::10"))
         self.assertEqual(elements[NFT_SET_INTERNAL_OK4], ["10001 . 192.168.0.10"])
         self.assertEqual(elements[NFT_SET_INTERNAL_OK6], ["10001 . fd00::10"])
 
     def test_an_empty_family_produces_no_command(self):
-        from vm import vm_internal_ok_commands
+        from vm import internal_ok_commands
         from nft_constants import NFT_SET_INTERNAL_OK6
-        cmds = vm_internal_ok_commands(10001, self._addrs("192.168.0.10"), "add")
+        cmds = internal_ok_commands(10001, self._addrs("192.168.0.10"), "add")
         self.assertEqual(len(cmds), 1)
         self.assertNotIn(NFT_SET_INTERNAL_OK6, cmds[0])
 
     def test_delete_mirrors_add(self):
-        from vm import vm_internal_ok_commands
+        from vm import internal_ok_commands
         addrs = self._addrs("192.168.0.10", "fd00::10")
-        add = vm_internal_ok_commands(10001, addrs, "add")
-        delete = vm_internal_ok_commands(10001, addrs, "delete")
+        add = internal_ok_commands(10001, addrs, "add")
+        delete = internal_ok_commands(10001, addrs, "delete")
         self.assertEqual([c[-1] for c in add], [c[-1] for c in delete])
         self.assertTrue(all(c[1] == "delete" for c in delete))
 
@@ -3502,19 +3502,19 @@ class TestInternalOkElements(unittest.TestCase):
         nothing and only widens what the inspector may open -- an operator's
         belief about where a name points, written down and wrong.
         """
-        from vm import vm_internal_ok_elements
+        from vm import internal_ok_elements
         for spec in ("93.184.216.34", "2606:2800::1"):
             with self.subTest(spec=spec):
                 with self.assertRaises(ValueError) as caught:
-                    vm_internal_ok_elements(10001, self._addrs(spec))
+                    internal_ok_elements(10001, self._addrs(spec))
                 self.assertIn("never have fired", str(caught.exception))
 
     def test_every_private_family_is_accepted(self):
-        from vm import vm_internal_ok_elements
+        from vm import internal_ok_elements
         for spec in ("10.0.0.5", "192.168.0.10", "172.16.0.1", "169.254.169.254",
                      "fd00::10", "fe80::1"):
             with self.subTest(spec=spec):
-                self.assertTrue(vm_internal_ok_elements(10001, self._addrs(spec)))
+                self.assertTrue(internal_ok_elements(10001, self._addrs(spec)))
 
     def _dump(self, *elems):
         """One `nft -j list set` document holding `elems`, as nft renders it."""
@@ -3531,8 +3531,8 @@ class TestInternalOkElements(unittest.TestCase):
         Elements are armed from names; a record that moves while the VM runs
         leaves an element the config can no longer name. The uid is the half of
         the key that cannot rotate, so it is the handle the teardown uses."""
-        from vm import vm_internal_ok_uid_elements
-        entries = vm_internal_ok_uid_elements(
+        from vm import internal_ok_uid_elements
+        entries = internal_ok_uid_elements(
             10001, self._dump((10001, "192.168.0.10"), (10001, "10.0.0.5"),
                               (10002, "192.168.0.11")))
         self.assertEqual(entries,
@@ -3542,37 +3542,37 @@ class TestInternalOkElements(unittest.TestCase):
         """nft names the uid half of the key when it can resolve it, which on a
         real host -- where `_wl-<name>` exists -- is the usual case. A purge
         that matched only the number would silently no-op exactly there."""
-        from vm import vm_internal_ok_uid_elements
-        entries = vm_internal_ok_uid_elements(
+        from vm import internal_ok_uid_elements
+        entries = internal_ok_uid_elements(
             10001, self._dump(("_wl-web", "192.168.0.10"),
                               ("_wl-other", "192.168.0.11")),
             "_wl-web")
         self.assertEqual(entries, ["_wl-web . 192.168.0.10"])
 
     def test_the_purge_reads_an_empty_or_malformed_dump_as_nothing_to_do(self):
-        from vm import vm_internal_ok_uid_elements
+        from vm import internal_ok_uid_elements
         for payload in ({}, {"nftables": []}, self._dump(),
                         {"nftables": [{"set": {"elem": ["not-a-concat"]}}]}):
             with self.subTest(payload=payload):
                 self.assertEqual(
-                    vm_internal_ok_uid_elements(10001, payload), [])
+                    internal_ok_uid_elements(10001, payload), [])
 
     def test_the_delete_command_carries_exactly_the_entries_given(self):
-        from vm import vm_internal_ok_delete_commands
+        from vm import internal_ok_delete_commands
         from nft_constants import NFT_SET_INTERNAL_OK4
-        cmds = vm_internal_ok_delete_commands(
+        cmds = internal_ok_delete_commands(
             NFT_SET_INTERNAL_OK4, ["10001 . 192.168.0.10"])
         self.assertEqual(len(cmds), 1)
         self.assertEqual(cmds[0][1], "delete")
         self.assertIn(NFT_SET_INTERNAL_OK4, cmds[0])
         self.assertEqual(cmds[0][-1], "{ 10001 . 192.168.0.10 }")
         self.assertEqual(
-            vm_internal_ok_delete_commands(NFT_SET_INTERNAL_OK4, []), [])
+            internal_ok_delete_commands(NFT_SET_INTERNAL_OK4, []), [])
 
     def test_the_list_commands_ask_for_json_for_both_families(self):
-        from vm import vm_internal_ok_list_commands
+        from vm import internal_ok_list_commands
         from nft_constants import NFT_SET_INTERNAL_OK4, NFT_SET_INTERNAL_OK6
-        cmds = vm_internal_ok_list_commands()
+        cmds = internal_ok_list_commands()
         self.assertEqual([c[-1] for c in cmds],
                          [NFT_SET_INTERNAL_OK4, NFT_SET_INTERNAL_OK6])
         self.assertTrue(all("-j" in c for c in cmds))
@@ -3594,10 +3594,10 @@ class TestInternalOkElements(unittest.TestCase):
         self.assertEqual(internal_hosts({"internal": "not a list"}), [])
 
     def test_an_unresolvable_internal_name_raises_naming_the_failure(self):
-        from vm import vm_internal_resolve
+        from vm import internal_resolve
         with mock.patch("socket.getaddrinfo", side_effect=OSError("nope")):
             with self.assertRaises(ValueError) as caught:
-                vm_internal_resolve("git.local")
+                internal_resolve("git.local")
         message = str(caught.exception)
         self.assertIn("git.local", message)
         # It must name the failure the operator will actually see, which is a

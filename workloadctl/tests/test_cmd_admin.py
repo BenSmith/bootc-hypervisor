@@ -2309,7 +2309,7 @@ user = "workload"
         self.enterContext(mock.patch("subprocess.run", lambda *a, **k: fake_proc))
         if resolve is not None:
             self.enterContext(mock.patch.object(
-                cmd_validate, "vm_internal_resolve", resolve))
+                cmd_validate, "internal_resolve", resolve))
         config = WorkloadConfig(name)
         manager = mock.Mock(spec=WorkloadManager)
         manager.user_exists.return_value = True
@@ -2410,7 +2410,7 @@ image = "example.com/test:latest"
 """)
         if resolve is not None:
             self.enterContext(mock.patch.object(
-                cmd_validate, "vm_internal_resolve", resolve))
+                cmd_validate, "internal_resolve", resolve))
         config = WorkloadConfig(name)
         manager = mock.Mock(spec=WorkloadManager)
         manager.user_exists.return_value = True

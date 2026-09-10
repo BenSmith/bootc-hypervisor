@@ -21,7 +21,7 @@ right id in scope.
 
 D6 in the build spec: the listener binary and the two nft tables are shared
 verbatim with the VM path (imported straight from lib/vm.py) -- the uid-keyed
-element builders (vm_inspect_element_commands, vm_internal_ok_commands, the
+element builders (inspect_element_commands, internal_ok_commands, the
 listener addressing) take nothing but a uid, so nothing here needed a
 container-flavoured twin. The container-specific work is entirely in parsing
 [network] instead of [vm.network] and building the container schema's own
@@ -56,7 +56,7 @@ from helper_main import log, run, run_helper, up_down_main
 from nft import (add_listener_addresses, purge_internal_exemptions,
                  remove_listener_addresses)
 from egress_policy import inspect_policy_path, inspect_status_path
-from vm import vm_inspect_element_commands, vm_internal_ok_commands
+from vm import inspect_element_commands, internal_ok_commands
 from broker_config import container_uses_credentials
 from nft_constants import NFT_BIN, NFT_PROXY_SKELETON, NFT_SKELETON
 from workload_addr import ensure_advertised_interface, broker_listen_address
@@ -138,12 +138,12 @@ def up(name: str) -> int:
 
     add_listener_addresses(uid)
 
-    # Eight elements, both tables -- see vm_inspect_element_commands's
+    # Eight elements, both tables -- see inspect_element_commands's
     # docstring. Purge before adding: `add element` on an existing key does
     # not overwrite a stale one.
-    for argv in vm_inspect_element_commands(uid, "delete"):
+    for argv in inspect_element_commands(uid, "delete"):
         run(argv)
-    for argv in vm_inspect_element_commands(uid, "add"):
+    for argv in inspect_element_commands(uid, "add"):
         run(argv, check=True)
 
     # The `internal` exemptions, resolved here and armed per address. Purged
@@ -174,7 +174,7 @@ def up(name: str) -> int:
     if container_uses_credentials(config):
         addresses.append(ipaddress.ip_address(broker_listen_address(uid)))
     try:
-        add_commands = vm_internal_ok_commands(uid, addresses, "add")
+        add_commands = internal_ok_commands(uid, addresses, "add")
     except ValueError as e:
         raise ValueError(internal_failure(name, ", ".join(hosts), e)) from None
     for argv in add_commands:
@@ -192,7 +192,7 @@ def down(name: str) -> int:
         uid = pwd.getpwnam(f"_wl-{name}").pw_uid
     except KeyError:
         return 0
-    for argv in vm_inspect_element_commands(uid, "delete"):
+    for argv in inspect_element_commands(uid, "delete"):
         run(argv)
 
     # NOT the two cgroup exemptions -- see the module docstring for why they

@@ -36,7 +36,7 @@ from broker_config import (VM_BROKER_BIN, VM_BROKER_INSTANCE_PORT,
                            vm_broker_upstream_addresses, vm_credential_entries,
                            vm_credential_env, vm_host_resolver_addresses,
                            vm_uses_credentials)
-from vm import vm_internal_ok_elements
+from vm import internal_ok_elements
 from vm_network_config import (
     VM_BROKER_DEFAULT_AUTH_FORMAT, VM_BROKER_DEFAULT_AUTH_HEADER,
     validate_vm_network,
@@ -1400,7 +1400,7 @@ class TestTheBrokerAddressIsExemptedFromTheInternalDrop(unittest.TestCase):
         asserting a no-op -- so the range membership is asserted rather than
         assumed."""
         addr = ipaddress.ip_address(broker_listen_address(UID_MIN + 7))
-        armed = vm_internal_ok_elements(UID_MIN + 7, [addr])
+        armed = internal_ok_elements(UID_MIN + 7, [addr])
         self.assertTrue(
             any(entries for entries in armed.values()),
             f"{addr} is not in wl_internal4, so the inspector's dial to it "
@@ -1416,7 +1416,7 @@ class TestTheBrokerAddressIsExemptedFromTheInternalDrop(unittest.TestCase):
         # Appended to the list the exemptions are built from, and BEFORE the
         # commands are generated -- after them it would be armed by nothing.
         self.assertLess(up.index("broker_listen_address(uid)"),
-                        up.index('vm_internal_ok_commands(uid, addresses, "add")'))
+                        up.index('internal_ok_commands(uid, addresses, "add")'))
         # And purged with the rest, so dropping the last credential removes it.
         self.assertLess(up.index("purge_internal_exemptions(uid, name)"),
                         up.index("broker_listen_address(uid)"))

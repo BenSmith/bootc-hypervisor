@@ -73,37 +73,37 @@ class TestHelperArmsBothTables(unittest.TestCase):
 
     def test_up_applies_both_skeletons_before_any_element(self):
         self.assertLess(self.up.index("NFT_PROXY_SKELETON"),
-                        self.up.index("vm_inspect_element_commands"))
+                        self.up.index("inspect_element_commands"))
         self.assertLess(self.up.index("NFT_SKELETON"),
-                        self.up.index("vm_inspect_element_commands"))
+                        self.up.index("inspect_element_commands"))
         self.assertIn("check=True", self.up)
 
     def test_up_never_arms_the_cgroup_elements(self):
-        self.assertNotIn("vm_inspect_cgroup_command", self.up)
-        self.assertNotIn("vm_inspect_cgroup_filter_command", self.up)
+        self.assertNotIn("inspect_cgroup_command", self.up)
+        self.assertNotIn("inspect_cgroup_filter_command", self.up)
 
     def test_up_clears_the_previous_instances_status_file(self):
         self.assertIn("clear_status(inspect_status_path(name))", self.up)
 
     def test_down_removes_elements_and_addresses_but_not_the_link(self):
-        self.assertIn('vm_inspect_element_commands(uid, "delete")', self.down)
+        self.assertIn('inspect_element_commands(uid, "delete")', self.down)
         self.assertIn("remove_listener_addresses", self.down)
         self.assertNotIn('"link", "del"', self.down)
         self.assertNotIn("VM_ADVERTISED_ADDR", self.down)
 
     def test_up_arms_the_internal_exemptions_after_the_skeleton(self):
-        self.assertIn("vm_internal_ok_commands", self.up)
+        self.assertIn("internal_ok_commands", self.up)
         self.assertLess(self.up.index("NFT_SKELETON"),
-                        self.up.index("vm_internal_ok_commands"))
+                        self.up.index("internal_ok_commands"))
         self.assertLess(
             self.up.index("purge_internal_exemptions(uid, name)"),
-            self.up.index('vm_internal_ok_commands(uid, addresses, "add")'),
+            self.up.index('internal_ok_commands(uid, addresses, "add")'),
             "purge before arming, or an edited config leaves a dropped "
             "host's element behind")
 
     def test_up_purges_by_uid_rather_than_by_the_addresses_it_is_arming(self):
         self.assertNotIn(
-            'vm_internal_ok_commands(uid, addresses, "delete")', self.up)
+            'internal_ok_commands(uid, addresses, "delete")', self.up)
 
     def test_down_clears_the_internal_exemptions_and_tolerates_absence(self):
         self.assertIn("purge_internal_exemptions(uid, name)", self.down)
@@ -119,7 +119,7 @@ class TestHelperArmsBothTables(unittest.TestCase):
     def test_up_writes_the_policy_before_it_arms_the_redirect(self):
         self.assertIn("write_policy(name, net)", self.up)
         self.assertLess(self.up.index("write_policy(name, net)"),
-                        self.up.index("vm_inspect_element_commands"))
+                        self.up.index("inspect_element_commands"))
 
     def test_the_policy_is_written_group_readable_and_not_world_readable(self):
         write = self.source[self.source.index("def write_policy("):
@@ -180,7 +180,7 @@ class TestTheInternalFailureSaysWhatItCosts(unittest.TestCase):
         up = source[source.index("def up("):source.index("def down(")]
         self.assertEqual(up.count("internal_failure("), 2)
         self.assertIn("container_internal_resolve(host)", up)
-        self.assertIn('vm_internal_ok_commands(uid, addresses, "add")', up)
+        self.assertIn('internal_ok_commands(uid, addresses, "add")', up)
 
 
 if __name__ == "__main__":

@@ -1877,7 +1877,7 @@ def container_allow_resolved(allow: list) -> list:
 def container_filter_elements(uid: int, allow: list, resolved=None) -> dict:
     """Map set name -> element expressions for one container workload.
 
-    Mirrors vm_filter_elements, but built from ContainerAllowEntry rather
+    Mirrors filter_elements, but built from ContainerAllowEntry rather
     than VmAllowEntry. Reuses the shared set names and the reserved-range
     check (nft_constants.NFT_SET_FILTERED/ALLOW4/ALLOW6,
     vm_network_config.vm_allow_reserved_reason): both substrates share the one
@@ -1918,7 +1918,7 @@ def container_filter_commands(uid: int, allow: list, action: str, resolved=None)
 
 def container_internal_resolve(host: str) -> list:
     """Resolve one [[network.internal]] host, or raise ValueError naming it.
-    Mirrors vm_internal_resolve. Fatal by design (see that function and
+    Mirrors internal_resolve. Fatal by design (see that function and
     workload-vm-inspect's internal_failure): an exemption armed for the wrong
     address, or not armed at all, leaves the host refused by the drop the
     entry existed to except.

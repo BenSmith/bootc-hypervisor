@@ -708,7 +708,7 @@ def inspect_digest_short(digest: str | None) -> str:
 def internal_hosts(net: dict) -> list[str]:
     """The host names in [[vm.network.internal]], in file order.
 
-    Shape-tolerant, while vm_internal_resolve two functions down is fatal on
+    Shape-tolerant, while internal_resolve two functions down is fatal on
     the same key at the same moment. The two are not in tension, and the
     difference is which question is still open at start.
 

@@ -22,8 +22,8 @@ from egress_policy import (
     INSPECT_PORT_CLEARTEXT, INSPECT_PORT_TLS, uses_inspect,
 )
 from vm import (
-    vm_inspect_cgroup, vm_inspect_cgroup_command,
-    vm_inspect_cgroup_filter_command,
+    inspect_cgroup, inspect_cgroup_command,
+    inspect_cgroup_filter_command,
 )
 from nft_constants import NFT_SET_INSPECT_CG, NFT_SET_EGRESS_CG
 from vm_defs import VM_EGRESS_DEFAULT, VM_SIDECAR_SLICE
@@ -238,12 +238,12 @@ class TestGeneratedService(unittest.TestCase):
         self.assertIn(f"Slice={VM_SIDECAR_SLICE}", self.unit.splitlines())
         self.assertEqual(VM_SIDECAR_SLICE, "workloads.slice")
         # The element names the cgroup on the pinned slice, two components...
-        self.assertEqual(vm_inspect_cgroup("web").count("/"), 1)
+        self.assertEqual(inspect_cgroup("web").count("/"), 1)
         # ...and on the SAME slice the unit pins. Two independent spellings of
         # the path exist -- the unit's Slice= and the element the rule matches
         # -- and a drift between them is a redirect that never returns.
-        self.assertTrue(vm_inspect_cgroup("web").startswith(f"{VM_SIDECAR_SLICE}/"),
-                        vm_inspect_cgroup("web"))
+        self.assertTrue(inspect_cgroup("web").startswith(f"{VM_SIDECAR_SLICE}/"),
+                        inspect_cgroup("web"))
 
     def test_both_cgroup_elements_are_armed_on_start(self):
         """Both or neither on the way in: the redirect exemption without the
@@ -256,9 +256,9 @@ class TestGeneratedService(unittest.TestCase):
         self.assertEqual(len(pre), 2)
         expected = {
             "+" + " ".join(dq(a) for a in
-                           vm_inspect_cgroup_command("web", "add")),
+                           inspect_cgroup_command("web", "add")),
             "+" + " ".join(dq(a) for a in
-                           vm_inspect_cgroup_filter_command("web", "add")),
+                           inspect_cgroup_filter_command("web", "add")),
         }
         self.assertEqual(set(pre), expected)
         # One element per table: the redirect exemption in the proxy table,
@@ -276,9 +276,9 @@ class TestGeneratedService(unittest.TestCase):
         self.assertEqual(len(post), 2)
         expected = {
             "-+" + " ".join(dq(a) for a in
-                            vm_inspect_cgroup_command("web", "delete")),
+                            inspect_cgroup_command("web", "delete")),
             "-+" + " ".join(dq(a) for a in
-                            vm_inspect_cgroup_filter_command("web", "delete")),
+                            inspect_cgroup_filter_command("web", "delete")),
         }
         self.assertEqual(set(post), expected)
         self.assertEqual(sum("wl_inspect_cg" in ln for ln in post), 1)

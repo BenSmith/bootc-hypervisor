@@ -29,7 +29,7 @@ from unittest import mock
 from pathlib import Path
 
 from egress_policy import uses_resolve
-from vm import vm_filter_elements
+from vm import filter_elements
 from vm_defs import VM_SIDECAR_SLICE
 from vm_network_config import (
     vm_allow_resolved, vm_resolve_policy, vm_resolve_policy_path,
@@ -336,17 +336,17 @@ class TestPolicyDocument(unittest.TestCase):
         resolved = [(_entry("git.local", 2222),
                      [ipaddress.IPv4Address("192.0.2.9"),
                       ipaddress.IPv4Address("192.0.2.10")])]
-        elements = vm_filter_elements(UID, [], resolved)
+        elements = filter_elements(UID, [], resolved)
         armed = {e.split(" . ")[1] for e in elements["wl_allow4"]}
         served = set(vm_resolve_policy({}, UID, resolved)["static"]["git.local"])
         self.assertEqual(served, armed)
 
     def test_resolution_is_shared_by_default_too(self):
-        """vm_filter_elements without a `resolved` still resolves for itself,
+        """filter_elements without a `resolved` still resolves for itself,
         so every pre-existing caller is unchanged."""
         net = {"allow": [{"address": "192.0.2.7:2222", "reason": "forge"}]}
-        self.assertEqual(vm_filter_elements(UID, net["allow"]),
-                         vm_filter_elements(UID, net["allow"],
+        self.assertEqual(filter_elements(UID, net["allow"]),
+                         filter_elements(UID, net["allow"],
                                             vm_allow_resolved(net["allow"])))
 
     def test_the_policy_path_is_beside_the_inspectors(self):

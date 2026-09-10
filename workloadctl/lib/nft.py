@@ -22,8 +22,8 @@ import subprocess
 from helper_main import log, run
 from nft_constants import (NFT_BIN, NFT_SET_INTERNAL_OK4,
                            NFT_SET_INTERNAL_OK6, NFT_SETS, NFT_TABLE)
-from vm import (vm_filter_delete_command, vm_internal_ok_delete_commands,
-                vm_internal_ok_list_commands, vm_internal_ok_uid_elements)
+from vm import (filter_delete_command, internal_ok_delete_commands,
+                internal_ok_list_commands, internal_ok_uid_elements)
 from broker_config import (vm_inspect_link_address_commands,
                            vm_inspect_link_delete_commands)
 from netfilter_state import owned_elements
@@ -104,7 +104,7 @@ def purge_uid_elements(uid: int) -> int:
         owned = owned_elements(uid, set_elements(payload))
         if not owned:
             continue
-        result = run(vm_filter_delete_command(set_name, owned))
+        result = run(filter_delete_command(set_name, owned))
         if result.returncode == 0:
             removed += len(owned)
         else:
@@ -121,9 +121,9 @@ def purge_internal_exemptions(uid: int, name: str) -> None:
     a record that rotated between start and stop resolves to an address that is
     not the one in the set, so a name-driven delete removes nothing and leaves
     the old (uid, address) element behind -- armed, unnamed by any config line,
-    and alive until reboot. See vm_internal_ok_uid_elements.
+    and alive until reboot. See internal_ok_uid_elements.
     """
-    for argv, set_name in zip(vm_internal_ok_list_commands(),
+    for argv, set_name in zip(internal_ok_list_commands(),
                               (NFT_SET_INTERNAL_OK4, NFT_SET_INTERNAL_OK6)):
         result = run(argv)
         if result.returncode != 0:
@@ -132,8 +132,8 @@ def purge_internal_exemptions(uid: int, name: str) -> None:
             payload = json.loads(result.stdout)
         except ValueError:
             continue
-        entries = vm_internal_ok_uid_elements(uid, payload, f"_wl-{name}")
-        for delete in vm_internal_ok_delete_commands(set_name, entries):
+        entries = internal_ok_uid_elements(uid, payload, f"_wl-{name}")
+        for delete in internal_ok_delete_commands(set_name, entries):
             run(delete)
 
 

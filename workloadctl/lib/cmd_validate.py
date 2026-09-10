@@ -22,7 +22,7 @@ from workload_lib import (
 from provisioning import shadowed_filecon_paths
 from egress_policy import internal_hosts, uses_inspect
 from broker_config import vm_credential_entries
-from vm import vm_internal_reserved_reason, vm_internal_resolve
+from vm import internal_reserved_reason, internal_resolve
 from vm_defs import parse_memory_mib, vm_mac_address, vm_mac_collisions
 from validation import (
     collect_config_warnings,
@@ -48,7 +48,7 @@ INTERNAL_RESOLVE_TIMEOUT = 2.0
 
 
 def _resolve_within(host: str, timeout: float):
-    """vm_internal_resolve, with a wall-clock bound on the lookup.
+    """internal_resolve, with a wall-clock bound on the lookup.
 
     getaddrinfo takes no timeout and does not honour the socket default -- it
     is a blocking call in libc -- so the only bound available without a
@@ -66,7 +66,7 @@ def _resolve_within(host: str, timeout: float):
 
     def run():
         try:
-            box["ok"] = vm_internal_resolve(host)
+            box["ok"] = internal_resolve(host)
         except BaseException as exc:              # reported, never raised here
             box["err"] = exc
 
@@ -485,9 +485,9 @@ def validate_single(config: WorkloadConfig, manager: WorkloadManager, json_mode=
                 # Resolving is half of it: the exemption is armed only for
                 # addresses the internal drop would actually match, and a name
                 # that answers with a public address is refused at start by
-                # vm_internal_ok_elements rather than here.
+                # internal_ok_elements rather than here.
                 for addr in addresses:
-                    reserved = vm_internal_reserved_reason(addr)
+                    reserved = internal_reserved_reason(addr)
                     if reserved:
                         problem = f"[vm.network].internal: {reserved}"
                         break
@@ -524,7 +524,7 @@ def validate_single(config: WorkloadConfig, manager: WorkloadManager, json_mode=
                 problem = str(e)
             else:
                 for addr in addresses:
-                    reserved = vm_internal_reserved_reason(addr)
+                    reserved = internal_reserved_reason(addr)
                     if reserved:
                         problem = f"[network.internal]: {reserved}"
                         break

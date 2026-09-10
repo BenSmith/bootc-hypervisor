@@ -33,7 +33,7 @@ from vm_network_config import vm_allow_reserved_reason, vm_allow_resolved
 from workload_addr import inspect_address
 
 
-def vm_filter_elements(uid: int, allow: list[str],
+def filter_elements(uid: int, allow: list[str],
                        resolved=None) -> dict[str, list[str]]:
     """Map set name -> element expressions for one workload.
 
@@ -75,12 +75,12 @@ def vm_filter_elements(uid: int, allow: list[str],
             **split_by_family(NFT_PAIR_ALLOW, allowed)}
 
 
-VM_RESOLVE_STATUS_FILE = "resolve-status.json"
+RESOLVE_STATUS_FILE = "resolve-status.json"
 
 
 def vm_resolve_status_path(name: str) -> str:
     """Where one workload's responder writes its counters."""
-    return f"{VM_SOCKET_DIR}/{name}/{VM_RESOLVE_STATUS_FILE}"
+    return f"{VM_SOCKET_DIR}/{name}/{RESOLVE_STATUS_FILE}"
 
 
 # The type the record subtree carries, and the pattern the CIL module's own
@@ -94,7 +94,7 @@ def vm_resolve_status_path(name: str) -> str:
 # /var/log is not one of them. One glob also covers every workload, so unlike
 # the PKI rules there is nothing per-workload to register or to remove at
 # disable.
-VM_INSPECT_RECORD_SELINUX_TYPE = "wlinspect_log_t"
+INSPECT_RECORD_SELINUX_TYPE = "wlinspect_log_t"
 
 
 # --- The transparent redirect's per-workload elements (§7.1, §7.2) ---
@@ -109,7 +109,7 @@ VM_INSPECT_RECORD_SELINUX_TYPE = "wlinspect_log_t"
 # table and not the other leaves a workload that looks configured and reaches
 # nothing, so the builder returns both families' commands in one shape.
 
-def vm_inspect_map_elements(uid: int) -> dict[str, list[str]]:
+def inspect_map_elements(uid: int) -> dict[str, list[str]]:
     """The DNAT map elements for one workload, map name -> element strings.
 
     Two per family, one per redirected port: the concatenated key is uid .
@@ -127,7 +127,7 @@ def vm_inspect_map_elements(uid: int) -> dict[str, list[str]]:
     ])
 
 
-def vm_inspect_dst_elements(uid: int) -> dict[str, list[str]]:
+def inspect_dst_elements(uid: int) -> dict[str, list[str]]:
     """The accept-set elements, holding the TRANSLATED tuple.
 
     Same shape as the maps but keyed on the destination the filter chain sees,
@@ -141,7 +141,7 @@ def vm_inspect_dst_elements(uid: int) -> dict[str, list[str]]:
     ])
 
 
-def vm_inspect_self_elements(uid: int) -> dict[str, list[str]]:
+def inspect_self_elements(uid: int) -> dict[str, list[str]]:
     """The wrong-port drop-set elements, one per family.
 
     Keyed on uid and listener address with NO port: their whole purpose is to
@@ -154,7 +154,7 @@ def vm_inspect_self_elements(uid: int) -> dict[str, list[str]]:
                           lambda a: [f"{uid} . {a}"])
 
 
-def vm_inspect_live_elements(uid: int) -> dict[str, list[str]]:
+def inspect_live_elements(uid: int) -> dict[str, list[str]]:
     """The cross-workload guard's elements: this workload's inspector address.
 
     A bare address per family, with NO uid and no port. The uid is deliberately
@@ -173,7 +173,7 @@ def vm_inspect_live_elements(uid: int) -> dict[str, list[str]]:
                           lambda a: [str(a)])
 
 
-def vm_inspect_element_commands(uid: int, action: str) -> list[list[str]]:
+def inspect_element_commands(uid: int, action: str) -> list[list[str]]:
     """argv lists arming ("add") or disarming ("delete") all eight elements.
 
     Two families, four objects each, in a fixed order: both DNAT maps (in
@@ -192,10 +192,10 @@ def vm_inspect_element_commands(uid: int, action: str) -> list[list[str]]:
         raise ValueError(f"action must be 'add' or 'delete', got {action!r}")
     commands = []
     groups = (
-        (NFT_PROXY_TABLE, vm_inspect_map_elements(uid)),
-        (NFT_TABLE, vm_inspect_dst_elements(uid)),
-        (NFT_TABLE, vm_inspect_self_elements(uid)),
-        (NFT_TABLE, vm_inspect_live_elements(uid)),
+        (NFT_PROXY_TABLE, inspect_map_elements(uid)),
+        (NFT_TABLE, inspect_dst_elements(uid)),
+        (NFT_TABLE, inspect_self_elements(uid)),
+        (NFT_TABLE, inspect_live_elements(uid)),
     )
     for table, elements in groups:
         for set_name, entries in elements.items():
@@ -204,7 +204,7 @@ def vm_inspect_element_commands(uid: int, action: str) -> list[list[str]]:
     return commands
 
 
-def vm_internal_reserved_reason(
+def internal_reserved_reason(
         addr: ipaddress.IPv4Address | ipaddress.IPv6Address) -> str | None:
     """Why this address may not be armed as an `internal` exemption, or None.
 
@@ -234,7 +234,7 @@ def vm_internal_reserved_reason(
             f"PRIVATE space; this one does not")
 
 
-def vm_internal_ok_elements(
+def internal_ok_elements(
         uid: int,
         addresses: list[ipaddress.IPv4Address | ipaddress.IPv6Address],
 ) -> dict[str, list[str]]:
@@ -246,19 +246,19 @@ def vm_internal_ok_elements(
     workload-filter.nft. Read them together or the missing port reads as an
     oversight.
 
-    Returns only non-empty sets, like vm_filter_elements, so a caller emits one
+    Returns only non-empty sets, like filter_elements, so a caller emits one
     command per family that has entries.
     """
     exempt = []
     for addr in addresses:
-        reserved = vm_internal_reserved_reason(addr)
+        reserved = internal_reserved_reason(addr)
         if reserved:
             raise ValueError(f"[vm.network].internal: {reserved}")
         exempt.append((addr, f"{uid} . {addr}"))
     return split_by_family(NFT_PAIR_INTERNAL_OK, exempt)
 
 
-def vm_internal_ok_commands(
+def internal_ok_commands(
         uid: int,
         addresses: list[ipaddress.IPv4Address | ipaddress.IPv6Address],
         action: str,
@@ -268,16 +268,16 @@ def vm_internal_ok_commands(
         raise ValueError(f"action must be 'add' or 'delete', got {action!r}")
     return [[NFT_BIN, action, "element", *NFT_TABLE.split(), set_name,
              "{ " + ", ".join(entries) + " }"]
-            for set_name, entries in vm_internal_ok_elements(uid, addresses).items()]
+            for set_name, entries in internal_ok_elements(uid, addresses).items()]
 
 
-def vm_internal_ok_list_commands() -> list[list[str]]:
+def internal_ok_list_commands() -> list[list[str]]:
     """argv lists that dump each `internal` exemption set as JSON, v4 then v6."""
     return [[NFT_BIN, "-j", "list", "set", *NFT_TABLE.split(), set_name]
             for set_name in NFT_PAIR_INTERNAL_OK]
 
 
-def vm_internal_ok_uid_elements(uid: int, payload, user_name=None) -> list[str]:
+def internal_ok_uid_elements(uid: int, payload, user_name=None) -> list[str]:
     """The element expressions in one dumped set that belong to `uid`.
 
     THIS IS THE HANDLE THE CONFIG IS NOT. The exemptions are armed from names,
@@ -313,7 +313,7 @@ def vm_internal_ok_uid_elements(uid: int, payload, user_name=None) -> list[str]:
     return out
 
 
-def vm_internal_ok_delete_commands(set_name: str,
+def internal_ok_delete_commands(set_name: str,
                                    entries: list[str]) -> list[list[str]]:
     """argv lists deleting exactly `entries` from one exemption set."""
     if not entries:
@@ -322,7 +322,7 @@ def vm_internal_ok_delete_commands(set_name: str,
              "{ " + ", ".join(entries) + " }"]]
 
 
-def vm_internal_resolve(host: str) -> list[ipaddress.IPv4Address | ipaddress.IPv6Address]:
+def internal_resolve(host: str) -> list[ipaddress.IPv4Address | ipaddress.IPv6Address]:
     """Resolve one `internal` host, or raise ValueError naming it.
 
     Separate from vm_allow_resolve despite the identical mechanics, because the
@@ -348,7 +348,7 @@ def vm_internal_resolve(host: str) -> list[ipaddress.IPv4Address | ipaddress.IPv
     return seen
 
 
-def vm_inspect_cgroup(name: str) -> str:
+def inspect_cgroup(name: str) -> str:
     """The control group path of one workload's inspector unit.
 
     The pinned slice plus the unit name, so the path is always two components
@@ -366,11 +366,11 @@ def vm_inspect_cgroup(name: str) -> str:
     return f"{VM_SIDECAR_SLICE}/workload-{name}-inspect.service"
 
 
-def vm_inspect_cgroup_command(name: str, action: str) -> list[str]:
+def inspect_cgroup_command(name: str, action: str) -> list[str]:
     """`nft add|delete element` for one inspector's redirect exemption.
 
     The element lives in the *proxy* table, not the filter table — the
-    opposite of vm_inspect_cgroup_filter_command. Backwards, it fails only at load
+    opposite of inspect_cgroup_filter_command. Backwards, it fails only at load
     time with `did you mean set 'wl_egress_cg' in table inet
     'workload_filter'?`: nftables sets are table-scoped, and wl_inspect_cg is
     declared in workload-proxy.nft next to the `return` rule it feeds.
@@ -382,27 +382,27 @@ def vm_inspect_cgroup_command(name: str, action: str) -> list[str]:
     helper.
     """
     return [NFT_BIN, action, "element", *NFT_PROXY_TABLE.split(),
-            NFT_SET_INSPECT_CG, '{ "' + vm_inspect_cgroup(name) + '" }']
+            NFT_SET_INSPECT_CG, '{ "' + inspect_cgroup(name) + '" }']
 
 
-def vm_inspect_cgroup_filter_command(name: str, action: str) -> list[str]:
+def inspect_cgroup_filter_command(name: str, action: str) -> list[str]:
     """`nft add|delete element` for one inspector's egress exemption.
 
-    The twin of vm_inspect_cgroup_command in the *filter* table: the
+    The twin of inspect_cgroup_command in the *filter* table: the
     inspector runs as _wl-<name>, a filtered uid, so without its cgroup in
     wl_egress_cg its own upstream connections hit the default-deny drop and it
     reaches nothing. The twin is owed by the same unit's start and stop as
-    vm_inspect_cgroup_command's: a helper that does one of the two and not
+    inspect_cgroup_command's: a helper that does one of the two and not
     the other produces an inspector that either reaches nothing (this one
     missing) or redirects its own dials into itself (the other missing).
     """
     return [NFT_BIN, action, "element", *NFT_TABLE.split(), NFT_SET_EGRESS_CG,
-            '{ "' + vm_inspect_cgroup(name) + '" }']
+            '{ "' + inspect_cgroup(name) + '" }']
 
 
 # --- Writing nft's elements: the filter's add and delete commands ---
 
-def vm_filter_delete_command(set_name: str, entries: list[str]) -> list[str]:
+def filter_delete_command(set_name: str, entries: list[str]) -> list[str]:
     """argv deleting `entries` from `set_name` in one transaction."""
     return [NFT_BIN, "delete", "element", *NFT_TABLE.split(), set_name,
             "{ " + ", ".join(entries) + " }"]
@@ -421,7 +421,7 @@ def vm_filter_commands(uid: int, allow: list[str], action: str,
         raise ValueError(f"action must be 'add' or 'delete', got {action!r}")
     table = NFT_TABLE.split()
     commands = []
-    for set_name, entries in vm_filter_elements(uid, allow, resolved).items():
+    for set_name, entries in filter_elements(uid, allow, resolved).items():
         commands.append([NFT_BIN, action, "element", *table, set_name,
                          "{ " + ", ".join(entries) + " }"])
     return commands

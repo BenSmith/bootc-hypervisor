@@ -27,7 +27,7 @@ from egress_policy import (
     uses_resolve, inspect_logs_directory,
 )
 from egress_ca import denial_dir, leaf_dir
-from vm import vm_inspect_cgroup_command, vm_inspect_cgroup_filter_command
+from vm import inspect_cgroup_command, inspect_cgroup_filter_command
 from broker_config import (
     VM_BROKER_BIN, vm_uses_credentials, vm_broker_config_path,
     vm_broker_credential, vm_broker_hosts, vm_broker_runtime_directory,
@@ -638,8 +638,8 @@ def generate_vm_inspect_service(config, user_name: str) -> str:
     # and the cgroup path each carry a space that a bare join would split, and
     # dq is the repo's own quoting for Exec lines, not shell quoting.
     for cmd in (
-        vm_inspect_cgroup_command(name, "add"),
-        vm_inspect_cgroup_filter_command(name, "add"),
+        inspect_cgroup_command(name, "add"),
+        inspect_cgroup_filter_command(name, "add"),
     ):
         svc.add("ExecStartPre",
                 "+" + " ".join(dq(a) for a in cmd))
@@ -671,8 +671,8 @@ def generate_vm_inspect_service(config, user_name: str) -> str:
     # the remove lives here and not on the socket's helper. See
     # workload-vm-inspect's `down`, which cannot do it and says so.
     for cmd in (
-        vm_inspect_cgroup_command(name, "delete"),
-        vm_inspect_cgroup_filter_command(name, "delete"),
+        inspect_cgroup_command(name, "delete"),
+        inspect_cgroup_filter_command(name, "delete"),
     ):
         svc.add("ExecStopPost",
                 "-+" + " ".join(dq(a) for a in cmd))

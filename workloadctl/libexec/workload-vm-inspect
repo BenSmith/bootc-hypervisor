@@ -109,7 +109,7 @@ from egress_policy import (
     inspect_status_path, uses_inspect,
 )
 from vm import (
-    vm_inspect_element_commands, vm_internal_ok_commands, vm_internal_resolve,
+    inspect_element_commands, internal_ok_commands, internal_resolve,
 )
 from broker_config import vm_uses_credentials
 from nft_constants import NFT_BIN, NFT_PROXY_SKELETON, NFT_SKELETON
@@ -231,13 +231,13 @@ def up(name: str) -> int:
     # has not removed them yet.
     add_listener_addresses(uid)
 
-    # Eight elements, both tables, for the reason vm_inspect_element_commands's
+    # Eight elements, both tables, for the reason inspect_element_commands's
     # docstring carries: arming one table and not the other leaves a workload
     # that looks configured and reaches nothing. Purge before adding, because
     # `add element` on an existing key does not overwrite a stale one.
-    for argv in vm_inspect_element_commands(uid, "delete"):
+    for argv in inspect_element_commands(uid, "delete"):
         run(argv)
-    for argv in vm_inspect_element_commands(uid, "add"):
+    for argv in inspect_element_commands(uid, "add"):
         run(argv, check=True)
 
     # The `internal` exemptions, resolved here and armed per address. Purged
@@ -254,7 +254,7 @@ def up(name: str) -> int:
     addresses = []
     for host in hosts:
         try:
-            addresses.extend(vm_internal_resolve(host))
+            addresses.extend(internal_resolve(host))
         except ValueError as e:
             raise ValueError(internal_failure(name, host, e)) from None
     # THE BROKER'S OWN ADDRESS IS AN INTERNAL DESTINATION, and without this
@@ -278,7 +278,7 @@ def up(name: str) -> int:
     if vm_uses_credentials({"vm": {"network": net}}):
         addresses.append(ipaddress.ip_address(broker_listen_address(uid)))
     try:
-        add_commands = vm_internal_ok_commands(uid, addresses, "add")
+        add_commands = internal_ok_commands(uid, addresses, "add")
     except ValueError as e:
         # A name that resolved, to an address the internal drop would never
         # match. Same consequence as an unresolvable one, so the same telling.
@@ -303,7 +303,7 @@ def down(name: str) -> int:
     # so a stale listener address here still removes the right elements. A
     # missing element is the expected state when the start failed before
     # arming, so these are not check=True.
-    for argv in vm_inspect_element_commands(uid, "delete"):
+    for argv in inspect_element_commands(uid, "delete"):
         run(argv)
 
     # NOT the two cgroup exemptions (wl_inspect_cg, wl_egress_cg), and their

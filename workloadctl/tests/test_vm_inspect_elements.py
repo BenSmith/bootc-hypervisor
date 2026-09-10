@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """`diagnose`'s reading of the four inspect elements nothing read until rung 5.
 
-`vm_inspect_element_commands` arms SIX objects across two tables. Until this
+`inspect_element_commands` arms SIX objects across two tables. Until this
 tier `vm_inspect_check` read two of them -- the DNAT maps -- and a workload
 missing an accept element rendered as `egress inspected on both families`,
 green, while the guest's HTTP and HTTPS died and its DNS and SSH kept working.
@@ -26,8 +26,8 @@ from cmd_diagnose import (
     INSPECT_ACCEPT_SETS, INSPECT_GUARD_SETS, INSPECT_SELF_SETS,
 )
 from vm import (
-    vm_inspect_dst_elements, vm_inspect_element_commands,
-    vm_inspect_live_elements, vm_inspect_self_elements,
+    inspect_dst_elements, inspect_element_commands,
+    inspect_live_elements, inspect_self_elements,
 )
 from nft_constants import (
     NFT_SET_INSPECT_DST, NFT_SET_INSPECT_DST6, NFT_SET_INSPECT_SELF,
@@ -52,18 +52,18 @@ class TestTheSetNamesAreTheOnesArmed(unittest.TestCase):
 
     def test_the_accept_sets_are_the_ones_the_arming_helper_writes(self):
         self.assertEqual(set(INSPECT_ACCEPT_SETS),
-                         set(vm_inspect_dst_elements(UID)))
+                         set(inspect_dst_elements(UID)))
 
     def test_the_self_sets_are_the_ones_the_arming_helper_writes(self):
         self.assertEqual(set(INSPECT_SELF_SETS),
-                         set(vm_inspect_self_elements(UID)))
+                         set(inspect_self_elements(UID)))
 
     def test_the_guard_sets_are_the_ones_the_arming_helper_writes(self):
         """The cross-workload guard's sets, whose absence is silent in a way
         the other two kinds are not: the guest keeps working and the counters
         keep reconciling while the inspector stands open to every local uid."""
         self.assertEqual(set(INSPECT_GUARD_SETS),
-                         set(vm_inspect_live_elements(UID)))
+                         set(inspect_live_elements(UID)))
 
     def test_all_six_live_in_the_filter_table(self):
         """Read out of one `nft list table <NFT_TABLE>`. The two DNAT maps
@@ -72,7 +72,7 @@ class TestTheSetNamesAreTheOnesArmed(unittest.TestCase):
         read as unreadable, which this check treats as silence."""
         filter_sets = {
             argv[argv.index("element") + 1 + len(NFT_TABLE.split())]
-            for argv in vm_inspect_element_commands(UID, "add")
+            for argv in inspect_element_commands(UID, "add")
             if NFT_TABLE.split() == argv[argv.index("element") + 1:
                                          argv.index("element") + 1
                                          + len(NFT_TABLE.split())]}
