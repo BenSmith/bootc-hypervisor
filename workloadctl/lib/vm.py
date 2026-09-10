@@ -87,7 +87,7 @@ def vm_resolve_status_path(name: str) -> str:
 # filecon names.
 #
 # A `filecon` IS reachable here, unlike the PKI subtree's -- and the difference
-# is worth stating, because vm_pki_fcontext_patterns()'s docstring says the
+# is worth stating, because pki_fcontext_patterns()'s docstring says the
 # opposite about a path that looks similar. file_contexts.local outranks the
 # base file wholesale, so a module filecon is shadowed only under a prefix
 # workloadctl has registered via semanage; LOCAL_FCONTEXT_ROOTS names those, and

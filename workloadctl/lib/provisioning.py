@@ -44,7 +44,7 @@ from workloadctl_core import (
     UsageError, WorkloadConfig, WorkloadManager, WorkloadUserNotFound,
 )
 from substrate import LifecycleError
-from egress_ca import vm_pki_fcontext_patterns
+from egress_ca import pki_fcontext_patterns
 from vm_defs import VM_SEED_CONTRACT_EXIT
 
 
@@ -829,7 +829,7 @@ def apply_vm_fcontext(config: WorkloadConfig, action: str):
     if not shutil.which("semanage"):
         return
 
-    pki_patterns = vm_pki_fcontext_patterns(config.name)
+    pki_patterns = pki_fcontext_patterns(config.name)
 
     if action == "disable":
         # The PKI rules first: they are more specific than the tree rule, so

@@ -187,7 +187,7 @@ class TestTheSkewCheck(_ClockCase):
         # already invalid -- the whole failure this unit removes.
         import egress_ca
         self.assertLess(vm_clock.CLOCK_SKEW_THRESHOLD_SECONDS,
-                        egress_ca.VM_CA_BACKDATE_SECONDS)
+                        egress_ca.CA_BACKDATE_SECONDS)
 
 
 class TestBackupResyncsAfterResuming(unittest.TestCase):

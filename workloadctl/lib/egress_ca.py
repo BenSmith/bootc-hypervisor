@@ -38,7 +38,7 @@ from egress_policy import vm_normalise_hostname, vm_uses_inspect
 # variables below name the FILE directly rather than relying on either, because
 # the whole point of the block is to work in a guest whose distribution we do
 # not choose.
-VM_CA_BUNDLE_PATH = "/usr/local/share/ca-certificates/workloadctl-egress.crt"
+CA_BUNDLE_PATH = "/usr/local/share/ca-certificates/workloadctl-egress.crt"
 
 
 # The environment variables that point a guest's HTTP clients at that bundle.
@@ -46,7 +46,7 @@ VM_CA_BUNDLE_PATH = "/usr/local/share/ca-certificates/workloadctl-egress.crt"
 # NODE_EXTRA_CA_CERTS, python-requests reads REQUESTS_CA_BUNDLE, git reads
 # GIT_SSL_CAINFO and pip reads PIP_CERT. A guest missing any one of them fails
 # only in that ecosystem, which is the hardest kind of failure to attribute.
-VM_CA_ENV_VARS = (
+CA_ENV_VARS = (
     "SSL_CERT_FILE",
     "NODE_EXTRA_CA_CERTS",
     "REQUESTS_CA_BUNDLE",
@@ -62,7 +62,7 @@ VM_CA_ENV_VARS = (
 #
 # No broker variable is reserved, because nothing seeds one -- the guest is
 # never told a broker address (ADR 007 decision 6).
-VM_RESERVED_GUEST_ENV = frozenset(VM_CA_ENV_VARS)
+RESERVED_GUEST_ENV = frozenset(CA_ENV_VARS)
 
 
 # --- The per-workload egress CA ---
@@ -79,9 +79,9 @@ VM_RESERVED_GUEST_ENV = frozenset(VM_CA_ENV_VARS)
 # `backup` never captures state/, so the key is in no archive and needs no
 # exclusion rule.
 
-VM_CA_DIR_NAME = "ca"
-VM_CA_KEY_NAME = "egress-ca.key"
-VM_CA_CERT_NAME = "egress-ca.crt"
+CA_DIR_NAME = "ca"
+CA_KEY_NAME = "egress-ca.key"
+CA_CERT_NAME = "egress-ca.crt"
 
 
 # The two leaf caches live beside the CA, under the same state directory, and
@@ -89,8 +89,8 @@ VM_CA_CERT_NAME = "egress-ca.crt"
 # below have to name the same three directories the minter creates. A drift
 # between the two spellings is a mislabelled directory, which presents as the
 # inspector failing to mint and not as a naming mistake.
-VM_LEAF_DIR_NAME = "leaves"
-VM_DENIAL_DIR_NAME = "leaves-denied"
+LEAF_DIR_NAME = "leaves"
+DENIAL_DIR_NAME = "leaves-denied"
 
 
 # THE PKI SUBTREE HAS ITS OWN LABELS, AND THAT IS THE WHOLE POINT
@@ -108,8 +108,8 @@ VM_DENIAL_DIR_NAME = "leaves-denied"
 # READ-ONLY to the inspector: an inspector that could rewrite it could replace
 # the anchor the guest was seeded with, which is unrecoverable without a
 # re-provision. The leaves are read-write because minting them is the job.
-VM_CA_SELINUX_TYPE = "wlinspect_ca_t"
-VM_LEAF_SELINUX_TYPE = "wlinspect_leaf_t"
+CA_SELINUX_TYPE = "wlinspect_ca_t"
+LEAF_SELINUX_TYPE = "wlinspect_leaf_t"
 
 
 # Ten years. The number follows from never rotating rather than from any threat
@@ -123,7 +123,7 @@ VM_LEAF_SELINUX_TYPE = "wlinspect_leaf_t"
 # Distance is not the same as invisibility: the CA report carries notAfter and
 # `diagnose` warns inside the last year, so a workload that lives long enough
 # to reach it gets a re-provision SCHEDULED rather than discovered.
-VM_CA_VALIDITY_DAYS = 3650
+CA_VALIDITY_DAYS = 3650
 
 
 # notBefore is backdated an hour for clock skew. Guest drift is ~10 ppm
@@ -131,42 +131,42 @@ VM_CA_VALIDITY_DAYS = 3650
 # years of it -- and exactly ONE HOUR of a vCPU pause, which a guest loses
 # permanently. The backdate is not what makes pauses survivable; the mint-time
 # clock check is.
-VM_CA_BACKDATE_SECONDS = 3600
+CA_BACKDATE_SECONDS = 3600
 
 
-# The window VM_CA_VALIDITY_DAYS' comment already promised: `diagnose` warns
+# The window CA_VALIDITY_DAYS' comment already promised: `diagnose` warns
 # inside the last year. A year rather than a month because the remedy is a
 # RE-PROVISION -- cloud-init runs once per instance-id, so the guest is rebuilt,
 # not restarted -- and a month's notice for that is notice of an outage rather
 # than of a decision.
-VM_CA_EXPIRY_WARN_DAYS = 365
+CA_EXPIRY_WARN_DAYS = 365
 
 
-def vm_ca_dir(state_dir) -> Path:
+def ca_dir(state_dir) -> Path:
     """Where this workload's egress CA lives, given its state directory."""
-    return Path(state_dir) / VM_CA_DIR_NAME
+    return Path(state_dir) / CA_DIR_NAME
 
 
-def vm_ca_key_path(state_dir) -> Path:
-    return vm_ca_dir(state_dir) / VM_CA_KEY_NAME
+def ca_key_path(state_dir) -> Path:
+    return ca_dir(state_dir) / CA_KEY_NAME
 
 
-def vm_ca_cert_path(state_dir) -> Path:
-    return vm_ca_dir(state_dir) / VM_CA_CERT_NAME
+def ca_cert_path(state_dir) -> Path:
+    return ca_dir(state_dir) / CA_CERT_NAME
 
 
-def vm_leaf_dir(state_dir) -> Path:
+def leaf_dir(state_dir) -> Path:
     """Where the working set of minted leaves lives."""
-    return Path(state_dir) / VM_LEAF_DIR_NAME
+    return Path(state_dir) / LEAF_DIR_NAME
 
 
-def vm_denial_dir(state_dir) -> Path:
+def denial_dir(state_dir) -> Path:
     """Where leaves minted under a refusal live -- a sibling of the working
     set, not a subdirectory, so a `rm -rf` of one cannot take the other."""
-    return Path(state_dir) / VM_DENIAL_DIR_NAME
+    return Path(state_dir) / DENIAL_DIR_NAME
 
 
-def vm_pki_fcontext_patterns(name: str) -> list[tuple[str, str]]:
+def pki_fcontext_patterns(name: str) -> list[tuple[str, str]]:
     """(pattern, type) for every directory in one workload's PKI subtree.
 
     Registered in `file_contexts.local` beside the per-workload svirt_image_t
@@ -177,19 +177,19 @@ def vm_pki_fcontext_patterns(name: str) -> list[tuple[str, str]]:
     """
     root = workload_root_dir(name)
     return [
-        (f"{root}/state/{VM_CA_DIR_NAME}(/.*)?", VM_CA_SELINUX_TYPE),
-        (f"{root}/state/{VM_LEAF_DIR_NAME}(/.*)?", VM_LEAF_SELINUX_TYPE),
-        (f"{root}/state/{VM_DENIAL_DIR_NAME}(/.*)?", VM_LEAF_SELINUX_TYPE),
+        (f"{root}/state/{CA_DIR_NAME}(/.*)?", CA_SELINUX_TYPE),
+        (f"{root}/state/{LEAF_DIR_NAME}(/.*)?", LEAF_SELINUX_TYPE),
+        (f"{root}/state/{DENIAL_DIR_NAME}(/.*)?", LEAF_SELINUX_TYPE),
     ]
 
 
-def vm_ca_subject(name: str) -> str:
+def ca_subject(name: str) -> str:
     """The CA's subject. Names the workload, because an operator reading a
     certificate error inside a guest needs to know which CA it came from."""
     return f"/CN=workloadctl egress CA ({name})"
 
 
-def vm_ca_openssl_argv(name: str, key_path, cert_path, *, now: float) -> list[str]:
+def ca_openssl_argv(name: str, key_path, cert_path, *, now: float) -> list[str]:
     """One `openssl req -x509` invocation that mints the CA.
 
     THE THREE EXTENSIONS ARE NOT DECORATION. Python 3.14's ssl (OpenSSL 3.5)
@@ -211,23 +211,23 @@ def vm_ca_openssl_argv(name: str, key_path, cert_path, *, now: float) -> list[st
     noticeable on a cold cache.
     """
     not_before = time.strftime(
-        "%Y%m%d%H%M%SZ", time.gmtime(now - VM_CA_BACKDATE_SECONDS))
+        "%Y%m%d%H%M%SZ", time.gmtime(now - CA_BACKDATE_SECONDS))
     return [
         "openssl", "req", "-x509",
         "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256",
         "-noenc",
         "-keyout", str(key_path),
         "-out", str(cert_path),
-        "-days", str(VM_CA_VALIDITY_DAYS),
+        "-days", str(CA_VALIDITY_DAYS),
         "-not_before", not_before,
-        "-subj", vm_ca_subject(name),
+        "-subj", ca_subject(name),
         "-addext", "basicConstraints=critical,CA:TRUE",
         "-addext", "keyUsage=critical,keyCertSign,cRLSign",
         "-addext", "subjectKeyIdentifier=hash",
     ]
 
 
-# Whether there is a bundle at VM_CA_BUNDLE_PATH for those variables to name.
+# Whether there is a bundle at CA_BUNDLE_PATH for those variables to name.
 #
 # THIS IS NOT CAUTION, IT IS THE DIFFERENCE BETWEEN WORKING AND BROKEN. Every
 # one of those five variables REPLACES the runtime's default trust store rather
@@ -239,7 +239,7 @@ def vm_ca_openssl_argv(name: str, key_path, cert_path, *, now: float) -> list[st
 # guest, not a degraded mode.
 #
 # THREE THINGS MOVE TOGETHER OR NONE OF THEM DO: this flag, the write_files
-# entry in _render_default_user_data that puts the PEM at VM_CA_BUNDLE_PATH,
+# entry in _render_default_user_data that puts the PEM at CA_BUNDLE_PATH,
 # and the seed contract in build_cloud_init_iso. Flipping this alone points
 # five variables at a file nothing writes, which is the total outage described
 # above -- so it is not a "safe" partial step, it is the worst of the three.
@@ -255,7 +255,7 @@ def vm_ca_env(config: dict) -> dict[str, str]:
     reaches a host address where nothing listens.
 
     This workload's own CA is minted into
-    its state directory, written into the seed at VM_CA_BUNDLE_PATH, and named
+    its state directory, written into the seed at CA_BUNDLE_PATH, and named
     by these five variables -- and under the default `tls = "inspect"` the guest
     NEEDS it, because the leaf the inspector presents is signed by nothing else.
 
@@ -268,11 +268,11 @@ def vm_ca_env(config: dict) -> dict[str, str]:
     # VM-only by construction: this is a cloud-init guest-env block. The
     # container equivalent would be env injection directly into the unit, and
     # it must not ship before a container CA exists -- these five variables
-    # REPLACE the trust store (VM_RESERVED_GUEST_ENV), so an empty shape is
+    # REPLACE the trust store (RESERVED_GUEST_ENV), so an empty shape is
     # not inert, it is every TLS verification in the workload failing.
     if not vm_uses_inspect(config) or not VM_CA_BUNDLE_AVAILABLE:
         return {}
-    return {var: VM_CA_BUNDLE_PATH for var in VM_CA_ENV_VARS}
+    return {var: CA_BUNDLE_PATH for var in CA_ENV_VARS}
 
 
 # --- Leaves ---
@@ -284,13 +284,13 @@ def vm_ca_env(config: dict) -> dict[str, str]:
 # because a leaf that leaked is a leaf valid for one host, for a month, signed
 # by a CA one guest trusts. Long enough that a VM which runs for a fortnight
 # never re-mints its working set.
-VM_LEAF_VALIDITY_DAYS = 30
+LEAF_VALIDITY_DAYS = 30
 
 
 # Re-mint once a leaf is inside this of notAfter. A day, so a long-running
 # connection opened just under the wire still outlives its certificate by an
 # order of magnitude.
-VM_LEAF_RENEW_WITHIN_SECONDS = 86400
+LEAF_RENEW_WITHIN_SECONDS = 86400
 
 
 class LeafRefused(ValueError):
@@ -305,15 +305,15 @@ class LeafRefused(ValueError):
 
 
 # The longest a DNS name may be, and the longest one label may be (RFC 1035).
-VM_LEAF_NAME_MAX = 253
-VM_LEAF_LABEL_MAX = 63
+LEAF_NAME_MAX = 253
+LEAF_LABEL_MAX = 63
 
 
 _LEAF_LABEL_CHARS = frozenset(
     "abcdefghijklmnopqrstuvwxyz0123456789-_")
 
 
-def vm_leaf_san(name: str) -> str:
+def leaf_san(name: str) -> str:
     """The subjectAltName value for one name, or raise LeafRefused.
 
     ALLOWLIST, NOT DENYLIST. The obvious spelling of this check is to reject
@@ -343,14 +343,14 @@ def vm_leaf_san(name: str) -> str:
     except ValueError:
         pass
 
-    if len(name) > VM_LEAF_NAME_MAX:
-        raise LeafRefused(f"name longer than {VM_LEAF_NAME_MAX} characters")
+    if len(name) > LEAF_NAME_MAX:
+        raise LeafRefused(f"name longer than {LEAF_NAME_MAX} characters")
     labels = name.split(".")
     for label in labels:
         if not label:
             raise LeafRefused(f"empty label in {name!r}")
-        if len(label) > VM_LEAF_LABEL_MAX:
-            raise LeafRefused(f"label longer than {VM_LEAF_LABEL_MAX} "
+        if len(label) > LEAF_LABEL_MAX:
+            raise LeafRefused(f"label longer than {LEAF_LABEL_MAX} "
                               f"characters in {name!r}")
         bad = set(label) - _LEAF_LABEL_CHARS
         if bad:
@@ -359,7 +359,7 @@ def vm_leaf_san(name: str) -> str:
     return f"DNS:{name}"
 
 
-def vm_leaf_openssl_argv(name: str, ca_key_path, ca_cert_path,
+def leaf_openssl_argv(name: str, ca_key, ca_cert,
                          key_path, cert_path, *, now: float) -> list[str]:
     """One `openssl req -x509 -CA` invocation that mints a leaf for `name`.
 
@@ -382,23 +382,23 @@ def vm_leaf_openssl_argv(name: str, ca_key_path, ca_cert_path,
     One name asked for, one name signed.
 
     notBefore is backdated by the same hour the CA is, for the same reason and
-    with the same caveat -- see VM_CA_BACKDATE_SECONDS, and the mint-time clock
+    with the same caveat -- see CA_BACKDATE_SECONDS, and the mint-time clock
     check that is the actual remedy for a paused guest.
     """
     not_before = time.strftime(
-        "%Y%m%d%H%M%SZ", time.gmtime(now - VM_CA_BACKDATE_SECONDS))
+        "%Y%m%d%H%M%SZ", time.gmtime(now - CA_BACKDATE_SECONDS))
     return [
         "openssl", "req", "-x509",
-        "-CA", str(ca_cert_path),
-        "-CAkey", str(ca_key_path),
+        "-CA", str(ca_cert),
+        "-CAkey", str(ca_key),
         "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256",
         "-noenc",
         "-keyout", str(key_path),
         "-out", str(cert_path),
-        "-days", str(VM_LEAF_VALIDITY_DAYS),
+        "-days", str(LEAF_VALIDITY_DAYS),
         "-not_before", not_before,
         "-subj", "/",
-        "-addext", f"subjectAltName=critical,{vm_leaf_san(name)}",
+        "-addext", f"subjectAltName=critical,{leaf_san(name)}",
         "-addext", "basicConstraints=critical,CA:FALSE",
         "-addext", "keyUsage=critical,digitalSignature,keyEncipherment",
         "-addext", "extendedKeyUsage=serverAuth",

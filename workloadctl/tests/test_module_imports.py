@@ -77,8 +77,8 @@ class TestAFacadeReExportsNothing(unittest.TestCase):
     they do not define.
 
     `lib/` is flat, so an import IS a re-export: `from egress_ca import
-    VM_CA_BACKDATE_SECONDS` inside vm.py does not merely make that name
-    available to vm.py, it makes `vm.VM_CA_BACKDATE_SECONDS` answer forever
+    CA_BACKDATE_SECONDS` inside vm.py does not merely make that name
+    available to vm.py, it makes `vm.CA_BACKDATE_SECONDS` answer forever
     after. vm.py published 299 names it did not define, drawn from eleven
     modules, and the line count was the least of it. A reader who found `vm.X`
     had no way to tell which module owned X. `mock.patch("vm.X")` rebound a
@@ -157,13 +157,13 @@ class TestAFacadeReExportsNothing(unittest.TestCase):
         anywhere -- including in a string, for __all__ and for annotations --
         so it is loose by construction, and a loose scan that has nothing to
         find reads exactly like a strict one."""
-        tree = ast.parse("from egress_ca import VM_CA_BACKDATE_SECONDS\n"
+        tree = ast.parse("from egress_ca import CA_BACKDATE_SECONDS\n"
                          "x = 1\n")
         imported = {a.asname or a.name
                     for node in ast.walk(tree)
                     if isinstance(node, ast.ImportFrom) for a in node.names}
         used = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)}
-        self.assertEqual(imported - used, {"VM_CA_BACKDATE_SECONDS"})
+        self.assertEqual(imported - used, {"CA_BACKDATE_SECONDS"})
 
 
 class TestASharedModuleIsNotShadowedByItsCaller(unittest.TestCase):

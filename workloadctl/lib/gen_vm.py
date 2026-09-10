@@ -26,7 +26,7 @@ from egress_policy import (
     VM_INSPECT_PORT_CLEARTEXT, VM_INSPECT_PORT_TLS, vm_uses_inspect,
     vm_uses_resolve, vm_inspect_logs_directory,
 )
-from egress_ca import vm_denial_dir, vm_leaf_dir
+from egress_ca import denial_dir, leaf_dir
 from vm import vm_inspect_cgroup_command, vm_inspect_cgroup_filter_command
 from broker_config import (
     VM_BROKER_BIN, vm_uses_credentials, vm_broker_config_path,
@@ -685,8 +685,8 @@ def generate_vm_inspect_service(config, user_name: str) -> str:
     _harden_vm_sidecar(svc, name,
                        families="AF_INET AF_INET6 AF_UNIX AF_NETLINK",
                        tasks_max=192, memory_max="512M",
-                       extra_rw=(vm_leaf_dir(workload_state_dir(name)),
-                                 vm_denial_dir(workload_state_dir(name))))
+                       extra_rw=(leaf_dir(workload_state_dir(name)),
+                                 denial_dir(workload_state_dir(name))))
     svc.blank()
     svc.add("StandardOutput", "journal")
     svc.add("StandardError", "journal")

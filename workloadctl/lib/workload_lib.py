@@ -40,7 +40,7 @@ from config_parser import (
 # back now, so the imports say where they are at the top of the file like every
 # other import in the tree -- which is also the only form the layering test can
 # read as a claim about direction.
-from egress_ca import VM_RESERVED_GUEST_ENV
+from egress_ca import RESERVED_GUEST_ENV
 from egress_policy import (
     INSPECT_GUEST_AGENT_KEY,
     VM_POLICY_METHODS, VM_POLICY_METHODS_REFUSED, vm_hostname_match,
@@ -1569,7 +1569,7 @@ def validate_container_network(net: dict, config: dict | None = None) -> list[st
     # arguments below are all that ever actually differed.
     credentials, credential_errors = validate_credential_entries(
         net, table="network", noun="container",
-        credential_cls=ContainerCredential, reserved_env=VM_RESERVED_GUEST_ENV)
+        credential_cls=ContainerCredential, reserved_env=RESERVED_GUEST_ENV)
     errors.extend(credential_errors)
     credential_names = {c.name for c in credentials}
 

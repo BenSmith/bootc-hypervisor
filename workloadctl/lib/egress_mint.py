@@ -50,9 +50,8 @@ from typing import NamedTuple
 
 from egress_policy import vm_normalise_hostname
 from egress_ca import (
-    LeafRefused, VM_DENIAL_DIR_NAME, VM_LEAF_DIR_NAME,
-    VM_LEAF_RENEW_WITHIN_SECONDS, VM_LEAF_VALIDITY_DAYS, vm_ca_cert_path,
-    vm_ca_key_path, vm_leaf_openssl_argv,
+    DENIAL_DIR_NAME, LEAF_DIR_NAME, LEAF_RENEW_WITHIN_SECONDS, LeafRefused,
+    ca_cert_path, ca_key_path, leaf_openssl_argv,
 )
 from vm_clock import CLOCK_FAILED, CLOCK_RESYNCED, CLOCK_UNAVAILABLE
 
@@ -115,13 +114,11 @@ MINT_WAIT_SECONDS = 5.0
 # beside the CA that signed it -- and the denial set's, a sibling rather than a
 # subdirectory so a `rm -rf` of one cannot take the other with it.
 #
-# Both names come from vm.py rather than being spelled here, because the
+# Both names are imported from egress_ca rather than spelled here, because the
 # SELinux fcontext patterns registered at enable have to name the same three
 # directories this module creates. Two spellings of "leaves" is a mislabelled
 # directory, and a mislabelled directory presents as the inspector failing to
 # mint rather than as a naming mistake.
-LEAF_DIR_NAME = VM_LEAF_DIR_NAME
-DENIAL_DIR_NAME = VM_DENIAL_DIR_NAME
 
 
 class MintThrottled(Exception):
@@ -158,7 +155,7 @@ class Leaf(NamedTuple):
     not_after: float
 
     def due_for_renewal(self, now: float) -> bool:
-        return now >= self.not_after - VM_LEAF_RENEW_WITHIN_SECONDS
+        return now >= self.not_after - LEAF_RENEW_WITHIN_SECONDS
 
 
 class TokenBucket:
@@ -547,7 +544,7 @@ class Minter:
         connection.
         """
         if self._ca_identity is None:
-            cert = vm_ca_cert_path(self.state_dir)
+            cert = ca_cert_path(self.state_dir)
             self._ca_identity = {
                 "sha256": pem_fingerprint(cert),
                 "not_after": pem_not_after(cert),
@@ -600,9 +597,9 @@ class Minter:
             with tempfile.TemporaryDirectory(dir=argv_dir) as tmp:
                 key_path = Path(tmp) / "leaf.key"
                 cert_path = Path(tmp) / "leaf.crt"
-                argv = vm_leaf_openssl_argv(
-                    name, vm_ca_key_path(self.state_dir),
-                    vm_ca_cert_path(self.state_dir),
+                argv = leaf_openssl_argv(
+                    name, ca_key_path(self.state_dir),
+                    ca_cert_path(self.state_dir),
                     key_path, cert_path, now=now)
                 try:
                     result = self._runner(argv, capture_output=True, text=True,
@@ -639,9 +636,8 @@ class Minter:
 
 
 __all__ = [
-    "DENIAL_CACHE_MAX", "DENIAL_DIR_NAME", "LEAF_CACHE_MAX",
-    "LEAF_DIR_NAME",
+    "DENIAL_CACHE_MAX", "LEAF_CACHE_MAX",
     "MINT_BUCKET_CAPACITY", "MINT_BUCKET_REFILL_PER_SECOND",
     "MINT_WAIT_SECONDS", "Leaf", "LeafCache", "LeafRefused", "MintFailed",
-    "MintThrottled", "Minter", "TokenBucket", "VM_LEAF_VALIDITY_DAYS",
+    "MintThrottled", "Minter", "TokenBucket",
 ]

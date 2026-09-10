@@ -507,7 +507,7 @@ def vm_inspect_status_path(name: str) -> str:
 # does not stay passwordless.
 #
 # NOT THE WORKLOAD TREE either. state/ is svirt_image_t, the label
-# vm_pki_fcontext_patterns() exists to move material OUT of -- an audit record
+# pki_fcontext_patterns() exists to move material OUT of -- an audit record
 # does not belong in the same tree as the guest's disks. data/ is worse: `./`
 # volume anchors resolve into it, so a guest with a virtiofs volume at the data
 # root would read its own audit log.

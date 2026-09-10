@@ -19,9 +19,9 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from egress_ca import (VM_CA_BACKDATE_SECONDS, VM_CA_CERT_NAME, VM_CA_KEY_NAME,
-                       VM_CA_VALIDITY_DAYS, vm_ca_cert_path, vm_ca_dir,
-                       vm_ca_key_path, vm_ca_openssl_argv, vm_ca_subject)
+from egress_ca import (CA_BACKDATE_SECONDS, CA_CERT_NAME, CA_KEY_NAME,
+                       CA_VALIDITY_DAYS, ca_cert_path, ca_dir,
+                       ca_key_path, ca_openssl_argv, ca_subject)
 
 
 # `lib/` reaches sys.path via tests/__init__, so this import follows it.
@@ -32,9 +32,9 @@ HAVE_OPENSSL = shutil.which("openssl") is not None
 
 
 def _mint(tmp, name="myvm", now=None):
-    key = Path(tmp) / VM_CA_KEY_NAME
-    cert = Path(tmp) / VM_CA_CERT_NAME
-    argv = vm_ca_openssl_argv(name, key, cert, now=now or time.time())
+    key = Path(tmp) / CA_KEY_NAME
+    cert = Path(tmp) / CA_CERT_NAME
+    argv = ca_openssl_argv(name, key, cert, now=now or time.time())
     p = subprocess.run(argv, capture_output=True, text=True)
     assert p.returncode == 0, p.stderr
     return key, cert
@@ -49,33 +49,33 @@ class TestCaPaths(unittest.TestCase):
     def test_the_ca_lives_under_the_state_dir(self):
         # state/, not data/: `backup` never captures state/, which is what
         # keeps the private key out of every archive with no exclusion rule.
-        d = vm_ca_dir("/var/lib/workloads/myvm/state")
+        d = ca_dir("/var/lib/workloads/myvm/state")
         self.assertEqual(d, Path("/var/lib/workloads/myvm/state/ca"))
-        self.assertEqual(vm_ca_key_path("/var/lib/workloads/myvm/state"),
-                         d / VM_CA_KEY_NAME)
-        self.assertEqual(vm_ca_cert_path("/var/lib/workloads/myvm/state"),
-                         d / VM_CA_CERT_NAME)
+        self.assertEqual(ca_key_path("/var/lib/workloads/myvm/state"),
+                         d / CA_KEY_NAME)
+        self.assertEqual(ca_cert_path("/var/lib/workloads/myvm/state"),
+                         d / CA_CERT_NAME)
 
     def test_the_subject_names_the_workload(self):
         # An operator reading a certificate error inside a guest has to be able
         # to tell which of several workloads' CAs it came from.
-        self.assertIn("myvm", vm_ca_subject("myvm"))
+        self.assertIn("myvm", ca_subject("myvm"))
 
 
 class TestBackdate(unittest.TestCase):
     def test_not_before_is_backdated_an_hour(self):
-        argv = vm_ca_openssl_argv("myvm", "/k", "/c", now=1787000000.0)
+        argv = ca_openssl_argv("myvm", "/k", "/c", now=1787000000.0)
         stamp = argv[argv.index("-not_before") + 1]
         self.assertEqual(
             stamp,
             time.strftime("%Y%m%d%H%M%SZ",
-                          time.gmtime(1787000000.0 - VM_CA_BACKDATE_SECONDS)))
+                          time.gmtime(1787000000.0 - CA_BACKDATE_SECONDS)))
 
     def test_not_before_is_explicit_rather_than_defaulted(self):
         # Letting notBefore default to "now" would make the hour of skew
         # tolerance a property of WHEN THE PROCESS RAN rather than of the
         # certificate, which is not a thing anything downstream can read.
-        self.assertIn("-not_before", vm_ca_openssl_argv("m", "/k", "/c", now=0.0))
+        self.assertIn("-not_before", ca_openssl_argv("m", "/k", "/c", now=0.0))
 
 
 @unittest.skipUnless(HAVE_OPENSSL, "needs openssl")
@@ -142,7 +142,7 @@ class TestTheMintedCertificate(unittest.TestCase):
         out = _text(self.cert, "-enddate").strip()
         end = time.mktime(time.strptime(out.split("=", 1)[1], "%b %d %H:%M:%S %Y %Z"))
         days = (end - self.now) / 86400
-        self.assertGreater(days, VM_CA_VALIDITY_DAYS - 2)
+        self.assertGreater(days, CA_VALIDITY_DAYS - 2)
 
     def test_python_ssl_will_at_least_load_it_as_an_anchor(self):
         # Deliberately NOT called "a Python client accepts it". Loading an
@@ -191,8 +191,8 @@ class TestGeneratorIsIdempotent(unittest.TestCase):
     @unittest.skipUnless(HAVE_OPENSSL, "needs openssl")
     def test_it_mints_once_and_leaves_it_alone(self):
         self.mod.generate_egress_ca(self.pw, "myvm")
-        cert = vm_ca_cert_path(self.state)
-        key = vm_ca_key_path(self.state)
+        cert = ca_cert_path(self.state)
+        key = ca_key_path(self.state)
         self.assertTrue(cert.exists() and key.exists())
         first = (cert.read_bytes(), key.read_bytes())
 
@@ -204,11 +204,11 @@ class TestGeneratorIsIdempotent(unittest.TestCase):
     @unittest.skipUnless(HAVE_OPENSSL, "needs openssl")
     def test_the_private_half_is_not_world_readable(self):
         self.mod.generate_egress_ca(self.pw, "myvm")
-        self.assertEqual(vm_ca_key_path(self.state).stat().st_mode & 0o777, 0o600)
+        self.assertEqual(ca_key_path(self.state).stat().st_mode & 0o777, 0o600)
         # The certificate is a public anchor -- the seed builder and `diagnose`
         # both read it -- so it is deliberately NOT 0600.
-        self.assertEqual(vm_ca_cert_path(self.state).stat().st_mode & 0o777, 0o644)
-        self.assertEqual(vm_ca_dir(self.state).stat().st_mode & 0o777, 0o700)
+        self.assertEqual(ca_cert_path(self.state).stat().st_mode & 0o777, 0o644)
+        self.assertEqual(ca_dir(self.state).stat().st_mode & 0o777, 0o700)
 
     def test_openssl_failing_raises_rather_than_returning_quietly(self):
         # A silent failure here yields a filtered VM with no CA, which does not
@@ -313,9 +313,9 @@ class TestTheCaReachesTheSeed(unittest.TestCase):
             mounts=[], has_data_disk=False, **kw)
 
     def test_the_bundle_is_written_where_the_env_vars_point(self):
-        from egress_ca import VM_CA_BUNDLE_PATH
+        from egress_ca import CA_BUNDLE_PATH
         out = self._render(ca_cert=self.PEM)
-        self.assertIn(f"  - path: {VM_CA_BUNDLE_PATH}", out)
+        self.assertIn(f"  - path: {CA_BUNDLE_PATH}", out)
         self.assertIn("-----BEGIN CERTIFICATE-----", out)
 
     def test_it_also_goes_into_the_system_trust_store(self):

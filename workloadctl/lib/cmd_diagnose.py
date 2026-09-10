@@ -57,7 +57,7 @@ from egress_policy import (
     VM_DROP_MISDIRECTED_LISTED, VM_DROP_BROKER_UNREACHABLE, VM_DROP_NOT_HTTP,
     VM_DROP_NOT_HTTP_POLICY, vm_uses_resolve,
 )
-from egress_ca import VM_CA_EXPIRY_WARN_DAYS, vm_ca_cert_path
+from egress_ca import CA_EXPIRY_WARN_DAYS, ca_cert_path
 from egress_selinux import (
     VM_INSPECT_SELINUX_CIL, VM_INSPECT_SELINUX_MODULE, VM_QEMU_TYPE,
     VM_RESOLVE_SELINUX_CIL, VM_RESOLVE_SELINUX_MODULE, VM_RUNCON_BIN,
@@ -2500,7 +2500,7 @@ def _ca_fingerprint_on_disk(name: str) -> str | None:
     A diagnostic must not die of the fault it was written to report.
     """
     try:
-        return pem_fingerprint(vm_ca_cert_path(workload_state_dir(name)))
+        return pem_fingerprint(ca_cert_path(workload_state_dir(name)))
     except (OSError, ValueError):
         return None
 
@@ -2542,7 +2542,7 @@ def _ca_fragments(status) -> list[str]:
     aggregation and the exporter surface, where one producer per figure is the
     property being built; here it appears only when it is the answer to
     something -- which is the expiry, inside the window
-    VM_CA_VALIDITY_DAYS' own comment already promised.
+    CA_VALIDITY_DAYS' own comment already promised.
 
     The expiry is read out of the status document rather than off the disk, and
     that is a deliberate limit as well as a saving. The saving: pem_not_after
@@ -2558,7 +2558,7 @@ def _ca_fragments(status) -> list[str]:
     if not isinstance(not_after, (int, float)):
         return []
     remaining = (not_after - time.time()) / 86400
-    if remaining > VM_CA_EXPIRY_WARN_DAYS:
+    if remaining > CA_EXPIRY_WARN_DAYS:
         return []
     when = time.strftime("%Y-%m-%d", time.gmtime(not_after))
     if remaining <= 0:

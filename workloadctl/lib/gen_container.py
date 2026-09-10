@@ -28,7 +28,7 @@ from workload_lib import (
     expand_workload_tokens, dq, uq, selinux_type_name,
     container_ca_delivery, container_ca_mount_path,
 )
-from egress_ca import VM_CA_ENV_VARS, VM_CA_BUNDLE_PATH, vm_ca_cert_path
+from egress_ca import CA_ENV_VARS, CA_BUNDLE_PATH, ca_cert_path
 from broker_config import container_uses_credentials
 from secrets_template import (
     SECRET_PATTERN, auto_detect_credentials, validate_env_key,
@@ -1258,8 +1258,8 @@ def _container_ca_delivery_args(spec) -> list:
     generate_egress_ca/provision_egress_pki_dirs (libexec/workload-ensure-user
     -- fully name-keyed already, reused verbatim for containers, see that
     file's G12 comment) into the container read-only. "env" additionally
-    points the same five variables the VM guest gets (VM_CA_ENV_VARS) at a
-    FIXED in-container path -- VM_CA_BUNDLE_PATH, reused rather than
+    points the same five variables the VM guest gets (CA_ENV_VARS) at a
+    FIXED in-container path -- CA_BUNDLE_PATH, reused rather than
     inventing a container-only constant, since it names nothing VM-specific
     (just a conventional certificate path) and keeping one constant is what
     lets a future reader search for the one path both substrates present a
@@ -1289,16 +1289,16 @@ def _container_ca_delivery_args(spec) -> list:
     delivery = container_ca_delivery(net)
     if delivery in (None, "image"):
         return []
-    cert_path = str(vm_ca_cert_path(workload_state_dir(name)))
+    cert_path = str(ca_cert_path(workload_state_dir(name)))
     if delivery == "mount":
         dest = container_ca_mount_path(net)
         if not dest:
             return []
         return [f"--volume {dq(cert_path)}:{dq(dest)}:ro"]
     # "env"
-    args = [f"--volume {dq(cert_path)}:{dq(VM_CA_BUNDLE_PATH)}:ro"]
-    for var in VM_CA_ENV_VARS:
-        args.append(f"--env {var}={dq(VM_CA_BUNDLE_PATH)}")
+    args = [f"--volume {dq(cert_path)}:{dq(CA_BUNDLE_PATH)}:ro"]
+    for var in CA_ENV_VARS:
+        args.append(f"--env {var}={dq(CA_BUNDLE_PATH)}")
     return args
 
 

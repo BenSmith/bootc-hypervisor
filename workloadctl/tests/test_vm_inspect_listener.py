@@ -654,9 +654,9 @@ class TestPolicyLoading(unittest.TestCase):
         built = {}
         with unittest.mock.patch.object(mod, "workload_state_dir",
                                lambda name: state), \
-                unittest.mock.patch.object(mod, "vm_ca_cert_path",
+                unittest.mock.patch.object(mod, "ca_cert_path",
                                   lambda d: os.path.join(d, "ca.crt")), \
-                unittest.mock.patch.object(mod, "vm_ca_key_path",
+                unittest.mock.patch.object(mod, "ca_key_path",
                                   lambda d: os.path.join(d, "ca.key")), \
                 unittest.mock.patch.object(mod, "Minter",
                                   lambda *a, **kw: built.update(kw)), \

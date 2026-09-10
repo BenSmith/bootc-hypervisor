@@ -227,7 +227,7 @@ HOSTS_FILE = Path("/etc/hosts")
 HOSTS_TAG = "# ceg-rig"
 
 # The embedded-root-store workload (R9). A JDK, because the five CA variables
-# workloadctl delivers (VM_CA_ENV_VARS, lib/vm.py) are read by OpenSSL, Node,
+# workloadctl delivers (CA_ENV_VARS, lib/vm.py) are read by OpenSSL, Node,
 # python-requests, git and pip -- and NODE_EXTRA_CA_CERTS is one of them, so the
 # obvious "Node ignores SSL_CERT_FILE" example is exactly wrong here. A JVM
 # reads none of the five: its trust store is `cacerts` inside the image, and
@@ -2255,7 +2255,7 @@ def check_embedded_root_store():
 
     THE OBVIOUS EXAMPLE IS THE WRONG ONE. Node looks like the canonical
     "ignores SSL_CERT_FILE" client and is not usable here: NODE_EXTRA_CA_CERTS
-    is one of the five workloadctl sets (VM_CA_ENV_VARS, lib/vm.py), so Node
+    is one of the five workloadctl sets (CA_ENV_VARS, lib/vm.py), so Node
     trusts the CA and the row would pass having measured nothing. Go reads
     SSL_CERT_FILE too. A JVM reads none of them.
 

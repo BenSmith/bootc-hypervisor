@@ -39,7 +39,7 @@ from pathlib import Path
 from tests import load_script
 from egress_policy import VM_INSPECT_PORT_TLS
 from egress_ca import (
-    vm_ca_cert_path, vm_ca_key_path, vm_ca_openssl_argv, vm_leaf_openssl_argv,
+    ca_cert_path, ca_key_path, ca_openssl_argv, leaf_openssl_argv,
 )
 
 _MOD = None
@@ -77,7 +77,7 @@ def _make_ca(directory, name):
     """A CA keypair in `directory`, minted by the code under test."""
     directory.mkdir(parents=True, exist_ok=True)
     key, cert = directory / "ca.key", directory / "ca.crt"
-    _run(vm_ca_openssl_argv(name, key, cert, now=time.time()))
+    _run(ca_openssl_argv(name, key, cert, now=time.time()))
     return key, cert
 
 
@@ -91,7 +91,7 @@ def _make_leaf(directory, name, ca_key, ca_cert, stem):
     """
     key = directory / f"{stem}.key"
     cert = directory / f"{stem}.crt"
-    _run(vm_leaf_openssl_argv(name, ca_key, ca_cert, key, cert,
+    _run(leaf_openssl_argv(name, ca_key, ca_cert, key, cert,
                               now=time.time()))
     pem = directory / f"{stem}.pem"
     pem.write_text(cert.read_text() + key.read_text())
@@ -214,8 +214,8 @@ class TerminationCase(unittest.TestCase):
         self.state = self.tmp / "state"
         ca_dir = self.state / "ca"
         ca_dir.mkdir(parents=True)
-        _run(vm_ca_openssl_argv("demo", vm_ca_key_path(self.state),
-                                vm_ca_cert_path(self.state), now=time.time()))
+        _run(ca_openssl_argv("demo", ca_key_path(self.state),
+                                ca_cert_path(self.state), now=time.time()))
         self.origin_ca_key, self.origin_ca_cert = _make_ca(
             self.tmp / "origin-root", "origin-root")
         self.origin_pem = _make_leaf(self.tmp, self.HOST, self.origin_ca_key,
@@ -251,7 +251,7 @@ class TerminationCase(unittest.TestCase):
 
     def _guest_context(self):
         ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-        ctx.load_verify_locations(str(vm_ca_cert_path(self.state)))
+        ctx.load_verify_locations(str(ca_cert_path(self.state)))
         return ctx
 
     def _exchange(self, listener, origin, *, request=None, host=None,

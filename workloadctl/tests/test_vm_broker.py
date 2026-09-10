@@ -28,8 +28,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from egress_ca import VM_CA_ENV_VARS
-from egress_ca import VM_RESERVED_GUEST_ENV
+from egress_ca import CA_ENV_VARS
+from egress_ca import RESERVED_GUEST_ENV
 from broker_config import (VM_BROKER_BIN, VM_BROKER_INSTANCE_PORT,
                            render_vm_broker_config, vm_broker_config_path,
                            vm_broker_credential, vm_broker_hosts,
@@ -361,7 +361,7 @@ class TestTheGuestHalf(unittest.TestCase):
         way: a guest with no placeholder (401s) or one with no CA path (every
         HTTPS request failing validation inside the guest)."""
         cfg = cred_config()
-        cfg["vm"]["network"]["credential"][0]["env"] = VM_CA_ENV_VARS[0]
+        cfg["vm"]["network"]["credential"][0]["env"] = CA_ENV_VARS[0]
         errors = validate_vm_network(cfg["vm"]["network"])
         self.assertTrue(any("already seeds" in e for e in errors), errors)
 
@@ -385,7 +385,7 @@ class TestTheGuestHalf(unittest.TestCase):
         in it after its writer went refuses a legal name for a collision that
         cannot happen.
         """
-        self.assertEqual(set(VM_RESERVED_GUEST_ENV), set(VM_CA_ENV_VARS))
+        self.assertEqual(set(RESERVED_GUEST_ENV), set(CA_ENV_VARS))
 
 
 class TestAWildcardHostCannotBeBrokered(unittest.TestCase):
@@ -1347,15 +1347,15 @@ class TestTheRetiredMechanismLeavesNoSymbols(unittest.TestCase):
                 self.assertFalse(hasattr(vm, name))
 
     def test_the_guest_is_told_nothing_about_a_broker(self):
-        """VM_RESERVED_GUEST_ENV loses its second producer.
+        """RESERVED_GUEST_ENV loses its second producer.
 
         Not cosmetic: the set is what refuses a credential's `env` for
         colliding with a variable workloadctl seeds. Nothing seeds
         WORKLOAD_BROKER_URL any more, so continuing to reserve it would refuse
         a legal name for a collision that cannot happen.
         """
-        self.assertEqual(set(VM_RESERVED_GUEST_ENV), set(VM_CA_ENV_VARS))
-        self.assertNotIn("WORKLOAD_BROKER_URL", VM_RESERVED_GUEST_ENV)
+        self.assertEqual(set(RESERVED_GUEST_ENV), set(CA_ENV_VARS))
+        self.assertNotIn("WORKLOAD_BROKER_URL", RESERVED_GUEST_ENV)
 
     def test_the_skeleton_and_the_host_wide_unit_are_gone(self):
         root = Path(__file__).resolve().parent.parent

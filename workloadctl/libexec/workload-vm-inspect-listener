@@ -132,7 +132,7 @@ from egress_policy import (
     vm_inspect_policy_path, vm_inspect_record_path, vm_inspect_status_path,
     vm_normalise_hostname, VmPolicyEntry, vm_policy_governs,
 )
-from egress_ca import LeafRefused, vm_ca_cert_path, vm_ca_key_path
+from egress_ca import LeafRefused, ca_cert_path, ca_key_path
 from broker_config import VM_BROKER_INSTANCE_PORT
 from workload_addr import vm_broker_listen_address
 from vm_clock import resync_guest_clock_if_skewed
@@ -4587,8 +4587,8 @@ def build_minter(name, policy):
     if policy.tls != "inspect":
         return None
     state_dir = workload_state_dir(name)
-    cert = vm_ca_cert_path(state_dir)
-    key = vm_ca_key_path(state_dir)
+    cert = ca_cert_path(state_dir)
+    key = ca_key_path(state_dir)
     for path in (cert, key):
         if not os.path.exists(path):
             raise FileNotFoundError(

@@ -39,7 +39,7 @@ from egress_policy import (
     VM_INSPECT_DIGEST_KEY, VM_INSPECT_DIGEST_SHORT, vm_inspect_digest_short,
     vm_inspect_policy_digest, vm_inspect_policy_text,
 )
-from egress_ca import VM_CA_EXPIRY_WARN_DAYS
+from egress_ca import CA_EXPIRY_WARN_DAYS
 
 from tests.test_vm_inspect_listener import _mod
 
@@ -268,10 +268,10 @@ class TestTheExpiryWarning(unittest.TestCase):
         """Ten years is the shipped validity. A line on every healthy workload
         for a date in 2036 is noise that trains the reader past the line that
         matters."""
-        self.assertEqual(self._fragments(VM_CA_EXPIRY_WARN_DAYS + 10), [])
+        self.assertEqual(self._fragments(CA_EXPIRY_WARN_DAYS + 10), [])
 
     def test_inside_the_window_it_warns(self):
-        fragments = self._fragments(VM_CA_EXPIRY_WARN_DAYS - 10)
+        fragments = self._fragments(CA_EXPIRY_WARN_DAYS - 10)
         self.assertEqual(len(fragments), 1)
         self.assertIn("expires on", fragments[0])
 
@@ -291,8 +291,8 @@ class TestTheExpiryWarning(unittest.TestCase):
 
     def test_the_boundary_warns(self):
         """A window that excluded its own edge would leave a workload silent on
-        the day the promise in VM_CA_VALIDITY_DAYS' comment comes due."""
-        self.assertEqual(len(self._fragments(VM_CA_EXPIRY_WARN_DAYS)), 1)
+        the day the promise in CA_VALIDITY_DAYS' comment comes due."""
+        self.assertEqual(len(self._fragments(CA_EXPIRY_WARN_DAYS)), 1)
 
     def test_a_status_with_no_expiry_says_nothing(self):
         self.assertEqual(cmd_diagnose._ca_fragments(
@@ -368,7 +368,7 @@ class TestTheDiskReadsAreDefensiveToo(unittest.TestCase):
         cert.write_bytes(self.GARBAGE)
         with mock.patch.object(cmd_diagnose, "workload_state_dir",
                                return_value=self.dir), \
-             mock.patch.object(cmd_diagnose, "vm_ca_cert_path",
+             mock.patch.object(cmd_diagnose, "ca_cert_path",
                                return_value=cert):
             self.assertIsNone(cmd_diagnose._ca_fingerprint_on_disk("vm1"))
 
@@ -391,7 +391,7 @@ class TestTheDiskReadsAreDefensiveToo(unittest.TestCase):
         elems = [{"concat": [UID, 80]}, {"concat": [UID, 443]}]
         with mock.patch.object(cmd_diagnose, "workload_state_dir",
                                return_value=self.dir), \
-             mock.patch.object(cmd_diagnose, "vm_ca_cert_path",
+             mock.patch.object(cmd_diagnose, "ca_cert_path",
                                return_value=cert):
             _name, ok, detail = cmd_diagnose.vm_inspect_check(
                 cfg, elements4=elems, elements6=elems, socket_active=True,

@@ -33,8 +33,8 @@ from workload_lib import (
 )
 from egress_policy import vm_uses_inspect
 from egress_ca import (
-    VM_CA_BUNDLE_AVAILABLE, VM_CA_BUNDLE_PATH, VM_CA_ENV_VARS, vm_ca_env,
-    vm_ca_cert_path,
+    VM_CA_BUNDLE_AVAILABLE, CA_BUNDLE_PATH, CA_ENV_VARS, vm_ca_env,
+    ca_cert_path,
 )
 from broker_config import vm_credential_env
 from vm_defs import (
@@ -358,7 +358,7 @@ def _read_vm_egress_ca(name: str) -> str:
     gets a CA, and generate_egress_ca only runs for filtered ones.
     """
     try:
-        return vm_ca_cert_path(workload_state_dir(name)).read_text()
+        return ca_cert_path(workload_state_dir(name)).read_text()
     except OSError:
         return ""
 
@@ -576,7 +576,7 @@ def _render_default_user_data(name: str, guest_user: str, pubkey: str,
         for contentline in content.splitlines():
             lines.append(f"      {contentline}")
     if ca_cert:
-        lines.append(f"  - path: {VM_CA_BUNDLE_PATH}")
+        lines.append(f"  - path: {CA_BUNDLE_PATH}")
         lines.append("    permissions: '0644'")
         lines.append("    content: |")
         for certline in ca_cert.splitlines():
@@ -953,10 +953,10 @@ def build_cloud_init_iso(pw, config: dict, name: str, config_path: Path | None =
         # replacement by trying to fold it into this contract.
         if (VM_CA_BUNDLE_AVAILABLE and vm_uses_inspect(config)
                 and "ca" not in seed_provides
-                and VM_CA_BUNDLE_PATH not in live):
+                and CA_BUNDLE_PATH not in live):
             raise SeedContractError(
                 f"[vm.cloud_init].user_data_file for {name} never installs the "
-                f"egress CA bundle at {VM_CA_BUNDLE_PATH}, but this workload's "
+                f"egress CA bundle at {CA_BUNDLE_PATH}, but this workload's "
                 f"egress is filtered and inspected. A custom seed replaces the "
                 f"built-in cloud-config, which is what would normally write it "
                 f"and point the guest's HTTP clients at it -- without it the "
@@ -965,7 +965,7 @@ def build_cloud_init_iso(pw, config: dict, name: str, config_path: Path | None =
                 f"rather than as a policy decision. Write the bundle from "
                 f"${{WORKLOADCTL_VM_EGRESS_CA_B64}} (encoding: b64), add it to "
                 f"the guest's system store with a ca_certs: block, and export "
-                f"{', '.join(VM_CA_ENV_VARS)} -- "
+                f"{', '.join(CA_ENV_VARS)} -- "
                 f"workloads/vm-base/cloud-init/user-data carries the whole "
                 f"block to copy. Or set "
                 f"[vm.cloud_init].seed_provides = [\"ca\"] if the guest image "

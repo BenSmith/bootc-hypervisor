@@ -36,8 +36,8 @@ from workload_lib import (
     workload_state_dir, workload_data_dir, workload_env_dir,
 )
 from egress_ca import (
-    vm_ca_cert_path, vm_ca_dir, vm_denial_dir, vm_leaf_dir, vm_ca_key_path,
-    vm_ca_openssl_argv,
+    ca_cert_path, ca_dir, denial_dir, leaf_dir, ca_key_path,
+    ca_openssl_argv,
 )
 from vm_defs import VM_SOCKET_DIR
 
@@ -339,18 +339,18 @@ def generate_egress_ca(pw, name: str):
     provision_egress_pki_dirs recreates and relabels them a moment later, which is
     why removing them here is safe.
     """
-    ca_dir = vm_ca_dir(workload_state_dir(name))
-    key_path = vm_ca_key_path(workload_state_dir(name))
-    cert_path = vm_ca_cert_path(workload_state_dir(name))
+    dir_path = ca_dir(workload_state_dir(name))
+    key_path = ca_key_path(workload_state_dir(name))
+    cert_path = ca_cert_path(workload_state_dir(name))
 
     if key_path.exists() and cert_path.exists():
         return  # already minted -- keep the guest's anchor valid
 
-    ca_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
-    os.chown(ca_dir, pw.pw_uid, pw.pw_gid)
+    dir_path.mkdir(mode=0o700, parents=True, exist_ok=True)
+    os.chown(dir_path, pw.pw_uid, pw.pw_gid)
 
     result = subprocess.run(
-        vm_ca_openssl_argv(name, key_path, cert_path, now=time.time()),
+        ca_openssl_argv(name, key_path, cert_path, now=time.time()),
         capture_output=True, text=True,
     )
     if result.returncode != 0:
@@ -380,8 +380,8 @@ def generate_egress_ca(pw, name: str):
     # trusts only the replacement. The result is a guest that fails handshakes
     # on exactly its established hosts, told by the listener's own log line to
     # re-seed -- which is both the wrong remedy and already done.
-    for cache_dir in (vm_leaf_dir(workload_state_dir(name)),
-                      vm_denial_dir(workload_state_dir(name))):
+    for cache_dir in (leaf_dir(workload_state_dir(name)),
+                      denial_dir(workload_state_dir(name))):
         shutil.rmtree(cache_dir, ignore_errors=True)
 
     log(f"  Generated egress CA: {cert_path}")
@@ -410,8 +410,8 @@ def provision_egress_pki_dirs(pw, name: str):
     a better failure than refusing to provision the VM at all.
     """
     state_dir = workload_state_dir(name)
-    for directory in (vm_ca_dir(state_dir), vm_leaf_dir(state_dir),
-                      vm_denial_dir(state_dir)):
+    for directory in (ca_dir(state_dir), leaf_dir(state_dir),
+                      denial_dir(state_dir)):
         directory.mkdir(mode=0o700, parents=True, exist_ok=True)
         os.chown(directory, pw.pw_uid, pw.pw_gid)
         if shutil.which("restorecon"):

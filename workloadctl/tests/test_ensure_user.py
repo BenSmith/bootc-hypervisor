@@ -280,7 +280,7 @@ class TestBuildCloudInitIsoTemplateMode(unittest.TestCase):
                 path = self.config_dir / udf
             if path.exists():
                 body = path.read_text()
-                if self.mod.VM_CA_BUNDLE_PATH not in body:
+                if self.mod.CA_BUNDLE_PATH not in body:
                     # A LIVE line, not a comment. This used to inject
                     # `# egress CA bundle: <path>` and the contract accepted it,
                     # because the pin was a bare substring search over the whole
@@ -290,7 +290,7 @@ class TestBuildCloudInitIsoTemplateMode(unittest.TestCase):
                     # injection has to be something a seed would really carry.
                     path.write_text(
                         body + f"\nca_bundle_path: "
-                               f"{self.mod.VM_CA_BUNDLE_PATH}\n")
+                               f"{self.mod.CA_BUNDLE_PATH}\n")
         if udf and inject_host_key:
             path = Path(udf)
             if not path.is_absolute():
@@ -555,7 +555,7 @@ class TestBuildCloudInitIsoTemplateMode(unittest.TestCase):
         # filtered by default, so the CA contract applies to them anyway.
         ud.write_text("#cloud-config\nhostname: test\n"
                       "ssh_deletekeys: false\n"
-                      f"ca_bundle_path: {self.mod.VM_CA_BUNDLE_PATH}\n"
+                      f"ca_bundle_path: {self.mod.CA_BUNDLE_PATH}\n"
                       "host_key: ${WORKLOADCTL_VM_HOST_KEY}\n")
         cfg = {"vm": {"cloud_init": {"user_data_file": "user-data"}}}
         import shutil as _shutil
@@ -584,7 +584,7 @@ class TestBuildCloudInitIsoTemplateMode(unittest.TestCase):
         # filtered by default, so the CA contract applies to them anyway.
         ud.write_text("#cloud-config\nhostname: test\n"
                       "ssh_deletekeys: false\n"
-                      f"ca_bundle_path: {self.mod.VM_CA_BUNDLE_PATH}\n"
+                      f"ca_bundle_path: {self.mod.CA_BUNDLE_PATH}\n"
                       "host_key: ${WORKLOADCTL_VM_HOST_KEY}\n")
         cfg = {"vm": {"cloud_init": {"user_data_file": "user-data"}}}
         import shutil as _shutil
@@ -786,7 +786,7 @@ class TestBuildCloudInitIsoTemplateMode(unittest.TestCase):
         # The message has to name both remedies: write the bundle, or declare
         # seed_provides = ["ca"]. An operator hitting this has a real config in
         # front of them and needs to know which one applies.
-        self.assertIn(self.mod.VM_CA_BUNDLE_PATH, str(ctx.exception))
+        self.assertIn(self.mod.CA_BUNDLE_PATH, str(ctx.exception))
         self.assertIn("seed_provides", str(ctx.exception))
 
     def test_the_seed_can_reach_the_ca_the_contract_demands(self):
@@ -811,10 +811,10 @@ class TestBuildCloudInitIsoTemplateMode(unittest.TestCase):
         result; it did, at column 0, in a document cloud-init can no longer
         parse at all.
         """
-        from egress_ca import vm_ca_cert_path
+        from egress_ca import ca_cert_path
         # `workload_state_dir` is mocked to self.home for the duration of the
         # build, so this is where _read_vm_egress_ca will look.
-        cert = vm_ca_cert_path(self.home)
+        cert = ca_cert_path(self.home)
         cert.parent.mkdir(parents=True, exist_ok=True)
         expected = ("-----BEGIN CERTIFICATE-----\n"
                     "TUlJTk9UQVJFQUxDRVJU\n"
@@ -822,7 +822,7 @@ class TestBuildCloudInitIsoTemplateMode(unittest.TestCase):
         cert.write_text(expected)
         self._seed(
             "write_files:\n"
-            f"  - path: {self.mod.VM_CA_BUNDLE_PATH}\n"
+            f"  - path: {self.mod.CA_BUNDLE_PATH}\n"
             "    encoding: b64\n"
             "    content: ${WORKLOADCTL_VM_EGRESS_CA_B64}\n"
             "raw_pem_at_column_zero: |\n"
@@ -858,7 +858,7 @@ class TestBuildCloudInitIsoTemplateMode(unittest.TestCase):
             "ssh_deletekeys: false\n"
             "host_key: ${WORKLOADCTL_VM_HOST_KEY}\n"
             "# write_files:\n"
-            f"#   - path: {self.mod.VM_CA_BUNDLE_PATH}\n"
+            f"#   - path: {self.mod.CA_BUNDLE_PATH}\n"
             "#     content: ${WORKLOADCTL_VM_EGRESS_CA_B64}\n")
         cfg = {"vm": {"cloud_init": {"user_data_file": "user-data"},
                       "network": self._FILTERED_NET}}
@@ -871,7 +871,7 @@ class TestBuildCloudInitIsoTemplateMode(unittest.TestCase):
         self._seed(
             "ssh_deletekeys: false\n"
             "host_key: ${WORKLOADCTL_VM_HOST_KEY}\n"
-            f"ca_bundle_path: {self.mod.VM_CA_BUNDLE_PATH}\n"
+            f"ca_bundle_path: {self.mod.CA_BUNDLE_PATH}\n"
             "# mounts:\n# - ['data-share', '/srv', 'virtiofs']\n")
         cfg = {"vm": {"cloud_init": {"user_data_file": "user-data"},
                       "network": self._FILTERED_NET,
