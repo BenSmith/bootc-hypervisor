@@ -25,7 +25,7 @@ import shutil
 import struct
 from dataclasses import dataclass, field
 
-from egress_policy import uses_inspect
+from egress_policy import vm_uses_inspect
 from nft_constants import NFT_BIN, NFT_TABLE
 from config_parser import container_uses_inspect
 from workload_addr import UID_MIN, nflog_group
@@ -149,7 +149,7 @@ def pcap_vantages(config) -> list[Vantage]:
         # asked for. Saying "as it leaves this machine" there is not a rounding
         # error -- it is the one place an operator is told what the vantage
         # means, and nothing else fails when it is wrong.
-        inspected = uses_inspect(config.config)
+        inspected = vm_uses_inspect(config.config)
         return [
             Vantage(
                 VANTAGE_HOST, not bridged,

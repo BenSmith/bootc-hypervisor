@@ -94,6 +94,27 @@ def _defined_by_kind():
     return found
 
 
+def _all_defined_names():
+    """Every top-level public name in lib/, prefix or not.
+
+    Wider than _defined(): the twin of a vm_ symbol is by definition NOT
+    vm-prefixed, so it is invisible to the sweep the ratchet runs on.
+    """
+    found = set()
+    for path in sorted(LIB.glob("*.py")):
+        for node in ast.parse(path.read_text()).body:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef,
+                                 ast.ClassDef)):
+                found.add(node.name)
+            elif isinstance(node, ast.Assign):
+                found.update(t.id for t in node.targets
+                             if isinstance(t, ast.Name))
+            elif isinstance(node, ast.AnnAssign) and \
+                    isinstance(node.target, ast.Name):
+                found.add(node.target.id)
+    return found
+
+
 def _table():
     """(keep, rename) as sets of "module.NAME"."""
     keep, rename = set(), set()
@@ -143,6 +164,54 @@ class TestTheTableIsReadable(unittest.TestCase):
         self.assertTrue(by_kind["assign"], "the Assign arm found nothing")
         self.assertTrue(by_kind["def"], "the FunctionDef arm found nothing")
         self.assertEqual(by_kind["assign"] & by_kind["def"], set())
+
+
+class TestASymbolWithAContainerTwinIsNotRenamed(unittest.TestCase):
+    """A `container_` twin is the strongest evidence the prefix is REAL.
+
+    The classification rule is "decide by consumer", and applied to a module
+    it asks whether anything on the container path imports it. That question
+    has a blind spot: it cannot see a symbol whose vm_ prefix distinguishes it
+    from a sibling that serves the other substrate. vm_uses_inspect lives in a
+    shared module and is reached by shared callers, so the module test says
+    RENAME -- and it is wrong, because config_parser.container_uses_inspect is
+    the same predicate for the other substrate and the prefix is what tells
+    them apart.
+
+    Stripping one of a pair leaves `uses_inspect` beside
+    `container_uses_inspect`, which reads as a generic and its specialisation.
+    That is the ORIGINAL defect with the sign flipped: a name that lies about
+    who it serves, arrived at by the campaign meant to remove them.
+
+    Six of these were renamed and reverted before this guard existed.
+    """
+
+    def _twin(self, symbol):
+        name = symbol.split(".", 1)[1]
+        for prefix in PREFIXES:
+            if name.startswith(prefix):
+                stem = name[len(prefix):]
+                return f"container_{stem}", f"CONTAINER_{stem}"
+        return None
+
+    def test_no_rename_verdict_has_a_container_twin(self):
+        _, rename = _table()
+        offenders = []
+        for symbol in sorted(rename):
+            twins = self._twin(symbol)
+            if twins and any(t in _all_defined_names() for t in twins):
+                offenders.append(symbol)
+        self.assertEqual(offenders, [],
+                         "these have a container_ sibling, so the prefix is a "
+                         "substrate discriminator and stripping it would leave "
+                         f"the pair asymmetric -- classify KEEP: {offenders}")
+
+    def test_the_twin_sweep_actually_sees_container_names(self):
+        """Guards the guard: an empty sweep passes the test above silently."""
+        names = _all_defined_names()
+        found = {n for n in names if n.startswith("container_")}
+        self.assertGreater(len(found), 10, sorted(found))
+        self.assertIn("container_uses_inspect", names)
 
 
 class TestTheClassificationIsComplete(unittest.TestCase):

@@ -323,7 +323,7 @@ class Policy(NamedTuple):
     nothing. The kernel's wl_internal_ok4/6 elements are the one enforcement
     point; this copy exists so a failed dial into private space can be
     attributed to the wildcard trap rather than to a host that is down. See
-    inspect_policy.
+    vm_inspect_policy.
     """
 
     tls: str
@@ -502,7 +502,7 @@ def load_policy(path):
         # reaches nothing and every unit test still passes.
         #
         # Uppercased and string-filtered HERE as well as in
-        # policy_entries, which is the convention this file already holds
+        # vm_policy_entries, which is the convention this file already holds
         # for `internal` and the responder holds for its static map: the
         # writer normalises, and the reader normalises again so that a
         # hand-edited document cannot introduce a rule that never matches.
@@ -513,7 +513,7 @@ def load_policy(path):
         methods = item.get("methods")
         paths = item.get("paths")
         # `.get`, not `[...]`: the document emits the key only on the entries
-        # that carry one (inspect_policy explains why the sparseness is
+        # that carry one (vm_inspect_policy explains why the sparseness is
         # load-bearing there), so absent and null mean the same thing here and
         # the reader is the side that pays for it. A non-string is dropped to
         # None rather than refused -- the value's only use is as a name, and a

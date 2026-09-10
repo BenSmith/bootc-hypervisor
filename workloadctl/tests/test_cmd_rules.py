@@ -27,7 +27,7 @@ import cmd_rules
 
 
 def doc(**over):
-    """A policy document with every key present, as inspect_policy renders
+    """A policy document with every key present, as vm_inspect_policy renders
     one. Written out rather than built by calling the renderer: a test that
     generated its input from the code under test's own upstream would follow a
     mistake there into a green run here."""
@@ -329,7 +329,7 @@ class CommandTest(unittest.TestCase):
         buf = io.StringIO()
         with mock.patch.object(cmd_rules, "load_config_or_exit",
                                return_value=self._config(net)), \
-             mock.patch.object(cmd_rules, "uses_inspect",
+             mock.patch.object(cmd_rules, "vm_uses_inspect",
                                return_value=uses_inspect), \
              mock.patch.object(cmd_rules, "inspect_policy_path",
                                return_value="/nonexistent/inspect.json"), \

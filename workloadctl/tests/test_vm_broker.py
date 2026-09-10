@@ -619,7 +619,7 @@ import time
 
 from egress_policy import (
     VM_DROP_BROKER_UNREACHABLE, VM_DROP_UNREACHABLE, INSPECT_RECORD_FIELDS,
-    VmPolicyEntry, inspect_policy, inspect_policy_text,
+    VmPolicyEntry, vm_inspect_policy, vm_inspect_policy_text,
 )
 from workload_addr import broker_listen_address
 import vm_inspect_figures
@@ -1015,7 +1015,7 @@ class TestTheListenerReadsTheCredentialFromTheDocument(unittest.TestCase):
         mod = listener_mod()
         with tempfile.TemporaryDirectory(prefix="policy-") as tmp:
             path = Path(tmp) / "policy.json"
-            path.write_text(inspect_policy_text(net))
+            path.write_text(vm_inspect_policy_text(net))
             return mod.load_policy(str(path))
 
     def test_the_credential_survives_the_round_trip(self):

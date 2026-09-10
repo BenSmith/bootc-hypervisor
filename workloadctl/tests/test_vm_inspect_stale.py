@@ -37,7 +37,7 @@ from unittest import mock
 import cmd_diagnose
 from egress_policy import (
     INSPECT_DIGEST_KEY, INSPECT_DIGEST_SHORT, inspect_digest_short,
-    inspect_policy_digest, inspect_policy_text,
+    inspect_policy_digest, vm_inspect_policy_text,
 )
 from egress_ca import CA_EXPIRY_WARN_DAYS
 
@@ -53,12 +53,12 @@ class TestTheDigestProducer(unittest.TestCase):
         """Both sides hold text -- the listener the string it read, the reader
         the file. Digesting a re-parsed structure would make the value depend
         on this Python's dict ordering rather than on the file."""
-        text = inspect_policy_text(NET)
+        text = vm_inspect_policy_text(NET)
         self.assertEqual(inspect_policy_digest(text),
                          inspect_policy_digest(text))
 
     def test_a_document_that_differs_by_one_byte_digests_differently(self):
-        text = inspect_policy_text(NET)
+        text = vm_inspect_policy_text(NET)
         self.assertNotEqual(inspect_policy_digest(text),
                             inspect_policy_digest(text + " "))
 
@@ -88,7 +88,7 @@ class TestTheListenerReportsWhatItLoaded(unittest.TestCase):
         return str(path)
 
     def test_the_loaded_policy_carries_the_documents_digest(self):
-        text = inspect_policy_text(NET)
+        text = vm_inspect_policy_text(NET)
         policy = self.mod.load_policy(self._write(text))
         self.assertEqual(policy.digest, inspect_policy_digest(text))
 
@@ -104,8 +104,8 @@ class TestTheListenerReportsWhatItLoaded(unittest.TestCase):
         one that happened to return the same bytes would pass the digest
         comparison while leaving the race wide open.
         """
-        first = inspect_policy_text(NET)
-        second = inspect_policy_text({"hosts": ["other.example"],
+        first = vm_inspect_policy_text(NET)
+        second = vm_inspect_policy_text({"hosts": ["other.example"],
                                          "egress": "filtered"})
         path = self._write(first)
         opened = []
@@ -124,7 +124,7 @@ class TestTheListenerReportsWhatItLoaded(unittest.TestCase):
         """The status file is the only channel from a running listener to the
         host. A digest held in memory and never written is unreadable by the
         check that exists to read it."""
-        policy = self.mod.load_policy(self._write(inspect_policy_text(NET)))
+        policy = self.mod.load_policy(self._write(vm_inspect_policy_text(NET)))
         listener = self.mod.Listener([], policy=policy)
         self.assertEqual(listener.status()[INSPECT_DIGEST_KEY],
                          policy.digest)

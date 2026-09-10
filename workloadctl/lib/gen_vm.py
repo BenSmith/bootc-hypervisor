@@ -23,7 +23,7 @@ from workload_lib import (
     dq, uq, virtiofs_tags, systemd_escape_path,
 )
 from egress_policy import (
-    INSPECT_PORT_CLEARTEXT, INSPECT_PORT_TLS, uses_inspect,
+    INSPECT_PORT_CLEARTEXT, INSPECT_PORT_TLS, vm_uses_inspect,
     uses_resolve, inspect_logs_directory,
 )
 from egress_ca import denial_dir, leaf_dir
@@ -1124,7 +1124,7 @@ def generate_vm_service(config, user_name: str, uid: int, vfs_tags=None) -> str:
     # only runs for kind == "vm". The container path's own inspect-socket
     # prerequisite wiring is P1-7/P1-9, in the container branch below the
     # `kind == "vm"` dispatch.
-    if uses_inspect(config):
+    if vm_uses_inspect(config):
         prereqs.append(f"workload-{name}-inspect.socket")
     # And the responder, on the same terms for the same reason: the guest has
     # exactly one nameserver, so a VM booted with its responder socket unbound
@@ -1438,7 +1438,7 @@ def generate_vm_workload(config, user_name: str, uid: int):
     # G2 in the container egress-parity build spec: VM-only by construction
     # (generate_vm_workload only runs for kind == "vm"), same as G1 above.
     # Container inspect-unit emission is P1-7/P1-9.
-    inspects = uses_inspect(config)
+    inspects = vm_uses_inspect(config)
     if inspects:
         socket_dests = paths.get(("unit", "inspect-socket"), [])
         if socket_dests:

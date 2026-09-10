@@ -53,7 +53,7 @@ from egress_policy import (
     INSPECT_DIGEST_KEY, inspect_policy_digest, inspect_policy_path,
     inspect_digest_short, INSPECT_DIGEST_SHORT,
     INSPECT_PORT_CLEARTEXT, INSPECT_PORT_TLS, INSPECT_ORIG_CLEARTEXT,
-    INSPECT_ORIG_TLS, TLS_DEFAULT, uses_inspect, VM_DROP_MISDIRECTED,
+    INSPECT_ORIG_TLS, TLS_DEFAULT, vm_uses_inspect, VM_DROP_MISDIRECTED,
     VM_DROP_MISDIRECTED_LISTED, VM_DROP_BROKER_UNREACHABLE, VM_DROP_NOT_HTTP,
     VM_DROP_NOT_HTTP_POLICY, uses_resolve,
 )
@@ -1828,14 +1828,14 @@ def _not_http_fragments(status) -> list[str]:
 def _uses_inspect(config) -> bool:
     """Is this workload's egress redirected into an inspector, either substrate?
 
-    D2 makes `Substrate.uses_inspect()` the primitive, but the checks here are
+    D2 makes `Substrate.vm_uses_inspect()` the primitive, but the checks here are
     pure functions of a config and take no manager, and get_substrate() needs
     one. This dispatches on `config.is_vm` -- which is the ONLY thing
     get_substrate() itself dispatches on -- so the two cannot disagree, and
     the alternative (threading a manager through every check and every test
     that calls one directly) would buy nothing.
     """
-    return (uses_inspect(config.config) if config.is_vm
+    return (vm_uses_inspect(config.config) if config.is_vm
             else container_uses_inspect(config.config))
 
 
@@ -2585,7 +2585,7 @@ def _policy_digest_on_disk(name: str) -> str | None:
     ValueError for the reason _ca_fingerprint_on_disk gives: the document is
     read as text and a byte the locale's codec rejects is a UnicodeDecodeError,
     which is a ValueError and not an OSError. The document is pure ASCII by
-    construction -- inspect_policy_text goes through json.dumps, whose
+    construction -- vm_inspect_policy_text goes through json.dumps, whose
     ensure_ascii defaults true, which is also what makes this digest
     comparable across a systemd-launched listener and an operator's shell --
     so reaching this needs the file itself to have been damaged. That is a

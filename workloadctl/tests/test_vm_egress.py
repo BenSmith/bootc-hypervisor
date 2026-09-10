@@ -2635,12 +2635,12 @@ class TestRung2Schema(unittest.TestCase):
     # --- methods and paths ---
 
     def test_a_lowercase_method_is_accepted_and_normalised(self):
-        from egress_policy import policy_entries
+        from egress_policy import vm_policy_entries
         self.assertEqual(self._egress({
             "hosts": ["a.example"],
             "policy": [{"host": "a.example", "methods": ["get"],
                         "paths": ["/*"]}]}), [])
-        entry, = policy_entries({
+        entry, = vm_policy_entries({
             "policy": [{"host": "a.example", "methods": ["get"]}]})
         self.assertEqual(entry.methods, ("GET",))
 
@@ -3594,10 +3594,10 @@ class TestInternalOkElements(unittest.TestCase):
         self.assertEqual(internal_hosts({"internal": "not a list"}), [])
 
     def test_an_unresolvable_internal_name_raises_naming_the_failure(self):
-        from vm import internal_resolve
+        from vm import vm_internal_resolve
         with mock.patch("socket.getaddrinfo", side_effect=OSError("nope")):
             with self.assertRaises(ValueError) as caught:
-                internal_resolve("git.local")
+                vm_internal_resolve("git.local")
         message = str(caught.exception)
         self.assertIn("git.local", message)
         # It must name the failure the operator will actually see, which is a
@@ -3849,7 +3849,7 @@ class TestRung6CredentialSchema(unittest.TestCase):
     def test_entries_are_read_shape_tolerantly(self):
         """Both readers run at VM start, where raising turns a typo into a
         workload that does not boot -- long after the error was reportable."""
-        from egress_policy import policy_entries
+        from egress_policy import vm_policy_entries
         from broker_config import vm_credential_entries
         self.assertEqual(vm_credential_entries({"credential": "not a list"}), [])
         self.assertEqual(vm_credential_entries({}), [])
@@ -3861,7 +3861,7 @@ class TestRung6CredentialSchema(unittest.TestCase):
                 {"name": "  ", "placeholder": "P", "env": "A"}]})],
             ["tok"])
         self.assertEqual(
-            [e.credential for e in policy_entries({"policy": [
+            [e.credential for e in vm_policy_entries({"policy": [
                 {"host": "a.example", "credential": "tok"},
                 {"host": "b.example"},
                 {"host": "c.example", "credential": "  "},
@@ -3881,8 +3881,8 @@ class TestRung6PolicyDocument(unittest.TestCase):
                                 "env": "A"}] if credential else []}
 
     def test_an_entry_with_a_credential_carries_its_name(self):
-        from egress_policy import inspect_policy
-        self.assertEqual(inspect_policy(self._net("tok"))["policy"][0]
+        from egress_policy import vm_inspect_policy
+        self.assertEqual(vm_inspect_policy(self._net("tok"))["policy"][0]
                          ["credential"], "tok")
 
     def test_an_entry_without_one_carries_no_key_at_all(self):
@@ -3893,15 +3893,15 @@ class TestRung6PolicyDocument(unittest.TestCase):
         digest of EVERY filtered VM on the fleet changes at upgrade, so every
         one of them reports drift and the report stops being read.
         """
-        from egress_policy import inspect_policy
-        self.assertNotIn("credential", inspect_policy(self._net(None))
+        from egress_policy import vm_inspect_policy
+        self.assertNotIn("credential", vm_inspect_policy(self._net(None))
                          ["policy"][0])
 
     def test_a_credential_free_document_is_byte_identical_across_the_change(self):
         """The concrete form of the rule above, in the bytes drift compares."""
-        from egress_policy import inspect_policy_text
+        from egress_policy import vm_inspect_policy_text
         self.assertEqual(
-            inspect_policy_text(self._net(None)),
+            vm_inspect_policy_text(self._net(None)),
             '{\n'
             '  "hosts": [\n'
             '    "api.example"\n'
@@ -3927,22 +3927,22 @@ class TestRung6PolicyDocument(unittest.TestCase):
         """Asserted in BOTH directions, because only the second half fails if
         the key is emitted unconditionally."""
         from egress_policy import (inspect_policy_digest,
-                                   inspect_policy_text)
-        bare = inspect_policy_digest(inspect_policy_text(self._net(None)))
+                                   vm_inspect_policy_text)
+        bare = inspect_policy_digest(vm_inspect_policy_text(self._net(None)))
         with_cred = inspect_policy_digest(
-            inspect_policy_text(self._net("tok")))
+            vm_inspect_policy_text(self._net("tok")))
         self.assertNotEqual(bare, with_cred)
         self.assertEqual(
             bare,
-            inspect_policy_digest(inspect_policy_text(self._net(None))))
+            inspect_policy_digest(vm_inspect_policy_text(self._net(None))))
 
     def test_no_address_placeholder_or_env_reaches_the_document(self):
         """D8. The listener derives the address from its own uid, and decides
         nothing by the other two -- carrying them would make the document
         non-deterministic w.r.t. the TOML or leak the fiction into a file the
         guest-facing process reads."""
-        from egress_policy import inspect_policy_text
-        text = inspect_policy_text(self._net("tok"))
+        from egress_policy import vm_inspect_policy_text
+        text = vm_inspect_policy_text(self._net("tok"))
         self.assertNotIn("127.129", text)
         self.assertNotIn("placeholder", text)
         self.assertNotIn('"env"', text)

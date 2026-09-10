@@ -20,9 +20,9 @@ from workload_lib import (
     GENERATOR_OWNED_DIRECTIVES,
 )
 from provisioning import shadowed_filecon_paths
-from egress_policy import internal_hosts, uses_inspect
+from egress_policy import internal_hosts, vm_uses_inspect
 from broker_config import vm_credential_entries
-from vm import internal_reserved_reason, internal_resolve
+from vm import internal_reserved_reason, vm_internal_resolve
 from vm_defs import parse_memory_mib, vm_mac_address, vm_mac_collisions
 from validation import (
     collect_config_warnings,
@@ -48,7 +48,7 @@ INTERNAL_RESOLVE_TIMEOUT = 2.0
 
 
 def _resolve_within(host: str, timeout: float):
-    """internal_resolve, with a wall-clock bound on the lookup.
+    """vm_internal_resolve, with a wall-clock bound on the lookup.
 
     getaddrinfo takes no timeout and does not honour the socket default -- it
     is a blocking call in libc -- so the only bound available without a
@@ -66,7 +66,7 @@ def _resolve_within(host: str, timeout: float):
 
     def run():
         try:
-            box["ok"] = internal_resolve(host)
+            box["ok"] = vm_internal_resolve(host)
         except BaseException as exc:              # reported, never raised here
             box["err"] = exc
 
@@ -473,7 +473,7 @@ def validate_single(config: WorkloadConfig, manager: WorkloadManager, json_mode=
     # then (a resolver still coming up, a split-horizon zone), and a name that
     # passes here can fail then. This says "this entry would stop the guest
     # booting right now", which is worth knowing and is not a verdict.
-    if config.config.get("vm") and uses_inspect(config.config):
+    if config.config.get("vm") and vm_uses_inspect(config.config):
         net = config.config.get("vm", {}).get("network", {}) or {}
         for host in internal_hosts(net):
             problem = None

@@ -25,7 +25,7 @@ from egress_policy import INSPECT_GUEST_AGENT_KEY
 from workload_lib import container_inspect_policy
 from egress_policy import (
     INSPECT_PORT_CLEARTEXT, INSPECT_PORT_TLS, hostname_match,
-    inspect_policy,
+    vm_inspect_policy,
 )
 from workload_addr import VM_INSPECT_LISTENER_BIN
 
@@ -570,7 +570,7 @@ class TestPolicyLoading(unittest.TestCase):
         a listener reading a key the helper does not write is a policy that
         loads clean and authorises nothing."""
         mod = _mod()
-        path = self._write(json.dumps(inspect_policy(
+        path = self._write(json.dumps(vm_inspect_policy(
             {"hosts": ["example.com"], "tls": "splice"})))
         policy = mod.load_policy(path)
         self.assertEqual(policy.hosts, ("example.com",))
@@ -583,7 +583,7 @@ class TestPolicyLoading(unittest.TestCase):
         Each of those asserts that a key the LISTENER reads survives the trip,
         so a helper that stopped writing one fails. Nothing asserted the other
         direction: `load_policy` reads by `doc.get(...)` and ignores what it
-        does not know, so a key added to inspect_policy and never wired into
+        does not know, so a key added to vm_inspect_policy and never wired into
         the listener loads clean and authorises nothing -- silently, across two
         processes, which is the seam a unit gate is least likely to see.
 
@@ -593,7 +593,7 @@ class TestPolicyLoading(unittest.TestCase):
         decide deliberately whether the listener should be reading it.
 
         ASSERTED OVER BOTH WRITERS, not just the VM's. There are two renderers
-        -- inspect_policy and container_inspect_policy -- and this only ever
+        -- vm_inspect_policy and container_inspect_policy -- and this only ever
         checked one, so a key the CONTAINER writer emitted and the listener
         ignored would have loaded clean and authorised nothing, which is the
         same silence this test exists to break. It is their UNION that has to
@@ -612,7 +612,7 @@ class TestPolicyLoading(unittest.TestCase):
         drift comparison would then have to know to ignore one of its own keys.
         """
         mod = _mod()
-        doc = inspect_policy({
+        doc = vm_inspect_policy({
             "hosts": ["example.com"],
             "internal": [{"host": "nas.example.com", "reason": "nas"}],
             "splice": [{"host": "pinned.example.com", "reason": "pinned"}],
@@ -693,7 +693,7 @@ class TestPolicyLoading(unittest.TestCase):
         error, and no counter that moves to say so.
         """
         mod = _mod()
-        path = self._write(json.dumps(inspect_policy(
+        path = self._write(json.dumps(vm_inspect_policy(
             {"hosts": ["example.com"]})))
         self.assertIs(mod.load_policy(path).guest_agent, True)
 
@@ -725,7 +725,7 @@ class TestPolicyLoading(unittest.TestCase):
         misfiled as 'upstream unreachable' and the counter that exists to name
         the wildcard trap never moves."""
         mod = _mod()
-        path = self._write(json.dumps(inspect_policy({
+        path = self._write(json.dumps(vm_inspect_policy({
             "hosts": ["nas.example.com"], "tls": "splice",
             "internal": [{"host": "nas.example.com"}]})))
         policy = mod.load_policy(path)
@@ -736,7 +736,7 @@ class TestPolicyLoading(unittest.TestCase):
         reading a key the helper does not write governs nothing while the
         config says every request is constrained."""
         mod = _mod()
-        path = self._write(json.dumps(inspect_policy({
+        path = self._write(json.dumps(vm_inspect_policy({
             "hosts": ["a.example"],
             "policy": [{"host": "a.example", "methods": ["GET"],
                         "paths": ["/v2/*"]}]})))
@@ -757,7 +757,7 @@ class TestPolicyLoading(unittest.TestCase):
         permits.
         """
         mod = _mod()
-        path = self._write(json.dumps(inspect_policy({
+        path = self._write(json.dumps(vm_inspect_policy({
             "policy": [{"host": "a.example"}]})))
         entry, = mod.load_policy(path).policy
         self.assertIsNone(entry.methods)
@@ -769,7 +769,7 @@ class TestPolicyLoading(unittest.TestCase):
         offers `http/1.1` to a host the operator listed for h2, which fails as
         that one host being broken rather than as a key being ignored."""
         mod = _mod()
-        path = self._write(json.dumps(inspect_policy({
+        path = self._write(json.dumps(vm_inspect_policy({
             "hosts": ["grpc.example.com"],
             "http2": [{"host": "grpc.example.com", "reason": "gRPC"}]})))
         policy = mod.load_policy(path)
@@ -1094,7 +1094,7 @@ class TestPerHostSplice(unittest.TestCase):
         self.addCleanup(shutil.rmtree, d)
         path = os.path.join(d, "inspect.json")
         with open(path, "w") as f:
-            json.dump(inspect_policy({
+            json.dump(vm_inspect_policy({
                 "hosts": ["sum.golang.org"],
                 "splice": [{"host": "sum.golang.org", "reason": "a log"}]}), f)
         self.assertEqual(mod.load_policy(path).splice, ("sum.golang.org",))
@@ -1103,7 +1103,7 @@ class TestPerHostSplice(unittest.TestCase):
         """The document describes the FILE, not the file filtered through the
         mode -- so a listener restarted onto `inspect` reads a document that
         already says what the per-host list was."""
-        doc = inspect_policy({
+        doc = vm_inspect_policy({
             "tls": "splice", "hosts": ["sum.golang.org"],
             "splice": [{"host": "sum.golang.org", "reason": "a log"}]})
         self.assertEqual(doc["splice"], ["sum.golang.org"])

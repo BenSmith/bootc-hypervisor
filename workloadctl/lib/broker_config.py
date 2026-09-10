@@ -33,9 +33,9 @@ from config_parser import (container_credential_entries,
                            parse_credential_entries)
 from workload_addr import (IP_BIN, ADVERTISED_IFACE,
                            broker_listen_address, inspect_address)
-from egress_policy import uses_inspect
+from egress_policy import vm_uses_inspect
 from secrets_template import credential_path, CREDSTORE_DIR
-from egress_policy import policy_entries
+from egress_policy import vm_policy_entries
 
 
 # The program the generated unit runs. One instance per workload, generated;
@@ -139,7 +139,7 @@ class VmCredential(NamedTuple):
 def vm_credential_entries(net: dict) -> list[VmCredential]:
     """The [[vm.network.credential]] blocks, normalised, in file order.
 
-    Shape-tolerant for the reason policy_entries is: validate_vm_network owns
+    Shape-tolerant for the reason vm_policy_entries is: validate_vm_network owns
     the shape and the boot generator skips a workload that does not validate.
     """
     return parse_credential_entries(net, VmCredential)
@@ -163,7 +163,7 @@ def vm_uses_credentials(config: dict) -> bool:
     """
     # The VM half. container_uses_credentials below is the container one, and
     # the two are deliberately identical: one mechanism on both substrates.
-    if not uses_inspect(config):
+    if not vm_uses_inspect(config):
         return False
     net = (config.get("vm", {}) or {}).get("network", {}) or {}
     if not isinstance(net, dict):
@@ -220,7 +220,7 @@ def vm_broker_hosts(config: dict) -> list[tuple[str, str]]:
     net = (config.get("vm", {}) or {}).get("network", {}) or {}
     if not isinstance(net, dict):
         return []
-    return [(e.host, e.credential) for e in policy_entries(net) if e.credential]
+    return [(e.host, e.credential) for e in vm_policy_entries(net) if e.credential]
 
 
 def container_broker_hosts(config: dict) -> list[tuple[str, str]]:

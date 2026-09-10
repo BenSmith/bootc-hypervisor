@@ -44,7 +44,7 @@ from egress_ca import RESERVED_GUEST_ENV
 from egress_policy import (
     INSPECT_GUEST_AGENT_KEY,
     POLICY_METHODS, POLICY_METHODS_REFUSED, hostname_match,
-    uses_inspect, uses_resolve,
+    vm_uses_inspect, uses_resolve,
 )
 from nft_constants import (
     NFT_BIN, NFT_SET_ALLOW4, NFT_SET_ALLOW6, NFT_SET_FILTERED, NFT_TABLE,
@@ -962,7 +962,7 @@ def workload_run_files(config) -> list[WorkloadRunFile]:
         # construction -- this whole block is inside `if config.is_vm:`. The
         # container `else` branch below carries its own container_inspects,
         # sourced from container_uses_inspect (P1-7..P1-9).
-        vm_inspects = uses_inspect(config.config)
+        vm_inspects = vm_uses_inspect(config.config)
         files.append(WorkloadRunFile(
             run / f"workload-{name}-inspect.socket", "unit", "inspect-socket",
             vm_inspects,
@@ -1575,7 +1575,7 @@ def validate_container_network(net: dict, config: dict | None = None) -> list[st
 
     # --- [[network.policy]] -- shape + V1-V11 ---
     raw_policy = net.get("policy", [])
-    policy_entries: list[ContainerPolicyEntry] = []
+    vm_policy_entries: list[ContainerPolicyEntry] = []
     if not isinstance(raw_policy, list):
         errors.append(
             f"[network].policy must be an array of [[network.policy]] "
@@ -1698,18 +1698,18 @@ def validate_container_network(net: dict, config: dict | None = None) -> list[st
                         f"authorised here and refused there. Name the exact "
                         f"host this credential belongs to")
 
-        policy_entries.append(ContainerPolicyEntry(
+        vm_policy_entries.append(ContainerPolicyEntry(
             host=host, methods=methods, paths=paths, credential=credential))
 
     # A credential nothing selects.
     for cred in credentials:
-        if not any(e.credential == cred.name for e in policy_entries):
+        if not any(e.credential == cred.name for e in vm_policy_entries):
             errors.append(
                 f"[network].credential: {cred.name!r} is declared but no "
                 f"[[network.policy]] entry selects it, so it is sealed, "
                 f"loaded and attached to nothing")
 
-    policy_hosts = [e.host for e in policy_entries]
+    policy_hosts = [e.host for e in vm_policy_entries]
 
     for host in internal_hosts:
         # V12, deferred until policy_hosts exists: a name in `policy` need
@@ -1724,7 +1724,7 @@ def validate_container_network(net: dict, config: dict | None = None) -> list[st
                 f"the exception is reached. Add it to .hosts, or drop this "
                 f"entry")
 
-    if policy_entries:
+    if vm_policy_entries:
         # V9: tls = "splice" plus any policy entry.
         explicit_tls = container_tls_mode(net)
         if explicit_tls == "splice":
@@ -1739,8 +1739,8 @@ def validate_container_network(net: dict, config: dict | None = None) -> list[st
 
         # V3: where more than one entry matches a host by pattern, every one
         # of those entries must state both `methods` and `paths`.
-        for i, entry in enumerate(policy_entries):
-            siblings = [o for j, o in enumerate(policy_entries)
+        for i, entry in enumerate(vm_policy_entries):
+            siblings = [o for j, o in enumerate(vm_policy_entries)
                        if j != i and patterns_overlap(entry.host, o.host)]
             if not siblings:
                 continue
@@ -1758,9 +1758,9 @@ def validate_container_network(net: dict, config: dict | None = None) -> list[st
         # the apex allowlisted and inspected with no rules applied.
         for apex in hosts:
             wildcard = f"*.{apex}"
-            if not any(e.host.strip().lower() == wildcard.lower() for e in policy_entries):
+            if not any(e.host.strip().lower() == wildcard.lower() for e in vm_policy_entries):
                 continue
-            if any(hostname_match(apex, (e.host,)) for e in policy_entries):
+            if any(hostname_match(apex, (e.host,)) for e in vm_policy_entries):
                 continue
             errors.append(
                 f"[network].policy: {wildcard!r} does not cover the apex "
@@ -1812,7 +1812,7 @@ def validate_container_network(net: dict, config: dict | None = None) -> list[st
     effective_tls = container_effective_tls_mode(net)
     ca_delivery = container_ca_delivery(net)
     ca_mount_path = container_ca_mount_path(net)
-    is_triggered = bool(hosts or policy_entries or net.get("allow"))
+    is_triggered = bool(hosts or vm_policy_entries or net.get("allow"))
     if is_triggered and effective_tls == "inspect":
         if ca_delivery is None:  # V16
             errors.append(
@@ -1877,7 +1877,7 @@ def container_allow_resolved(allow: list) -> list:
 def container_filter_elements(uid: int, allow: list, resolved=None) -> dict:
     """Map set name -> element expressions for one container workload.
 
-    Mirrors filter_elements, but built from ContainerAllowEntry rather
+    Mirrors vm_filter_elements, but built from ContainerAllowEntry rather
     than VmAllowEntry. Reuses the shared set names and the reserved-range
     check (nft_constants.NFT_SET_FILTERED/ALLOW4/ALLOW6,
     vm_network_config.vm_allow_reserved_reason): both substrates share the one
@@ -1918,7 +1918,7 @@ def container_filter_commands(uid: int, allow: list, action: str, resolved=None)
 
 def container_internal_resolve(host: str) -> list:
     """Resolve one [[network.internal]] host, or raise ValueError naming it.
-    Mirrors internal_resolve. Fatal by design (see that function and
+    Mirrors vm_internal_resolve. Fatal by design (see that function and
     workload-vm-inspect's internal_failure): an exemption armed for the wrong
     address, or not armed at all, leaves the host refused by the drop the
     entry existed to except.
@@ -1944,7 +1944,7 @@ def container_internal_resolve(host: str) -> list:
 def container_inspect_policy(net: dict) -> dict:
     """The inspector's policy document for one container workload.
 
-    Same JSON shape as inspect_policy (lib/egress_policy.py) -- D6: the
+    Same JSON shape as vm_inspect_policy (lib/egress_policy.py) -- D6: the
     listener binary (workload-vm-inspect-listener) does not change between
     substrates, so whichever wrote the file, it reads the same keys. `http2`
     is always empty: [[network.http2]] is deferred for containers (§5 of the
@@ -1986,7 +1986,7 @@ def container_inspect_policy(net: dict) -> dict:
 
 def container_inspect_policy_text(net: dict) -> str:
     """The policy document as the exact bytes that land on disk. Mirrors
-    inspect_policy_text -- same formatting, so a future drift/digest
+    vm_inspect_policy_text -- same formatting, so a future drift/digest
     comparison cannot disagree with itself over which substrate rendered the
     file."""
     import json

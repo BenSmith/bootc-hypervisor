@@ -71,7 +71,7 @@ TLS_MODES = ("splice", "inspect")
 TLS_DEFAULT = "inspect"
 
 
-def uses_inspect(config: dict) -> bool:
+def vm_uses_inspect(config: dict) -> bool:
     """Whether this workload's egress is redirected into an inspector.
 
     The single source of the predicate that decides whether the inspect
@@ -191,7 +191,7 @@ INSPECT_ORIG_TLS = INSPECT_ORIG_TLS
 def uses_resolve(config: dict) -> bool:
     """Whether this workload gets a synthesising responder.
 
-    Everything uses_inspect requires (a VM, not bridged, filtered) plus
+    Everything vm_uses_inspect requires (a VM, not bridged, filtered) plus
     `resolver` not being "none". One knob, one meaning, in both places: a
     responder under `egress = "open"` would answer every name with an inspector
     address that nothing redirects to, and one under `resolver = "none"` would
@@ -202,7 +202,7 @@ def uses_resolve(config: dict) -> bool:
     # VM-only, and not an omission: a container resolves through the
     # host/podman resolver rather than a per-workload nameserver, so there is
     # no container analogue to extend this to.
-    if not uses_inspect(config):
+    if not vm_uses_inspect(config):
         return False
     net = (config.get("vm", {}) or {}).get("network", {}) or {}
     return net.get("resolver", "host") != "none"
@@ -270,7 +270,7 @@ class VmPolicyEntry(NamedTuple):
         return True
 
 
-def policy_entries(net: dict) -> list[VmPolicyEntry]:
+def vm_policy_entries(net: dict) -> list[VmPolicyEntry]:
     """The [[vm.network.policy]] entries, normalised, in file order.
 
     Shape-tolerant for the reason internal_hosts is: validate_vm_network
@@ -560,7 +560,7 @@ def inspect_logs_directory(name: str) -> str:
     return str(inspect_record_dir(name).relative_to(LOG_BASE))
 
 
-def inspect_policy(net: dict) -> dict:
+def vm_inspect_policy(net: dict) -> dict:
     """The inspector's policy document for one workload.
 
     `hosts` is `[vm.network].hosts` unchanged.
@@ -631,11 +631,11 @@ def inspect_policy(net: dict) -> dict:
              "methods": None if e.methods is None else list(e.methods),
              "paths": None if e.paths is None else list(e.paths),
              **({"credential": e.credential} if e.credential else {})}
-            for e in policy_entries(net)],
+            for e in vm_policy_entries(net)],
     }
 
 
-def inspect_policy_text(net: dict) -> str:
+def vm_inspect_policy_text(net: dict) -> str:
     """The policy document as the exact bytes that land on disk.
 
     THE ONE RENDERER. `write_policy()` in libexec/workload-vm-inspect writes
@@ -651,7 +651,7 @@ def inspect_policy_text(net: dict) -> str:
     a diff of a file that does not says `\\ No newline at end of file` on
     every hunk.
     """
-    return json.dumps(inspect_policy(net), indent=2, sort_keys=True) + "\n"
+    return json.dumps(vm_inspect_policy(net), indent=2, sort_keys=True) + "\n"
 
 
 # How much of the digest an operator is shown. Twelve hex characters is enough
@@ -685,7 +685,7 @@ INSPECT_GUEST_AGENT_KEY = "guest_agent"
 def inspect_policy_digest(text: str) -> str:
     """The digest of one rendered policy document.
 
-    THE ONE PRODUCER, for the same reason inspect_policy_text is: the
+    THE ONE PRODUCER, for the same reason vm_inspect_policy_text is: the
     listener digests the bytes it loaded and `diagnose` digests the bytes on
     disk, and the two are compared for equality. A hashlib call at each end
     would be two definitions of that comparison, and the failure mode of a
@@ -708,7 +708,7 @@ def inspect_digest_short(digest: str | None) -> str:
 def internal_hosts(net: dict) -> list[str]:
     """The host names in [[vm.network.internal]], in file order.
 
-    Shape-tolerant, while internal_resolve two functions down is fatal on
+    Shape-tolerant, while vm_internal_resolve two functions down is fatal on
     the same key at the same moment. The two are not in tension, and the
     difference is which question is still open at start.
 

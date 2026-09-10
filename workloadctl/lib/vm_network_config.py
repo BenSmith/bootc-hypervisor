@@ -3,7 +3,7 @@
 
 Split out of vm.py, where it was the last 1,800 lines -- BELOW every renderer
 that consumes it. That inversion is the reason for the cut, not the size: a
-reader following `inspect_policy` down to see what a policy entry is had to
+reader following `vm_inspect_policy` down to see what a policy entry is had to
 scroll a thousand lines PAST it, and a validator added near its neighbours
 here sat further from the constant it enforces than from code it has nothing
 to do with.
@@ -32,7 +32,7 @@ from egress_policy import (INSPECT_ORIG_CLEARTEXT, INSPECT_ORIG_TLS,
                            POLICY_METHODS, POLICY_METHODS_REFUSED,
                            TLS_DEFAULT, TLS_MODES, VmPolicyEntry,
                            hostname_match, normalise_hostname,
-                           policy_entries, policy_governs)
+                           vm_policy_entries, policy_governs)
 from workload_addr import (INSPECT_ADDR6_PREFIX, INSPECT_NETWORK,
                            RESOLVE_POLICY_FILE, RESOLVE_TTL,
                            inspect_address, reserved_range)
@@ -234,12 +234,12 @@ def parse_vm_allow(entry, *, filtered: bool = True) -> VmAllowEntry:
 
     # Checked here rather than beside the schema, because this is the single
     # funnel every allow entry passes through: `_validate_egress` calls it for
-    # the operator-facing error and `filter_elements` calls it on the arming
+    # the operator-facing error and `vm_filter_elements` calls it on the arming
     # path, so the refusal cannot be reached around by a config that never met
     # validation. The design asks for it "in the helper as well as the schema";
     # one funnel is how both get it without two copies that can drift.
     #
-    # The name form is checked where it is resolved (filter_elements), not
+    # The name form is checked where it is resolved (vm_filter_elements), not
     # here: this function deliberately does not resolve.
     if addr is not None:
         reserved = vm_allow_reserved_reason(addr)
@@ -283,9 +283,9 @@ def vm_allow_resolved(allow):
     "works until it doesn't" failure the both-families-or-neither rule exists to
     stop.
 
-    It is a function of its own rather than a loop inside filter_elements
+    It is a function of its own rather than a loop inside vm_filter_elements
     because two consumers need the SAME answer -- the nftables elements and the
-    responder's static map. See filter_elements for what a second resolution
+    responder's static map. See vm_filter_elements for what a second resolution
     costs.
     """
     out = []
@@ -321,7 +321,7 @@ def vm_resolve_policy(net: dict, uid: int, resolved=None) -> dict:
     `hosts` and `allow` is therefore legal.
 
     Addresses come from `resolved` when the caller has one, so the map holds the
-    addresses that were ARMED -- see filter_elements for why a second
+    addresses that were ARMED -- see vm_filter_elements for why a second
     resolution is a different question.
 
     `hosts` changes NO answer this responder gives. Synthesis is unconditional
@@ -365,7 +365,7 @@ def vm_resolve_policy(net: dict, uid: int, resolved=None) -> dict:
         "ttl": RESOLVE_TTL,
         "static": static,
         "hosts": vm_allowed_hosts(net),
-        "policy": [e.host for e in policy_entries(net)],
+        "policy": [e.host for e in vm_policy_entries(net)],
     }
 
 
@@ -1099,10 +1099,10 @@ def _validate_egress(net: dict) -> list[str]:
     credentials, credential_errors = _validate_credentials(net)
     errors.extend(credential_errors)
 
-    policy_entries, policy_errors = _validate_policy(
+    vm_policy_entries, policy_errors = _validate_policy(
         net, splice_hosts, http2_hosts, egress, tls, credentials)
     errors.extend(policy_errors)
-    policy_hosts = [e.host for e in policy_entries]
+    policy_hosts = [e.host for e in vm_policy_entries]
 
     # §3's apex trap, for both keys that can fall into it, with the consequence
     # each one actually produces. They are not the same failure: a spliced apex

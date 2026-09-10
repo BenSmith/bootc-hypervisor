@@ -33,7 +33,7 @@ from vm_network_config import vm_allow_reserved_reason, vm_allow_resolved
 from workload_addr import inspect_address
 
 
-def filter_elements(uid: int, allow: list[str],
+def vm_filter_elements(uid: int, allow: list[str],
                        resolved=None) -> dict[str, list[str]]:
     """Map set name -> element expressions for one workload.
 
@@ -246,7 +246,7 @@ def internal_ok_elements(
     workload-filter.nft. Read them together or the missing port reads as an
     oversight.
 
-    Returns only non-empty sets, like filter_elements, so a caller emits one
+    Returns only non-empty sets, like vm_filter_elements, so a caller emits one
     command per family that has entries.
     """
     exempt = []
@@ -322,7 +322,7 @@ def internal_ok_delete_commands(set_name: str,
              "{ " + ", ".join(entries) + " }"]]
 
 
-def internal_resolve(host: str) -> list[ipaddress.IPv4Address | ipaddress.IPv6Address]:
+def vm_internal_resolve(host: str) -> list[ipaddress.IPv4Address | ipaddress.IPv6Address]:
     """Resolve one `internal` host, or raise ValueError naming it.
 
     Separate from vm_allow_resolve despite the identical mechanics, because the
@@ -421,7 +421,7 @@ def vm_filter_commands(uid: int, allow: list[str], action: str,
         raise ValueError(f"action must be 'add' or 'delete', got {action!r}")
     table = NFT_TABLE.split()
     commands = []
-    for set_name, entries in filter_elements(uid, allow, resolved).items():
+    for set_name, entries in vm_filter_elements(uid, allow, resolved).items():
         commands.append([NFT_BIN, action, "element", *table, set_name,
                          "{ " + ", ".join(entries) + " }"])
     return commands

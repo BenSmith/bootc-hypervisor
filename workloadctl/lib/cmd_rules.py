@@ -54,8 +54,8 @@ from config_parser import container_uses_inspect
 from workload_lib import container_inspect_policy
 from egress_policy import (
     TLS_DEFAULT, TLS_MODES, VmPolicyEntry, hostname_match,
-    inspect_policy, inspect_policy_path, policy_governs,
-    uses_inspect,
+    vm_inspect_policy, inspect_policy_path, policy_governs,
+    vm_uses_inspect,
 )
 
 # The fnmatch metacharacters. A name carrying any of them names no host, so it
@@ -67,7 +67,7 @@ _WILDCARD_CHARS = "*?["
 
 # The keys of the policy document whose values are host patterns, and the label
 # each gets in the report. Driven by a table rather than by four hand-written
-# blocks so that a key added to inspect_policy() and not to this one shows up
+# blocks so that a key added to vm_inspect_policy() and not to this one shows up
 # as an absent column rather than as a silently narrower report.
 _PATTERN_KEYS = (
     ("hosts", "hosts"),
@@ -141,7 +141,7 @@ def load_document(name: str, config) -> tuple:
         and it is the one that can differ from the TOML.
       * "config" -- rendered here from the TOML for a workload that has not
         started this boot, through that substrate's own renderer:
-        `[vm.network]` via inspect_policy, `[network]` via
+        `[vm.network]` via vm_inspect_policy, `[network]` via
         container_inspect_policy. A stopped workload has no document on
         either substrate, and that is its ordinary state, not a fault --
         `drift` makes the same distinction and for the same reason.
@@ -163,7 +163,7 @@ def load_document(name: str, config) -> tuple:
             net = config.config.get("network") or {}
             return container_inspect_policy(net), "config", None
         net = (config.config.get("vm") or {}).get("network") or {}
-        return inspect_policy(net), "config", None
+        return vm_inspect_policy(net), "config", None
     except PermissionError:
         # The remedy, not just the errno. The document is 0640 root:_wl-<name>
         # by write_policy(), so an operator who is neither is refused -- and a
@@ -437,7 +437,7 @@ def cmd_rules(args, manager):
     # Both substrates reach the reader, each rendering through its own
     # renderer (see load_document). Routing this gate without that split
     # reports an effective `tls` the workload does not have.
-    if not (uses_inspect(config.config)
+    if not (vm_uses_inspect(config.config)
             or container_uses_inspect(config.config)):
         cli_log.error(
             f"{workload} has no inspected egress, so there is no policy "

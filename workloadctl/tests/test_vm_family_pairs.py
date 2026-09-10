@@ -239,7 +239,7 @@ class TestSplitByFamily(unittest.TestCase):
     def test_the_allowlist_splits_and_keeps_the_family_agnostic_set(self):
         """wl_filtered carries the bare uid and belongs to neither family:
         "is this workload under policy at all?" has one answer."""
-        elements = vm.filter_elements(
+        elements = vm.vm_filter_elements(
             UID, [], resolved=[
                 (_entry(443), [ipaddress.ip_address("93.184.216.34"),
                                ipaddress.ip_address("2606:2800::1")])])
@@ -248,7 +248,7 @@ class TestSplitByFamily(unittest.TestCase):
         self.assertIn("2606:2800::1", " ".join(elements[NFT_PAIR_ALLOW.v6]))
 
     def test_a_v4_only_allowlist_emits_no_v6_set(self):
-        elements = vm.filter_elements(
+        elements = vm.vm_filter_elements(
             UID, [], resolved=[
                 (_entry(443), [ipaddress.ip_address("93.184.216.34")])])
         self.assertNotIn(NFT_PAIR_ALLOW.v6, elements)

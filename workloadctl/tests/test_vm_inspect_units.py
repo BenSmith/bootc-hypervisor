@@ -19,7 +19,7 @@ import unittest
 import unittest.mock
 
 from egress_policy import (
-    INSPECT_PORT_CLEARTEXT, INSPECT_PORT_TLS, uses_inspect,
+    INSPECT_PORT_CLEARTEXT, INSPECT_PORT_TLS, vm_uses_inspect,
 )
 from vm import (
     inspect_cgroup, inspect_cgroup_command,
@@ -42,16 +42,16 @@ def _config(net):
 
 
 class TestPredicate(unittest.TestCase):
-    """uses_inspect: not bridged, egress filtered."""
+    """vm_uses_inspect: not bridged, egress filtered."""
 
     def test_filtered_default_applies(self):
-        self.assertTrue(uses_inspect(net_config()))
+        self.assertTrue(vm_uses_inspect(net_config()))
 
     def test_filtered_explicit_applies(self):
-        self.assertTrue(uses_inspect(net_config(egress="filtered")))
+        self.assertTrue(vm_uses_inspect(net_config(egress="filtered")))
 
     def test_open_egress_does_not_apply(self):
-        self.assertFalse(uses_inspect(net_config(egress="open")))
+        self.assertFalse(vm_uses_inspect(net_config(egress="open")))
 
     def test_a_container_workload_is_not_inspected(self):
         """The predicate has to be right standing alone.
@@ -61,19 +61,19 @@ class TestPredicate(unittest.TestCase):
         as the single source of a decision that is wrong for a config shape it
         happily accepts is a bug waiting for its next caller.
         """
-        self.assertFalse(uses_inspect({"workload": {"name": "x"},
+        self.assertFalse(vm_uses_inspect({"workload": {"name": "x"},
                                           "container": {"image": "y"}}))
-        self.assertFalse(uses_inspect({}))
+        self.assertFalse(vm_uses_inspect({}))
 
     def test_a_bridged_vm_never_applies(self):
         self.assertFalse(
-            uses_inspect(net_config(bridge="br0", egress="filtered")))
+            vm_uses_inspect(net_config(bridge="br0", egress="filtered")))
 
     def test_default_egress_is_filtered(self):
         """VM_EGRESS_DEFAULT is filtered, so a VM whose network sets no egress
         is inspected — the default-deny posture, not an opt-in."""
         self.assertEqual(VM_EGRESS_DEFAULT, "filtered")
-        self.assertTrue(uses_inspect(net_config()))
+        self.assertTrue(vm_uses_inspect(net_config()))
 
 
 class TestGeneratedSocket(unittest.TestCase):
@@ -455,7 +455,7 @@ class TestGeneratorWiring(unittest.TestCase):
         # can actually be measured.
 
     def _predicate(self, net):
-        return self.gen.uses_inspect(_config(net))
+        return self.gen.vm_uses_inspect(_config(net))
 
     def _vm_unit_requires(self, net):
         """The VM unit's Requires= line, or None if it carries none."""

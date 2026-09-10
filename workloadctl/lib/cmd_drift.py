@@ -16,7 +16,7 @@ import tomllib
 from pathlib import Path
 
 from egress_policy import (
-    INSPECT_POLICY_FILE, inspect_policy_text, uses_inspect,
+    INSPECT_POLICY_FILE, vm_inspect_policy_text, vm_uses_inspect,
 )
 from vm_defs import VM_SOCKET_DIR
 from config_parser import container_uses_inspect
@@ -200,9 +200,9 @@ def _rendered_policy(name: str) -> str:
     # so it would read as a whole file removed.
     if container_uses_inspect(config):
         return container_inspect_policy_text(config.get("network", {}) or {})
-    if not uses_inspect(config):
+    if not vm_uses_inspect(config):
         return ""
-    return inspect_policy_text(config.get("vm", {}).get("network", {}) or {})
+    return vm_inspect_policy_text(config.get("vm", {}).get("network", {}) or {})
 
 
 def collect_policy_drift(workload_name=None) -> list:

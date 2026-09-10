@@ -40,7 +40,7 @@ by the rule that stops the workload reaching the LAN.
 G18: inspection_applies() delegates to container_uses_inspect(), the single
 source of the predicate the generator's run-file list (P1-9) must agree
 with -- the same reason workload-vm-inspect's inspection_applies delegates to
-uses_inspect() for the VM side.
+vm_uses_inspect() for the VM side.
 
 EXIT CODES: same convention as workload-vm-inspect. `up` fails loudly, `down`
 is tolerant.

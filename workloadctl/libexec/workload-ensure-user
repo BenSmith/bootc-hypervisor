@@ -19,7 +19,7 @@ from workload_lib import (
     load_workload_config, workload_config_path,
     workload_username, infer_workload_kind,
 )
-from egress_policy import uses_inspect
+from egress_policy import vm_uses_inspect
 from vm_defs import VM_SEED_CONTRACT_EXIT, SeedContractError
 import ensure_common
 from ensure_common import (
@@ -293,7 +293,7 @@ def _ensure_user(name: str) -> int:
         # construction -- this is inside `if kind == "vm":`. Per-workload
         # egress CA generation for containers is P1-10, in the container
         # branch below this one.
-        if uses_inspect(config):
+        if vm_uses_inspect(config):
             try:
                 generate_egress_ca(pw, name)
             except Exception as e:

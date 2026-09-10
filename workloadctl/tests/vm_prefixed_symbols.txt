@@ -11,6 +11,14 @@
 # every consumer outside its own module is on a path only a VM takes, and
 # RENAME otherwise. Two consequences that are easy to get backwards:
 #
+#   * A container_ TWIN OUTRANKS ALL OF THIS. If container_<stem> exists,
+#     the prefix is not a leftover -- it is what tells two substrate variants
+#     of one operation apart, and stripping one of the pair leaves
+#     `uses_inspect` beside `container_uses_inspect`, reading as a generic and
+#     its specialisation. That is this file's own defect with the sign
+#     flipped. Six symbols were renamed and reverted before anyone noticed, so
+#     the ratchet now FAILS on a RENAME verdict for any symbol with a twin
+#     rather than leaving the rule to a reader.
 #   * A vm-named FILE is not evidence either. generators/workload-generate
 #     calls gen_vm's generate_vm_inspect_service, generate_vm_inspect_socket
 #     and generate_vm_broker_service for CONTAINERS -- the arming helper is
@@ -39,7 +47,20 @@
 # real hosts already have the path: workload_addr.VM_INSPECT_LISTENER_BIN and
 # vm_defs.VM_SOCKET_DIR. Rename the constant, never what it holds.
 
-# KEEP -- the prefix is accurate: 24 symbols.
+# KEEP -- the prefix is accurate: 37 symbols.
+KEEP	broker_config.vm_broker_hosts
+KEEP	broker_config.vm_broker_upstream_addresses
+KEEP	broker_config.vm_credential_entries
+KEEP	broker_config.vm_uses_credentials
+KEEP	egress_policy.vm_inspect_policy
+KEEP	egress_policy.vm_inspect_policy_text
+KEEP	egress_policy.vm_policy_entries
+KEEP	egress_policy.vm_uses_inspect
+KEEP	vm.vm_filter_elements
+KEEP	vm.vm_internal_resolve
+KEEP	vm_defs.vm_allowed_hosts
+KEEP	vm_network_config.vm_allow_resolve
+KEEP	vm_network_config.vm_allow_resolved
 KEEP	egress_ca.VM_CA_BUNDLE_AVAILABLE
 KEEP	egress_ca.vm_ca_env
 KEEP	broker_config.vm_credential_env
@@ -73,14 +94,10 @@ RENAME	broker_config.VM_BROKER_RUNTIME_SUBDIR
 RENAME	broker_config.vm_broker_config_dir
 RENAME	broker_config.vm_broker_config_path
 RENAME	broker_config.vm_broker_credential
-RENAME	broker_config.vm_broker_hosts
 RENAME	broker_config.vm_broker_runtime_directory
-RENAME	broker_config.vm_broker_upstream_addresses
-RENAME	broker_config.vm_credential_entries
 RENAME	broker_config.vm_host_resolver_addresses
 RENAME	broker_config.vm_inspect_link_address_commands
 RENAME	broker_config.vm_inspect_link_delete_commands
-RENAME	broker_config.vm_uses_credentials
 RENAME	cmd_diagnose.vm_confinement_check
 RENAME	cmd_diagnose.vm_egress_check
 RENAME	cmd_diagnose.vm_inspect_check
@@ -130,7 +147,6 @@ RENAME	vm_defs.VM_SEED_CONTRACT_EXIT
 RENAME	vm_defs.VM_SIDECAR_SLICE
 RENAME	vm_defs.VM_SOCKET_DIR
 RENAME	vm_defs.VM_TLS_UNBUILT
-RENAME	vm_defs.vm_allowed_hosts
 RENAME	vm_defs.vm_mac_address
 RENAME	vm_defs.vm_mac_collisions
 RENAME	vm_defs.vm_runtime_dir
@@ -140,8 +156,6 @@ RENAME	vm_network_config.VM_BROKER_DEFAULT_AUTH_FORMAT
 RENAME	vm_network_config.VM_BROKER_DEFAULT_AUTH_HEADER
 RENAME	vm_network_config.VM_NETWORK_SCALARS
 RENAME	vm_network_config.vm_allow_reserved_reason
-RENAME	vm_network_config.vm_allow_resolve
-RENAME	vm_network_config.vm_allow_resolved
 RENAME	vm_network_config.vm_network_warnings
 RENAME	vm_network_config.vm_policy_permits
 RENAME	vm_network_config.vm_resolve_policy_path

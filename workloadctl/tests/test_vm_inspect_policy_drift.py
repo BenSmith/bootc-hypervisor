@@ -12,7 +12,7 @@ policy — the state detail §7.7 names, and the one nothing could see before.
 Two properties carry the whole unit:
 
 * the comparison is a BYTE comparison, so there is exactly one renderer
-  (`inspect_policy_text`) and `write_policy` writes what it returns; and
+  (`vm_inspect_policy_text`) and `write_policy` writes what it returns; and
 * the scan is driven by what is on disk, so a stopped workload with no document
   is not drift while a document whose workload is gone is.
 
@@ -30,7 +30,7 @@ from pathlib import Path
 from unittest import mock
 
 import cmd_drift  # noqa: E402
-from egress_policy import inspect_policy, inspect_policy_text
+from egress_policy import vm_inspect_policy, vm_inspect_policy_text
 from workload_lib import container_inspect_policy_text  # noqa: E402
 
 from tests import load_script
@@ -74,18 +74,18 @@ class TestThereIsOneRenderer(unittest.TestCase):
 
     def test_the_text_is_the_document_json_encoded(self):
         net = {"hosts": ["b.example.com", "a.example.com"], "tls": "inspect"}
-        text = inspect_policy_text(net)
-        self.assertEqual(json.loads(text), inspect_policy(net))
+        text = vm_inspect_policy_text(net)
+        self.assertEqual(json.loads(text), vm_inspect_policy(net))
 
     def test_the_text_ends_in_a_newline(self):
         # A text file ends in one; without it every hunk of the drift diff
         # carries "\\ No newline at end of file".
-        self.assertTrue(inspect_policy_text({}).endswith("\n"))
+        self.assertTrue(vm_inspect_policy_text({}).endswith("\n"))
 
     def test_the_keys_are_sorted(self):
         # The document has to be a pure function of the TOML, and dict order
         # is not. Finding 1 of the rung plan rests on this.
-        text = inspect_policy_text({"hosts": ["a"]})
+        text = vm_inspect_policy_text({"hosts": ["a"]})
         keys = [line.split('"')[1] for line in text.splitlines()
                 if line.startswith('  "')]
         self.assertEqual(keys, sorted(keys))
@@ -103,7 +103,7 @@ class TestThereIsOneRenderer(unittest.TestCase):
                  mock.patch.object(self.mod.pwd, "getpwnam",
                                    lambda _n: mock.Mock(pw_gid=10000)):
                 self.mod.write_policy("demo")
-            self.assertEqual(Path(path).read_text(), inspect_policy_text(net))
+            self.assertEqual(Path(path).read_text(), vm_inspect_policy_text(net))
 
 
 class _PolicyDriftCase(unittest.TestCase):
@@ -135,7 +135,7 @@ class _PolicyDriftCase(unittest.TestCase):
             import tomllib
             with open(self.cfg / name / "workload.toml", "rb") as f:
                 net = tomllib.load(f)["vm"]["network"]
-            text = inspect_policy_text(net)
+            text = vm_inspect_policy_text(net)
         (d / "inspect.json").write_text(text)
         return d / "inspect.json"
 

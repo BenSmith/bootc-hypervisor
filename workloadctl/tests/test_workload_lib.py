@@ -2931,7 +2931,7 @@ class TestContainerFilterElements(unittest.TestCase):
 
 class TestContainerInspectPolicy(unittest.TestCase):
     """P1-9: the JSON document workload-container-inspect writes for the
-    (substrate-generic) listener to read -- same shape inspect_policy
+    (substrate-generic) listener to read -- same shape vm_inspect_policy
     produces, per D6."""
 
     def test_shape_matches_listener_expectations(self):
@@ -2988,7 +2988,7 @@ class TestContainerInspectPolicy(unittest.TestCase):
         """
         import egress_policy
         self.assertNotIn("guest_agent",
-                         egress_policy.inspect_policy({"hosts": ["a.com"]}))
+                         egress_policy.vm_inspect_policy({"hosts": ["a.com"]}))
 
 
 if __name__ == "__main__":

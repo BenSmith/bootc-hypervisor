@@ -684,7 +684,7 @@ POLICY_DOC = {
     # and the 200 it gets below is the only proof of that composition rule.
     "hosts": [PLAIN, OTHER, SPLICED, H2, H1ONLY],
     # PATTERN STRINGS, not tables. `reason` is a schema key that never reaches
-    # the document -- inspect_policy carries `splice_hosts(net)`, which is
+    # the document -- vm_inspect_policy carries `splice_hosts(net)`, which is
     # the patterns alone. Writing the schema's shape here instead cost a run:
     # load_policy checks that these are LISTS but not what is in them, so a
     # table reached normalise_hostname and took the connection thread down
