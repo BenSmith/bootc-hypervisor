@@ -2,7 +2,7 @@
 """The inspector check is actually emitted by the battery.
 
 A check function that is never called is worse than no check: it passes its own
-unit tests, reads as coverage, and reports nothing. `vm_inspect_check` could be
+unit tests, reads as coverage, and reports nothing. `inspect_check` could be
 deleted from collect_diagnose_checks' body and every other test in the suite
 stays green — verified by mutation, which is why this file exists.
 
@@ -129,7 +129,7 @@ class InspectCheckIsWiredTests(unittest.TestCase):
     def test_a_filtered_container_gets_an_inspector_line(self):
         """G7's routing, asserted where it can actually go wrong.
 
-        vm_inspect_check() became substrate-aware in one commit and was
+        inspect_check() became substrate-aware in one commit and was
         hoisted out of `if config.is_vm:` in the same one. Either half alone
         is inert and the whole suite stays green: the check's substrate
         wording is unreachable behind the gate, and the hoist reports nothing

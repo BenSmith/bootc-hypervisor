@@ -32,7 +32,7 @@ from nft_constants import (
     NFT_SET_INSPECT_LIVE6, NFT_SET_EGRESS_CG, NFT_TABLE,
 )
 from vm_defs import vm_allowed_hosts, runtime_dir
-from vm_network_config import vm_policy_permits
+from vm_network_config import policy_permits
 from workload_addr import IP_BIN, ADVERTISED_IFACE
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -517,8 +517,8 @@ class TestPolicyComposition(unittest.TestCase):
                                  "paths": ["/repos/myorg/*"]})
         self.assertTrue(policy_governs("api.github.com", entries))
         self.assertFalse(
-            vm_policy_permits("api.github.com", "GET", "/user", entries))
-        self.assertTrue(vm_policy_permits(
+            policy_permits("api.github.com", "GET", "/user", entries))
+        self.assertTrue(policy_permits(
             "api.github.com", "GET", "/repos/myorg/thing", entries))
 
     def test_a_host_no_entry_matches_is_governed_by_nothing(self):
@@ -534,11 +534,11 @@ class TestPolicyComposition(unittest.TestCase):
         for method in ("GET", "POST"):
             for path in ("/v2/x", "/token"):
                 self.assertTrue(
-                    vm_policy_permits("r.example", method, path, entries),
+                    policy_permits("r.example", method, path, entries),
                     (method, path))
-        self.assertFalse(vm_policy_permits("r.example", "DELETE", "/token",
+        self.assertFalse(policy_permits("r.example", "DELETE", "/token",
                                            entries))
-        self.assertFalse(vm_policy_permits("r.example", "GET", "/other",
+        self.assertFalse(policy_permits("r.example", "GET", "/other",
                                            entries))
 
     def test_entries_union_so_reordering_cannot_change_what_is_allowed(self):
@@ -551,11 +551,11 @@ class TestPolicyComposition(unittest.TestCase):
              "paths": ["/v1/models", "/v1/models/*"]}
         for order in ((a, b), (b, a)):
             entries = self._entries(*order)
-            self.assertTrue(vm_policy_permits(
+            self.assertTrue(policy_permits(
                 "api.example.com", "POST", "/v1/messages", entries))
-            self.assertTrue(vm_policy_permits(
+            self.assertTrue(policy_permits(
                 "api.example.com", "GET", "/v1/models/x", entries))
-            self.assertFalse(vm_policy_permits(
+            self.assertFalse(policy_permits(
                 "api.example.com", "POST", "/v1/models", entries))
 
     def test_there_is_no_way_to_subtract(self):
@@ -566,7 +566,7 @@ class TestPolicyComposition(unittest.TestCase):
             {"host": "a.example", "methods": ["GET"], "paths": ["/v1/*"]},
             {"host": "a.example", "methods": ["GET"], "paths": ["/v1/public"]})
         self.assertTrue(
-            vm_policy_permits("a.example", "GET", "/v1/admin", entries))
+            policy_permits("a.example", "GET", "/v1/admin", entries))
 
     def test_host_patterns_union_too(self):
         """A specific entry does NOT override a general one -- the apex trap's
@@ -577,7 +577,7 @@ class TestPolicyComposition(unittest.TestCase):
             {"host": "api.example.com", "methods": ["POST"],
              "paths": ["/v1/messages"]})
         self.assertEqual(len(policy_governs("api.example.com", entries)), 2)
-        self.assertTrue(vm_policy_permits(
+        self.assertTrue(policy_permits(
             "api.example.com", "GET", "/anything", entries))
 
     def test_case_sensitivity_is_per_field_and_paths_are_the_odd_one_out(self):
@@ -601,11 +601,11 @@ class TestPolicyComposition(unittest.TestCase):
         """
         entries = self._entries({"host": "api.example.com",
                                  "methods": ["GET"], "paths": ["/v1/*"]})
-        self.assertTrue(vm_policy_permits(
+        self.assertTrue(policy_permits(
             "API.Example.COM", "get", "/v1/models", entries))
-        self.assertTrue(vm_policy_permits(
+        self.assertTrue(policy_permits(
             "api.example.com.", "GET", "/v1/models", entries))
-        self.assertFalse(vm_policy_permits(
+        self.assertFalse(policy_permits(
             "api.example.com", "GET", "/V1/models", entries))
 
     def test_an_absent_key_means_any_and_an_empty_one_would_mean_none(self):
@@ -617,7 +617,7 @@ class TestPolicyComposition(unittest.TestCase):
         self.assertIsNone(entry.methods)
         self.assertIsNone(entry.paths)
         self.assertTrue(
-            vm_policy_permits("a.example", "DELETE", "/anything", [entry]))
+            policy_permits("a.example", "DELETE", "/anything", [entry]))
 
     def test_the_document_carries_absent_keys_as_null(self):
         """JSON has a word for the difference, so the document uses it rather

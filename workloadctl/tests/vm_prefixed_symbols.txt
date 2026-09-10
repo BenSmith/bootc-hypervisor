@@ -47,7 +47,18 @@
 # real hosts already have the path: workload_addr.VM_INSPECT_LISTENER_BIN and
 # vm_defs.VM_SOCKET_DIR. Rename the constant, never what it holds.
 
-# KEEP -- the prefix is accurate: 47 symbols.
+# KEEP -- the prefix is accurate: 58 symbols.
+KEEP	vm_network_config.VM_ALLOW_ADDR_RE
+KEEP	vm_network_config.VM_ALLOW_NAME_RE
+KEEP	vm_network_config.VM_NETWORK_SCALARS
+KEEP	vm_network_config.vm_network_warnings
+KEEP	vm_network_config.vm_resolve_policy_path
+KEEP	cmd_diagnose.vm_confinement_check
+KEEP	cmd_diagnose.vm_egress_check
+KEEP	cmd_diagnose.vm_network_check
+KEEP	cmd_diagnose.vm_provisioning_check
+KEEP	cmd_diagnose.vm_resolve_check
+KEEP	cmd_diagnose.vm_socket_dir_selinux_check
 KEEP	egress_selinux.VM_QEMU_CONTEXT
 KEEP	egress_selinux.VM_QEMU_TYPE
 KEEP	egress_selinux.VM_RESOLVE_SELINUX_CIL
@@ -97,13 +108,6 @@ KEEP	vm_ptp.vm_ptp_kvm_seed_files
 KEEP	workload_addr.VM_RESOLVE_LISTENER_BIN
 
 # RENAME -- shared, and the prefix misleads: 202 symbols.
-RENAME	cmd_diagnose.vm_confinement_check
-RENAME	cmd_diagnose.vm_egress_check
-RENAME	cmd_diagnose.vm_inspect_check
-RENAME	cmd_diagnose.vm_network_check
-RENAME	cmd_diagnose.vm_provisioning_check
-RENAME	cmd_diagnose.vm_resolve_check
-RENAME	cmd_diagnose.vm_socket_dir_selinux_check
 RENAME	egress_policy.VM_DROP_BROKER_UNREACHABLE
 RENAME	egress_policy.VM_DROP_CEILING
 RENAME	egress_policy.VM_DROP_CLIENT_CERT
@@ -125,13 +129,4 @@ RENAME	egress_policy.VM_DROP_UNREACHABLE
 RENAME	egress_policy.VM_DROP_UNREADABLE_REQUEST
 RENAME	egress_policy.VM_DROP_UNVERIFIED
 RENAME	vm_defs.VM_SOCKET_DIR
-RENAME	vm_network_config.VM_ALLOW_ADDR_RE
-RENAME	vm_network_config.VM_ALLOW_NAME_RE
-RENAME	vm_network_config.VM_BROKER_DEFAULT_AUTH_FORMAT
-RENAME	vm_network_config.VM_BROKER_DEFAULT_AUTH_HEADER
-RENAME	vm_network_config.VM_NETWORK_SCALARS
-RENAME	vm_network_config.vm_allow_reserved_reason
-RENAME	vm_network_config.vm_network_warnings
-RENAME	vm_network_config.vm_policy_permits
-RENAME	vm_network_config.vm_resolve_policy_path
 RENAME	workload_addr.VM_INSPECT_LISTENER_BIN

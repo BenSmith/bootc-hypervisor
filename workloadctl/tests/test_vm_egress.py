@@ -30,7 +30,7 @@ from nft_constants import (
     NFT_SET_INSPECT_LIVE, NFT_SET_INSPECT_LIVE6, NFT_SET_INTERNAL4,
     NFT_SET_INTERNAL6, NFT_SET_EGRESS_CG, NFT_SKELETON,
 )
-from vm_network_config import parse_vm_allow, vm_allow_reserved_reason
+from vm_network_config import parse_vm_allow, allow_reserved_reason
 from workload_addr import (UID_MAX, UID_MIN, INSPECT_ADDR6_PREFIX,
                            INSPECT_NETWORK, inspect_address,
                            resolve_address)
@@ -1527,22 +1527,22 @@ class TestInspectDiagnose(unittest.TestCase):
         # reads as "none of them could be read", which is the silent branch and
         # the right default for every test that is not about them.
         kw.setdefault("filter_sets", {})
-        return self.mod.vm_inspect_check(self._config(tls=tls), **kw)
+        return self.mod.inspect_check(self._config(tls=tls), **kw)
 
     # --- applicability ---
 
     def test_a_container_gets_no_line(self):
         cfg = self._config(is_vm=False)
-        self.assertIsNone(self.mod.vm_inspect_check(cfg))
+        self.assertIsNone(self.mod.inspect_check(cfg))
 
     def test_a_bridged_vm_gets_no_line(self):
         # No host socket in the data path, so there is no uid to key on.
         cfg = self._config(bridge="br0")
-        self.assertIsNone(self.mod.vm_inspect_check(cfg))
+        self.assertIsNone(self.mod.inspect_check(cfg))
 
     def test_an_unfiltered_vm_gets_no_line(self):
         cfg = self._config(egress="unfiltered")
-        self.assertIsNone(self.mod.vm_inspect_check(cfg))
+        self.assertIsNone(self.mod.inspect_check(cfg))
 
     # --- verdicts ---
 
@@ -1632,7 +1632,7 @@ class TestInspectDiagnose(unittest.TestCase):
             def uid(self):
                 raise KeyError("_wl-vm1")
 
-        self.assertIsNone(self.mod.vm_inspect_check(NoUser()))
+        self.assertIsNone(self.mod.inspect_check(NoUser()))
 
     def test_the_socket_probe_unpacks_what_service_active_returns(self):
         """The uninjected path, which every test above skips.
@@ -1978,9 +1978,9 @@ class TestAllowMayNotNameTheListenerRange(unittest.TestCase):
 
     def test_the_reason_helper_answers_none_for_a_public_address(self):
         self.assertIsNone(
-            vm_allow_reserved_reason(ipaddress.ip_address("93.184.216.34")))
+            allow_reserved_reason(ipaddress.ip_address("93.184.216.34")))
         self.assertIsNone(
-            vm_allow_reserved_reason(ipaddress.ip_address("2606:2800::1")))
+            allow_reserved_reason(ipaddress.ip_address("2606:2800::1")))
 
     def test_a_v4_address_does_not_refuse_the_v6_family_and_back(self):
         """Each family is judged against its own range.
@@ -1990,9 +1990,9 @@ class TestAllowMayNotNameTheListenerRange(unittest.TestCase):
         everything and read as a passing test.
         """
         self.assertIsNone(
-            vm_allow_reserved_reason(ipaddress.ip_address("2001:db8::1")))
+            allow_reserved_reason(ipaddress.ip_address("2001:db8::1")))
         self.assertIsNotNone(
-            vm_allow_reserved_reason(ipaddress.ip_address("198.18.1.0")))
+            allow_reserved_reason(ipaddress.ip_address("198.18.1.0")))
 
 
 class TestListenerRangeRefusalReachesBothPaths(unittest.TestCase):
@@ -2162,7 +2162,7 @@ class TestSelfDialCounterIsReported(unittest.TestCase):
             vm_network={"egress": "filtered"},
             config={"vm": {"network": {"egress": "filtered"}}}, is_vm=True)
         elems = [{"concat": [10001, 80]}, {"concat": [10001, 443]}]
-        return self.mod.vm_inspect_check(
+        return self.mod.inspect_check(
             cfg, elements4=elems, elements6=elems, socket_active=True,
             v6_route=True, self_dials=self_dials, filter_sets={})
 

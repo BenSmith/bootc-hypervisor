@@ -2,7 +2,7 @@
 """`diagnose`'s reading of the four inspect elements nothing read until rung 5.
 
 `inspect_element_commands` arms SIX objects across two tables. Until this
-tier `vm_inspect_check` read two of them -- the DNAT maps -- and a workload
+tier `inspect_check` read two of them -- the DNAT maps -- and a workload
 missing an accept element rendered as `egress inspected on both families`,
 green, while the guest's HTTP and HTTPS died and its DNS and SSH kept working.
 The docstring on the arming helper already named that state; nothing asserted
@@ -97,7 +97,7 @@ class TestTheVerdicts(unittest.TestCase):
             vm_network={"egress": "filtered"},
             config={"vm": {"network": {"egress": "filtered"}}}, is_vm=True)
         elems = [{"concat": [UID, 80]}, {"concat": [UID, 443]}]
-        return cmd_diagnose.vm_inspect_check(
+        return cmd_diagnose.inspect_check(
             cfg, elements4=elems, elements6=elems, socket_active=True,
             v6_route=True, self_dials=None, status=None,
             filter_sets=filter_sets)
@@ -248,7 +248,7 @@ class TestTheReadCostsOneExec(unittest.TestCase):
 
     def test_an_unreadable_table_says_nothing_about_any_of_them(self):
         """nft absent, or a table under an upgrade. The absence of the table
-        itself is already the first branch of vm_inspect_check; inventing four
+        itself is already the first branch of inspect_check; inventing four
         failures out of it here would fire on a host mid-upgrade."""
         result, calls = self._read(None)
         self.assertEqual(len(calls), 1)

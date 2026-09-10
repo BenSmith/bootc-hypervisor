@@ -796,7 +796,7 @@ class VMSubstrate(Substrate):
             # elements survive keyed on a uid get_next_uid will hand out again,
             # and the next workload issued it -- one with `egress = "open"` and
             # no inspector at all -- has its 80/443 DNATed into a listener that
-            # does not exist. It black-holes silently: vm_inspect_check returns
+            # does not exist. It black-holes silently: inspect_check returns
             # None for an unfiltered VM, so `status`, `vm_egress` and
             # `vm_inspect` all read correct while nothing reaches the network.
             #

@@ -197,7 +197,7 @@ def cmd_doctor(args, manager):
     # doing its job is a fault, which is how a report stops being read.
     #
     # The inspector's fault-shaped conditions are already here, through
-    # `collect_diagnose_checks` — vm_inspect_check compares the loaded policy
+    # `collect_diagnose_checks` — inspect_check compares the loaded policy
     # against disk, the minting CA against disk, and the nft maps against the
     # uid. A second pass/fail over the same document would be a second
     # definition of "is the inspector healthy" that agrees with the first only

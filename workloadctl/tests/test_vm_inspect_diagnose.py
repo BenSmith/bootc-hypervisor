@@ -215,7 +215,7 @@ class TestTheNonHttpFigureIsTheSpliceList(unittest.TestCase):
 
 
 class TestTheFiguresReachTheLine(unittest.TestCase):
-    """The seam. Both fragment builders can be perfect and `vm_inspect_check`
+    """The seam. Both fragment builders can be perfect and `inspect_check`
     never call them: the figures would then be computed, correct, and printed
     nowhere, which is indistinguishable from a workload with nothing to report.
     """
@@ -230,7 +230,7 @@ class TestTheFiguresReachTheLine(unittest.TestCase):
             vm_network={"egress": "filtered"},
             config={"vm": {"network": {"egress": "filtered"}}}, is_vm=True)
         elems = [{"concat": [10001, 80]}, {"concat": [10001, 443]}]
-        return self.mod.vm_inspect_check(
+        return self.mod.inspect_check(
             cfg, elements4=elems, elements6=elems, socket_active=True,
             v6_route=True, self_dials=None, status=status,
             filter_sets={})

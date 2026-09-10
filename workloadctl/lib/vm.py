@@ -29,7 +29,7 @@ from nft_constants import (both_families, split_by_family, NFT_BIN,
                            NFT_SET_FILTERED, NFT_SET_INSPECT_CG, NFT_TABLE)
 from vm_defs import (INTERNAL_PREFIXES4, INTERNAL_PREFIXES6,
                      SIDECAR_SLICE, VM_SOCKET_DIR)
-from vm_network_config import vm_allow_reserved_reason, vm_allow_resolved
+from vm_network_config import allow_reserved_reason, vm_allow_resolved
 from workload_addr import inspect_address
 
 
@@ -66,7 +66,7 @@ def vm_filter_elements(uid: int, allow: list[str],
             # deliberately does not resolve -- so a name pointed at another
             # workload's inspector would otherwise arm the exact element the
             # address form is refused for.
-            reserved = vm_allow_reserved_reason(addr)
+            reserved = allow_reserved_reason(addr)
             if reserved:
                 where = f"{entry.host!r} resolves there — " if entry.host else ""
                 raise ValueError(f"[vm.network].allow: {where}{reserved}")
@@ -208,7 +208,7 @@ def internal_reserved_reason(
         addr: ipaddress.IPv4Address | ipaddress.IPv6Address) -> str | None:
     """Why this address may not be armed as an `internal` exemption, or None.
 
-    The mirror of vm_allow_reserved_reason, and the same shape of foot-gun seen
+    The mirror of allow_reserved_reason, and the same shape of foot-gun seen
     from the other side: arm only addresses the internal drop would actually
     have caught. An element for a public address excepts a drop that was never
     going to fire on it, so the accept it installs is pure widening -- it grants

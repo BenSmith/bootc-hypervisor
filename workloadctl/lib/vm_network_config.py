@@ -90,7 +90,7 @@ class VmAllowEntry(NamedTuple):
     reason: str
 
 
-def vm_allow_reserved_reason(
+def allow_reserved_reason(
         addr: ipaddress.IPv4Address | ipaddress.IPv6Address) -> str | None:
     """Why this address may not appear in `allow`, or None if it may.
 
@@ -242,7 +242,7 @@ def parse_vm_allow(entry, *, filtered: bool = True) -> VmAllowEntry:
     # The name form is checked where it is resolved (vm_filter_elements), not
     # here: this function deliberately does not resolve.
     if addr is not None:
-        reserved = vm_allow_reserved_reason(addr)
+        reserved = allow_reserved_reason(addr)
         if reserved:
             raise ValueError(f"{spec!r}: {reserved}")
     return VmAllowEntry(address=addr, host=host, port=port,
@@ -369,7 +369,7 @@ def vm_resolve_policy(net: dict, uid: int, resolved=None) -> dict:
     }
 
 
-def vm_policy_permits(host: str, method: str, path: str, entries) -> bool:
+def policy_permits(host: str, method: str, path: str, entries) -> bool:
     """Whether the governing entries permit one request. Union, not precedence.
 
     Every entry either permits something or does nothing, so REORDERING THE
@@ -509,14 +509,6 @@ def _validate_policy_methods(item, host: str) -> tuple[tuple | None, list[str]]:
             f"[vm.network].policy: {host!r} has an empty `methods` list, which "
             f"permits no method at all. Omit the key to mean any method")
     return tuple(out), errors
-
-
-# Re-exported under the names test_vm_broker.py and the docs already use. The
-# bodies moved to workload_lib because the container schema has the same five
-# keys, the same render and the same broker binary -- see
-# validate_credential_entries there.
-VM_BROKER_DEFAULT_AUTH_HEADER = BROKER_DEFAULT_AUTH_HEADER
-VM_BROKER_DEFAULT_AUTH_FORMAT = BROKER_DEFAULT_AUTH_FORMAT
 
 
 def _validate_credentials(net: dict) -> tuple[list[VmCredential], list[str]]:

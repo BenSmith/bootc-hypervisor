@@ -37,10 +37,9 @@ from broker_config import (BROKER_BIN, BROKER_INSTANCE_PORT,
                            vm_credential_env, host_resolver_addresses,
                            vm_uses_credentials)
 from vm import internal_ok_elements
-from vm_network_config import (
-    VM_BROKER_DEFAULT_AUTH_FORMAT, VM_BROKER_DEFAULT_AUTH_HEADER,
-    validate_vm_network,
-)
+from config_parser import (BROKER_DEFAULT_AUTH_FORMAT,
+                           BROKER_DEFAULT_AUTH_HEADER)
+from vm_network_config import validate_vm_network
 from workload_addr import UID_MIN, broker_listen_address
 import ipaddress
 import tomllib
@@ -1473,10 +1472,10 @@ class TestTheProvidersAuthConvention(unittest.TestCase):
         source = (Path(__file__).resolve().parent.parent
                   / "libexec" / "agent-broker").read_text()
         self.assertIn(
-            f'cfg.setdefault("auth_header", "{VM_BROKER_DEFAULT_AUTH_HEADER}")',
+            f'cfg.setdefault("auth_header", "{BROKER_DEFAULT_AUTH_HEADER}")',
             source)
         self.assertIn(
-            f'cfg.setdefault("auth_format", "{VM_BROKER_DEFAULT_AUTH_FORMAT}")',
+            f'cfg.setdefault("auth_format", "{BROKER_DEFAULT_AUTH_FORMAT}")',
             source)
 
     def test_the_broker_accepts_both_keys_where_they_are_written(self):

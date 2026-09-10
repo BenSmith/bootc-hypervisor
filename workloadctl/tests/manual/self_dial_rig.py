@@ -197,7 +197,7 @@ from types import SimpleNamespace
 import cmd_diagnose
 
 uid = %d
-# is_vm is not decoration: vm_inspect_check dispatches its nouns, its
+# is_vm is not decoration: inspect_check dispatches its nouns, its
 # schema section and its remedy on it (G7), so a stub without it raises
 # AttributeError and this row reports "diagnose produced no line" -- a
 # rig defect wearing a product defect's face.
@@ -207,7 +207,7 @@ cfg = SimpleNamespace(name="wlsd", uid=uid, vm_bridge=None, is_vm=True,
 elems = [{"concat": [uid, 80]}, {"concat": [uid, 443]}]
 # self_dials is left to PROBE on purpose: this is the half no unit test can
 # cover, the real _inspect_self_counter reading the real nft in this netns.
-name, ok, detail = cmd_diagnose.vm_inspect_check(
+name, ok, detail = cmd_diagnose.inspect_check(
     cfg, elements4=elems, elements6=elems, socket_active=True, v6_route=True)
 print(json.dumps({"ok": ok, "detail": detail}))
 ''' % (LIBDIR, UID)

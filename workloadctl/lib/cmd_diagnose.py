@@ -1552,7 +1552,7 @@ def _count_log_rules(payload) -> int:
 # vm_proxy_check lived here, with _proxy_map_keys and _proxy_address_present.
 # It reported whether a workload's hostname policy was REACHABLE: an element in
 # wl_proxy_dest for this uid, and the advertised address present on the dummy
-# link. Rung 2 deleted both objects, and vm_inspect_check below is the same
+# link. Rung 2 deleted both objects, and inspect_check below is the same
 # check against the objects that replaced them -- the redirect maps and the
 # inspector's socket unit. Nothing was lost with it except the count of `hosts`
 # patterns in its healthy line, which was reporting rather than diagnosis and
@@ -1839,16 +1839,18 @@ def _uses_inspect(config) -> bool:
             else container_uses_inspect(config.config))
 
 
-def vm_inspect_check(config, *, elements4=PROBE, elements6=PROBE,
+def inspect_check(config, *, elements4=PROBE, elements6=PROBE,
                      socket_active=PROBE, v6_route=PROBE, self_dials=PROBE,
                      status=PROBE, filter_sets=PROBE, disk_digest=PROBE,
                      disk_ca=PROBE) -> tuple[str, bool, str] | None:
-    """Report whether a VM's egress is actually being redirected to its inspector.
+    """Report whether a workload's egress is really redirected to its inspector.
 
-    Returns None for workloads the redirect does not apply to (not a VM,
-    bridged, or unfiltered egress), so no line is emitted.
+    Returns None for workloads the redirect does not apply to (bridged, or
+    unfiltered egress), so no line is emitted. NOT gated on is_vm: G7 hoisted
+    the call out of the VM block because a filtered container gets the same
+    inspect socket from the same generator and the same two uid-keyed maps.
 
-    Inspection is default-on for every filtered VM, which is what makes its
+    Inspection is default-on for every filtered workload, which is what makes its
     absence hard to see: unlike the hostname proxy it replaced, nothing in the
     config asked for it, so there is no declaration for an operator to compare
     reality against. A guest whose uid is missing from the inspect maps reaches the
@@ -2216,7 +2218,7 @@ def vm_resolve_check(config, *, socket_active=PROBE, policy_present=PROBE,
     Returns None for workloads with no responder (not a VM, bridged,
     unfiltered, or `resolver = "none"`), so no line is emitted.
 
-    The same argument vm_inspect_check makes for checking its socket
+    The same argument inspect_check makes for checking its socket
     separately, one step worse. The guest's resolver list has EXACTLY ONE
     entry, so a responder that is not there is not a degraded lookup path --
     it is the whole of DNS for that guest. Nothing else in `diagnose` would
@@ -2259,7 +2261,7 @@ def vm_resolve_check(config, *, socket_active=PROBE, policy_present=PROBE,
     except Exception:
         # No user yet, so no units either: generation precedes user creation,
         # and a first `enable` reaches this before _wl-<name> exists. Check 1
-        # already reports that. vm_inspect_check guards the same way, and
+        # already reports that. inspect_check guards the same way, and
         # without it the address in the healthy line below raises straight out
         # of collect_diagnose_checks, which catches nothing -- one unresolvable
         # uid would take the whole command down rather than skip one line.
@@ -2270,7 +2272,7 @@ def vm_resolve_check(config, *, socket_active=PROBE, policy_present=PROBE,
     restart = f"systemctl restart {unit}"
 
     if socket_active is PROBE:
-        # Unpacked. See vm_inspect_check: the bare tuple is always truthy.
+        # Unpacked. See inspect_check: the bare tuple is always truthy.
         socket_active, _ = service_active(unit)
     if not socket_active:
         return ("vm_resolve", False,
@@ -2466,7 +2468,7 @@ def _ca_report(status) -> dict:
     purpose. `_inspect_status` guarantees only that the top level is a dict;
     a truthy non-dict under `mint` or `ca` -- which only a bug in the writer
     produces, but a bug in the writer is exactly when this command is run --
-    would otherwise raise an AttributeError out of vm_inspect_check, and
+    would otherwise raise an AttributeError out of inspect_check, and
     nothing wraps that call. Twenty other checks would not run, over a figure
     that is a footnote.
     """
@@ -2493,7 +2495,7 @@ def _ca_fingerprint_on_disk(name: str) -> str | None:
     ValueError AS WELL AS OSError, and that is not belt-and-braces. A PEM is
     read as TEXT, at the locale's encoding, so a byte outside it raises
     UnicodeDecodeError -- a ValueError, which pem_fingerprint's own `except
-    OSError` does not catch either. Nothing wraps vm_inspect_check, so that
+    OSError` does not catch either. Nothing wraps inspect_check, so that
     escapes the whole command and the twenty checks after this one never run.
     The state it fires on is exactly the one this comparison exists for: a CA
     file that a restore left truncated or garbage under a running listener.
@@ -3290,7 +3292,7 @@ def collect_diagnose_checks(config, manager: WorkloadManager):
             _check(*confinement_result)
 
     # G7: NOT gated on is_vm, and this hoist is the whole of the routing --
-    # the substrate-aware wording inside vm_inspect_check() is inert without
+    # the substrate-aware wording inside inspect_check() is inert without
     # it. The check's own `if not _uses_inspect(config)` early return is the
     # only gate it needs now that a container gets the same
     # workload-<name>-inspect.socket from the same generate_vm_inspect_socket()
@@ -3302,7 +3304,7 @@ def collect_diagnose_checks(config, manager: WorkloadManager):
     # inspector, resolver. Reading the resolver's verdict before the
     # inspector's sends someone after a DNS answer when what failed was the
     # redirect that answer points into.
-    inspect_result = vm_inspect_check(config)
+    inspect_result = inspect_check(config)
     if inspect_result:
         _check(*inspect_result)
 

@@ -76,7 +76,7 @@ def _string_imports():
       plain_imports -- (rig, line, module, [attributes read off it])
 
     The attribute half matters because `import cmd_diagnose` followed by
-    `cmd_diagnose.vm_inspect_check(...)` is the same decay with the name on
+    `cmd_diagnose.inspect_check(...)` is the same decay with the name on
     the other side of the dot, and resolving only the module would pass
     against a module that had lost the function entirely.
     """

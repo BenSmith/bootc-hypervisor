@@ -50,7 +50,7 @@ from nft_constants import (
     NFT_BIN, NFT_SET_ALLOW4, NFT_SET_ALLOW6, NFT_SET_FILTERED, NFT_TABLE,
 )
 from broker_config import container_uses_credentials, vm_uses_credentials
-from vm_network_config import vm_allow_reserved_reason
+from vm_network_config import allow_reserved_reason
 
 
 # --- Constants ---
@@ -1880,7 +1880,7 @@ def container_filter_elements(uid: int, allow: list, resolved=None) -> dict:
     Mirrors vm_filter_elements, but built from ContainerAllowEntry rather
     than VmAllowEntry. Reuses the shared set names and the reserved-range
     check (nft_constants.NFT_SET_FILTERED/ALLOW4/ALLOW6,
-    vm_network_config.vm_allow_reserved_reason): both substrates share the one
+    vm_network_config.allow_reserved_reason): both substrates share the one
     filter table (D3), so a container's would-be element in another workload's
     listener range is refused by the identical rule a VM's is.
     """
@@ -1891,7 +1891,7 @@ def container_filter_elements(uid: int, allow: list, resolved=None) -> dict:
     v6: list[str] = []
     for entry, addresses in resolved:
         for addr in addresses:
-            reserved = vm_allow_reserved_reason(addr)
+            reserved = allow_reserved_reason(addr)
             if reserved:
                 where = f"{entry.host!r} resolves there -- " if entry.host else ""
                 raise ValueError(f"[network].allow: {where}{reserved}")

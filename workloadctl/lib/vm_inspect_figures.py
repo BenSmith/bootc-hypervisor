@@ -21,12 +21,12 @@ WHAT IS AND IS NOT HERE. This module reads the two runtime status documents
 (`inspect-status.json`, `resolve-status.json`) and nothing else. It renders no
 verdict, and `doctor` adds none: every figure here is a COUNT OF EVENTS, and
 the fault-shaped conditions in the inspector already have verdicts in
-`vm_inspect_check`, which `doctor` already aggregates through
+`inspect_check`, which `doctor` already aggregates through
 `collect_diagnose_checks`. A second, weaker pass/fail over the same document
 would be precisely the second definition decision 9 forbids — and a `doctor`
 that reported UNHEALTHY because a guest was denied 147 times would be teaching
 an operator that the filter working is a fault, which is how a report stops
-being read. If a figure deserves a verdict it belongs in `vm_inspect_check`,
+being read. If a figure deserves a verdict it belongs in `inspect_check`,
 beside the digest and CA comparisons.
 
 ABSENT GROUPS ARE OMITTED, NOT ZEROED. A workload under `tls = "splice"` has no

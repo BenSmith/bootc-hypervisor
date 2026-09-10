@@ -152,7 +152,7 @@ class TestTheStaleChecks(unittest.TestCase):
             kw["disk_digest"] = disk_digest
         if disk_ca is not None:
             kw["disk_ca"] = disk_ca
-        return cmd_diagnose.vm_inspect_check(
+        return cmd_diagnose.inspect_check(
             cfg, elements4=elems, elements6=elems, socket_active=True,
             v6_route=True, self_dials=None, status=status, filter_sets={},
             **kw)
@@ -307,7 +307,7 @@ class TestTheExpiryWarning(unittest.TestCase):
 
 
 class TestTheStatusReadIsDefensiveEverywhere(unittest.TestCase):
-    """Nothing wraps vm_inspect_check, so a raise here is not one lost line.
+    """Nothing wraps inspect_check, so a raise here is not one lost line.
 
     `_inspect_status` guarantees only that the TOP LEVEL of the status document
     is a dict. A truthy non-dict under `mint` -- a number, a string, a
@@ -334,7 +334,7 @@ class TestTheStatusReadIsDefensiveEverywhere(unittest.TestCase):
             config={"vm": {"network": {"egress": "filtered"}}}, is_vm=True)
         elems = [{"concat": [UID, 80]}, {"concat": [UID, 443]}]
         for status in self.HOSTILE:
-            cmd_diagnose.vm_inspect_check(
+            cmd_diagnose.inspect_check(
                 cfg, elements4=elems, elements6=elems, socket_active=True,
                 v6_route=True, self_dials=None, status=status,
                 filter_sets={}, disk_digest="", disk_ca="AA:BB")
@@ -348,7 +348,7 @@ class TestTheDiskReadsAreDefensiveToo(unittest.TestCase):
     never exercised with a damaged file. Both read TEXT at the locale's
     encoding, so a byte the codec rejects raises UnicodeDecodeError -- a
     ValueError, not an OSError, and `except OSError` let it straight out. There
-    is no wrapper around vm_inspect_check, so that ends the whole command and
+    is no wrapper around inspect_check, so that ends the whole command and
     every later check with it.
 
     The reachable one is the CA. `_ca_fingerprint_on_disk` runs whenever the
@@ -393,7 +393,7 @@ class TestTheDiskReadsAreDefensiveToo(unittest.TestCase):
                                return_value=self.dir), \
              mock.patch.object(cmd_diagnose, "ca_cert_path",
                                return_value=cert):
-            _name, ok, detail = cmd_diagnose.vm_inspect_check(
+            _name, ok, detail = cmd_diagnose.inspect_check(
                 cfg, elements4=elems, elements6=elems, socket_active=True,
                 v6_route=True, self_dials=None, filter_sets={},
                 disk_digest="", status={"mint": {"ca": {"sha256": "AA:BB"}}})

@@ -64,7 +64,7 @@ UPWARD_EDGES = {}
 It held three `workload_lib` -> `vm` imports until the shared plane existed to
 import instead: `vm_uses_credentials`/`container_uses_credentials` now come
 from `broker_config`, the nft set and table names from `nft_constants`, and
-`vm_allow_reserved_reason` from `vm_network_config` -- which `workload_lib` is
+`allow_reserved_reason` from `vm_network_config` -- which `workload_lib` is
 allowed to name, because a substrate module is above it, not below.
 
 `workload_lib` still has exactly one deferred import of ours, `from
