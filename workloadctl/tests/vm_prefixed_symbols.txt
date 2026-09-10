@@ -47,7 +47,17 @@
 # real hosts already have the path: workload_addr.VM_INSPECT_LISTENER_BIN and
 # vm_defs.VM_SOCKET_DIR. Rename the constant, never what it holds.
 
-# KEEP -- the prefix is accurate: 37 symbols.
+# KEEP -- the prefix is accurate: 47 symbols.
+KEEP	egress_selinux.VM_QEMU_CONTEXT
+KEEP	egress_selinux.VM_QEMU_TYPE
+KEEP	egress_selinux.VM_RESOLVE_SELINUX_CIL
+KEEP	egress_selinux.VM_RESOLVE_SELINUX_MODULE
+KEEP	egress_selinux.VM_RUNCON_BIN
+KEEP	egress_selinux.VM_SELINUX_CIL
+KEEP	egress_selinux.VM_SELINUX_MODULE
+KEEP	egress_selinux.VM_SOCKET_FCONTEXT_PATTERN
+KEEP	egress_selinux.VM_SOCKET_SELINUX_TYPE
+KEEP	egress_selinux.VM_SOCKET_SELINUX_TYPE_REAL
 KEEP	broker_config.vm_broker_hosts
 KEEP	broker_config.vm_broker_upstream_addresses
 KEEP	broker_config.vm_credential_entries
@@ -125,18 +135,6 @@ RENAME	egress_policy.VM_DROP_TIMED_OUT
 RENAME	egress_policy.VM_DROP_UNREACHABLE
 RENAME	egress_policy.VM_DROP_UNREADABLE_REQUEST
 RENAME	egress_policy.VM_DROP_UNVERIFIED
-RENAME	egress_selinux.VM_INSPECT_SELINUX_CIL
-RENAME	egress_selinux.VM_INSPECT_SELINUX_MODULE
-RENAME	egress_selinux.VM_QEMU_CONTEXT
-RENAME	egress_selinux.VM_QEMU_TYPE
-RENAME	egress_selinux.VM_RESOLVE_SELINUX_CIL
-RENAME	egress_selinux.VM_RESOLVE_SELINUX_MODULE
-RENAME	egress_selinux.VM_RUNCON_BIN
-RENAME	egress_selinux.VM_SELINUX_CIL
-RENAME	egress_selinux.VM_SELINUX_MODULE
-RENAME	egress_selinux.VM_SOCKET_FCONTEXT_PATTERN
-RENAME	egress_selinux.VM_SOCKET_SELINUX_TYPE
-RENAME	egress_selinux.VM_SOCKET_SELINUX_TYPE_REAL
 RENAME	vm_defs.VM_SOCKET_DIR
 RENAME	vm_network_config.VM_ALLOW_ADDR_RE
 RENAME	vm_network_config.VM_ALLOW_NAME_RE
