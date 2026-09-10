@@ -21,6 +21,8 @@ import unittest.mock
 from pathlib import Path
 
 from tests import load_script
+from egress_policy import INSPECT_GUEST_AGENT_KEY
+from workload_lib import container_inspect_policy
 from egress_policy import (
     VM_INSPECT_PORT_CLEARTEXT, VM_INSPECT_PORT_TLS, vm_hostname_match,
     vm_inspect_policy,
@@ -590,6 +592,18 @@ class TestPolicyLoading(unittest.TestCase):
         the document with no field behind it fails here, and the fix is to
         decide deliberately whether the listener should be reading it.
 
+        ASSERTED OVER BOTH WRITERS, not just the VM's. There are two renderers
+        -- vm_inspect_policy and container_inspect_policy -- and this only ever
+        checked one, so a key the CONTAINER writer emitted and the listener
+        ignored would have loaded clean and authorised nothing, which is the
+        same silence this test exists to break. It is their UNION that has to
+        equal the reader's fields, because `guest_agent` is deliberately
+        written by one and not the other: a container states that it has no
+        QEMU guest agent, and a VM says nothing so that its document stays
+        byte-identical for the drift comparison. Neither renderer alone
+        covers the reader, and requiring both to would force the key onto a
+        document that has no business carrying it.
+
         NON_DOCUMENT_FIELDS is the one exemption and it is enumerated rather
         than tolerated, so a field added later without thought still fails
         here. `digest` is in it because rung 5 decision 3 puts the digest in
@@ -604,13 +618,105 @@ class TestPolicyLoading(unittest.TestCase):
             "splice": [{"host": "pinned.example.com", "reason": "pinned"}],
             "http2": [{"host": "grpc.example.com", "reason": "gRPC"}],
             "policy": [{"host": "api.example.com", "methods": ["GET"]}]})
-        self.assertEqual(set(doc),
+        container_doc = container_inspect_policy({
+            "hosts": ["example.com"],
+            "policy": [{"host": "api.example.com", "methods": ["GET"]}]})
+        self.assertEqual(set(doc) | set(container_doc),
                          set(mod.Policy._fields) - NON_DOCUMENT_FIELDS)
+        # Each writer on its own may be short of the reader, but neither may
+        # exceed it: a key with no field behind it is the silent half.
+        for written in (doc, container_doc):
+            self.assertLessEqual(
+                set(written), set(mod.Policy._fields) - NON_DOCUMENT_FIELDS)
         # The other direction of the exemption: a digest that leaked INTO the
         # document is the thing decision 3 refuses, and it would pass the line
         # above unnoticed.
         for field in NON_DOCUMENT_FIELDS:
             self.assertNotIn(field, doc)
+            self.assertNotIn(field, container_doc)
+
+    def test_the_key_actually_reaches_the_minter(self):
+        """The seam, not the field. A policy key that loads correctly and
+        changes nothing is the shape a unit gate is worst at: every reader
+        test above still passes while the container goes on dialling a socket
+        it does not have.
+
+        So this asserts the OUTCOME of the check the Minter was handed --
+        None where there is no agent, and a real vm_clock call where there is
+        -- rather than that a flag arrived.
+        """
+        mod = _mod()
+        state = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, state)
+        for path in (os.path.join(state, "ca.crt"),
+                     os.path.join(state, "ca.key")):
+            open(path, "w").close()
+        built = {}
+        with unittest.mock.patch.object(mod, "workload_state_dir",
+                               lambda name: state), \
+                unittest.mock.patch.object(mod, "vm_ca_cert_path",
+                                  lambda d: os.path.join(d, "ca.crt")), \
+                unittest.mock.patch.object(mod, "vm_ca_key_path",
+                                  lambda d: os.path.join(d, "ca.key")), \
+                unittest.mock.patch.object(mod, "Minter",
+                                  lambda *a, **kw: built.update(kw)), \
+                unittest.mock.patch.object(mod, "vm_resync_guest_clock_if_skewed",
+                                  lambda name: "RESYNCED-SENTINEL"):
+            mod.build_minter("w", mod.Policy(tls="inspect", hosts=(),
+                                             guest_agent=False))
+            self.assertIsNone(built["clock_check"]())
+
+            built.clear()
+            mod.build_minter("w", mod.Policy(tls="inspect", hosts=(),
+                                             guest_agent=True))
+            self.assertEqual(built["clock_check"](), "RESYNCED-SENTINEL")
+
+    def test_the_key_name_is_pinned_to_its_spelling(self):
+        """The constant may be renamed; the STRING may not.
+
+        Documents are already on disk on every filtered host, and this reader
+        treats an unrecognised spelling as absence -- which means "there IS an
+        agent". So changing the string turns every container's document back
+        into one that reads as a VM's, restoring the exact behaviour this key
+        was added to stop, with no error and no counter to say so. Asserted
+        against a literal on purpose: comparing the constant to itself would
+        pass through any rename.
+        """
+        self.assertEqual(INSPECT_GUEST_AGENT_KEY, "guest_agent")
+
+    def test_a_document_without_the_key_keeps_the_clock_remedy(self):
+        """Absence means a VM, and a VM must not lose its remedy silently.
+
+        Every policy document written before this key existed is a VM's, and
+        reading absence as "no agent" would switch off a working mint-time
+        clock repair on every one of them until it was re-armed -- with no
+        error, and no counter that moves to say so.
+        """
+        mod = _mod()
+        path = self._write(json.dumps(vm_inspect_policy(
+            {"hosts": ["example.com"]})))
+        self.assertIs(mod.load_policy(path).guest_agent, True)
+
+    def test_a_container_document_turns_the_clock_remedy_off(self):
+        mod = _mod()
+        path = self._write(json.dumps(container_inspect_policy(
+            {"hosts": ["example.com"]})))
+        self.assertIs(mod.load_policy(path).guest_agent, False)
+
+    def test_only_a_literal_false_turns_it_off(self):
+        """A malformed value keeps the remedy rather than dropping it.
+
+        The failure modes are not symmetric: a VM that wrongly keeps the check
+        pays one guest-agent round trip per mint miss, while a VM that wrongly
+        loses it goes on serving leaves from a skewed clock -- which is the
+        condition the remedy exists for and the one nothing else detects.
+        """
+        mod = _mod()
+        for value in ("false", 0, None, "no"):
+            with self.subTest(value=value):
+                path = self._write(json.dumps(
+                    {"hosts": [], "guest_agent": value}))
+                self.assertIs(mod.load_policy(path).guest_agent, True)
 
     def test_the_document_carries_the_internal_list_through(self):
         """The listener's copy of [[vm.network.internal]] authorises nothing --

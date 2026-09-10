@@ -42,6 +42,7 @@ from config_parser import (
 # read as a claim about direction.
 from egress_ca import VM_RESERVED_GUEST_ENV
 from egress_policy import (
+    INSPECT_GUEST_AGENT_KEY,
     VM_POLICY_METHODS, VM_POLICY_METHODS_REFUSED, vm_hostname_match,
     vm_uses_inspect, vm_uses_resolve,
 )
@@ -1943,16 +1944,33 @@ def container_internal_resolve(host: str) -> list:
 def container_inspect_policy(net: dict) -> dict:
     """The inspector's policy document for one container workload.
 
-    Same JSON shape as vm_inspect_policy (lib/vm.py) -- D6: the listener
-    binary (workload-vm-inspect-listener) does not change between substrates,
-    so whichever wrote the file, it reads the same keys. `http2` is always
-    empty: [[network.http2]] is deferred for containers (§5 of the build
-    spec). `tls` is the EFFECTIVE mode (container_effective_tls_mode), not
-    the literal key, since the container schema computes it per the
+    Same JSON shape as vm_inspect_policy (lib/egress_policy.py) -- D6: the
+    listener binary (workload-vm-inspect-listener) does not change between
+    substrates, so whichever wrote the file, it reads the same keys. `http2`
+    is always empty: [[network.http2]] is deferred for containers (§5 of the
+    build spec). `tls` is the EFFECTIVE mode (container_effective_tls_mode),
+    not the literal key, since the container schema computes it per the
     three-rung ladder rather than defaulting it the way the VM schema does.
+
+    `guest_agent` IS THE ONE KEY THIS RENDERER EMITS AND THE VM'S DOES NOT,
+    and it states a fact about the substrate rather than an instruction. A
+    container has no QEMU guest agent, so a remedy that works by asking one --
+    the mint-time clock check -- cannot run here. Left unsaid, the listener
+    wired that check for containers too, dialled a socket that has never
+    existed on this substrate once per mint miss, and counted each attempt
+    into `clock_unavailable`, whose exported meaning is "the mint-time clock
+    remedy is INERT in this guest". On a container that reading was
+    guaranteed and told an operator a remedy was broken rather than absent.
+
+    A FACT, not `clock_remedy: false`, so the next thing that turns on "there
+    is no agent to ask" reads this key instead of adding a second one. Emitted
+    only here, so a VM's document is byte-identical to what it was and the
+    drift comparison does not fire for every VM; a container's document DOES
+    change once, and reports drift until it is re-armed.
     """
     return {
         "tls": container_effective_tls_mode(net),
+        INSPECT_GUEST_AGENT_KEY: False,
         "hosts": container_allowed_hosts(net),
         "internal": [e.host for e in container_internal_entries(net)],
         "splice": [e.host for e in container_splice_entries(net)],

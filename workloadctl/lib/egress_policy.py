@@ -668,6 +668,19 @@ VM_INSPECT_DIGEST_SHORT = 12
 # silence.
 VM_INSPECT_DIGEST_KEY = "policy_digest"
 
+# Whether this workload has a QEMU guest agent to ask. Named here for the same
+# reason as the digest key above -- the writer is container_inspect_policy and
+# the reader is the listener, two processes that never see each other's source,
+# and a typo in either reads as "absent", which means "there IS an agent". A
+# container would then go back to dialling a socket it does not have, silently.
+#
+# NOT `VM_`-prefixed, unlike its neighbour, and deliberately: this key exists
+# to describe a CONTAINER, so the prefix would be false on the one substrate
+# that writes it. tests/vm_prefixed_symbols.txt is the record of how many
+# shared names already carry that prefix wrongly; this is not becoming one of
+# them for the sake of matching the line above it.
+INSPECT_GUEST_AGENT_KEY = "guest_agent"
+
 
 def vm_inspect_policy_digest(text: str) -> str:
     """The digest of one rendered policy document.

@@ -2964,6 +2964,32 @@ class TestContainerInspectPolicy(unittest.TestCase):
         self.assertEqual(first, second)
         self.assertTrue(first.endswith("\n"))
 
+    def test_the_document_says_there_is_no_guest_agent(self):
+        """The one key this renderer emits and the VM's does not.
+
+        A container has no QEMU guest agent, and the listener's mint-time
+        clock remedy works by asking one. Unsaid, that remedy ran here anyway
+        -- dialling a socket this substrate has never had, once per mint miss,
+        and counting each attempt into a figure published as meaning the
+        remedy is INERT IN THIS GUEST. Guaranteed on a container, so it
+        reported a broken remedy where there is none to break, with nothing
+        red anywhere.
+        """
+        self.assertIs(container_inspect_policy({"hosts": ["a.com"]})
+                      ["guest_agent"], False)
+
+    def test_the_vm_renderer_stays_silent_about_it(self):
+        """Absence is what keeps every VM document byte-identical.
+
+        The document is byte-compared for drift, so a key added on both sides
+        would report every inspected VM as drifted until it was re-armed --
+        for a value that did not change. Containers pay that once because
+        their document really did change; VMs must not pay it at all.
+        """
+        import egress_policy
+        self.assertNotIn("guest_agent",
+                         egress_policy.vm_inspect_policy({"hosts": ["a.com"]}))
+
 
 if __name__ == "__main__":
     unittest.main()

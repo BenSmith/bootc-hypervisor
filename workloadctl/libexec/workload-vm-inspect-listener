@@ -126,7 +126,7 @@ from typing import NamedTuple
 sys.dont_write_bytecode = True
 
 from egress_policy import (
-    VM_INSPECT_ORIG_CLEARTEXT, VM_INSPECT_ORIG_TLS, VM_INSPECT_PORT_CLEARTEXT,
+    INSPECT_GUEST_AGENT_KEY, VM_INSPECT_ORIG_CLEARTEXT, VM_INSPECT_ORIG_TLS, VM_INSPECT_PORT_CLEARTEXT,
     VM_INSPECT_PORT_TLS, VM_TLS_DEFAULT, vm_hostname_control_character,
     vm_hostname_match, VM_INSPECT_DIGEST_KEY, vm_inspect_policy_digest,
     vm_inspect_policy_path, vm_inspect_record_path, vm_inspect_status_path,
@@ -339,6 +339,13 @@ class Policy(NamedTuple):
     # reads downstream as "this listener does not report a digest", which is a
     # state the check is required to pass over in silence anyway.
     digest: str = ""
+    # Whether this workload has a QEMU guest agent to ask. DEFAULTS TRUE, and
+    # the default is the load-bearing half: a document written before the key
+    # existed is a VM's, and reading absence as "no agent" would silently
+    # switch off a working clock remedy on every VM until each was re-armed.
+    # A container's renderer states the false explicitly. See
+    # container_inspect_policy.
+    guest_agent: bool = True
 
     @property
     def summary(self) -> str:
@@ -525,10 +532,16 @@ def load_policy(path):
             paths=None if paths is None else tuple(
                 p for p in paths if isinstance(p, str)),
             credential=credential))
+    # `is not False` rather than `.get(..., True)`: the only value that turns
+    # the remedy off is a literal false written by the container renderer, so
+    # a document carrying a malformed value keeps the VM behaviour instead of
+    # disabling a remedy on the strength of a typo.
+    guest_agent = doc.get(INSPECT_GUEST_AGENT_KEY) is not False
     return Policy(tls=doc.get("tls") or VM_TLS_DEFAULT, hosts=tuple(hosts),
                   internal=tuple(vm_normalise_hostname(h) for h in internal),
                   splice=tuple(splice), http2=tuple(http2),
-                  policy=tuple(policy), digest=digest)
+                  policy=tuple(policy), digest=digest,
+                  guest_agent=guest_agent)
 
 
 # --- the ClientHello peek ---
@@ -4585,8 +4598,22 @@ def build_minter(name, policy):
     # Minter refuses to be built without one. It runs on a mint MISS only, so a
     # guest cannot make the guest agent be dialled more often than it can make
     # us mint.
-    return Minter(name, state_dir,
-                  clock_check=lambda: vm_resync_guest_clock_if_skewed(name))
+    #
+    # `lambda: None` WHERE THERE IS NO AGENT TO ASK, which is Minter's own
+    # documented way of saying a caller decided against the remedy rather than
+    # forgot it. A container has no QEMU guest agent, so the check could only
+    # ever fail: it dialled a socket that has never existed on that substrate,
+    # once per mint miss, and counted every attempt into `clock_unavailable` --
+    # a figure whose published meaning is that the remedy is INERT IN THIS
+    # GUEST. Structurally guaranteed on a container, so it reported a broken
+    # remedy where there is simply no such remedy, and nothing went red.
+    #
+    # The substrate is read off the policy document rather than branched on
+    # here, because D6 is that this binary does not differ between substrates.
+    # The document differs; the binary reads the same keys from either.
+    clock_check = ((lambda: vm_resync_guest_clock_if_skewed(name))
+                   if policy.guest_agent else (lambda: None))
+    return Minter(name, state_dir, clock_check=clock_check)
 
 
 def main(argv=None):
