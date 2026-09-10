@@ -1,0 +1,270 @@
+# Every vm_/VM_-prefixed public symbol defined in lib/, classified.
+#
+# THE PREFIX IS A CLAIM, AND FOR MOST OF THESE IT IS FALSE. The egress stack,
+# the CA, hostname policy, inspection records, the nft constants and uid
+# addressing all live in vm-named symbols and are used by the container path
+# just as much. A reader who trusts the prefix concludes a shared thing is the
+# VM's; someone editing on that belief changes container behaviour without
+# knowing it.
+#
+# HOW A LINE IS DECIDED: BY CONSUMER, NEVER BY NAME. A symbol is KEEP when
+# every consumer outside its own module is on a path only a VM takes, and
+# RENAME otherwise. Two consequences that are easy to get backwards:
+#
+#   * A vm-named FILE is not evidence either. generators/workload-generate
+#     calls gen_vm's generate_vm_inspect_service, generate_vm_inspect_socket
+#     and generate_vm_broker_service for CONTAINERS -- the arming helper is
+#     the only substrate-specific value -- so what those three functions touch
+#     is shared no matter which file it is reached from.
+#   * Tests are not evidence. A symbol used only by tests/test_vm_*.py is
+#     classified by where it is DEFINED, because a test name follows the code
+#     it was written against and would just restate the prefix.
+#   * A symbol with NO consumer outside its own module has no consumer
+#     evidence at all, so it falls back to the module -- and a module is
+#     VM-only only when every file that IMPORTS it is. That test is what
+#     separates vm_ptp, imported by ensure_vm alone, from vm_clock, which
+#     egress_mint and the substrate-shared inspect listener both import.
+#
+# WHAT THIS FILE IS FOR. tests/test_vm_prefix_ratchet.py asserts that what the
+# tree actually defines equals RENAME + KEEP exactly, in both directions. So
+# renaming a symbol forces its line to be deleted in the same commit, and a
+# new vm-prefixed symbol fails the suite until someone classifies it. RENAME
+# only shrinks, and its diff is the record of the work.
+#
+# THE HONEST WEAKNESS: nothing mechanical stops a line being moved from RENAME
+# to KEEP instead of the work being done. That is a review question, and the
+# diff is what makes it visible.
+#
+# Two entries may be renamed but hold a value that MUST NOT change, because
+# real hosts already have the path: workload_addr.VM_INSPECT_LISTENER_BIN and
+# vm_defs.VM_SOCKET_DIR. Rename the constant, never what it holds.
+
+# KEEP -- the prefix is accurate: 24 symbols.
+KEEP	broker_config.vm_credential_env
+KEEP	egress_ca.VM_CA_BUNDLE_AVAILABLE
+KEEP	egress_ca.vm_ca_env
+KEEP	vm.vm_filter_commands
+KEEP	vm.vm_resolve_status_path
+KEEP	vm_defs.VM_DEFAULT_GUEST_USER
+KEEP	vm_defs.VM_GUEST_AGENT_PORT
+KEEP	vm_defs.VM_GUEST_HOME_BASE
+KEEP	vm_defs.VM_GUEST_UID
+KEEP	vm_defs.VM_HOME_SELINUX_CONTEXT
+KEEP	vm_defs.VM_HOME_SELINUX_TYPES
+KEEP	vm_defs.VM_REBOOT_EXIT_CODE
+KEEP	vm_defs.vm_guest_agent_socket
+KEEP	vm_network_config.vm_resolve_policy
+KEEP	vm_ptp.VM_PTP_KVM_CHRONY_MARKER
+KEEP	vm_ptp.VM_PTP_KVM_CHRONY_PATH
+KEEP	vm_ptp.VM_PTP_KVM_CLOCK_NAME
+KEEP	vm_ptp.VM_PTP_KVM_DEVICE
+KEEP	vm_ptp.VM_PTP_KVM_MODULE
+KEEP	vm_ptp.VM_PTP_KVM_MODULES_LOAD_PATH
+KEEP	vm_ptp.VM_PTP_KVM_UDEV_RULE_PATH
+KEEP	vm_ptp.vm_ptp_kvm_runcmd_lines
+KEEP	vm_ptp.vm_ptp_kvm_seed_files
+KEEP	workload_addr.VM_RESOLVE_LISTENER_BIN
+
+# RENAME -- shared, and the prefix misleads: 202 symbols.
+RENAME	broker_config.VM_BROKER_BIN
+RENAME	broker_config.VM_BROKER_CONFIG_NAME
+RENAME	broker_config.VM_BROKER_INSTANCE_PORT
+RENAME	broker_config.VM_BROKER_RUNTIME_SUBDIR
+RENAME	broker_config.vm_broker_config_dir
+RENAME	broker_config.vm_broker_config_path
+RENAME	broker_config.vm_broker_credential
+RENAME	broker_config.vm_broker_hosts
+RENAME	broker_config.vm_broker_runtime_directory
+RENAME	broker_config.vm_broker_upstream_addresses
+RENAME	broker_config.vm_credential_entries
+RENAME	broker_config.vm_host_resolver_addresses
+RENAME	broker_config.vm_inspect_link_address_commands
+RENAME	broker_config.vm_inspect_link_delete_commands
+RENAME	broker_config.vm_uses_credentials
+RENAME	cmd_diagnose.vm_confinement_check
+RENAME	cmd_diagnose.vm_egress_check
+RENAME	cmd_diagnose.vm_inspect_check
+RENAME	cmd_diagnose.vm_network_check
+RENAME	cmd_diagnose.vm_provisioning_check
+RENAME	cmd_diagnose.vm_resolve_check
+RENAME	cmd_diagnose.vm_socket_dir_selinux_check
+RENAME	egress_ca.VM_CA_BACKDATE_SECONDS
+RENAME	egress_ca.VM_CA_BUNDLE_PATH
+RENAME	egress_ca.VM_CA_CERT_NAME
+RENAME	egress_ca.VM_CA_DIR_NAME
+RENAME	egress_ca.VM_CA_ENV_VARS
+RENAME	egress_ca.VM_CA_EXPIRY_WARN_DAYS
+RENAME	egress_ca.VM_CA_KEY_NAME
+RENAME	egress_ca.VM_CA_SELINUX_TYPE
+RENAME	egress_ca.VM_CA_VALIDITY_DAYS
+RENAME	egress_ca.VM_DENIAL_DIR_NAME
+RENAME	egress_ca.VM_LEAF_DIR_NAME
+RENAME	egress_ca.VM_LEAF_LABEL_MAX
+RENAME	egress_ca.VM_LEAF_NAME_MAX
+RENAME	egress_ca.VM_LEAF_RENEW_WITHIN_SECONDS
+RENAME	egress_ca.VM_LEAF_SELINUX_TYPE
+RENAME	egress_ca.VM_LEAF_VALIDITY_DAYS
+RENAME	egress_ca.VM_RESERVED_GUEST_ENV
+RENAME	egress_ca.vm_ca_cert_path
+RENAME	egress_ca.vm_ca_dir
+RENAME	egress_ca.vm_ca_key_path
+RENAME	egress_ca.vm_ca_openssl_argv
+RENAME	egress_ca.vm_ca_subject
+RENAME	egress_ca.vm_denial_dir
+RENAME	egress_ca.vm_leaf_dir
+RENAME	egress_ca.vm_leaf_openssl_argv
+RENAME	egress_ca.vm_leaf_san
+RENAME	egress_ca.vm_pki_fcontext_patterns
+RENAME	egress_policy.VM_DROP_BROKER_UNREACHABLE
+RENAME	egress_policy.VM_DROP_CEILING
+RENAME	egress_policy.VM_DROP_CLIENT_CERT
+RENAME	egress_policy.VM_DROP_FOREIGN_CALLER
+RENAME	egress_policy.VM_DROP_INTERNAL
+RENAME	egress_policy.VM_DROP_MINT_FAILED
+RENAME	egress_policy.VM_DROP_MISDIRECTED
+RENAME	egress_policy.VM_DROP_MISDIRECTED_LISTED
+RENAME	egress_policy.VM_DROP_NOT_ALLOWLISTED
+RENAME	egress_policy.VM_DROP_NOT_H2
+RENAME	egress_policy.VM_DROP_NOT_HTTP
+RENAME	egress_policy.VM_DROP_NOT_HTTP_POLICY
+RENAME	egress_policy.VM_DROP_NOT_PERMITTED
+RENAME	egress_policy.VM_DROP_NO_NAME
+RENAME	egress_policy.VM_DROP_RELAY_FAILED
+RENAME	egress_policy.VM_DROP_THROTTLED
+RENAME	egress_policy.VM_DROP_TIMED_OUT
+RENAME	egress_policy.VM_DROP_UNREACHABLE
+RENAME	egress_policy.VM_DROP_UNREADABLE_REQUEST
+RENAME	egress_policy.VM_DROP_UNVERIFIED
+RENAME	egress_policy.VM_INSPECT_DIGEST_KEY
+RENAME	egress_policy.VM_INSPECT_DIGEST_SHORT
+RENAME	egress_policy.VM_INSPECT_LOG_ID_FIELD
+RENAME	egress_policy.VM_INSPECT_LOG_REQ_FIELD
+RENAME	egress_policy.VM_INSPECT_ORIG_CLEARTEXT
+RENAME	egress_policy.VM_INSPECT_ORIG_TLS
+RENAME	egress_policy.VM_INSPECT_POLICY_FILE
+RENAME	egress_policy.VM_INSPECT_PORT_CLEARTEXT
+RENAME	egress_policy.VM_INSPECT_PORT_TLS
+RENAME	egress_policy.VM_INSPECT_RECORD_DECISIONS
+RENAME	egress_policy.VM_INSPECT_RECORD_FIELDS
+RENAME	egress_policy.VM_INSPECT_RECORD_FILE
+RENAME	egress_policy.VM_INSPECT_RECORD_MODES
+RENAME	egress_policy.VM_INSPECT_RECORD_PLANES
+RENAME	egress_policy.VM_INSPECT_RECORD_REASONS
+RENAME	egress_policy.VM_INSPECT_RECORD_ROOT
+RENAME	egress_policy.VM_INSPECT_STATUS_FILE
+RENAME	egress_policy.VM_LOG_BASE
+RENAME	egress_policy.VM_POLICY_METHODS
+RENAME	egress_policy.VM_POLICY_METHODS_REFUSED
+RENAME	egress_policy.VM_TLS_DEFAULT
+RENAME	egress_policy.VM_TLS_MODES
+RENAME	egress_policy.vm_hostname_control_character
+RENAME	egress_policy.vm_hostname_match
+RENAME	egress_policy.vm_http2_hosts
+RENAME	egress_policy.vm_inspect_digest_short
+RENAME	egress_policy.vm_inspect_logs_directory
+RENAME	egress_policy.vm_inspect_policy
+RENAME	egress_policy.vm_inspect_policy_digest
+RENAME	egress_policy.vm_inspect_policy_path
+RENAME	egress_policy.vm_inspect_policy_text
+RENAME	egress_policy.vm_inspect_record_dir
+RENAME	egress_policy.vm_inspect_record_path
+RENAME	egress_policy.vm_inspect_status_path
+RENAME	egress_policy.vm_internal_hosts
+RENAME	egress_policy.vm_normalise_hostname
+RENAME	egress_policy.vm_policy_entries
+RENAME	egress_policy.vm_policy_governs
+RENAME	egress_policy.vm_splice_hosts
+RENAME	egress_policy.vm_uses_inspect
+RENAME	egress_policy.vm_uses_resolve
+RENAME	egress_selinux.VM_INSPECT_SELINUX_CIL
+RENAME	egress_selinux.VM_INSPECT_SELINUX_MODULE
+RENAME	egress_selinux.VM_QEMU_CONTEXT
+RENAME	egress_selinux.VM_QEMU_TYPE
+RENAME	egress_selinux.VM_RESOLVE_SELINUX_CIL
+RENAME	egress_selinux.VM_RESOLVE_SELINUX_MODULE
+RENAME	egress_selinux.VM_RUNCON_BIN
+RENAME	egress_selinux.VM_SELINUX_CIL
+RENAME	egress_selinux.VM_SELINUX_MODULE
+RENAME	egress_selinux.VM_SOCKET_FCONTEXT_PATTERN
+RENAME	egress_selinux.VM_SOCKET_SELINUX_TYPE
+RENAME	egress_selinux.VM_SOCKET_SELINUX_TYPE_REAL
+RENAME	netfilter_state.vm_owned_elements
+RENAME	provisioning.VM_IMAGE_SELINUX_TYPE
+RENAME	provisioning.vm_fcontext_pattern
+RENAME	vm.VM_INSPECT_RECORD_SELINUX_TYPE
+RENAME	vm.VM_RESOLVE_STATUS_FILE
+RENAME	vm.vm_filter_delete_command
+RENAME	vm.vm_filter_elements
+RENAME	vm.vm_inspect_cgroup
+RENAME	vm.vm_inspect_cgroup_command
+RENAME	vm.vm_inspect_cgroup_filter_command
+RENAME	vm.vm_inspect_dst_elements
+RENAME	vm.vm_inspect_element_commands
+RENAME	vm.vm_inspect_live_elements
+RENAME	vm.vm_inspect_map_elements
+RENAME	vm.vm_inspect_self_elements
+RENAME	vm.vm_internal_ok_commands
+RENAME	vm.vm_internal_ok_delete_commands
+RENAME	vm.vm_internal_ok_elements
+RENAME	vm.vm_internal_ok_list_commands
+RENAME	vm.vm_internal_ok_uid_elements
+RENAME	vm.vm_internal_reserved_reason
+RENAME	vm.vm_internal_resolve
+RENAME	vm_clock.VM_CLOCK_SKEW_THRESHOLD_SECONDS
+RENAME	vm_clock.vm_guest_clock_offset
+RENAME	vm_clock.vm_resync_guest_clock_if_skewed
+RENAME	vm_clock.vm_set_guest_time
+RENAME	vm_defs.VM_EGRESS_DEFAULT
+RENAME	vm_defs.VM_EGRESS_MODES
+RENAME	vm_defs.VM_INTERNAL_PREFIXES4
+RENAME	vm_defs.VM_INTERNAL_PREFIXES6
+RENAME	vm_defs.VM_PORT_RE
+RENAME	vm_defs.VM_REGISTRATION_DOMAIN_PARENTS
+RENAME	vm_defs.VM_SEED_CONTRACT_EXIT
+RENAME	vm_defs.VM_SIDECAR_SLICE
+RENAME	vm_defs.VM_SOCKET_DIR
+RENAME	vm_defs.VM_TLS_UNBUILT
+RENAME	vm_defs.vm_allowed_hosts
+RENAME	vm_defs.vm_mac_address
+RENAME	vm_defs.vm_mac_collisions
+RENAME	vm_defs.vm_runtime_dir
+RENAME	vm_network_config.VM_ALLOW_ADDR_RE
+RENAME	vm_network_config.VM_ALLOW_NAME_RE
+RENAME	vm_network_config.VM_BROKER_DEFAULT_AUTH_FORMAT
+RENAME	vm_network_config.VM_BROKER_DEFAULT_AUTH_HEADER
+RENAME	vm_network_config.VM_NETWORK_SCALARS
+RENAME	vm_network_config.vm_allow_reserved_reason
+RENAME	vm_network_config.vm_allow_resolve
+RENAME	vm_network_config.vm_allow_resolved
+RENAME	vm_network_config.vm_network_warnings
+RENAME	vm_network_config.vm_policy_permits
+RENAME	vm_network_config.vm_resolve_policy_path
+RENAME	workload_addr.VM_ADVERTISED_IFACE
+RENAME	workload_addr.VM_BROKER_ADDR_BASE
+RENAME	workload_addr.VM_INSPECT_ADDR6_PREFIX
+RENAME	workload_addr.VM_INSPECT_ADDR_BASE
+RENAME	workload_addr.VM_INSPECT_LISTENER_BIN
+RENAME	workload_addr.VM_INSPECT_NETWORK
+RENAME	workload_addr.VM_MGMT_ADDR_BASE
+RENAME	workload_addr.VM_MGMT_NETWORK
+RENAME	workload_addr.VM_MGMT_SSH_PORT
+RENAME	workload_addr.VM_RESERVATION_INSPECT4
+RENAME	workload_addr.VM_RESERVATION_INSPECT6
+RENAME	workload_addr.VM_RESERVATION_MGMT
+RENAME	workload_addr.VM_RESERVED_RANGES
+RENAME	workload_addr.VM_RESOLVE_ADDR_BASE
+RENAME	workload_addr.VM_RESOLVE_POLICY_FILE
+RENAME	workload_addr.VM_RESOLVE_PORT
+RENAME	workload_addr.VM_RESOLVE_TTL
+RENAME	workload_addr.VM_UID_BROKER
+RENAME	workload_addr.VM_UID_DERIVED
+RENAME	workload_addr.VM_UID_INSPECT
+RENAME	workload_addr.VM_UID_MGMT
+RENAME	workload_addr.VM_UID_NFLOG
+RENAME	workload_addr.VM_UID_RESOLVE
+RENAME	workload_addr.vm_broker_listen_address
+RENAME	workload_addr.vm_inspect_address
+RENAME	workload_addr.vm_management_address
+RENAME	workload_addr.vm_nflog_group
+RENAME	workload_addr.vm_reserved_range
+RENAME	workload_addr.vm_resolve_address
