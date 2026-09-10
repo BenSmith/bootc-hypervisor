@@ -176,10 +176,15 @@ build-base-local: sync-cosy
   #!/usr/bin/env bash
   set -euo pipefail
   cp policy-local.json policy.json
+  # BASE_IMAGE, not --from: --from overrides the build's FIRST stage, which
+  # here is the fedora:latest rpm-builder, so it swapped the throwaway RPM
+  # builder for the bootc minimal and left the real base at the ARG default --
+  # a registry pull. The build then failed inside a stage that has no
+  # rpm-build. Same knob build-base uses, pointed at the local minimal.
   http_proxy={{proxy}} https_proxy={{proxy}} \
   podman build \
     --network=host \
-    --from localhost/fedora-bootc-minimal:{{fedora_version}} \
+    --build-arg BASE_IMAGE=localhost/fedora-bootc-minimal:{{fedora_version}} \
     --build-arg ENABLE_PASSWORDLESS_SUDO=true \
     --env=http_proxy={{proxy}} --env=https_proxy={{proxy}} \
     -t localhost/hypervisor-bootc:{{fedora_version}} \
