@@ -164,7 +164,7 @@ UID_INSPECT = UidDerived("inspector address", INSPECT_ADDR_BASE,
 
 # The inspector's listener binary, the socket unit's ExecStart. Named here so
 # the unit and the RPM stay one place apart.
-VM_INSPECT_LISTENER_BIN = "/usr/libexec/workloadctl/workload-vm-inspect-listener"
+INSPECT_LISTENER_BIN = "/usr/libexec/workloadctl/workload-vm-inspect-listener"
 
 # VM workloads have no bridge. passt terminates the guest's stack in userspace
 # and re-originates its traffic as ordinary host sockets owned by the workload's

@@ -39,7 +39,7 @@ from egress_ca import (
     ca_cert_path, ca_dir, denial_dir, leaf_dir, ca_key_path,
     ca_openssl_argv,
 )
-from vm_defs import VM_SOCKET_DIR
+from vm_defs import SOCKET_DIR
 
 def log(msg):
     """Print to stdout (captured by systemd journal)."""
@@ -303,12 +303,12 @@ def setup_workload_runtime_dir(pw, name: str):
     Plain restorecon, no -F: var_run_t is not a customizable type, unlike the
     container_file_t/svirt_image_t pair under /var/lib/workloads.
     """
-    sock_dir = VM_SOCKET_DIR / name
+    sock_dir = SOCKET_DIR / name
     sock_dir.mkdir(parents=True, exist_ok=True)
     if shutil.which("restorecon"):
         # Recursive and rooted at the parent: the parent is what the rule names,
         # and a wrong label there is inherited by every workload's subdirectory.
-        subprocess.run(["restorecon", "-R", str(VM_SOCKET_DIR)],
+        subprocess.run(["restorecon", "-R", str(SOCKET_DIR)],
                        check=False, capture_output=True)
     os.chown(sock_dir, pw.pw_uid, pw.pw_gid)
     os.chmod(sock_dir, 0o750)

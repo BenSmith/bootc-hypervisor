@@ -23,7 +23,7 @@ import time
 
 sys.dont_write_bytecode = True
 
-from vm_defs import VM_SOCKET_DIR
+from vm_defs import SOCKET_DIR
 from qmp import QMPClient
 
 DEFAULT_TIMEOUT = 80.0
@@ -73,7 +73,7 @@ def main():
     name = sys.argv[1]
     timeout = float(sys.argv[2]) if len(sys.argv) > 2 else DEFAULT_TIMEOUT
 
-    sock_path = VM_SOCKET_DIR / name / "qmp.sock"
+    sock_path = SOCKET_DIR / name / "qmp.sock"
     if not sock_path.exists():
         # Already stopped — nothing to do, exit cleanly.
         return

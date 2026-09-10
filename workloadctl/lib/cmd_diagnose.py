@@ -76,7 +76,7 @@ from nft_constants import (
     NFT_SET_INSPECT_SELF6, NFT_SET_INSPECT_DST, NFT_SET_INSPECT_DST6,
     NFT_SET_INSPECT_LIVE, NFT_SET_INSPECT_LIVE6,
 )
-from vm_defs import EGRESS_DEFAULT, VM_SOCKET_DIR
+from vm_defs import EGRESS_DEFAULT, SOCKET_DIR
 from vm_network_config import (
     vm_resolve_policy_path, parse_vm_allow, vm_allow_resolve,
 )
@@ -401,7 +401,7 @@ def vm_socket_dir_selinux_check(rule_present: bool | None, label: str | None,
     caller actually inspected (the shared parent, or one workload's preserved
     subdirectory under it), so the message points at the thing to relabel.
     """
-    path = path or str(VM_SOCKET_DIR)
+    path = path or str(SOCKET_DIR)
     if rule_present is None and label is None:
         return (True, "VM socket dir SELinux state unknown "
                       "(semanage unavailable or SELinux disabled)", None)
@@ -413,7 +413,7 @@ def vm_socket_dir_selinux_check(rule_present: bool | None, label: str | None,
     fix = (f"sudo semanage fcontext -a -t {VM_SOCKET_SELINUX_TYPE} "
            f"'{VM_SOCKET_FCONTEXT_PATTERN}' "
            f"&& sudo systemctl stop workload-<name> "
-           f"&& sudo restorecon -R {VM_SOCKET_DIR}")
+           f"&& sudo restorecon -R {SOCKET_DIR}")
 
     if label is not None and label not in (VM_SOCKET_SELINUX_TYPE,
                                            VM_SOCKET_SELINUX_TYPE_REAL):
@@ -433,7 +433,7 @@ def vm_socket_dir_selinux_check(rule_present: bool | None, label: str | None,
     if rule_present is False:
         return (False, f"No fcontext rule registered for "
                        f"{VM_SOCKET_FCONTEXT_PATTERN} — the next boot recreates "
-                       f"{VM_SOCKET_DIR} on tmpfs as var_run_t and every VM "
+                       f"{SOCKET_DIR} on tmpfs as var_run_t and every VM "
                        f"workload on this host stops starting",
                 fix)
     return (True, f"VM socket dir labeled correctly "
@@ -988,7 +988,7 @@ def _vm_qemu_context(name: str) -> str | None:
     it is a Python script) and reports every confined VM as unconfined. Observed
     on a live host where `ps -eo label` showed svirt_t at the same moment.
     """
-    needle = f"{VM_SOCKET_DIR}/{name}/qmp.sock".encode()
+    needle = f"{SOCKET_DIR}/{name}/qmp.sock".encode()
     for entry in os.scandir("/proc"):
         if not entry.name.isdigit():
             continue
@@ -3140,10 +3140,10 @@ def collect_diagnose_checks(config, manager: WorkloadManager):
         # first one that is wrong, so the fix names a directory that is
         # actually wrong rather than the one further up.
         rule_present = _fcontext_rule_present(VM_SOCKET_FCONTEXT_PATTERN)
-        inspected = str(VM_SOCKET_DIR)
-        label = _selinux_type(VM_SOCKET_DIR) if VM_SOCKET_DIR.exists() else None
+        inspected = str(SOCKET_DIR)
+        label = _selinux_type(SOCKET_DIR) if SOCKET_DIR.exists() else None
         if label in (VM_SOCKET_SELINUX_TYPE, VM_SOCKET_SELINUX_TYPE_REAL):
-            sock_dir = VM_SOCKET_DIR / config.name
+            sock_dir = SOCKET_DIR / config.name
             if sock_dir.exists():
                 inspected, label = str(sock_dir), _selinux_type(sock_dir)
         passed, message, fix = vm_socket_dir_selinux_check(

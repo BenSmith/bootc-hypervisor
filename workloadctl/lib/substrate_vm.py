@@ -38,7 +38,7 @@ from substrate import (
 )
 from egress_policy import vm_uses_inspect
 from vm_defs import (
-    VM_SOCKET_DIR, parse_memory_mib, vm_guest_agent_socket, mac_address,
+    SOCKET_DIR, parse_memory_mib, vm_guest_agent_socket, mac_address,
 )
 from workload_addr import MGMT_SSH_PORT, management_address
 from vm_clock import GUEST_AGENT_TIMEOUT, guest_agent_sync
@@ -48,7 +48,7 @@ from workloadctl_core import WorkloadUserNotFound, format_size
 
 
 def _vm_console_sock(name: str) -> Path:
-    return VM_SOCKET_DIR / name / "console.sock"
+    return SOCKET_DIR / name / "console.sock"
 
 
 def _vm_ssh_key(config) -> Path:
@@ -704,7 +704,7 @@ class VMSubstrate(Substrate):
                 )
                 return 2
 
-        sock_path = VM_SOCKET_DIR / self.config.name / "qmp.sock"
+        sock_path = SOCKET_DIR / self.config.name / "qmp.sock"
         if not sock_path.exists():
             print(f"Error: QMP socket not found: {sock_path}", file=sys.stderr)
             print(f"Is workload '{self.config.name}' running?", file=sys.stderr)
@@ -767,7 +767,7 @@ class VMSubstrate(Substrate):
 
         if purge:
             try:
-                sock_dir = VM_SOCKET_DIR / self.config.name
+                sock_dir = SOCKET_DIR / self.config.name
                 if sock_dir.exists():
                     shutil.rmtree(sock_dir, ignore_errors=True)
             except Exception as e:
@@ -817,7 +817,7 @@ class VMSubstrate(Substrate):
         """Describe teardown, reporting only what is actually present."""
         lines = []
         if purge:
-            sock_dir = VM_SOCKET_DIR / self.config.name
+            sock_dir = SOCKET_DIR / self.config.name
             if sock_dir.exists():
                 lines.append(f"remove VM socket dir: {sock_dir}")
             lines.append(

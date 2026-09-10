@@ -36,10 +36,10 @@ from broker_config import (
 from vm_defs import (
     VM_REBOOT_EXIT_CODE, VM_GUEST_UID, VM_GUEST_AGENT_PORT, SIDECAR_SLICE,
     mac_address, parse_vm_port, find_ovmf_code, parse_memory_mib,
-    VM_SOCKET_DIR,
+    SOCKET_DIR,
 )
 from workload_addr import (
-    MGMT_SSH_PORT, VM_INSPECT_LISTENER_BIN, management_address,
+    MGMT_SSH_PORT, INSPECT_LISTENER_BIN, management_address,
     inspect_address, VM_RESOLVE_LISTENER_BIN, RESOLVE_PORT,
     resolve_address,
 )
@@ -547,7 +547,7 @@ def _harden_vm_sidecar(svc, name: str, *, families: str, tasks_max: int,
     svc.set("ProtectProc", "invisible")
     svc.set("PrivateTmp", "yes")
     svc.set("ReadWritePaths",
-            " ".join([uq(f"{VM_SOCKET_DIR}/{name}")]
+            " ".join([uq(f"{SOCKET_DIR}/{name}")]
                      + [uq(str(path)) for path in extra_rw]))
 
     # The families each one actually opens, so a code path that grew a socket
@@ -649,7 +649,7 @@ def generate_vm_inspect_service(config, user_name: str) -> str:
     # it back out of getpwuid(geteuid()) -- would make the listener's identity
     # depend on the _wl- naming convention instead of on the unit it was
     # generated for. It is what the listener resolves its policy path from.
-    svc.add("ExecStart", f"{VM_INSPECT_LISTENER_BIN} {dq(name)}")
+    svc.add("ExecStart", f"{INSPECT_LISTENER_BIN} {dq(name)}")
     # Remove both exemptions on stop, kill and failure. ExecStopPost so a
     # killed or failed inspector still withdraws them; `-+` tolerant because
     # the elements are legitimately absent when the start failed before

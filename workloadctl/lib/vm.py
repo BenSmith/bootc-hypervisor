@@ -28,7 +28,7 @@ from nft_constants import (both_families, split_by_family, NFT_BIN,
                            NFT_PROXY_TABLE, NFT_SET_EGRESS_CG,
                            NFT_SET_FILTERED, NFT_SET_INSPECT_CG, NFT_TABLE)
 from vm_defs import (INTERNAL_PREFIXES4, INTERNAL_PREFIXES6,
-                     SIDECAR_SLICE, VM_SOCKET_DIR)
+                     SIDECAR_SLICE, SOCKET_DIR)
 from vm_network_config import allow_reserved_reason, vm_allow_resolved
 from workload_addr import inspect_address
 
@@ -80,7 +80,7 @@ RESOLVE_STATUS_FILE = "resolve-status.json"
 
 def vm_resolve_status_path(name: str) -> str:
     """Where one workload's responder writes its counters."""
-    return f"{VM_SOCKET_DIR}/{name}/{RESOLVE_STATUS_FILE}"
+    return f"{SOCKET_DIR}/{name}/{RESOLVE_STATUS_FILE}"
 
 
 # The type the record subtree carries, and the pattern the CIL module's own

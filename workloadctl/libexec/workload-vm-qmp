@@ -14,7 +14,7 @@ from pathlib import Path
 
 sys.dont_write_bytecode = True
 
-from vm_defs import VM_SOCKET_DIR
+from vm_defs import SOCKET_DIR
 from qmp import QMPClient
 
 
@@ -49,7 +49,7 @@ def main():
             k, _, v = kv.partition("=")
             arguments[k] = v
 
-    sock_path = str(VM_SOCKET_DIR / name / "qmp.sock")
+    sock_path = str(SOCKET_DIR / name / "qmp.sock")
 
     if not Path(sock_path).exists():
         print(f"Error: QMP socket not found: {sock_path}", file=sys.stderr)

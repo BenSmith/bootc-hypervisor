@@ -239,7 +239,7 @@ class TestBuildCloudInitIsoTemplateMode(unittest.TestCase):
         (self.home / ".ssh" / "vm_host_ed25519_key.pub").write_text(FAKE_HOST_PUB + "\n")
         self.config_dir = Path(self.tmp) / "cfg"
         self.config_dir.mkdir()
-        # The ISO is built into VM_SOCKET_DIR/{name} (tmpfs in production);
+        # The ISO is built into SOCKET_DIR/{name} (tmpfs in production);
         # redirect it under tmp so the build can mkdir/chmod it as a non-root
         # test user instead of touching the real /run/workload-vm.
         self.runtime = Path(self.tmp) / "run"
@@ -308,7 +308,7 @@ class TestBuildCloudInitIsoTemplateMode(unittest.TestCase):
                     )
         import shutil as _shutil
         with mock.patch.object(self.mod.os, "chown", lambda *a, **kw: None), \
-             mock.patch.object(self.mod, "VM_SOCKET_DIR", self.runtime), \
+             mock.patch.object(self.mod, "SOCKET_DIR", self.runtime), \
              mock.patch.object(self.mod, "workload_state_dir",
                                lambda _name: self.home), \
              mock.patch.object(self.mod.subprocess, "run", self._fake_iso_run), \
@@ -560,7 +560,7 @@ class TestBuildCloudInitIsoTemplateMode(unittest.TestCase):
         cfg = {"vm": {"cloud_init": {"user_data_file": "user-data"}}}
         import shutil as _shutil
         with mock.patch.object(self.mod.os, "chown", lambda *a, **kw: None), \
-             mock.patch.object(self.mod, "VM_SOCKET_DIR", self.runtime), \
+             mock.patch.object(self.mod, "SOCKET_DIR", self.runtime), \
              mock.patch.object(self.mod, "workload_state_dir",
                                lambda _name: self.home), \
              mock.patch.object(self.mod.subprocess, "run", self._fake_iso_run), \
@@ -590,7 +590,7 @@ class TestBuildCloudInitIsoTemplateMode(unittest.TestCase):
         import shutil as _shutil
         rmtree_calls = []
         with mock.patch.object(self.mod.os, "chown", lambda *a, **kw: None), \
-             mock.patch.object(self.mod, "VM_SOCKET_DIR", self.runtime), \
+             mock.patch.object(self.mod, "SOCKET_DIR", self.runtime), \
              mock.patch.object(self.mod, "workload_state_dir",
                                lambda _name: self.home), \
              mock.patch.object(self.mod.subprocess, "run", self._fake_iso_run), \
@@ -2071,7 +2071,7 @@ class TestSetupVmSocketDir(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             socket_base = Path(tmp) / "run" / "workload-vm"
             pw = _fake_pw(Path(tmp), uid=10001, gid=10001)
-            with mock.patch.object(self.mod, "VM_SOCKET_DIR", socket_base), \
+            with mock.patch.object(self.mod, "SOCKET_DIR", socket_base), \
                  mock.patch("os.chown"):
                 self.mod.setup_workload_runtime_dir(pw, "myvm")
             sock_dir = socket_base / "myvm"
@@ -2083,7 +2083,7 @@ class TestSetupVmSocketDir(unittest.TestCase):
             socket_base = Path(tmp) / "run" / "workload-vm"
             (socket_base / "myvm").mkdir(parents=True)
             pw = _fake_pw(Path(tmp), uid=10001, gid=10001)
-            with mock.patch.object(self.mod, "VM_SOCKET_DIR", socket_base), \
+            with mock.patch.object(self.mod, "SOCKET_DIR", socket_base), \
                  mock.patch("os.chown"):
                 self.mod.setup_workload_runtime_dir(pw, "myvm")  # must not raise
 
@@ -2551,7 +2551,7 @@ class TestBuildCloudInitIsoValidation(unittest.TestCase):
     def test_invalid_guest_user_raises(self):
         cfg = {"vm": {"user": "Not Valid!"}}
         with mock.patch.object(self.mod.os, "chown", lambda *a, **kw: None), \
-             mock.patch.object(self.mod, "VM_SOCKET_DIR", self.runtime), \
+             mock.patch.object(self.mod, "SOCKET_DIR", self.runtime), \
              mock.patch.object(self.mod, "workload_state_dir", lambda n: self.home):
             with self.assertRaises(RuntimeError) as ctx:
                 self.mod.build_cloud_init_iso(self.pw, cfg, "myvm")
@@ -2561,7 +2561,7 @@ class TestBuildCloudInitIsoValidation(unittest.TestCase):
         (self.home / ".ssh" / "id_ed25519.pub").unlink()
         cfg = {"vm": {}}
         with mock.patch.object(self.mod.os, "chown", lambda *a, **kw: None), \
-             mock.patch.object(self.mod, "VM_SOCKET_DIR", self.runtime), \
+             mock.patch.object(self.mod, "SOCKET_DIR", self.runtime), \
              mock.patch.object(self.mod, "workload_state_dir", lambda n: self.home):
             with self.assertRaises(RuntimeError) as ctx:
                 self.mod.build_cloud_init_iso(self.pw, cfg, "myvm")
@@ -2573,7 +2573,7 @@ class TestBuildCloudInitIsoValidation(unittest.TestCase):
         cfg = {"vm": {}}
         import shutil as _shutil
         with mock.patch.object(self.mod.os, "chown", lambda *a, **kw: None), \
-             mock.patch.object(self.mod, "VM_SOCKET_DIR", self.runtime), \
+             mock.patch.object(self.mod, "SOCKET_DIR", self.runtime), \
              mock.patch.object(self.mod, "workload_state_dir", lambda n: self.home), \
              mock.patch.object(_shutil, "which", return_value=None):
             self.mod.build_cloud_init_iso(self.pw, cfg, "myvm")
@@ -2584,7 +2584,7 @@ class TestBuildCloudInitIsoValidation(unittest.TestCase):
         msgs = []
         import shutil as _shutil
         with mock.patch.object(self.mod.os, "chown", lambda *a, **kw: None), \
-             mock.patch.object(self.mod, "VM_SOCKET_DIR", self.runtime), \
+             mock.patch.object(self.mod, "SOCKET_DIR", self.runtime), \
              mock.patch.object(self.mod, "workload_state_dir", lambda n: self.home), \
              mock.patch.object(_shutil, "which", return_value=None), \
              mock.patch.object(ensure_common, "log", side_effect=msgs.append):
@@ -2597,7 +2597,7 @@ class TestBuildCloudInitIsoValidation(unittest.TestCase):
         msgs = []
         import shutil as _shutil
         with mock.patch.object(self.mod.os, "chown", lambda *a, **kw: None), \
-             mock.patch.object(self.mod, "VM_SOCKET_DIR", self.runtime), \
+             mock.patch.object(self.mod, "SOCKET_DIR", self.runtime), \
              mock.patch.object(self.mod, "workload_state_dir", lambda n: self.home), \
              mock.patch.object(_shutil, "which",
                                lambda name: "/usr/bin/genisoimage" if name == "genisoimage" else None), \

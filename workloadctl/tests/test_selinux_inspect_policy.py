@@ -15,7 +15,7 @@ import pathlib
 import re
 import unittest
 
-from workload_addr import VM_INSPECT_LISTENER_BIN
+from workload_addr import INSPECT_LISTENER_BIN
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 CIL = ROOT / "security" / "workload-inspect.cil"
@@ -54,7 +54,7 @@ class TestFilecon(unittest.TestCase):
     def test_the_entrypoint_filecon_is_the_installed_listener(self):
         """The drift guard. The module and lib/workload_addr.py each name this path, and
         a disagreement looks exactly like the domain not being applied."""
-        self.assertIn(VM_INSPECT_LISTENER_BIN, _filecons())
+        self.assertIn(INSPECT_LISTENER_BIN, _filecons())
 
 
 class TestSocketActivation(unittest.TestCase):
@@ -266,7 +266,7 @@ class TestPackaging(unittest.TestCase):
         spec = SPEC.read_text()
         self.assertRegex(
             spec, r"semodule -i %\{_datadir\}/workloadctl/workload-inspect\.cil"
-                  r"[^\n]*\n\s*restorecon " + re.escape(VM_INSPECT_LISTENER_BIN))
+                  r"[^\n]*\n\s*restorecon " + re.escape(INSPECT_LISTENER_BIN))
 
 
 if __name__ == "__main__":

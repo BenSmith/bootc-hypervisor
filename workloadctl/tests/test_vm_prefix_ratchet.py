@@ -274,12 +274,12 @@ class TestTheValuePinnedConstants(unittest.TestCase):
 
     def test_the_socket_dir_value_is_unchanged(self):
         import vm_defs
-        self.assertEqual(str(vm_defs.VM_SOCKET_DIR), "/run/workload-vm")
+        self.assertEqual(str(vm_defs.SOCKET_DIR), "/run/workload-vm")
 
     def test_the_listener_path_is_unchanged(self):
         import workload_addr
         self.assertEqual(
-            workload_addr.VM_INSPECT_LISTENER_BIN,
+            workload_addr.INSPECT_LISTENER_BIN,
             "/usr/libexec/workloadctl/workload-vm-inspect-listener")
 
 

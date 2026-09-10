@@ -18,7 +18,7 @@ import time
 sys.dont_write_bytecode = True
 
 from egress_selinux import qemu_launch_argv
-from vm_defs import VM_SOCKET_DIR
+from vm_defs import SOCKET_DIR
 from qmp import QMPClient
 from vm_provision import (marker_reports_failure, marker_vouches_for,
                           read_provision_marker, record_guest_provision_result)
@@ -128,7 +128,7 @@ def monitor_shutdown_reason(name: str, proc) -> str | None:
     returns None on any error, so a monitoring hiccup falls back to QEMU's own
     exit code rather than breaking the VM lifecycle.
     """
-    sock_path = str(VM_SOCKET_DIR / name / "qmp-notify.sock")
+    sock_path = str(SOCKET_DIR / name / "qmp-notify.sock")
     qmp = QMPClient()
     try:
         qmp.connect(sock_path, timeout=60.0, recv_timeout=2.0)
@@ -165,7 +165,7 @@ def main():
     name = sys.argv[1]
     qemu_cmd = sys.argv[2:]
 
-    qmp_sock = str(VM_SOCKET_DIR / name / "qmp.sock")
+    qmp_sock = str(SOCKET_DIR / name / "qmp.sock")
 
     # Start QEMU as a child process. We stay alive to hold the service's
     # main PID; systemd tracks *us* for cgroup membership.

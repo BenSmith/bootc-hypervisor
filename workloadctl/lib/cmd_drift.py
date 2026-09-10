@@ -18,7 +18,7 @@ from pathlib import Path
 from egress_policy import (
     INSPECT_POLICY_FILE, vm_inspect_policy_text, vm_uses_inspect,
 )
-from vm_defs import VM_SOCKET_DIR
+from vm_defs import SOCKET_DIR
 from config_parser import container_uses_inspect
 from workload_lib import (
     GENERATED_BY_RE,
@@ -39,7 +39,7 @@ LIVE_UNITS_DIR = Path("/run/systemd/system")
 
 # Where the inspectors' policy documents live. A module-level name for the same
 # reason LIVE_UNITS_DIR is one: it is the root the tests stage instead of.
-POLICY_ROOT = VM_SOCKET_DIR
+POLICY_ROOT = SOCKET_DIR
 
 
 def _find_generator() -> Path:

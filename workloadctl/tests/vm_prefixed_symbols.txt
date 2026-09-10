@@ -43,9 +43,11 @@
 # to KEEP instead of the work being done. That is a review question, and the
 # diff is what makes it visible.
 #
-# Two entries may be renamed but hold a value that MUST NOT change, because
-# real hosts already have the path: workload_addr.VM_INSPECT_LISTENER_BIN and
-# vm_defs.VM_SOCKET_DIR. Rename the constant, never what it holds.
+# The two constants whose VALUE is pinned by hosts already running --
+# workload_addr.INSPECT_LISTENER_BIN and vm_defs.SOCKET_DIR -- were renamed
+# last and deliberately, with the values asserted before and after. The rule
+# outlives the rename: change either constant's spelling freely, never what it
+# holds. TestTheValuePinnedConstants pins both strings.
 
 # KEEP -- the prefix is accurate: 58 symbols.
 KEEP	vm_network_config.VM_ALLOW_ADDR_RE
@@ -128,5 +130,3 @@ RENAME	egress_policy.VM_DROP_TIMED_OUT
 RENAME	egress_policy.VM_DROP_UNREACHABLE
 RENAME	egress_policy.VM_DROP_UNREADABLE_REQUEST
 RENAME	egress_policy.VM_DROP_UNVERIFIED
-RENAME	vm_defs.VM_SOCKET_DIR
-RENAME	workload_addr.VM_INSPECT_LISTENER_BIN

@@ -29,7 +29,7 @@ from workload_addr import VmInspectAddress  # noqa: F401  (FamilyPair annotation
 
 
 # Runtime socket directory for VM workloads: /run/workload-vm/{name}/
-VM_SOCKET_DIR = Path("/run/workload-vm")
+SOCKET_DIR = Path("/run/workload-vm")
 
 
 # virtio-serial port name qemu-guest-agent binds to inside the guest. Fixed by
@@ -116,7 +116,7 @@ def vm_guest_agent_socket(name: str) -> Path:
     contend with qmp.sock's ExecStop system_powerdown or the exporter's
     qmp-metrics.sock.
     """
-    return VM_SOCKET_DIR / name / "ga.sock"
+    return SOCKET_DIR / name / "ga.sock"
 
 
 def mac_address(name: str) -> str:
@@ -347,6 +347,6 @@ def vm_allowed_hosts(net: dict) -> list[str]:
 
 def runtime_dir(name: str) -> str:
     """Where one instance's config, allowlist, log and pid file live."""
-    return f"{VM_SOCKET_DIR}/{name}"
+    return f"{SOCKET_DIR}/{name}"
 
 

@@ -59,7 +59,7 @@ from pcap import (
     pcap_rule_commands, pcap_shift_timestamps, tcpdump_argv,
 )
 from nft_constants import NFT_BIN, NFT_TABLE, NFT_SKELETON
-from vm_defs import VM_SOCKET_DIR
+from vm_defs import SOCKET_DIR
 from workload_addr import MGMT_SSH_PORT, management_address, nflog_group
 from qmp import QMPClient
 from podman import Podman
@@ -226,7 +226,7 @@ def qmp_socket(name: str) -> str:
     system_powerdown rather than on the channel the exporter polls on a timer —
     colliding with a timer is likelier than colliding with a shutdown.
     """
-    return f"{VM_SOCKET_DIR}/{name}/qmp.sock"
+    return f"{SOCKET_DIR}/{name}/qmp.sock"
 
 
 def guest_vm_up(name: str, plan: dict) -> str | None:

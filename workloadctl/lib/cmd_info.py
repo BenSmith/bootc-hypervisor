@@ -12,7 +12,7 @@ import pwd
 import subprocess
 from typing import Any
 
-from vm_defs import VM_SOCKET_DIR
+from vm_defs import SOCKET_DIR
 from qmp import QMPClient
 from service_runtime import parse_active_since, systemctl_show
 from substrate import get_substrate
@@ -29,7 +29,7 @@ from workloadctl_core import (
 
 def _vm_qmp_status(name: str) -> str | None:
     """Return the QMP running status string, or None if unavailable."""
-    sock_path = VM_SOCKET_DIR / name / "qmp.sock"
+    sock_path = SOCKET_DIR / name / "qmp.sock"
     if not sock_path.exists():
         return None
     qmp = QMPClient()

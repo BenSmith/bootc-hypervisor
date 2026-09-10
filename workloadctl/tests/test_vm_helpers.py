@@ -290,7 +290,7 @@ class QmpTest(unittest.TestCase):
             seen["arguments"] = arguments
 
         with mock.patch.object(qmp, "qmp_send_cmd", _capture), \
-             mock.patch.object(qmp, "VM_SOCKET_DIR", Path("/sockroot")), \
+             mock.patch.object(qmp, "SOCKET_DIR", Path("/sockroot")), \
              mock.patch.object(qmp.Path, "exists", lambda self: True), \
              mock.patch.object(sys, "argv",
                                ["prog", "myvm", "block_resize",
@@ -315,7 +315,7 @@ class QmpTest(unittest.TestCase):
         # Valid argv but the QMP socket file doesn't exist => exit 1 before
         # any connection attempt, with a "not running?" hint.
         with mock.patch.object(qmp, "qmp_send_cmd") as send, \
-             mock.patch.object(qmp, "VM_SOCKET_DIR", Path("/sockroot")), \
+             mock.patch.object(qmp, "SOCKET_DIR", Path("/sockroot")), \
              mock.patch.object(qmp.Path, "exists", lambda self: False), \
              mock.patch.object(sys, "argv", ["prog", "myvm", "query-status"]):
             err = io.StringIO()
@@ -411,13 +411,13 @@ class ShutdownMainTest(unittest.TestCase):
         sock.__str__.return_value = "/fake/qmp.sock"
         sock_dir = mock.MagicMock()
         sock_dir.__truediv__ = lambda self, other: sock_dir
-        # VM_SOCKET_DIR / name / "qmp.sock" => sock
+        # SOCKET_DIR / name / "qmp.sock" => sock
         chain = mock.MagicMock()
         chain.__truediv__ = mock.MagicMock(return_value=sock)
         vm_socket_dir = mock.MagicMock()
         vm_socket_dir.__truediv__ = mock.MagicMock(return_value=chain)
         out, err = io.StringIO(), io.StringIO()
-        with mock.patch.object(shutdown, "VM_SOCKET_DIR", vm_socket_dir), \
+        with mock.patch.object(shutdown, "SOCKET_DIR", vm_socket_dir), \
              mock.patch.object(shutdown, "shutdown_and_wait",
                                return_value=wait_result) as waited, \
              mock.patch.object(sys, "argv", argv), \

@@ -434,7 +434,7 @@ class TestBackupVMCrash(unittest.TestCase):
         sock_dir = Path(d) / config_name
         sock_dir.mkdir(parents=True, exist_ok=True)
         (sock_dir / "qmp.sock").touch()
-        return patch.object(_backup_mod, 'VM_SOCKET_DIR', Path(d))
+        return patch.object(_backup_mod, 'SOCKET_DIR', Path(d))
 
     def test_crash_calls_qmp_stop_then_cont(self):
         """Active VM: QMP 'stop' is issued before copy, 'cont' after."""
@@ -500,9 +500,9 @@ class TestBackupVMCrash(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as d:
             output = Path(d) / 'out.tar.zst'
-            # VM_SOCKET_DIR points to d but qmp.sock doesn't exist there
+            # SOCKET_DIR points to d but qmp.sock doesn't exist there
             with patch('backup.subprocess.run', side_effect=fake_run), \
-                 patch.object(_backup_mod, 'VM_SOCKET_DIR', Path(d)):
+                 patch.object(_backup_mod, 'SOCKET_DIR', Path(d)):
                 buf = io.StringIO()
                 with patch('sys.stderr', buf):
                     with self.assertRaises(BackupError):
@@ -1359,7 +1359,7 @@ class TestCapabilityMatrix(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             sock_dir = Path(tmp) / config.name
             sock_dir.mkdir()
-            with patch.object(_vm_mod, 'VM_SOCKET_DIR', Path(tmp)), \
+            with patch.object(_vm_mod, 'SOCKET_DIR', Path(tmp)), \
                  patch.object(_vm_mod.subprocess, 'run', MagicMock()):
                 substrate.teardown(purge=False)
                 self.assertTrue(sock_dir.exists(),
@@ -1383,7 +1383,7 @@ class TestCapabilityMatrix(unittest.TestCase):
         substrate = VMSubstrate(config, manager)
         with tempfile.TemporaryDirectory() as tmp:
             (Path(tmp) / config.name).mkdir()
-            with patch.object(_vm_mod, 'VM_SOCKET_DIR', Path(tmp)), \
+            with patch.object(_vm_mod, 'SOCKET_DIR', Path(tmp)), \
                  patch.object(_vm_mod.subprocess, 'run',
                               MagicMock()) as run:
                 self.assertEqual(substrate.teardown(purge=True), [])
@@ -1422,7 +1422,7 @@ class TestCapabilityMatrix(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             (Path(tmp) / config.name).mkdir()
-            with patch.object(_vm_mod, 'VM_SOCKET_DIR', Path(tmp)), \
+            with patch.object(_vm_mod, 'SOCKET_DIR', Path(tmp)), \
                  patch.object(_vm_mod.subprocess, 'run',
                               MagicMock(side_effect=_run)) as run:
                 failures = substrate.teardown(purge=True)
@@ -1439,7 +1439,7 @@ class TestCapabilityMatrix(unittest.TestCase):
         substrate = VMSubstrate(config, manager)
         with tempfile.TemporaryDirectory() as tmp:
             (Path(tmp) / config.name).mkdir()
-            with patch.object(_vm_mod, 'VM_SOCKET_DIR', Path(tmp)):
+            with patch.object(_vm_mod, 'SOCKET_DIR', Path(tmp)):
                 shallow = substrate.teardown_plan(purge=False)
                 deep = substrate.teardown_plan(purge=True)
         # The socket dir is the whole plan, and only on purge. Retiring the
@@ -2076,11 +2076,11 @@ class TestVMControl(unittest.TestCase):
         return VMSubstrate(config, None)
 
     def test_control_sends_qmp_command(self):
-        from vm_defs import VM_SOCKET_DIR as _VM_SOCKET_DIR
+        from vm_defs import SOCKET_DIR
         substrate = self._substrate()
         mock_qmp = MagicMock()
         mock_qmp.execute.return_value = {"return": {}}
-        sock_path = _VM_SOCKET_DIR / substrate.config.name / "qmp.sock"
+        sock_path = SOCKET_DIR / substrate.config.name / "qmp.sock"
         with patch('substrate_vm.QMPClient', return_value=mock_qmp), \
              patch('pathlib.Path.exists', return_value=True), \
              patch('builtins.print'):

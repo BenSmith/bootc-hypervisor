@@ -40,7 +40,7 @@ from egress_ca import RESERVED_GUEST_ENV
 from broker_config import VmCredential
 from vm_defs import (SEED_PROVIDES_CHOICES, SEED_PROVIDES_RETIRED,
                      EGRESS_DEFAULT, EGRESS_MODES,
-                     REGISTRATION_DOMAIN_PARENTS, VM_SOCKET_DIR, TLS_UNBUILT, parse_memory_mib, parse_vm_port,
+                     REGISTRATION_DOMAIN_PARENTS, SOCKET_DIR, TLS_UNBUILT, parse_memory_mib, parse_vm_port,
                      vm_allowed_hosts)
 
 
@@ -301,7 +301,7 @@ def vm_allow_resolved(allow):
 
 def vm_resolve_policy_path(name: str) -> str:
     """Where one workload's responder reads its answers from."""
-    return f"{VM_SOCKET_DIR}/{name}/{RESOLVE_POLICY_FILE}"
+    return f"{SOCKET_DIR}/{name}/{RESOLVE_POLICY_FILE}"
 
 
 def vm_resolve_policy(net: dict, uid: int, resolved=None) -> dict:

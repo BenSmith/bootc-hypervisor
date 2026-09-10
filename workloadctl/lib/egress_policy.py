@@ -32,7 +32,7 @@ from typing import NamedTuple
 
 from config_parser import (INSPECT_ORIG_CLEARTEXT, INSPECT_ORIG_TLS,
                            normalise_hostname, parse_policy_entries)
-from vm_defs import EGRESS_DEFAULT, VM_SOCKET_DIR, vm_allowed_hosts
+from vm_defs import EGRESS_DEFAULT, SOCKET_DIR, vm_allowed_hosts
 
 
 # --- The two TLS modes, and the hostname rules every list is matched by ---
@@ -319,7 +319,7 @@ INSPECT_POLICY_FILE = "inspect.json"
 
 def inspect_policy_path(name: str) -> str:
     """Where one workload's inspector reads its lists from."""
-    return f"{VM_SOCKET_DIR}/{name}/{INSPECT_POLICY_FILE}"
+    return f"{SOCKET_DIR}/{name}/{INSPECT_POLICY_FILE}"
 
 
 INSPECT_STATUS_FILE = "inspect-status.json"
@@ -487,7 +487,7 @@ def inspect_status_path(name: str) -> str:
     processes atomically replacing one path leaves only the last writer's
     figures, silently.
     """
-    return f"{VM_SOCKET_DIR}/{name}/{INSPECT_STATUS_FILE}"
+    return f"{SOCKET_DIR}/{name}/{INSPECT_STATUS_FILE}"
 
 
 # WHERE THE PER-REQUEST RECORD GOES, and why it is not in the journal and not

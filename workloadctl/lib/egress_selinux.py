@@ -16,7 +16,7 @@ Installed to /usr/libexec/workloadctl/egress_selinux.py.
 
 import os
 
-from vm_defs import VM_SOCKET_DIR
+from vm_defs import SOCKET_DIR
 
 
 # QEMU runs as svirt_t (alias qemu_t), the domain the shipped policy already
@@ -60,7 +60,7 @@ VM_RESOLVE_SELINUX_CIL = "/usr/share/workloadctl/workload-resolve.cil"
 
 # --- The label the QMP socket directory has to carry ---
 #
-# The type VM_SOCKET_DIR must carry, and the fcontext pattern the RPM's %post
+# The type SOCKET_DIR must carry, and the fcontext pattern the RPM's %post
 # registers to give it that type. A confined QEMU cannot create a socket under
 # /run's default var_run_t, so without this the guest dies before it binds QMP
 # and the only symptom is a timeout that names nothing SELinux.
@@ -72,7 +72,7 @@ VM_RESOLVE_SELINUX_CIL = "/usr/share/workloadctl/workload-resolve.cil"
 # the time, which is why `diagnose`'s socket-label check accepts either.
 VM_SOCKET_SELINUX_TYPE = "svirt_var_run_t"
 VM_SOCKET_SELINUX_TYPE_REAL = "qemu_var_run_t"
-VM_SOCKET_FCONTEXT_PATTERN = f"{VM_SOCKET_DIR}(/.*)?"
+VM_SOCKET_FCONTEXT_PATTERN = f"{SOCKET_DIR}(/.*)?"
 
 
 # The transition needs a wrapper, and only a wrapper. `SELinuxContext=` in the

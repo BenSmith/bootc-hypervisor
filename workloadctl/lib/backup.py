@@ -21,7 +21,7 @@ from qmp import QMPClient
 from secrets_template import auto_detect_credentials, CREDSTORE_DIR
 from service_runtime import restart_workload_service
 from substrate import BackupError
-from vm_defs import VM_SOCKET_DIR
+from vm_defs import SOCKET_DIR
 from vm_clock import CLOCK_RESYNCED, resync_guest_clock_if_skewed
 from workload_lib import mount_points, workload_config_path
 
@@ -64,7 +64,7 @@ def backup_vm_crash(config, output: Path, *, quiet: bool) -> int:
         return backup_vm(config, output, quiet=quiet)
 
     # VM is running — pause vCPUs, copy durable disk + home, then resume.
-    sock_path = VM_SOCKET_DIR / config.name / "qmp.sock"
+    sock_path = SOCKET_DIR / config.name / "qmp.sock"
     if not sock_path.exists():
         error(
             f"Error: QMP socket not found at {sock_path}. "

@@ -38,7 +38,7 @@ from egress_ca import (
 )
 from broker_config import vm_credential_env
 from vm_defs import (
-    VM_SOCKET_DIR, VM_DEFAULT_GUEST_USER, VM_GUEST_HOME_BASE, VM_GUEST_UID,
+    SOCKET_DIR, VM_DEFAULT_GUEST_USER, VM_GUEST_HOME_BASE, VM_GUEST_UID,
     VM_HOME_SELINUX_CONTEXT, VM_HOME_SELINUX_TYPES, SeedContractError,
     find_ovmf_vars,
 )
@@ -751,7 +751,7 @@ def build_cloud_init_iso(pw, config: dict, name: str, config_path: Path | None =
     # it can embed decrypted secrets. setup_workload_runtime_dir() created this dir
     # earlier in the same invocation; recreate it defensively in case this is
     # called out of order (e.g. tests).
-    runtime_dir = VM_SOCKET_DIR / name
+    runtime_dir = SOCKET_DIR / name
     runtime_dir.mkdir(parents=True, exist_ok=True)
     os.chown(runtime_dir, pw.pw_uid, pw.pw_gid)
     os.chmod(runtime_dir, 0o750)

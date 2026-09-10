@@ -27,7 +27,7 @@ from egress_policy import (
     INSPECT_PORT_CLEARTEXT, INSPECT_PORT_TLS, hostname_match,
     vm_inspect_policy,
 )
-from workload_addr import VM_INSPECT_LISTENER_BIN
+from workload_addr import INSPECT_LISTENER_BIN
 
 ROOT = Path(__file__).resolve().parent.parent
 LISTENER_FILE = ROOT / "libexec" / "workload-vm-inspect-listener"
@@ -391,7 +391,7 @@ class TestInstalledPath(unittest.TestCase):
     """The installed path and the constant the unit's ExecStart read agree."""
 
     def test_the_spec_installs_the_listener_at_the_vm_constant_path(self):
-        self.assertEqual(VM_INSPECT_LISTENER_BIN,
+        self.assertEqual(INSPECT_LISTENER_BIN,
                          "/usr/libexec/workloadctl/workload-vm-inspect-listener")
         spec = (ROOT / "rpm" / "workloadctl.spec").read_text()
         self.assertIn("%{_libexecdir}/workloadctl/workload-vm-inspect-listener", spec)

@@ -12,7 +12,7 @@ import subprocess
 from pathlib import Path
 
 from qmp import QMPClient
-from vm_defs import VM_SOCKET_DIR
+from vm_defs import SOCKET_DIR
 from workload_lib import workload_service_name
 
 # Unified cgroup v2 mount. A module constant so tests can redirect it.
@@ -50,7 +50,7 @@ def get_vm_qmp_metrics(name):
     # (qmp.sock). A QMP monitor serves one client at a time, so scraping the
     # control socket every 15s could block the ExecStop system_powerdown and
     # force an unclean SIGKILL shutdown.
-    sock_path = VM_SOCKET_DIR / name / "qmp-metrics.sock"
+    sock_path = SOCKET_DIR / name / "qmp-metrics.sock"
     if not sock_path.exists():
         return {}
 

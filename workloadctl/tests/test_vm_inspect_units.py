@@ -27,7 +27,7 @@ from vm import (
 )
 from nft_constants import NFT_SET_INSPECT_CG, NFT_SET_EGRESS_CG
 from vm_defs import EGRESS_DEFAULT, SIDECAR_SLICE
-from workload_addr import VM_INSPECT_LISTENER_BIN, inspect_address
+from workload_addr import INSPECT_LISTENER_BIN, inspect_address
 from workload_lib import dq
 
 UID = 10004  # worked example, matching test_vm_inspect.py
@@ -285,7 +285,7 @@ class TestGeneratedService(unittest.TestCase):
         self.assertEqual(sum("wl_egress_cg" in ln for ln in post), 1)
 
     def test_execstart_is_the_listener_binary(self):
-        self.assertIn(f"ExecStart={VM_INSPECT_LISTENER_BIN}", self.unit)
+        self.assertIn(f"ExecStart={INSPECT_LISTENER_BIN}", self.unit)
 
     def test_execstart_names_the_workload(self):
         """The listener resolves its policy path from argv[1].
@@ -296,7 +296,7 @@ class TestGeneratedService(unittest.TestCase):
         fails its start, but only on the guest's first dial, long after the
         generator ran.
         """
-        self.assertIn(f'ExecStart={VM_INSPECT_LISTENER_BIN} {dq("web")}',
+        self.assertIn(f'ExecStart={INSPECT_LISTENER_BIN} {dq("web")}',
                       self.unit)
 
     def test_partof_the_vm(self):
