@@ -80,9 +80,9 @@ NAME = "wlpol"
 
 # Spelled out rather than imported, on the other rigs' reasoning: a rig that
 # computes both sides from one constant cannot notice them drifting apart.
-PORT_TLS = 8443            # VM_INSPECT_PORT_TLS
-PORT_CLEARTEXT = 8080      # VM_INSPECT_PORT_CLEARTEXT
-ORIGIN_PORT = 443          # VM_INSPECT_ORIG_TLS
+PORT_TLS = 8443            # INSPECT_PORT_TLS
+PORT_CLEARTEXT = 8080      # INSPECT_PORT_CLEARTEXT
+ORIGIN_PORT = 443          # INSPECT_ORIG_TLS
 RUNDIR = f"/run/workload-vm/{NAME}"
 POLICY = f"{RUNDIR}/inspect.json"
 STATUS = f"{RUNDIR}/inspect-status.json"
@@ -684,10 +684,10 @@ POLICY_DOC = {
     # and the 200 it gets below is the only proof of that composition rule.
     "hosts": [PLAIN, OTHER, SPLICED, H2, H1ONLY],
     # PATTERN STRINGS, not tables. `reason` is a schema key that never reaches
-    # the document -- vm_inspect_policy carries `vm_splice_hosts(net)`, which is
+    # the document -- inspect_policy carries `splice_hosts(net)`, which is
     # the patterns alone. Writing the schema's shape here instead cost a run:
     # load_policy checks that these are LISTS but not what is in them, so a
-    # table reached vm_normalise_hostname and took the connection thread down
+    # table reached normalise_hostname and took the connection thread down
     # with an AttributeError rather than failing the start. `policy` below is
     # the one that validates its entries, which is why it takes tables.
     "splice": [SPLICED],

@@ -636,7 +636,7 @@ def container_runs_on_host_network(config: dict) -> bool:
 def container_uses_inspect(config: dict) -> bool:
     """Whether this workload's egress is redirected into an inspector.
 
-    Mirrors ``vm_uses_inspect()`` (lib/egress_policy.py) for the container
+    Mirrors ``uses_inspect()`` (lib/egress_policy.py) for the container
     substrate: the single source of the predicate (D2 in the container
     egress-parity build spec). ``ContainerSubstrate.uses_inspect()`` delegates here rather than
     restating the logic, and ``get_enabled_workloads()``

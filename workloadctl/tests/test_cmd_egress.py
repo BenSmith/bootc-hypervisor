@@ -7,7 +7,7 @@ to do with the record.
 Three kinds of thing are held here.
 
 **The pins.** The reader restates two of the listener's vocabularies —
-`VM_INSPECT_RECORD_REASONS` and the `id=`/`req=` field names — because nothing
+`INSPECT_RECORD_REASONS` and the `id=`/`req=` field names — because nothing
 in `lib/` can import an extension-less entrypoint. Both directions are checked:
 a reason the listener writes and `lib/vm.py` omits is a filter that cannot
 select a real refusal, and one `lib/vm.py` carries that the listener never
@@ -43,10 +43,10 @@ from cmd_egress import (
     resolve_id, resolve_reason, resolve_status, select,
 )
 from egress_policy import (
-    VM_INSPECT_LOG_ID_FIELD, VM_INSPECT_LOG_REQ_FIELD,
-    VM_INSPECT_RECORD_DECISIONS, VM_INSPECT_RECORD_FIELDS,
-    VM_INSPECT_RECORD_MODES, VM_INSPECT_RECORD_PLANES,
-    VM_INSPECT_RECORD_REASONS,
+    INSPECT_LOG_ID_FIELD, INSPECT_LOG_REQ_FIELD,
+    INSPECT_RECORD_DECISIONS, INSPECT_RECORD_FIELDS,
+    INSPECT_RECORD_MODES, INSPECT_RECORD_PLANES,
+    INSPECT_RECORD_REASONS,
 )
 
 from tests.test_vm_inspect_listener import _mod
@@ -59,10 +59,10 @@ def _rec(**overrides):
     that is null are different facts — so a fixture that omitted them would be
     testing a shape the listener never emits.
     """
-    record = dict.fromkeys(VM_INSPECT_RECORD_FIELDS)
+    record = dict.fromkeys(INSPECT_RECORD_FIELDS)
     record.update({
-        VM_INSPECT_LOG_ID_FIELD: "a1b2c3d4e5f6",
-        VM_INSPECT_LOG_REQ_FIELD: 1,
+        INSPECT_LOG_ID_FIELD: "a1b2c3d4e5f6",
+        INSPECT_LOG_REQ_FIELD: 1,
         "ts": "2026-08-31T12:00:00.000Z",
         "plane": "tls",
         "mode": "terminate",
@@ -104,18 +104,18 @@ class TestReasonPin(unittest.TestCase):
     def test_every_reason_the_listener_writes_is_selectable(self):
         """A missing one is a refusal no --reason value can ask about."""
         for reason in _mod().DROP_REASONS:
-            self.assertIn(reason, VM_INSPECT_RECORD_REASONS)
+            self.assertIn(reason, INSPECT_RECORD_REASONS)
 
     def test_no_reason_here_is_one_the_listener_never_writes(self):
         """A stale one is a filter that always returns nothing, silently."""
-        for reason in VM_INSPECT_RECORD_REASONS:
+        for reason in INSPECT_RECORD_REASONS:
             self.assertIn(reason, _mod().DROP_REASONS)
 
     def test_the_vocabularies_match_the_listeners(self):
         mod = _mod()
-        self.assertEqual(tuple(VM_INSPECT_RECORD_DECISIONS),
+        self.assertEqual(tuple(INSPECT_RECORD_DECISIONS),
                          tuple(mod.RECORD_DECISIONS))
-        self.assertEqual(tuple(VM_INSPECT_RECORD_MODES),
+        self.assertEqual(tuple(INSPECT_RECORD_MODES),
                          tuple(mod.RECORD_MODES))
 
     def test_planes_are_the_two_the_listener_labels(self):
@@ -132,15 +132,15 @@ class TestReasonPin(unittest.TestCase):
         """
         mod = _mod()
         self.assertEqual(
-            set(VM_INSPECT_RECORD_PLANES),
-            {mod.plane_for_port(mod.VM_INSPECT_PORT_TLS),
-             mod.plane_for_port(mod.VM_INSPECT_PORT_CLEARTEXT)})
+            set(INSPECT_RECORD_PLANES),
+            {mod.plane_for_port(mod.INSPECT_PORT_TLS),
+             mod.plane_for_port(mod.INSPECT_PORT_CLEARTEXT)})
 
     def test_every_plane_is_a_port_the_socket_unit_binds(self):
         """And nothing else is a plane: an unrecognised port is None, which is
         not a value any record can carry."""
         self.assertIsNone(_mod().plane_for_port(9999))
-        self.assertNotIn(None, VM_INSPECT_RECORD_PLANES)
+        self.assertNotIn(None, INSPECT_RECORD_PLANES)
 
 
 class TestIdPatternIsBuiltFromTheConstant(unittest.TestCase):
@@ -152,15 +152,15 @@ class TestIdPatternIsBuiltFromTheConstant(unittest.TestCase):
     """
 
     def test_the_pasted_token_and_the_bare_hex_are_the_same_id(self):
-        self.assertEqual(resolve_id(f"{VM_INSPECT_LOG_ID_FIELD}=A1B2C3"),
+        self.assertEqual(resolve_id(f"{INSPECT_LOG_ID_FIELD}=A1B2C3"),
                          "a1b2c3")
         self.assertEqual(resolve_id("a1b2c3"), "a1b2c3")
 
     def test_a_renamed_field_moves_the_pattern_with_it(self):
-        with unittest.mock.patch.object(cmd_egress, "VM_INSPECT_LOG_ID_FIELD",
+        with unittest.mock.patch.object(cmd_egress, "INSPECT_LOG_ID_FIELD",
                                         "conn"):
             pattern = cmd_egress.re.compile(
-                rf"\A(?:{cmd_egress.re.escape(cmd_egress.VM_INSPECT_LOG_ID_FIELD)}=)?"
+                rf"\A(?:{cmd_egress.re.escape(cmd_egress.INSPECT_LOG_ID_FIELD)}=)?"
                 r"([0-9a-fA-F]+)\Z")
             self.assertTrue(pattern.match("conn=a1b2c3"))
 
@@ -245,12 +245,12 @@ class TestFiltersSelectAndReject(unittest.TestCase):
     def setUp(self):
         self.records = [
             _rec(),
-            _rec(**{VM_INSPECT_LOG_ID_FIELD: "ffffffffffff",
+            _rec(**{INSPECT_LOG_ID_FIELD: "ffffffffffff",
                     "decision": "drop", "mode": "splice", "plane": "cleartext",
                     "host": "files.internal.test", "method": "POST",
                     "reason": "not allowlisted", "status": None,
-                    "path": None, VM_INSPECT_LOG_REQ_FIELD: None}),
-            _rec(**{VM_INSPECT_LOG_REQ_FIELD: 2, "decision": "drop",
+                    "path": None, INSPECT_LOG_REQ_FIELD: None}),
+            _rec(**{INSPECT_LOG_REQ_FIELD: 2, "decision": "drop",
                     "status": 403, "reason": "not permitted by policy",
                     "path": "/v1/admin"}),
         ]
@@ -278,7 +278,7 @@ class TestFiltersSelectAndReject(unittest.TestCase):
         self.assertEqual(len(self._select(reason=["timed out"])), 0)
 
     def test_id_takes_the_pasted_token(self):
-        picked = self._select(id=[f"{VM_INSPECT_LOG_ID_FIELD}=ffffffffffff"])
+        picked = self._select(id=[f"{INSPECT_LOG_ID_FIELD}=ffffffffffff"])
         self.assertEqual(len(picked), 1)
         self.assertEqual(picked[0]["mode"], "splice")
 
@@ -404,8 +404,8 @@ class TestGrouping(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             path = Path(tmp) / "requests.log"
             _write(Path(tmp) / "requests.log.1",
-                   [_rec(**{VM_INSPECT_LOG_REQ_FIELD: 1, "path": "/a"})])
-            _write(path, [_rec(**{VM_INSPECT_LOG_REQ_FIELD: 2, "path": "/b"})])
+                   [_rec(**{INSPECT_LOG_REQ_FIELD: 1, "path": "/a"})])
+            _write(path, [_rec(**{INSPECT_LOG_REQ_FIELD: 2, "path": "/b"})])
             records, _, _ = read_records(path)
             groups = group_by_connection(records)
             self.assertEqual(len(groups), 1)
@@ -413,26 +413,26 @@ class TestGrouping(unittest.TestCase):
 
     def test_the_connection_level_record_heads_its_group(self):
         """It describes a decision taken before any request existed."""
-        records = [_rec(**{VM_INSPECT_LOG_REQ_FIELD: 1}),
-                   _rec(**{VM_INSPECT_LOG_REQ_FIELD: None, "mode": "splice"})]
+        records = [_rec(**{INSPECT_LOG_REQ_FIELD: 1}),
+                   _rec(**{INSPECT_LOG_REQ_FIELD: None, "mode": "splice"})]
         _, items = group_by_connection(records)[0]
-        self.assertIsNone(items[0][VM_INSPECT_LOG_REQ_FIELD])
+        self.assertIsNone(items[0][INSPECT_LOG_REQ_FIELD])
 
     def test_a_group_missing_its_first_request_is_partial(self):
         self.assertTrue(group_is_partial(
-            [_rec(**{VM_INSPECT_LOG_REQ_FIELD: 3})]))
+            [_rec(**{INSPECT_LOG_REQ_FIELD: 3})]))
         self.assertFalse(group_is_partial(
-            [_rec(**{VM_INSPECT_LOG_REQ_FIELD: 1})]))
+            [_rec(**{INSPECT_LOG_REQ_FIELD: 1})]))
 
     def test_a_connection_level_record_makes_a_group_complete(self):
         """That record IS the front of the connection, so nothing is missing."""
         self.assertFalse(group_is_partial(
-            [_rec(**{VM_INSPECT_LOG_REQ_FIELD: None, "mode": "h2"})]))
+            [_rec(**{INSPECT_LOG_REQ_FIELD: None, "mode": "h2"})]))
 
     def test_the_marker_says_retained_or_filtered_and_not_the_other(self):
         """Calling a filtered view a retention gap is a false claim about the
         record; calling a retention gap a filtered view hides a real one."""
-        records = [_rec(**{VM_INSPECT_LOG_REQ_FIELD: 3})]
+        records = [_rec(**{INSPECT_LOG_REQ_FIELD: 3})]
         buf = io.StringIO()
         with redirect_stdout(buf):
             cmd_egress._print_grouped(records, filtered=False)
@@ -473,9 +473,9 @@ class TestCommand(unittest.TestCase):
         self._patches = [
             unittest.mock.patch.object(cmd_egress, "load_config_or_exit",
                                        return_value=config),
-            unittest.mock.patch.object(cmd_egress, "vm_inspect_record_dir",
+            unittest.mock.patch.object(cmd_egress, "inspect_record_dir",
                                        return_value=self.dir),
-            unittest.mock.patch.object(cmd_egress, "vm_inspect_record_path",
+            unittest.mock.patch.object(cmd_egress, "inspect_record_path",
                                        return_value=self.path),
         ]
         for patch in self._patches:
@@ -595,9 +595,9 @@ class TestTheSubsetMarkerCountsMinusN(unittest.TestCase):
         for patch in (
                 unittest.mock.patch.object(cmd_egress, "load_config_or_exit",
                                            return_value=config),
-                unittest.mock.patch.object(cmd_egress, "vm_inspect_record_dir",
+                unittest.mock.patch.object(cmd_egress, "inspect_record_dir",
                                            return_value=self.dir),
-                unittest.mock.patch.object(cmd_egress, "vm_inspect_record_path",
+                unittest.mock.patch.object(cmd_egress, "inspect_record_path",
                                            return_value=self.path)):
             patch.start()
             self.addCleanup(patch.stop)
@@ -609,8 +609,8 @@ class TestTheSubsetMarkerCountsMinusN(unittest.TestCase):
         return out.getvalue()
 
     def _one_long_connection(self, count):
-        _write(self.path, [_rec(**{VM_INSPECT_LOG_ID_FIELD: "aa",
-                                   VM_INSPECT_LOG_REQ_FIELD: n})
+        _write(self.path, [_rec(**{INSPECT_LOG_ID_FIELD: "aa",
+                                   INSPECT_LOG_REQ_FIELD: n})
                            for n in range(1, count + 1)])
 
     def test_a_group_cut_by_the_limit_is_not_called_a_retention_gap(self):
@@ -630,8 +630,8 @@ class TestTheSubsetMarkerCountsMinusN(unittest.TestCase):
     def test_a_real_retention_gap_still_reads_as_one(self):
         """The other direction, which is the one that matters: rendering a
         rotated-away history as a filtered view hides a real loss."""
-        _write(self.path, [_rec(**{VM_INSPECT_LOG_ID_FIELD: "aa",
-                                   VM_INSPECT_LOG_REQ_FIELD: n})
+        _write(self.path, [_rec(**{INSPECT_LOG_ID_FIELD: "aa",
+                                   INSPECT_LOG_REQ_FIELD: n})
                            for n in (7, 8)])
         out = self._run(group=True)
         self.assertIn("not retained", out)
@@ -690,16 +690,16 @@ class TestRecordsWithNoIdDoNotMerge(unittest.TestCase):
 
     def test_two_id_less_records_are_two_groups(self):
         groups = cmd_egress.group_by_connection(
-            [_rec(**{VM_INSPECT_LOG_ID_FIELD: None, "host": "a.example"}),
-             _rec(**{VM_INSPECT_LOG_ID_FIELD: None, "host": "b.example"})])
+            [_rec(**{INSPECT_LOG_ID_FIELD: None, "host": "a.example"}),
+             _rec(**{INSPECT_LOG_ID_FIELD: None, "host": "b.example"})])
         self.assertEqual(len(groups), 2)
         self.assertEqual([key for key, _ in groups], [None, None])
 
     def test_records_that_do_have_an_id_still_group(self):
         groups = cmd_egress.group_by_connection(
-            [_rec(**{VM_INSPECT_LOG_ID_FIELD: "aa"}),
-             _rec(**{VM_INSPECT_LOG_ID_FIELD: None}),
-             _rec(**{VM_INSPECT_LOG_ID_FIELD: "aa"})])
+            [_rec(**{INSPECT_LOG_ID_FIELD: "aa"}),
+             _rec(**{INSPECT_LOG_ID_FIELD: None}),
+             _rec(**{INSPECT_LOG_ID_FIELD: "aa"})])
         self.assertEqual(len(groups), 2)
         by_key = {key: items for key, items in groups}
         self.assertEqual(len(by_key["aa"]), 2)
@@ -730,9 +730,9 @@ class TestAPrunedWindowIsNotAnAbsentRecord(unittest.TestCase):
         for patch in (
                 unittest.mock.patch.object(cmd_egress, "load_config_or_exit",
                                            return_value=config),
-                unittest.mock.patch.object(cmd_egress, "vm_inspect_record_dir",
+                unittest.mock.patch.object(cmd_egress, "inspect_record_dir",
                                            return_value=self.dir),
-                unittest.mock.patch.object(cmd_egress, "vm_inspect_record_path",
+                unittest.mock.patch.object(cmd_egress, "inspect_record_path",
                                            return_value=self.path)):
             patch.start()
             self.addCleanup(patch.stop)
@@ -804,9 +804,9 @@ class TestTheJsonWrapperDisclosesTheLimit(unittest.TestCase):
         for patch in (
                 unittest.mock.patch.object(cmd_egress, "load_config_or_exit",
                                            return_value=config),
-                unittest.mock.patch.object(cmd_egress, "vm_inspect_record_dir",
+                unittest.mock.patch.object(cmd_egress, "inspect_record_dir",
                                            return_value=self.dir),
-                unittest.mock.patch.object(cmd_egress, "vm_inspect_record_path",
+                unittest.mock.patch.object(cmd_egress, "inspect_record_path",
                                            return_value=self.path)):
             patch.start()
             self.addCleanup(patch.stop)
@@ -870,9 +870,9 @@ class TestANegativeLineCountIsRefused(unittest.TestCase):
         for patch in (
                 unittest.mock.patch.object(cmd_egress, "load_config_or_exit",
                                            return_value=config),
-                unittest.mock.patch.object(cmd_egress, "vm_inspect_record_dir",
+                unittest.mock.patch.object(cmd_egress, "inspect_record_dir",
                                            return_value=self.dir),
-                unittest.mock.patch.object(cmd_egress, "vm_inspect_record_path",
+                unittest.mock.patch.object(cmd_egress, "inspect_record_path",
                                            return_value=self.path)):
             patch.start()
             self.addCleanup(patch.stop)

@@ -58,8 +58,8 @@ lifecycle note under "The set").
 | `/run/systemd/system/workload-<name>-net.service` | `bridge` mode (the auto-created `workload-<name>-net` network) |
 | `/run/systemd/system/workload-<name>-<cname>.service` | one per container, in `pod`/`bridge`/multi |
 | `/run/systemd/system/workload-<name>-virtiofs-<tag>.service` | one per virtiofs volume, VM workloads |
-| `/run/systemd/system/workload-<name>-inspect.socket` + `-inspect.service` | VM workloads whose egress is inspected (`vm_uses_inspect`). Enumerated for every VM regardless, on the superset rule below |
-| `/run/systemd/system/workload-<name>-resolve.socket` + `-resolve.service` | the synthesising responder — inspected **and** `resolver` not `"none"` (`vm_uses_resolve`). Same superset rule |
+| `/run/systemd/system/workload-<name>-inspect.socket` + `-inspect.service` | VM workloads whose egress is inspected (`uses_inspect`). Enumerated for every VM regardless, on the superset rule below |
+| `/run/systemd/system/workload-<name>-resolve.socket` + `-resolve.service` | the synthesising responder — inspected **and** `resolver` not `"none"` (`uses_resolve`). Same superset rule |
 | `/run/systemd/system/workload-<name>-broker.service` | VM workloads declaring `[[vm.network.credential]]` material and inspected (`vm_uses_credentials`). Same superset rule |
 | `/run/systemd/system/workload-<name>-proxy.service` | **Nothing emits this.** A cleanup entry, listed only so that a host carrying this unit from an earlier install has something that knows its name and can unlink it. `emitted=False` always. Deletable once no host has one |
 

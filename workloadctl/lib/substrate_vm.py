@@ -36,7 +36,7 @@ from substrate import (
     service_active,
     systemctl_or_raise,
 )
-from egress_policy import vm_uses_inspect
+from egress_policy import uses_inspect
 from vm_defs import (
     VM_SOCKET_DIR, parse_memory_mib, vm_guest_agent_socket, vm_mac_address,
 )
@@ -392,7 +392,7 @@ class VMSubstrate(Substrate):
         return workload_service_units(self.config, roles={"setup", "build"})
 
     def uses_inspect(self) -> bool:
-        return vm_uses_inspect(self.config.config)
+        return uses_inspect(self.config.config)
 
     def _guest_ip(self) -> tuple[str, int] | None:
         """The (host, port) the SSH paths need; None if not resolvable yet."""

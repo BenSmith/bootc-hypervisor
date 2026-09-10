@@ -528,7 +528,7 @@ class PurgeRemovesTheEgressRecordTest(unittest.TestCase):
                  patch.object(cmd_disable, 'apply_selinux_policy', MagicMock()), \
                  patch.object(cmd_disable, '_stop_user_manager',
                               MagicMock(return_value=False)), \
-                 patch.object(cmd_disable, 'vm_inspect_record_dir',
+                 patch.object(cmd_disable, 'inspect_record_dir',
                               lambda name: record_root / name), \
                  patch.object(VMSubstrate, 'teardown', MagicMock(return_value=[])), \
                  patch.object(cmd_disable, 'workload_enabled_marker',

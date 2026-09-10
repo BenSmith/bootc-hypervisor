@@ -28,7 +28,7 @@ container-flavoured twin. The container-specific work is entirely in parsing
 policy document (container_inspect_policy_text) -- see lib/workload_lib.py.
 
 D7: no synthesising DNS responder for containers, so unlike
-workload-vm-inspect there is no vm_uses_resolve check and no resolve-status
+workload-vm-inspect there is no uses_resolve check and no resolve-status
 clearing here.
 
 The credential-broker exemption (S2's carve-out) IS made here, gated on
@@ -40,7 +40,7 @@ by the rule that stops the workload reaching the LAN.
 G18: inspection_applies() delegates to container_uses_inspect(), the single
 source of the predicate the generator's run-file list (P1-9) must agree
 with -- the same reason workload-vm-inspect's inspection_applies delegates to
-vm_uses_inspect() for the VM side.
+uses_inspect() for the VM side.
 
 EXIT CODES: same convention as workload-vm-inspect. `up` fails loudly, `down`
 is tolerant.
@@ -55,7 +55,7 @@ sys.dont_write_bytecode = True
 from helper_main import log, run, run_helper, up_down_main
 from nft import (add_listener_addresses, purge_internal_exemptions,
                  remove_listener_addresses)
-from egress_policy import vm_inspect_policy_path, vm_inspect_status_path
+from egress_policy import inspect_policy_path, inspect_status_path
 from vm import vm_inspect_element_commands, vm_internal_ok_commands
 from broker_config import container_uses_credentials
 from nft_constants import NFT_BIN, NFT_PROXY_SKELETON, NFT_SKELETON
@@ -80,7 +80,7 @@ def write_policy(name: str, net: dict) -> str:
     """Write the inspector's policy document. Same contract as
     workload-vm-inspect's write_policy: root-owned, 0640, replaced rather
     than truncated in place."""
-    path = vm_inspect_policy_path(name)
+    path = inspect_policy_path(name)
     tmp = f"{path}.tmp"
     with open(tmp, "w") as f:
         f.write(container_inspect_policy_text(net))
@@ -126,7 +126,7 @@ def up(name: str) -> int:
     uid = pwd.getpwnam(f"_wl-{name}").pw_uid
 
     write_policy(name, net)
-    clear_status(vm_inspect_status_path(name))
+    clear_status(inspect_status_path(name))
 
     ensure_advertised_interface(run)
     # Both skeletons, for the reason workload-vm-inspect's module docstring

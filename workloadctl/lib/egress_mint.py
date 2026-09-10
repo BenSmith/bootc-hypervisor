@@ -48,7 +48,7 @@ from collections import OrderedDict
 from pathlib import Path
 from typing import NamedTuple
 
-from egress_policy import vm_normalise_hostname
+from egress_policy import normalise_hostname
 from egress_ca import (
     DENIAL_DIR_NAME, LEAF_DIR_NAME, LEAF_RENEW_WITHIN_SECONDS, LeafRefused,
     ca_cert_path, ca_key_path, leaf_openssl_argv,
@@ -482,7 +482,7 @@ class Minter:
         MINT_WAIT_SECONDS, because legitimate traffic never empties the bucket
         and losing it is the outcome the whole rung exists to avoid.
         """
-        name = vm_normalise_hostname(server_name)
+        name = normalise_hostname(server_name)
         cache = self.denials if denied else self.working_set
         now = self._clock()
 

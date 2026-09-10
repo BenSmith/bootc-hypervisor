@@ -36,8 +36,8 @@ from unittest import mock
 
 import cmd_diagnose
 from egress_policy import (
-    VM_INSPECT_DIGEST_KEY, VM_INSPECT_DIGEST_SHORT, vm_inspect_digest_short,
-    vm_inspect_policy_digest, vm_inspect_policy_text,
+    INSPECT_DIGEST_KEY, INSPECT_DIGEST_SHORT, inspect_digest_short,
+    inspect_policy_digest, inspect_policy_text,
 )
 from egress_ca import CA_EXPIRY_WARN_DAYS
 
@@ -53,26 +53,26 @@ class TestTheDigestProducer(unittest.TestCase):
         """Both sides hold text -- the listener the string it read, the reader
         the file. Digesting a re-parsed structure would make the value depend
         on this Python's dict ordering rather than on the file."""
-        text = vm_inspect_policy_text(NET)
-        self.assertEqual(vm_inspect_policy_digest(text),
-                         vm_inspect_policy_digest(text))
+        text = inspect_policy_text(NET)
+        self.assertEqual(inspect_policy_digest(text),
+                         inspect_policy_digest(text))
 
     def test_a_document_that_differs_by_one_byte_digests_differently(self):
-        text = vm_inspect_policy_text(NET)
-        self.assertNotEqual(vm_inspect_policy_digest(text),
-                            vm_inspect_policy_digest(text + " "))
+        text = inspect_policy_text(NET)
+        self.assertNotEqual(inspect_policy_digest(text),
+                            inspect_policy_digest(text + " "))
 
     def test_the_short_form_is_the_prefix_of_the_full_one(self):
-        digest = vm_inspect_policy_digest("x")
-        self.assertEqual(vm_inspect_digest_short(digest),
-                         digest[:VM_INSPECT_DIGEST_SHORT])
+        digest = inspect_policy_digest("x")
+        self.assertEqual(inspect_digest_short(digest),
+                         digest[:INSPECT_DIGEST_SHORT])
 
     def test_a_missing_digest_shortens_to_a_word_not_an_empty_string(self):
         """It reaches a sentence. An empty string there renders as a gap where
         a value was promised, which reads as a rendering bug rather than as an
         unknown."""
-        self.assertEqual(vm_inspect_digest_short(None), "unknown")
-        self.assertEqual(vm_inspect_digest_short(""), "unknown")
+        self.assertEqual(inspect_digest_short(None), "unknown")
+        self.assertEqual(inspect_digest_short(""), "unknown")
 
 
 class TestTheListenerReportsWhatItLoaded(unittest.TestCase):
@@ -88,9 +88,9 @@ class TestTheListenerReportsWhatItLoaded(unittest.TestCase):
         return str(path)
 
     def test_the_loaded_policy_carries_the_documents_digest(self):
-        text = vm_inspect_policy_text(NET)
+        text = inspect_policy_text(NET)
         policy = self.mod.load_policy(self._write(text))
-        self.assertEqual(policy.digest, vm_inspect_policy_digest(text))
+        self.assertEqual(policy.digest, inspect_policy_digest(text))
 
     def test_the_digest_is_of_the_bytes_that_were_parsed(self):
         """Not of a re-read. A rewrite landing between the read and the digest
@@ -104,8 +104,8 @@ class TestTheListenerReportsWhatItLoaded(unittest.TestCase):
         one that happened to return the same bytes would pass the digest
         comparison while leaving the race wide open.
         """
-        first = vm_inspect_policy_text(NET)
-        second = vm_inspect_policy_text({"hosts": ["other.example"],
+        first = inspect_policy_text(NET)
+        second = inspect_policy_text({"hosts": ["other.example"],
                                          "egress": "filtered"})
         path = self._write(first)
         opened = []
@@ -117,16 +117,16 @@ class TestTheListenerReportsWhatItLoaded(unittest.TestCase):
         with mock.patch.object(self.mod, "open", versioned_open, create=True):
             policy = self.mod.load_policy(path)
         self.assertEqual(len(opened), 1)
-        self.assertEqual(policy.digest, vm_inspect_policy_digest(first))
-        self.assertNotEqual(policy.digest, vm_inspect_policy_digest(second))
+        self.assertEqual(policy.digest, inspect_policy_digest(first))
+        self.assertNotEqual(policy.digest, inspect_policy_digest(second))
 
     def test_the_digest_reaches_the_status_document(self):
         """The status file is the only channel from a running listener to the
         host. A digest held in memory and never written is unreadable by the
         check that exists to read it."""
-        policy = self.mod.load_policy(self._write(vm_inspect_policy_text(NET)))
+        policy = self.mod.load_policy(self._write(inspect_policy_text(NET)))
         listener = self.mod.Listener([], policy=policy)
-        self.assertEqual(listener.status()[VM_INSPECT_DIGEST_KEY],
+        self.assertEqual(listener.status()[INSPECT_DIGEST_KEY],
                          policy.digest)
 
     def test_the_key_is_written_even_when_empty(self):
@@ -135,8 +135,8 @@ class TestTheListenerReportsWhatItLoaded(unittest.TestCase):
         treats one of those as silence."""
         listener = self.mod.Listener([], policy=self.mod.Policy(
             tls="inspect", hosts=("example.com",)))
-        self.assertIn(VM_INSPECT_DIGEST_KEY, listener.status())
-        self.assertEqual(listener.status()[VM_INSPECT_DIGEST_KEY], "")
+        self.assertIn(INSPECT_DIGEST_KEY, listener.status())
+        self.assertEqual(listener.status()[INSPECT_DIGEST_KEY], "")
 
 
 class TestTheStaleChecks(unittest.TestCase):
@@ -161,23 +161,23 @@ class TestTheStaleChecks(unittest.TestCase):
 
     def test_a_matching_digest_passes(self):
         _name, ok, detail = self._line(
-            status={VM_INSPECT_DIGEST_KEY: "abc123"}, disk_digest="abc123")
+            status={INSPECT_DIGEST_KEY: "abc123"}, disk_digest="abc123")
         self.assertTrue(ok, detail)
         self.assertNotIn("DIFFERENT policy", detail)
 
     def test_a_differing_digest_fails(self):
         _name, ok, detail = self._line(
-            status={VM_INSPECT_DIGEST_KEY: "aaaa1111"}, disk_digest="bbbb2222")
+            status={INSPECT_DIGEST_KEY: "aaaa1111"}, disk_digest="bbbb2222")
         self.assertFalse(ok)
         self.assertIn("DIFFERENT policy", detail)
 
     def test_both_digests_are_shown_short(self):
-        running = vm_inspect_policy_digest("a")
-        disk = vm_inspect_policy_digest("b")
+        running = inspect_policy_digest("a")
+        disk = inspect_policy_digest("b")
         _name, _ok, detail = self._line(
-            status={VM_INSPECT_DIGEST_KEY: running}, disk_digest=disk)
-        self.assertIn(running[:VM_INSPECT_DIGEST_SHORT], detail)
-        self.assertIn(disk[:VM_INSPECT_DIGEST_SHORT], detail)
+            status={INSPECT_DIGEST_KEY: running}, disk_digest=disk)
+        self.assertIn(running[:INSPECT_DIGEST_SHORT], detail)
+        self.assertIn(disk[:INSPECT_DIGEST_SHORT], detail)
 
     def test_the_remedy_is_the_vm_not_the_socket(self):
         """Restarting the socket is what CREATES this state -- its ExecStartPre
@@ -185,7 +185,7 @@ class TestTheStaleChecks(unittest.TestCase):
         repeating the socket remedy would loop the operator through the same
         non-fix."""
         _name, _ok, detail = self._line(
-            status={VM_INSPECT_DIGEST_KEY: "aaaa"}, disk_digest="bbbb")
+            status={INSPECT_DIGEST_KEY: "aaaa"}, disk_digest="bbbb")
         self.assertIn("systemctl restart workload-vm1.service", detail)
         self.assertIn("does NOT fix this", detail)
 
@@ -206,7 +206,7 @@ class TestTheStaleChecks(unittest.TestCase):
         """T3's `drift` already reports a missing document; a second line here
         sends an operator to the same fix twice."""
         _name, ok, detail = self._line(
-            status={VM_INSPECT_DIGEST_KEY: "aaaa"}, disk_digest="")
+            status={INSPECT_DIGEST_KEY: "aaaa"}, disk_digest="")
         self.assertTrue(ok, detail)
         self.assertNotIn("DIFFERENT policy", detail)
 
@@ -375,7 +375,7 @@ class TestTheDiskReadsAreDefensiveToo(unittest.TestCase):
     def test_a_policy_document_that_is_not_text_reads_as_unknown(self):
         doc = self.dir / "inspect.json"
         doc.write_bytes(b'{"hosts": ["\xff\xfe"]}')
-        with mock.patch.object(cmd_diagnose, "vm_inspect_policy_path",
+        with mock.patch.object(cmd_diagnose, "inspect_policy_path",
                                return_value=str(doc)):
             self.assertIsNone(cmd_diagnose._policy_digest_on_disk("vm1"))
 
@@ -404,7 +404,7 @@ class TestTheDiskReadsAreDefensiveToo(unittest.TestCase):
 class TestTheFingerprintIsShownShort(unittest.TestCase):
     """Two 95-character fingerprints in one sentence is a line nobody reads.
 
-    VM_INSPECT_DIGEST_SHORT already fixes how much of a digest is enough to
+    INSPECT_DIGEST_SHORT already fixes how much of a digest is enough to
     tell two apart by eye; this is the certificate spelling of the same
     number, cut on a byte boundary rather than through the middle of a pair.
     """
@@ -416,7 +416,7 @@ class TestTheFingerprintIsShownShort(unittest.TestCase):
         self.assertTrue(self.FULL.startswith(short.rstrip(":\u2026")))
         self.assertLess(len(short), len(self.FULL))
         self.assertEqual(len(short.split(":")[:-1]),
-                         VM_INSPECT_DIGEST_SHORT // 2)
+                         INSPECT_DIGEST_SHORT // 2)
 
     def test_an_already_short_value_is_left_alone(self):
         """The tests and the rig use two-byte stand-ins; truncating one to a

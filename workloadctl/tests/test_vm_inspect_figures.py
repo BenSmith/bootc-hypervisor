@@ -162,7 +162,7 @@ class ReaderTest(unittest.TestCase):
     of a healthy workload between boot and its guest's first connection."""
 
     def test_a_missing_file_is_none(self):
-        with mock.patch.object(fig, "vm_inspect_status_path",
+        with mock.patch.object(fig, "inspect_status_path",
                                return_value="/nonexistent/x.json"):
             self.assertIsNone(fig.read_inspect_status("vm1"))
 
@@ -170,7 +170,7 @@ class ReaderTest(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             path = Path(tmp) / "s.json"
             path.write_text("{not json")
-            with mock.patch.object(fig, "vm_inspect_status_path",
+            with mock.patch.object(fig, "inspect_status_path",
                                    return_value=str(path)):
                 self.assertIsNone(fig.read_inspect_status("vm1"))
 
@@ -367,7 +367,7 @@ class ExporterTest(unittest.TestCase):
         """Derived where the TOML is already parsed. Deciding from the runtime
         directory instead cannot tell a filtered VM that has not started this
         boot from an unfiltered one, and those owe opposite output."""
-        self.assertIn("vm_uses_inspect",
+        self.assertIn("uses_inspect",
                       (REPO / "libexec" / "workload-exporter").read_text())
 
 

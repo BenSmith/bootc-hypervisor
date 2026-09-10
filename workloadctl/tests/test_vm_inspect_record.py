@@ -28,10 +28,10 @@ import unittest.mock
 from pathlib import Path
 
 from egress_policy import (
-    VM_INSPECT_LOG_ID_FIELD, VM_INSPECT_LOG_REQ_FIELD,
-    VM_INSPECT_RECORD_DECISIONS, VM_INSPECT_RECORD_FIELDS,
-    VM_INSPECT_RECORD_MODES, VM_INSPECT_RECORD_FILE, VM_INSPECT_RECORD_ROOT,
-    vm_inspect_logs_directory, vm_inspect_record_dir, vm_inspect_record_path,
+    INSPECT_LOG_ID_FIELD, INSPECT_LOG_REQ_FIELD,
+    INSPECT_RECORD_DECISIONS, INSPECT_RECORD_FIELDS,
+    INSPECT_RECORD_MODES, INSPECT_RECORD_FILE, INSPECT_RECORD_ROOT,
+    inspect_logs_directory, inspect_record_dir, inspect_record_path,
 )
 from vm import VM_INSPECT_RECORD_SELINUX_TYPE
 
@@ -98,19 +98,19 @@ class TestTheFieldNamesAreShared(unittest.TestCase):
     nobody emits any more and reports every join as a miss."""
 
     def test_the_id_field_name_matches(self):
-        self.assertEqual(_mod().LOG_ID_FIELD, VM_INSPECT_LOG_ID_FIELD)
+        self.assertEqual(_mod().LOG_ID_FIELD, INSPECT_LOG_ID_FIELD)
 
     def test_the_request_field_name_matches(self):
-        self.assertEqual(_mod().LOG_REQ_FIELD, VM_INSPECT_LOG_REQ_FIELD)
+        self.assertEqual(_mod().LOG_REQ_FIELD, INSPECT_LOG_REQ_FIELD)
 
     def test_the_record_field_names_match(self):
-        self.assertEqual(_mod().RECORD_FIELDS, VM_INSPECT_RECORD_FIELDS)
+        self.assertEqual(_mod().RECORD_FIELDS, INSPECT_RECORD_FIELDS)
 
     def test_the_decision_vocabulary_matches(self):
-        self.assertEqual(_mod().RECORD_DECISIONS, VM_INSPECT_RECORD_DECISIONS)
+        self.assertEqual(_mod().RECORD_DECISIONS, INSPECT_RECORD_DECISIONS)
 
     def test_the_mode_vocabulary_matches(self):
-        self.assertEqual(_mod().RECORD_MODES, VM_INSPECT_RECORD_MODES)
+        self.assertEqual(_mod().RECORD_MODES, INSPECT_RECORD_MODES)
 
 
 class TestEveryLineCarriesTheId(_Harness):
@@ -253,17 +253,17 @@ class TestWhereTheRecordGoes(unittest.TestCase):
         """state/ is svirt_image_t, the label the PKI rules exist to move
         material out of, and data/ is where `./` volume anchors resolve — a
         guest with a volume at the data root would read its own audit log."""
-        path = str(vm_inspect_record_path("demo"))
+        path = str(inspect_record_path("demo"))
         self.assertNotIn("/var/lib/workloads", path)
         self.assertNotIn("/run/workload-vm", path)
 
     def test_the_path_is_per_workload(self):
-        self.assertNotEqual(vm_inspect_record_path("a"),
-                            vm_inspect_record_path("b"))
-        self.assertEqual(vm_inspect_record_path("a").name,
-                         VM_INSPECT_RECORD_FILE)
-        self.assertEqual(vm_inspect_record_dir("a").parent,
-                         VM_INSPECT_RECORD_ROOT)
+        self.assertNotEqual(inspect_record_path("a"),
+                            inspect_record_path("b"))
+        self.assertEqual(inspect_record_path("a").name,
+                         INSPECT_RECORD_FILE)
+        self.assertEqual(inspect_record_dir("a").parent,
+                         INSPECT_RECORD_ROOT)
 
     def test_the_logs_directory_names_the_same_place(self):
         """A LogsDirectory= naming a different path than the listener writes to
@@ -271,13 +271,13 @@ class TestWhereTheRecordGoes(unittest.TestCase):
         EROFS under ProtectSystem=strict — swallowed by the per-connection
         OSError handler, and shaped like a network fault."""
         self.assertEqual(
-            Path("/var/log") / vm_inspect_logs_directory("demo"),
-            vm_inspect_record_dir("demo"))
+            Path("/var/log") / inspect_logs_directory("demo"),
+            inspect_record_dir("demo"))
 
     def _root_line(self):
         conf = (ROOT / "systemd" / "workloads-dirs.conf").read_text()
         line = [ln for ln in conf.splitlines()
-                if ln.split()[1:2] == [str(VM_INSPECT_RECORD_ROOT)]]
+                if ln.split()[1:2] == [str(INSPECT_RECORD_ROOT)]]
         self.assertEqual(len(line), 1, conf)
         return line[0].split()
 
@@ -340,7 +340,7 @@ class TestTheUnitCarriesTheDirectory(unittest.TestCase):
         return gen.generate_vm_inspect_service(config, "_wl-recdemo")
 
     def test_it_names_the_workloads_own_directory(self):
-        self.assertIn(f"LogsDirectory={vm_inspect_logs_directory('recdemo')}",
+        self.assertIn(f"LogsDirectory={inspect_logs_directory('recdemo')}",
                       self._unit())
 
     def test_the_mode_is_0700(self):
@@ -364,7 +364,7 @@ class TestTheSubtreeIsLabelled(unittest.TestCase):
             self._cil())
 
     def test_the_filecon_covers_every_workload(self):
-        self.assertIn(f'(filecon "{VM_INSPECT_RECORD_ROOT}(/.*)?"', self._cil())
+        self.assertIn(f'(filecon "{INSPECT_RECORD_ROOT}(/.*)?"', self._cil())
 
     def test_init_may_mount_it(self):
         """ReadWritePaths=/LogsDirectory= under ProtectSystem=strict is a bind
@@ -381,7 +381,7 @@ class TestTheSubtreeIsLabelled(unittest.TestCase):
         is the only reason this rule may live in the module at all."""
         from provisioning import LOCAL_FCONTEXT_ROOTS
         for root in LOCAL_FCONTEXT_ROOTS:
-            self.assertFalse(str(VM_INSPECT_RECORD_ROOT).startswith(root))
+            self.assertFalse(str(INSPECT_RECORD_ROOT).startswith(root))
 
 
 class TestRotationIsLogrotates(unittest.TestCase):
@@ -401,7 +401,7 @@ class TestRotationIsLogrotates(unittest.TestCase):
             if not ln.lstrip().startswith("#"))
 
     def test_it_covers_the_record_path(self):
-        self.assertIn(f"{VM_INSPECT_RECORD_ROOT}/*/{VM_INSPECT_RECORD_FILE} {{",
+        self.assertIn(f"{INSPECT_RECORD_ROOT}/*/{INSPECT_RECORD_FILE} {{",
                       self._directives())
 
     def test_it_does_not_create_the_file(self):
@@ -453,7 +453,7 @@ class TestTheRecordFile(unittest.TestCase):
         self.dir = tempfile.mkdtemp()
         self.addCleanup(lambda: __import__("shutil").rmtree(
             self.dir, ignore_errors=True))
-        self.path = os.path.join(self.dir, VM_INSPECT_RECORD_FILE)
+        self.path = os.path.join(self.dir, INSPECT_RECORD_FILE)
 
     def _log(self, path=None, out=None, on_failure=None):
         log = _mod().RequestLog(self.path if path is None else path,
@@ -705,7 +705,7 @@ class TestTheRecordOfAnAllowedRequest(_Records):
         """A field absent and a field null are different facts. A reader that
         has to tell "not measured" from "measured as nothing" cannot, if the
         writer drops keys whose value is None."""
-        self.assertEqual(sorted(self._one()), sorted(VM_INSPECT_RECORD_FIELDS))
+        self.assertEqual(sorted(self._one()), sorted(INSPECT_RECORD_FIELDS))
 
     def test_the_decision_and_mode(self):
         rec = self._one()
@@ -800,9 +800,9 @@ class TestTheRecordOfAnAllowedRequest(_Records):
             b"GET / HTTP/1.1\r\nHost: ok.example\r\nConnection: close\r\n\r\n",
             policy=mod.Policy(tls="splice", hosts=("ok.example",)),
             origin=self._origin())
-        self.assertEqual(records[0][VM_INSPECT_LOG_ID_FIELD],
+        self.assertEqual(records[0][INSPECT_LOG_ID_FIELD],
                          ID.search(log).group(1))
-        self.assertEqual(records[0][VM_INSPECT_LOG_REQ_FIELD], 1)
+        self.assertEqual(records[0][INSPECT_LOG_REQ_FIELD], 1)
 
 
 class TestNoHeaderOrBodyEverReachesIt(_Records):
@@ -915,7 +915,7 @@ class TestTheConnectionLevelRecords(_Records):
         self.assertEqual(rec["host"], "ok.example")
         self.assertIsNone(rec["path"], "a splice decodes nothing")
         self.assertIsNone(rec["status"])
-        self.assertIsNone(rec[VM_INSPECT_LOG_REQ_FIELD])
+        self.assertIsNone(rec[INSPECT_LOG_REQ_FIELD])
 
     def test_a_hello_with_no_name_is_recorded(self):
         mod = _mod()

@@ -284,7 +284,7 @@ class TestTheFiguresReachTheLine(unittest.TestCase):
             # three ideas of what a malformed document means is the thing that
             # module exists to prevent. What is pinned is unchanged — the
             # reader uses the helper, never a hand-built path.
-            with mock.patch.object(figures_mod, "vm_inspect_status_path",
+            with mock.patch.object(figures_mod, "inspect_status_path",
                                    return_value=str(path)) as spy:
                 _, _, detail = self._line(self.mod.PROBE)
         spy.assert_called_once_with("vm1")
@@ -297,7 +297,7 @@ class TestTheFiguresReachTheLine(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "inspect-status.json"
             path.write_text("{not json")
-            with mock.patch.object(figures_mod, "vm_inspect_status_path",
+            with mock.patch.object(figures_mod, "inspect_status_path",
                                    return_value=str(path)):
                 _, ok, detail = self._line(self.mod.PROBE)
         self.assertTrue(ok)

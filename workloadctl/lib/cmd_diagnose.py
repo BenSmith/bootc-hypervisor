@@ -50,12 +50,12 @@ from provisioning import (
 from validation import uses_host_userns
 from nft import nft_json
 from egress_policy import (
-    VM_INSPECT_DIGEST_KEY, vm_inspect_policy_digest, vm_inspect_policy_path,
-    vm_inspect_digest_short, VM_INSPECT_DIGEST_SHORT,
-    VM_INSPECT_PORT_CLEARTEXT, VM_INSPECT_PORT_TLS, VM_INSPECT_ORIG_CLEARTEXT,
-    VM_INSPECT_ORIG_TLS, VM_TLS_DEFAULT, vm_uses_inspect, VM_DROP_MISDIRECTED,
+    INSPECT_DIGEST_KEY, inspect_policy_digest, inspect_policy_path,
+    inspect_digest_short, INSPECT_DIGEST_SHORT,
+    INSPECT_PORT_CLEARTEXT, INSPECT_PORT_TLS, INSPECT_ORIG_CLEARTEXT,
+    INSPECT_ORIG_TLS, TLS_DEFAULT, uses_inspect, VM_DROP_MISDIRECTED,
     VM_DROP_MISDIRECTED_LISTED, VM_DROP_BROKER_UNREACHABLE, VM_DROP_NOT_HTTP,
-    VM_DROP_NOT_HTTP_POLICY, vm_uses_resolve,
+    VM_DROP_NOT_HTTP_POLICY, uses_resolve,
 )
 from egress_ca import CA_EXPIRY_WARN_DAYS, ca_cert_path
 from egress_selinux import (
@@ -1835,7 +1835,7 @@ def _uses_inspect(config) -> bool:
     the alternative (threading a manager through every check and every test
     that calls one directly) would buy nothing.
     """
-    return (vm_uses_inspect(config.config) if config.is_vm
+    return (uses_inspect(config.config) if config.is_vm
             else container_uses_inspect(config.config))
 
 
@@ -1920,7 +1920,7 @@ def vm_inspect_check(config, *, elements4=PROBE, elements6=PROBE,
         return ("vm_inspect", False,
                 f"egress inspection is on for this {noun} but uid {uid} is in "
                 f"neither {NFT_MAP_INSPECT4} nor {NFT_MAP_INSPECT6}, so its "
-                f"traffic to ports {VM_INSPECT_ORIG_CLEARTEXT}/{VM_INSPECT_ORIG_TLS} "
+                f"traffic to ports {INSPECT_ORIG_CLEARTEXT}/{INSPECT_ORIG_TLS} "
                 f"is not redirected — this "
                 f"{inside} is reaching the internet uninspected while every other "
                 f"signal reads correct. Re-arm it: {restart}")
@@ -1999,7 +1999,7 @@ def vm_inspect_check(config, *, elements4=PROBE, elements6=PROBE,
     # missing diagnostic.
     if status is PROBE:
         status = _inspect_status(config.name)
-    running_digest = (status or {}).get(VM_INSPECT_DIGEST_KEY)
+    running_digest = (status or {}).get(INSPECT_DIGEST_KEY)
     if running_digest:
         if disk_digest is PROBE:
             disk_digest = _policy_digest_on_disk(config.name)
@@ -2014,8 +2014,8 @@ def vm_inspect_check(config, *, elements4=PROBE, elements6=PROBE,
             return ("vm_inspect", False,
                     f"the running inspector is enforcing a DIFFERENT policy "
                     f"than the one on disk (loaded "
-                    f"{vm_inspect_digest_short(running_digest)}, on disk "
-                    f"{vm_inspect_digest_short(disk_digest)}) — the lists in "
+                    f"{inspect_digest_short(running_digest)}, on disk "
+                    f"{inspect_digest_short(disk_digest)}) — the lists in "
                     f"force are not the lists in the file, in one direction or "
                     f"the other. Restarting the socket does NOT fix this: the "
                     f"listener stops with the {noun}, not with the socket. "
@@ -2161,21 +2161,21 @@ def vm_inspect_check(config, *, elements4=PROBE, elements6=PROBE,
     # An operator reading "inspected" and getting the other one is the whole
     # reason this word is here.
     # The two substrates DEFAULT DIFFERENTLY, which is why this cannot be one
-    # `net.get("tls", ...)`. A VM with no `tls` key inspects (VM_TLS_DEFAULT);
+    # `net.get("tls", ...)`. A VM with no `tls` key inspects (TLS_DEFAULT);
     # a container with no `tls` key splices unless it has policy entries, per
     # container_effective_tls_mode(). Reading the key directly with the VM
     # default would tell a container operator their plaintext is being held
     # when it is not -- the exact misreport G5 and G8 stayed VM-only to avoid,
     # and the reason this line calls the container helper instead.
     if config.is_vm:
-        tls_mode = net.get("tls", VM_TLS_DEFAULT)
+        tls_mode = net.get("tls", TLS_DEFAULT)
     else:
         tls_mode = container_effective_tls_mode(net)
     posture = "terminating" if tls_mode == "inspect" else "splicing"
     return ("vm_inspect", True,
             f"egress inspected on both families: uid {uid} redirected to "
-            f"{addr.v4}/[{addr.v6}] ports {VM_INSPECT_PORT_CLEARTEXT} "
-            f"(cleartext) and {VM_INSPECT_PORT_TLS} (tls, {posture}), "
+            f"{addr.v4}/[{addr.v6}] ports {INSPECT_PORT_CLEARTEXT} "
+            f"(cleartext) and {INSPECT_PORT_TLS} (tls, {posture}), "
             f"{unit} listening{tail}")
 
 
@@ -2252,7 +2252,7 @@ def vm_resolve_check(config, *, socket_active=PROBE, policy_present=PROBE,
     Observations are injectable (PROBE sentinel) so the verdict logic is
     testable without a live host.
     """
-    if not vm_uses_resolve(config.config):
+    if not uses_resolve(config.config):
         return None
     try:
         uid = config.uid
@@ -2443,7 +2443,7 @@ def _named_set_elements(payload, name: str) -> tuple[bool, list]:
 def _short_fingerprint(fingerprint: str | None) -> str:
     """A certificate fingerprint as it is shown to a person.
 
-    The same amount of digest VM_INSPECT_DIGEST_SHORT shows for a policy, cut
+    The same amount of digest INSPECT_DIGEST_SHORT shows for a policy, cut
     on a byte boundary rather than mid-pair: pem_fingerprint returns 95
     characters of colon-separated uppercase hex, and two of those in one
     sentence is a three-hundred-character line an operator scrolls past. There
@@ -2453,7 +2453,7 @@ def _short_fingerprint(fingerprint: str | None) -> str:
     if not fingerprint:
         return "unknown"
     groups = fingerprint.split(":")
-    keep = VM_INSPECT_DIGEST_SHORT // 2
+    keep = INSPECT_DIGEST_SHORT // 2
     if len(groups) <= keep:
         return fingerprint
     return ":".join(groups[:keep]) + ":…"
@@ -2585,15 +2585,15 @@ def _policy_digest_on_disk(name: str) -> str | None:
     ValueError for the reason _ca_fingerprint_on_disk gives: the document is
     read as text and a byte the locale's codec rejects is a UnicodeDecodeError,
     which is a ValueError and not an OSError. The document is pure ASCII by
-    construction -- vm_inspect_policy_text goes through json.dumps, whose
+    construction -- inspect_policy_text goes through json.dumps, whose
     ensure_ascii defaults true, which is also what makes this digest
     comparable across a systemd-launched listener and an operator's shell --
     so reaching this needs the file itself to have been damaged. That is a
     state somebody runs `diagnose` in.
     """
     try:
-        with open(vm_inspect_policy_path(name)) as fh:
-            return vm_inspect_policy_digest(fh.read())
+        with open(inspect_policy_path(name)) as fh:
+            return inspect_policy_digest(fh.read())
     except (OSError, ValueError):
         return None
 

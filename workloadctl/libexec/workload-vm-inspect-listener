@@ -76,8 +76,8 @@ The socket unit runs with Accept=no, under which systemd names every
 activated fd after the unit — all four carry the same LISTEN_FDNAMES entry, so
 the name cannot tell the cleartext listener from the TLS one. The local port
 of the inherited fd can, and it is the honest source of it: a guest dial to 80
-is translated onto VM_INSPECT_PORT_CLEARTEXT, one to 443 onto
-VM_INSPECT_PORT_TLS, and the socket that accepted the connection knows which
+is translated onto INSPECT_PORT_CLEARTEXT, one to 443 onto
+INSPECT_PORT_TLS, and the socket that accepted the connection knows which
 it is. §7.1 uses exactly this property to justify never calling
 SO_ORIGINAL_DST; a regression that started reading the port from anywhere
 else quietly reintroduces the need for it.
@@ -126,11 +126,11 @@ from typing import NamedTuple
 sys.dont_write_bytecode = True
 
 from egress_policy import (
-    INSPECT_GUEST_AGENT_KEY, VM_INSPECT_ORIG_CLEARTEXT, VM_INSPECT_ORIG_TLS, VM_INSPECT_PORT_CLEARTEXT,
-    VM_INSPECT_PORT_TLS, VM_TLS_DEFAULT, vm_hostname_control_character,
-    vm_hostname_match, VM_INSPECT_DIGEST_KEY, vm_inspect_policy_digest,
-    vm_inspect_policy_path, vm_inspect_record_path, vm_inspect_status_path,
-    vm_normalise_hostname, VmPolicyEntry, vm_policy_governs,
+    INSPECT_GUEST_AGENT_KEY, INSPECT_ORIG_CLEARTEXT, INSPECT_ORIG_TLS, INSPECT_PORT_CLEARTEXT,
+    INSPECT_PORT_TLS, TLS_DEFAULT, hostname_control_character,
+    hostname_match, INSPECT_DIGEST_KEY, inspect_policy_digest,
+    inspect_policy_path, inspect_record_path, inspect_status_path,
+    normalise_hostname, VmPolicyEntry, policy_governs,
 )
 from egress_ca import LeafRefused, ca_cert_path, ca_key_path
 from broker_config import VM_BROKER_INSTANCE_PORT
@@ -264,7 +264,7 @@ PEEK_ATTEMPTS_MAX = 16
 # back out of the journal to join a decision to the request it was taken on,
 # and nothing in lib/ can import this extension-less entrypoint -- the same
 # situation VM_DROP_* is in, and answered the same way:
-# VM_INSPECT_LOG_ID_FIELD / VM_INSPECT_LOG_REQ_FIELD in lib/vm.py are pinned
+# INSPECT_LOG_ID_FIELD / INSPECT_LOG_REQ_FIELD in lib/vm.py are pinned
 # against these by tests/test_vm_inspect_diagnose.py. A rename here fails that
 # test rather than turning the join into a silent no-match, which is what a
 # reader looking for a field nobody emits any more would look like.
@@ -295,9 +295,9 @@ def plane_for_port(port):
     unit binds are recognisable; anything else is not one of our listeners, and
     naming it a plane would be a guess.
     """
-    if port == VM_INSPECT_PORT_CLEARTEXT:
+    if port == INSPECT_PORT_CLEARTEXT:
         return "cleartext"
-    if port == VM_INSPECT_PORT_TLS:
+    if port == INSPECT_PORT_TLS:
         return "tls"
     return None
 
@@ -323,7 +323,7 @@ class Policy(NamedTuple):
     nothing. The kernel's wl_internal_ok4/6 elements are the one enforcement
     point; this copy exists so a failed dial into private space can be
     attributed to the wildcard trap rather than to a host that is down. See
-    vm_inspect_policy.
+    inspect_policy.
     """
 
     tls: str
@@ -364,8 +364,8 @@ class Policy(NamedTuple):
         before the request the rules were written about ever exists, and the
         operator sees `not allowlisted` for a host their file plainly names.
         """
-        return (vm_hostname_match(host, self.hosts)
-                or bool(vm_policy_governs(host, self.policy)))
+        return (hostname_match(host, self.hosts)
+                or bool(policy_governs(host, self.policy)))
 
     def permits(self, host: str, method: str, path: str) -> bool:
         """Whether one request is authorised -- §3's composition rule.
@@ -378,10 +378,10 @@ class Policy(NamedTuple):
         contributes "any method, any path" to every host it covers, silently
         removing the restriction somebody wrote a policy entry for.
         """
-        governing = vm_policy_governs(host, self.policy)
+        governing = policy_governs(host, self.policy)
         if governing:
             return any(e.permits(method, path) for e in governing)
-        return vm_hostname_match(host, self.hosts)
+        return hostname_match(host, self.hosts)
 
     def governs(self, host: str) -> bool:
         """Whether ANY policy entry names this host.
@@ -391,7 +391,7 @@ class Policy(NamedTuple):
         HTTP at all. It answers the operator's question instead: are there
         `methods` and `paths` here that never got to run?
         """
-        return bool(vm_policy_governs(host, self.policy))
+        return bool(policy_governs(host, self.policy))
 
     def splices(self, host: str) -> bool:
         """Whether this host is exempt from termination.
@@ -402,7 +402,7 @@ class Policy(NamedTuple):
         and reads correct: the connection is spliced by the mode and terminated
         by the list, or the reverse, depending on which branch it took.
         """
-        return self.tls == "splice" or vm_hostname_match(host, self.splice)
+        return self.tls == "splice" or hostname_match(host, self.splice)
 
     def speaks_h2(self, host: str) -> bool:
         """Whether this host is offered h2 and relayed at the frame level.
@@ -415,7 +415,7 @@ class Policy(NamedTuple):
         they ask for something already true -- so this list is populated and
         inert, and the one caller reaches it only past a `splices()` check.
         """
-        return vm_hostname_match(host, self.http2)
+        return hostname_match(host, self.http2)
 
     def credential_for(self, host: str):
         """The credstore NAME this host's requests are brokered with, or None.
@@ -436,7 +436,7 @@ class Policy(NamedTuple):
         turn an editing mistake into a dead workload. First-match is
         deterministic and matches the order the file states.
         """
-        for entry in vm_policy_governs(host, self.policy):
+        for entry in policy_governs(host, self.policy):
             if entry.credential:
                 return entry.credential
         return None
@@ -460,7 +460,7 @@ def load_policy(path):
     # rewrite landing between the two would give a listener that advertises the
     # new document's digest while enforcing the old one -- green on the one
     # case the comparison exists for.
-    digest = vm_inspect_policy_digest(text)
+    digest = inspect_policy_digest(text)
     doc = json.loads(text)
     if not isinstance(doc, dict):
         raise ValueError(f"{path}: expected a JSON object, got {type(doc).__name__}")
@@ -478,14 +478,14 @@ def load_policy(path):
     if not isinstance(splice, list):
         raise ValueError(f"{path}: 'splice' is not a list")
     # NOT normalised here, unlike `internal`: these are fnmatch PATTERNS and
-    # vm_hostname_match normalises both sides at the point of comparison.
+    # hostname_match normalises both sides at the point of comparison.
     # Normalising a pattern early is harmless today and would silently stop
     # being so the moment a pattern could carry something a hostname cannot.
     http2 = doc.get("http2") or []
     if not isinstance(http2, list):
         raise ValueError(f"{path}: 'http2' is not a list")
     # Unnormalised, like `splice` and for the same reason: these are fnmatch
-    # PATTERNS, and vm_hostname_match normalises both sides where they are
+    # PATTERNS, and hostname_match normalises both sides where they are
     # compared.
     entries = doc.get("policy") or []
     if not isinstance(entries, list):
@@ -502,7 +502,7 @@ def load_policy(path):
         # reaches nothing and every unit test still passes.
         #
         # Uppercased and string-filtered HERE as well as in
-        # vm_policy_entries, which is the convention this file already holds
+        # policy_entries, which is the convention this file already holds
         # for `internal` and the responder holds for its static map: the
         # writer normalises, and the reader normalises again so that a
         # hand-edited document cannot introduce a rule that never matches.
@@ -513,7 +513,7 @@ def load_policy(path):
         methods = item.get("methods")
         paths = item.get("paths")
         # `.get`, not `[...]`: the document emits the key only on the entries
-        # that carry one (vm_inspect_policy explains why the sparseness is
+        # that carry one (inspect_policy explains why the sparseness is
         # load-bearing there), so absent and null mean the same thing here and
         # the reader is the side that pays for it. A non-string is dropped to
         # None rather than refused -- the value's only use is as a name, and a
@@ -537,8 +537,8 @@ def load_policy(path):
     # a document carrying a malformed value keeps the VM behaviour instead of
     # disabling a remedy on the strength of a typo.
     guest_agent = doc.get(INSPECT_GUEST_AGENT_KEY) is not False
-    return Policy(tls=doc.get("tls") or VM_TLS_DEFAULT, hosts=tuple(hosts),
-                  internal=tuple(vm_normalise_hostname(h) for h in internal),
+    return Policy(tls=doc.get("tls") or TLS_DEFAULT, hosts=tuple(hosts),
+                  internal=tuple(normalise_hostname(h) for h in internal),
                   splice=tuple(splice), http2=tuple(http2),
                   policy=tuple(policy), digest=digest,
                   guest_agent=guest_agent)
@@ -632,7 +632,7 @@ def _parse_server_name(data: bytes):
     A control character is refused for the second reason, which ASCII-ness does
     not cover: this name is logged and written into the status document, and a
     bare LF inside it forges a journal record. See
-    `vm_hostname_control_character`.
+    `hostname_control_character`.
     """
     r = _Reader(data)
     entries = _Reader(r.take(r.u16()))
@@ -646,7 +646,7 @@ def _parse_server_name(data: bytes):
                 raise HelloUnreadable(
                     "the server_name is not ASCII, so it is not a name as "
                     "RFC 6066 puts one on the wire") from None
-            ch = vm_hostname_control_character(name)
+            ch = hostname_control_character(name)
             if ch is not None:
                 # The character is named with !r and nothing else of the name
                 # is: quoting the whole thing would put the injected bytes in
@@ -1213,8 +1213,8 @@ class Scheme(NamedTuple):
     port: int
 
 
-SCHEME_HTTP = Scheme("http", VM_INSPECT_ORIG_CLEARTEXT)
-SCHEME_HTTPS = Scheme("https", VM_INSPECT_ORIG_TLS)
+SCHEME_HTTP = Scheme("http", INSPECT_ORIG_CLEARTEXT)
+SCHEME_HTTPS = Scheme("https", INSPECT_ORIG_TLS)
 
 
 # The characters RFC 3986 says a percent-encoding of is equivalent to the
@@ -1407,7 +1407,7 @@ def host_from_authority(authority, scheme=SCHEME_HTTP):
             "where its port begins is a guess")
     else:
         host, _, port = authority.partition(":")
-    host = vm_normalise_hostname(host)
+    host = normalise_hostname(host)
     if not host:
         raise RequestUnreadable(f"authority {authority!r} names no host")
     # A plane is reached by a redirect keyed on one dport and it dials that
@@ -2261,7 +2261,7 @@ class RequestLog:
     journal is the right place for that. This carries the per-request detail
     for allowed and denied alike, which is evidence of what a sandboxed agent
     was doing, and lands in a file readable by root and the workload uid only.
-    vm.py's VM_INSPECT_RECORD_ROOT comment carries the whole argument, including
+    vm.py's INSPECT_RECORD_ROOT comment carries the whole argument, including
     why a LogNamespace= was not enough.
 
     NEVER RAISES, and the except clauses have to be as wide as that claim -- the
@@ -2528,7 +2528,7 @@ class Counters:
         # what they are governed BY is the half an operator is reading this
         # for.
         self.lists = {
-            "tls": policy.tls if policy else VM_TLS_DEFAULT,
+            "tls": policy.tls if policy else TLS_DEFAULT,
             "hosts": list(policy.hosts) if policy else [],
             "internal": list(policy.internal) if policy else [],
             "splice": list(policy.splice) if policy else [],
@@ -2743,7 +2743,7 @@ class Listener:
         # An empty policy is a legal configuration and NOT a default: main()
         # will not construct a Listener without one. The fallback exists so the
         # rung-1 tests that only exercise the shape need not invent a policy.
-        # `splice`, NOT VM_TLS_DEFAULT. This fallback is a test convenience,
+        # `splice`, NOT TLS_DEFAULT. This fallback is a test convenience,
         # and the product default terminates -- which needs a CA, a minter and a
         # state directory none of the shape tests have. Naming the weaker mode
         # here is the honest version of that: a Listener built with no policy is
@@ -3022,7 +3022,7 @@ class Listener:
             self._log(f"drop {where} reason='no readable name: the "
                       f"ClientHello carries no server_name extension'")
             return
-        host = vm_normalise_hostname(hello.server_name)
+        host = normalise_hostname(hello.server_name)
         # `admits`, not a bare `hosts` match: a [[vm.network.policy]] entry
         # allowlists its own host, so a workload whose entire allowlist is
         # written as policy entries would otherwise lose every connection at
@@ -3054,7 +3054,7 @@ class Listener:
         # the policy authorised rather than one the guest chose.
         try:
             upstream = socket.create_connection(
-                (host, VM_INSPECT_ORIG_TLS), timeout=CONNECTION_TIMEOUT)
+                (host, INSPECT_ORIG_TLS), timeout=CONNECTION_TIMEOUT)
         except OSError as exc:
             reason = self._dial_failure_reason(host)
             self.counters.record_drop(reason, host)
@@ -3392,7 +3392,7 @@ class Listener:
         key to turn it off.
         """
         sock = socket.create_connection(
-            (host, VM_INSPECT_ORIG_TLS), timeout=CONNECTION_TIMEOUT)
+            (host, INSPECT_ORIG_TLS), timeout=CONNECTION_TIMEOUT)
         try:
             ctx = (self._upstream_ctx_h2 if alpn == ALPN_H2
                    else self._upstream_ctx)
@@ -4211,7 +4211,7 @@ class Listener:
     def _dial_upstream_cleartext(self, host):
         """A plain connection to an authorised name, as a _Stream."""
         sock = socket.create_connection(
-            (host, VM_INSPECT_ORIG_CLEARTEXT), timeout=CONNECTION_TIMEOUT)
+            (host, INSPECT_ORIG_CLEARTEXT), timeout=CONNECTION_TIMEOUT)
         sock.settimeout(RELAY_IDLE_TIMEOUT)
         return _Stream(sock)
 
@@ -4528,7 +4528,7 @@ class Listener:
         # when non-empty would make "no digest" and "an older listener"
         # indistinguishable to the reader, and the reader treats one of those
         # as silence.
-        snap[VM_INSPECT_DIGEST_KEY] = self._policy.digest
+        snap[INSPECT_DIGEST_KEY] = self._policy.digest
         if self._minter is not None:
             # The minter's own figures, live sizes and CA identity included.
             # `hits` against `mints` says whether the working set is doing its
@@ -4621,7 +4621,7 @@ def main(argv=None):
     if len(argv) != 2:
         print(f"usage: {argv[0]} <workload-name>", file=sys.stderr)
         return 2
-    policy_path = vm_inspect_policy_path(argv[1])
+    policy_path = inspect_policy_path(argv[1])
     try:
         policy = load_policy(policy_path)
     except (OSError, ValueError) as exc:
@@ -4645,8 +4645,8 @@ def main(argv=None):
         print(f"error: {exc}", file=sys.stderr)
         return 1
     listener = Listener(sockets, policy=policy, minter=minter,
-                        status_path=vm_inspect_status_path(argv[1]),
-                        record_path=vm_inspect_record_path(argv[1]))
+                        status_path=inspect_status_path(argv[1]),
+                        record_path=inspect_record_path(argv[1]))
     print(f"policy loaded from {policy_path}: {policy.summary}", flush=True)
     signal.signal(signal.SIGTERM, lambda *_args: listener.stop())
     # Rotation is logrotate's (see /etc/logrotate.d/workloadctl-inspect), and

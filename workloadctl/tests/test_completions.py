@@ -126,7 +126,7 @@ class OfferedChoiceValuesTest(unittest.TestCase):
     closed vocabularies (`forward drop`, `forward terminate splice h2`,
     `tls cleartext`) as bash literals under a comment claiming they came from
     the values cmd_egress validates against. They did not; they were a fourth
-    copy, and the next value added to VM_INSPECT_RECORD_MODES would simply
+    copy, and the next value added to INSPECT_RECORD_MODES would simply
     never be offered.
 
     Derived the same way the flag test is, from argparse's own rendering:
@@ -140,7 +140,7 @@ class OfferedChoiceValuesTest(unittest.TestCase):
     completion that has gone stale — which is the drift this whole file exists
     to catch, and the drift that motivated this test. Checking only the subset
     direction would have left the defect in the docstring above unguarded:
-    the next value added to VM_INSPECT_RECORD_MODES would still never be
+    the next value added to INSPECT_RECORD_MODES would still never be
     offered, and nothing would say so.
 
     Only for flags that HAVE an arm. A `choices=` flag the completion does not

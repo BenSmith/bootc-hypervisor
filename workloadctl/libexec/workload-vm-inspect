@@ -105,8 +105,8 @@ from helper_main import log, run, run_helper, up_down_main
 from nft import (add_listener_addresses, purge_internal_exemptions,
                  remove_listener_addresses)
 from egress_policy import (
-    vm_inspect_policy_path, vm_inspect_policy_text, vm_internal_hosts,
-    vm_inspect_status_path, vm_uses_inspect,
+    inspect_policy_path, inspect_policy_text, internal_hosts,
+    inspect_status_path, uses_inspect,
 )
 from vm import (
     vm_inspect_element_commands, vm_internal_ok_commands, vm_internal_resolve,
@@ -126,7 +126,7 @@ def network_config(name: str) -> dict:
 def inspection_applies(net: dict) -> bool:
     """Whether this workload's egress is redirected into an inspector.
 
-    Delegates to vm.vm_uses_inspect, the single source of the predicate that
+    Delegates to vm.uses_inspect, the single source of the predicate that
     also gates the generator's inspect socket/service units: re-stating the
     not-bridged-and-filtered rule here would let the helper and the generator
     disagree about which workloads have an inspector at all.
@@ -137,7 +137,7 @@ def inspection_applies(net: dict) -> bool:
     the same way, to the same source (container_uses_inspect), for the same
     reason this one does.
     """
-    return vm_uses_inspect({"vm": {"network": net}})
+    return uses_inspect({"vm": {"network": net}})
 
 
 def write_policy(name: str) -> str:
@@ -150,15 +150,15 @@ def write_policy(name: str) -> str:
     restart racing a rewrite would otherwise read a half-written document and
     fail its start over a file that is about to be complete.
     """
-    path = vm_inspect_policy_path(name)
+    path = inspect_policy_path(name)
     net = network_config(name)
     tmp = f"{path}.tmp"
     with open(tmp, "w") as f:
-        # vm_inspect_policy_text, not a json.dump with its own arguments:
+        # inspect_policy_text, not a json.dump with its own arguments:
         # `workloadctl drift` compares this file's bytes against a re-render
         # through that function, so a formatting difference here would report
         # every inspected workload as permanently drifted.
-        f.write(vm_inspect_policy_text(net))
+        f.write(inspect_policy_text(net))
     os.chown(tmp, 0, pwd.getpwnam(f"_wl-{name}").pw_gid)
     os.chmod(tmp, 0o640)
     os.replace(tmp, path)
@@ -180,7 +180,7 @@ def internal_failure(name: str, host: str, cause: Exception) -> str:
 
     So the message states the blast radius and both ways out. Removing the
     entry is a real option and cheap to describe, because `internal`
-    authorises nothing on its own -- see vm_inspect_policy. It costs exactly
+    authorises nothing on its own -- see inspect_policy. It costs exactly
     this host's reachability from this guest.
     """
     return (f"{cause}\n"
@@ -215,7 +215,7 @@ def up(name: str) -> int:
     # socket-activated, so without this an operator reading `diagnose` between
     # the VM's start and the guest's first dial sees the last boot's ECH alarms
     # and internal refusals presented as this boot's.
-    clear_status(vm_inspect_status_path(name))
+    clear_status(inspect_status_path(name))
 
     ensure_advertised_interface(run)
     # Both skeletons, for the reason in the module docstring: the DNAT maps
@@ -250,7 +250,7 @@ def up(name: str) -> int:
     # left an element this config cannot name, and adding the new address
     # beside it would exempt the workload for an address nothing asked for.
     purge_internal_exemptions(uid, name)
-    hosts = vm_internal_hosts(net)
+    hosts = internal_hosts(net)
     addresses = []
     for host in hosts:
         try:

@@ -390,8 +390,8 @@ class Substrate(ABC):
         parity build spec): a default would let a third substrate silently
         inherit "never inspected", turning "did every call site get updated"
         from a class-instantiation error into a grep. The 18 call sites this
-        replaces all previously called `vm_uses_inspect()` directly and were
-        VM-gated by construction; `vm_uses_inspect` itself is untouched
+        replaces all previously called `uses_inspect()` directly and were
+        VM-gated by construction; `uses_inspect` itself is untouched
         (R2) and VMSubstrate delegates to it here rather than restating its
         logic.
         """

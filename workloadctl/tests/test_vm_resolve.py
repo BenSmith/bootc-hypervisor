@@ -28,7 +28,7 @@ import unittest
 from unittest import mock
 from pathlib import Path
 
-from egress_policy import vm_uses_resolve
+from egress_policy import uses_resolve
 from vm import vm_filter_elements
 from vm_defs import VM_SIDECAR_SLICE
 from vm_network_config import (
@@ -206,31 +206,31 @@ class TestAddress(unittest.TestCase):
 
 
 class TestPredicate(unittest.TestCase):
-    """vm_uses_resolve: the inspector's terms plus `resolver` not "none"."""
+    """uses_resolve: the inspector's terms plus `resolver` not "none"."""
 
     def test_a_filtered_vm_gets_one_by_default(self):
-        self.assertTrue(vm_uses_resolve(net_config()))
-        self.assertTrue(vm_uses_resolve(net_config(egress="filtered")))
+        self.assertTrue(uses_resolve(net_config()))
+        self.assertTrue(uses_resolve(net_config(egress="filtered")))
 
     def test_resolver_none_switches_it_off(self):
-        self.assertFalse(vm_uses_resolve(net_config(resolver="none")))
+        self.assertFalse(uses_resolve(net_config(resolver="none")))
 
     def test_resolver_host_keeps_it_on(self):
-        self.assertTrue(vm_uses_resolve(net_config(resolver="host")))
+        self.assertTrue(uses_resolve(net_config(resolver="host")))
 
     def test_open_egress_does_not_get_one(self):
         """A responder under `egress = "open"` would answer every name with an
         inspector address that nothing redirects to."""
-        self.assertFalse(vm_uses_resolve(net_config(egress="open")))
+        self.assertFalse(uses_resolve(net_config(egress="open")))
         self.assertFalse(
-            vm_uses_resolve(net_config(egress="open", resolver="host")))
+            uses_resolve(net_config(egress="open", resolver="host")))
 
     def test_a_bridged_vm_does_not_get_one(self):
-        self.assertFalse(vm_uses_resolve(net_config(bridge="br0")))
+        self.assertFalse(uses_resolve(net_config(bridge="br0")))
 
     def test_a_container_workload_does_not_get_one(self):
-        self.assertFalse(vm_uses_resolve({"container": {"image": "x"}}))
-        self.assertFalse(vm_uses_resolve({}))
+        self.assertFalse(uses_resolve({"container": {"image": "x"}}))
+        self.assertFalse(uses_resolve({}))
 
 
 class TestPolicyDocument(unittest.TestCase):

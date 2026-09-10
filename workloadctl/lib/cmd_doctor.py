@@ -17,7 +17,7 @@ from cmd_diagnose import collect_diagnose_checks
 from cmd_drift import collect_drift, collect_policy_drift
 from cmd_validate import report_config_load_failure
 from substrate import get_substrate
-from egress_policy import vm_inspect_digest_short
+from egress_policy import inspect_digest_short
 from vm_inspect_figures import (
     drop_reasons,
     figure_lines,
@@ -204,7 +204,7 @@ def cmd_doctor(args, manager):
     # until someone edits one of them.
     egress = None
     # Routed through the substrate predicate (G6 in the container
-    # egress-parity build spec) rather than vm_uses_inspect() directly: the
+    # egress-parity build spec) rather than uses_inspect() directly: the
     # figures below are read purely off the on-disk status JSON keyed by
     # workload name (vm_inspect_figures.read_inspect_status/read_resolve_status),
     # which carries nothing VM-specific, so this block already generalises.
@@ -330,7 +330,7 @@ def cmd_doctor(args, manager):
         else:
             digest = egress["policy_digest"]
             if digest:
-                print(f"  · enforcing policy {vm_inspect_digest_short(digest)}")
+                print(f"  · enforcing policy {inspect_digest_short(digest)}")
             for line in figure_lines(egress["figures"],
                                      egress["drop_reasons"]):
                 print(line)

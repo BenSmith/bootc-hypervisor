@@ -51,7 +51,7 @@ def _fake_config(enabled=True):
         name="app", kind="container", mode="single", lifecycle="cattle",
         enabled=enabled,
         # The parsed TOML, as WorkloadConfig carries it. Present even though
-        # this fixture is a container: doctor asks `vm_uses_inspect` about
+        # this fixture is a container: doctor asks `uses_inspect` about
         # every workload, and a stub without it would make the egress section
         # unreachable in exactly the tests written to cover the report.
         config={},

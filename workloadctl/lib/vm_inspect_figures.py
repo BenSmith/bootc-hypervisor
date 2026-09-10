@@ -43,7 +43,7 @@ import json
 from dataclasses import dataclass
 from typing import Callable
 
-from egress_policy import VM_INSPECT_DIGEST_KEY, vm_inspect_status_path
+from egress_policy import INSPECT_DIGEST_KEY, inspect_status_path
 from vm import vm_resolve_status_path
 
 # Group keys. A group is present or absent as a whole, because what makes it
@@ -309,7 +309,7 @@ def _read(path: str):
 
 
 def read_inspect_status(name: str):
-    return _read(vm_inspect_status_path(name))
+    return _read(inspect_status_path(name))
 
 
 def read_resolve_status(name: str):
@@ -371,7 +371,7 @@ def drop_reasons(status) -> dict:
 
 
 def policy_digest(status) -> str:
-    value = (status or {}).get(VM_INSPECT_DIGEST_KEY)
+    value = (status or {}).get(INSPECT_DIGEST_KEY)
     return value if isinstance(value, str) else ""
 
 

@@ -18,8 +18,8 @@ Installed to /usr/libexec/workloadctl/vm.py.
 import ipaddress
 import socket
 
-from egress_policy import (VM_INSPECT_ORIG_CLEARTEXT, VM_INSPECT_ORIG_TLS,
-                           VM_INSPECT_PORT_CLEARTEXT, VM_INSPECT_PORT_TLS)
+from egress_policy import (INSPECT_ORIG_CLEARTEXT, INSPECT_ORIG_TLS,
+                           INSPECT_PORT_CLEARTEXT, INSPECT_PORT_TLS)
 from netfilter_state import nft_set_elements
 from nft_constants import (both_families, split_by_family, NFT_BIN,
                            NFT_PAIR_ALLOW, NFT_PAIR_INSPECT_DST,
@@ -122,8 +122,8 @@ def vm_inspect_map_elements(uid: int) -> dict[str, list[str]]:
     broker redirect that was its last consumer.
     """
     return both_families(NFT_PAIR_INSPECT_MAP, inspect_address(uid), lambda a: [
-        f"{uid} . {VM_INSPECT_ORIG_CLEARTEXT} : {a} . {VM_INSPECT_PORT_CLEARTEXT}",
-        f"{uid} . {VM_INSPECT_ORIG_TLS} : {a} . {VM_INSPECT_PORT_TLS}",
+        f"{uid} . {INSPECT_ORIG_CLEARTEXT} : {a} . {INSPECT_PORT_CLEARTEXT}",
+        f"{uid} . {INSPECT_ORIG_TLS} : {a} . {INSPECT_PORT_TLS}",
     ])
 
 
@@ -136,8 +136,8 @@ def vm_inspect_dst_elements(uid: int) -> dict[str, list[str]]:
     through to the default drop.
     """
     return both_families(NFT_PAIR_INSPECT_DST, inspect_address(uid), lambda a: [
-        f"{uid} . {a} . {VM_INSPECT_PORT_CLEARTEXT}",
-        f"{uid} . {a} . {VM_INSPECT_PORT_TLS}",
+        f"{uid} . {a} . {INSPECT_PORT_CLEARTEXT}",
+        f"{uid} . {a} . {INSPECT_PORT_TLS}",
     ])
 
 

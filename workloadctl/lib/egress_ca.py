@@ -26,7 +26,7 @@ import time
 from pathlib import Path
 
 from config_parser import workload_root_dir
-from egress_policy import vm_normalise_hostname, vm_uses_inspect
+from egress_policy import normalise_hostname, uses_inspect
 
 
 # Where the guest finds the CA whose certificates the inspector's spliced
@@ -270,7 +270,7 @@ def vm_ca_env(config: dict) -> dict[str, str]:
     # it must not ship before a container CA exists -- these five variables
     # REPLACE the trust store (RESERVED_GUEST_ENV), so an empty shape is
     # not inert, it is every TLS verification in the workload failing.
-    if not vm_uses_inspect(config) or not VM_CA_BUNDLE_AVAILABLE:
+    if not uses_inspect(config) or not VM_CA_BUNDLE_AVAILABLE:
         return {}
     return {var: CA_BUNDLE_PATH for var in CA_ENV_VARS}
 
@@ -334,7 +334,7 @@ def leaf_san(name: str) -> str:
     validates such names. Refusing them would break traffic the allowlist
     authorised, which is the failure this whole rung exists to avoid.
     """
-    name = vm_normalise_hostname(name)
+    name = normalise_hostname(name)
     if not name:
         raise LeafRefused("empty name")
 

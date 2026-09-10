@@ -23,8 +23,8 @@ from workload_lib import (
     dq, uq, virtiofs_tags, systemd_escape_path,
 )
 from egress_policy import (
-    VM_INSPECT_PORT_CLEARTEXT, VM_INSPECT_PORT_TLS, vm_uses_inspect,
-    vm_uses_resolve, vm_inspect_logs_directory,
+    INSPECT_PORT_CLEARTEXT, INSPECT_PORT_TLS, uses_inspect,
+    uses_resolve, inspect_logs_directory,
 )
 from egress_ca import denial_dir, leaf_dir
 from vm import vm_inspect_cgroup_command, vm_inspect_cgroup_filter_command
@@ -468,10 +468,10 @@ def generate_vm_inspect_socket(config, user_name: str, uid: int,
     # from the T4 derivation (inspect_address) and the port constants —
     # never a literal. The v6 form brackets the address so it is not parsed as
     # the scope-id separator.
-    sock.add("ListenStream", f"{addr.v4}:{VM_INSPECT_PORT_CLEARTEXT}")
-    sock.add("ListenStream", f"{addr.v4}:{VM_INSPECT_PORT_TLS}")
-    sock.add("ListenStream", f"[{addr.v6}]:{VM_INSPECT_PORT_CLEARTEXT}")
-    sock.add("ListenStream", f"[{addr.v6}]:{VM_INSPECT_PORT_TLS}")
+    sock.add("ListenStream", f"{addr.v4}:{INSPECT_PORT_CLEARTEXT}")
+    sock.add("ListenStream", f"{addr.v4}:{INSPECT_PORT_TLS}")
+    sock.add("ListenStream", f"[{addr.v6}]:{INSPECT_PORT_CLEARTEXT}")
+    sock.add("ListenStream", f"[{addr.v6}]:{INSPECT_PORT_TLS}")
     # One service instance, not one per connection: the listener is a single
     # long-lived process, and Accept=no is what makes the trigger limit below
     # the meaningful knob. Set explicitly rather than inherited.
@@ -695,7 +695,7 @@ def generate_vm_inspect_service(config, user_name: str) -> str:
     # two lines are different documents with different readers: the journal
     # carries the decision and the remedy, and the record carries what the
     # guest actually asked for -- paths, and query strings that can carry a
-    # credential outright. vm.py's VM_INSPECT_RECORD_ROOT comment has the
+    # credential outright. vm.py's INSPECT_RECORD_ROOT comment has the
     # argument; the modes are the access decision.
     #
     # LogsDirectory= rather than a mkdir of ours, for three things at once:
@@ -706,7 +706,7 @@ def generate_vm_inspect_service(config, user_name: str) -> str:
     # ReadWritePaths= entry of ours. See _harden_vm_sidecar's `extra_rw`
     # comment for what the absence of that costs: EROFS, swallowed by the
     # per-connection OSError handler, presenting as a network fault.
-    svc.add("LogsDirectory", vm_inspect_logs_directory(name))
+    svc.add("LogsDirectory", inspect_logs_directory(name))
     # 0700, not the 0755 systemd would default to. Root and the workload uid,
     # nobody else -- the whole reason the record is not in a journal.
     svc.add("LogsDirectoryMode", "0700")
@@ -1124,12 +1124,12 @@ def generate_vm_service(config, user_name: str, uid: int, vfs_tags=None) -> str:
     # only runs for kind == "vm". The container path's own inspect-socket
     # prerequisite wiring is P1-7/P1-9, in the container branch below the
     # `kind == "vm"` dispatch.
-    if vm_uses_inspect(config):
+    if uses_inspect(config):
         prereqs.append(f"workload-{name}-inspect.socket")
     # And the responder, on the same terms for the same reason: the guest has
     # exactly one nameserver, so a VM booted with its responder socket unbound
     # resolves nothing at all while looking healthy. Requires=, not Wants=.
-    if vm_uses_resolve(config):
+    if uses_resolve(config):
         prereqs.append(f"workload-{name}-resolve.socket")
     # And the broker instance, Requires= on the same terms once more: a
     # credential-backed host reached while the broker is down produces a
@@ -1438,8 +1438,8 @@ def generate_vm_workload(config, user_name: str, uid: int):
     # G2 in the container egress-parity build spec: VM-only by construction
     # (generate_vm_workload only runs for kind == "vm"), same as G1 above.
     # Container inspect-unit emission is P1-7/P1-9.
-    uses_inspect = vm_uses_inspect(config)
-    if uses_inspect:
+    inspects = uses_inspect(config)
+    if inspects:
         socket_dests = paths.get(("unit", "inspect-socket"), [])
         if socket_dests:
             socket_dests[0].write_text(
@@ -1463,7 +1463,7 @@ def generate_vm_workload(config, user_name: str, uid: int):
     # The synthesising responder, on the inspector's terms plus `resolver` not
     # being "none" -- a separate predicate, not a second reading of this one,
     # so the knob has one meaning here and in the passt fragment.
-    if vm_uses_resolve(config):
+    if uses_resolve(config):
         resolve_socket_dests = paths.get(("unit", "resolve-socket"), [])
         if resolve_socket_dests:
             resolve_socket_dests[0].write_text(

@@ -42,7 +42,7 @@ UID_MAX = 52948
 # `[vm.network].ports`. Most of these rows sit in one; the nflog group is not
 # an address and sits in none, which is why the reservation fields are
 # optional. "Plane" is deliberately NOT the word for any of this: in this
-# codebase a plane is which port a record arrived on (VM_INSPECT_RECORD_PLANES,
+# codebase a plane is which port a record arrived on (INSPECT_RECORD_PLANES,
 # and the user-visible `--plane tls`), and one word for two unrelated things
 # is how a v6 range went unchecked for a whole rung.
 #

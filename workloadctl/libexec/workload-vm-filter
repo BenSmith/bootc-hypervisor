@@ -30,7 +30,7 @@ sys.dont_write_bytecode = True
 
 from helper_main import log, run, run_helper, up_down_main
 from nft import purge_uid_elements
-from egress_policy import vm_uses_resolve
+from egress_policy import uses_resolve
 from vm import vm_filter_commands, vm_resolve_status_path
 from nft_constants import NFT_BIN, NFT_SKELETON
 from vm_defs import VM_EGRESS_DEFAULT
@@ -110,7 +110,7 @@ def up(name: str) -> int:
     log(f"  Filtered uid {uid} with {len(allow)} allow entr"
         f"{'y' if len(allow) == 1 else 'ies'}")
 
-    if vm_uses_resolve({"vm": {"network": net}}):
+    if uses_resolve({"vm": {"network": net}}):
         # Not tolerant: a responder with no answer document fails its start, and
         # it fails it on a query the guest has already made. The guest has
         # exactly one nameserver, so that is the whole of DNS for it -- better

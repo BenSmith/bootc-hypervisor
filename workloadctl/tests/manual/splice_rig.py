@@ -83,10 +83,10 @@ NAME = "wlspl"
 
 # Spelled out rather than imported, on the other rigs' reasoning: a rig that
 # computes both sides from one constant cannot notice them drifting apart.
-PORT_TLS = 8443            # VM_INSPECT_PORT_TLS
-PORT_CLEARTEXT = 8080      # VM_INSPECT_PORT_CLEARTEXT
-ORIGIN_PORT = 443          # VM_INSPECT_ORIG_TLS
-ORIGIN_PLAIN_PORT = 80     # VM_INSPECT_ORIG_CLEARTEXT
+PORT_TLS = 8443            # INSPECT_PORT_TLS
+PORT_CLEARTEXT = 8080      # INSPECT_PORT_CLEARTEXT
+ORIGIN_PORT = 443          # INSPECT_ORIG_TLS
+ORIGIN_PLAIN_PORT = 80     # INSPECT_ORIG_CLEARTEXT
 POLICY = f"/run/workload-vm/{NAME}/inspect.json"
 
 ALLOWED = "localhost"      # resolves everywhere, and to the origin below

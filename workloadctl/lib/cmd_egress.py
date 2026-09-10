@@ -40,7 +40,7 @@ bytes on the wire are ciphertext and the decision was taken here.
 THE JOIN RUNS JOURNAL -> RECORD. An operator reads a refusal in `workloadctl
 logs`, copies the `id=` token off it, and asks for that connection. So `--id`
 takes the bare hex or the whole pasted token, and its pattern is built from
-`VM_INSPECT_LOG_ID_FIELD` rather than from a literal `id=` — the standing
+`INSPECT_LOG_ID_FIELD` rather than from a literal `id=` — the standing
 constraint against a second definition of a listener string, satisfied by
 construction. The reverse direction is deliberately absent: the record already
 carries what the journal line carries, and shelling out to journalctl from here
@@ -61,10 +61,10 @@ import cli_log
 from cmd_validate import load_config_or_exit
 from substrate import get_substrate
 from egress_policy import (
-    VM_INSPECT_LOG_ID_FIELD, VM_INSPECT_LOG_REQ_FIELD,
-    VM_INSPECT_RECORD_DECISIONS, VM_INSPECT_RECORD_MODES,
-    VM_INSPECT_RECORD_PLANES, VM_INSPECT_RECORD_REASONS, vm_hostname_match,
-    vm_inspect_record_dir, vm_inspect_record_path,
+    INSPECT_LOG_ID_FIELD, INSPECT_LOG_REQ_FIELD,
+    INSPECT_RECORD_DECISIONS, INSPECT_RECORD_MODES,
+    INSPECT_RECORD_PLANES, INSPECT_RECORD_REASONS, hostname_match,
+    inspect_record_dir, inspect_record_path,
 )
 
 LINES_DEFAULT = 50
@@ -74,7 +74,7 @@ LINES_DEFAULT = 50
 # field name fails the pin in tests/test_cmd_egress.py instead of quietly
 # refusing every token an operator pastes.
 _ID_TOKEN_RE = re.compile(
-    rf"\A(?:{re.escape(VM_INSPECT_LOG_ID_FIELD)}=)?([0-9a-fA-F]+)\Z")
+    rf"\A(?:{re.escape(INSPECT_LOG_ID_FIELD)}=)?([0-9a-fA-F]+)\Z")
 
 _STATUS_CLASS_RE = re.compile(r"\A([1-5])xx\Z", re.IGNORECASE)
 
@@ -159,17 +159,17 @@ def resolve_reason(value: str) -> str:
     this branch the more common of the pair would be unselectable.
     """
     raw = str(value).strip()
-    for reason in VM_INSPECT_RECORD_REASONS:
+    for reason in INSPECT_RECORD_REASONS:
         if raw == reason:
             return reason
     lowered = raw.casefold()
-    hits = [r for r in VM_INSPECT_RECORD_REASONS if lowered in r.casefold()]
+    hits = [r for r in INSPECT_RECORD_REASONS if lowered in r.casefold()]
     if len(hits) == 1:
         return hits[0]
     if not hits:
         raise EgressUsage(
             f"{value!r} is not a drop reason. Valid values:\n  "
-            + "\n  ".join(VM_INSPECT_RECORD_REASONS))
+            + "\n  ".join(INSPECT_RECORD_REASONS))
     raise EgressUsage(
         f"{value!r} matches {len(hits)} drop reasons:\n  " + "\n  ".join(hits))
 
@@ -180,7 +180,7 @@ def resolve_id(value: str) -> str:
     if not match:
         raise EgressUsage(
             f"{value!r} is not a connection id — paste the "
-            f"{VM_INSPECT_LOG_ID_FIELD}= token from a journal line, or its "
+            f"{INSPECT_LOG_ID_FIELD}= token from a journal line, or its "
             "hex alone")
     return match.group(1).lower()
 
@@ -383,7 +383,7 @@ def select(records, filters):
         if filters["reason"] and record.get("reason") not in filters["reason"]:
             continue
         if filters["id"] and str(
-                record.get(VM_INSPECT_LOG_ID_FIELD) or "").lower() not in filters["id"]:
+                record.get(INSPECT_LOG_ID_FIELD) or "").lower() not in filters["id"]:
             continue
         if filters["method"] and str(
                 record.get("method") or "").upper() not in filters["method"]:
@@ -392,11 +392,11 @@ def select(records, filters):
             continue
         if filters["host"]:
             host = record.get("host")
-            # vm_hostname_match is the shipped matcher, and both sides are
+            # hostname_match is the shipped matcher, and both sides are
             # normalised inside it. A record with no host — a hello that never
             # gave one — cannot match a host pattern, and must not be included
             # by accident.
-            if not isinstance(host, str) or not vm_hostname_match(
+            if not isinstance(host, str) or not hostname_match(
                     host, filters["host"]):
                 continue
         if filters["since"] or filters["until"]:
@@ -427,14 +427,14 @@ def group_by_connection(records):
     """
     groups = {}
     for index, record in enumerate(records):
-        key = record.get(VM_INSPECT_LOG_ID_FIELD)
+        key = record.get(INSPECT_LOG_ID_FIELD)
         groups.setdefault(key if key else ("", index), []).append(record)
     ordered = []
     for key, items in groups.items():
         if isinstance(key, tuple):
             key = None
-        items.sort(key=lambda r: (r.get(VM_INSPECT_LOG_REQ_FIELD) is not None,
-                                  r.get(VM_INSPECT_LOG_REQ_FIELD) or 0))
+        items.sort(key=lambda r: (r.get(INSPECT_LOG_REQ_FIELD) is not None,
+                                  r.get(INSPECT_LOG_REQ_FIELD) or 0))
         ordered.append((key, items))
     return ordered
 
@@ -446,7 +446,7 @@ def group_is_partial(items) -> bool:
     A group with a connection-level record is complete by construction: that
     record IS the front of the connection.
     """
-    seqs = [r.get(VM_INSPECT_LOG_REQ_FIELD) for r in items]
+    seqs = [r.get(INSPECT_LOG_REQ_FIELD) for r in items]
     if any(s is None for s in seqs):
         return False
     numbers = [s for s in seqs if isinstance(s, int)]
@@ -469,8 +469,8 @@ def format_record(record: dict) -> str:
     It is off the default line because a query is frequently longer than a
     terminal and would push every other column off the screen.
     """
-    ident = _cell(record.get(VM_INSPECT_LOG_ID_FIELD))
-    seq = record.get(VM_INSPECT_LOG_REQ_FIELD)
+    ident = _cell(record.get(INSPECT_LOG_ID_FIELD))
+    seq = record.get(INSPECT_LOG_REQ_FIELD)
     ident = f"{ident}/{seq}" if seq is not None else f"{ident}/-"
     target = " ".join(x for x in (record.get("method"), record.get("path")) if x)
     duration = record.get("duration_ms")
@@ -502,7 +502,7 @@ def _print_grouped(records, *, filtered: bool) -> None:
         if not first:
             print()
         first = False
-        print(f"{VM_INSPECT_LOG_ID_FIELD}={_cell(ident)}"
+        print(f"{INSPECT_LOG_ID_FIELD}={_cell(ident)}"
               f"  ({len(items)} record{'s' if len(items) != 1 else ''})")
         if group_is_partial(items):
             print("  (earlier records not shown — filtered or limited by -n)"
@@ -571,7 +571,7 @@ def cmd_egress(args, manager):
 
     # Routed through the substrate predicate (G4 in the container
     # egress-parity build spec): everything below keys purely on workload
-    # name (vm_inspect_record_dir/_path), nothing VM-specific, so this
+    # name (inspect_record_dir/_path), nothing VM-specific, so this
     # already generalises to a container once one is actually inspected.
     if not get_substrate(config, manager).uses_inspect():
         cli_log.error(
@@ -581,8 +581,8 @@ def cmd_egress(args, manager):
             "without a bridge.")
         return 1
 
-    directory = vm_inspect_record_dir(workload)
-    path = vm_inspect_record_path(workload)
+    directory = inspect_record_dir(workload)
+    path = inspect_record_path(workload)
 
     if _record_dir_state(directory) == "denied":
         cli_log.error(
@@ -696,13 +696,13 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
                         help="Connection id, as pasted from a journal line. "
                              "Repeatable")
     parser.add_argument("--decision", action="append",
-                        choices=list(VM_INSPECT_RECORD_DECISIONS),
+                        choices=list(INSPECT_RECORD_DECISIONS),
                         help="Repeatable")
     parser.add_argument("--mode", action="append",
-                        choices=list(VM_INSPECT_RECORD_MODES),
+                        choices=list(INSPECT_RECORD_MODES),
                         help="Repeatable")
     parser.add_argument("--plane", action="append",
-                        choices=list(VM_INSPECT_RECORD_PLANES),
+                        choices=list(INSPECT_RECORD_PLANES),
                         help="Repeatable")
     parser.add_argument("--reason", action="append", metavar="REASON",
                         help="Drop reason, or an unambiguous part of one. "

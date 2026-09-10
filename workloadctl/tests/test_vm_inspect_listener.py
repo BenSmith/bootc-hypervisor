@@ -24,8 +24,8 @@ from tests import load_script
 from egress_policy import INSPECT_GUEST_AGENT_KEY
 from workload_lib import container_inspect_policy
 from egress_policy import (
-    VM_INSPECT_PORT_CLEARTEXT, VM_INSPECT_PORT_TLS, vm_hostname_match,
-    vm_inspect_policy,
+    INSPECT_PORT_CLEARTEXT, INSPECT_PORT_TLS, hostname_match,
+    inspect_policy,
 )
 from workload_addr import VM_INSPECT_LISTENER_BIN
 
@@ -127,11 +127,11 @@ class TestPlaneDetection(unittest.TestCase):
 
     def test_the_cleartext_port_is_the_cleartext_plane(self):
         mod = _mod()
-        self.assertEqual(mod.plane_for_port(VM_INSPECT_PORT_CLEARTEXT), "cleartext")
+        self.assertEqual(mod.plane_for_port(INSPECT_PORT_CLEARTEXT), "cleartext")
 
     def test_the_tls_port_is_the_tls_plane(self):
         mod = _mod()
-        self.assertEqual(mod.plane_for_port(VM_INSPECT_PORT_TLS), "tls")
+        self.assertEqual(mod.plane_for_port(INSPECT_PORT_TLS), "tls")
 
     def test_a_third_port_is_neither(self):
         """A port that is not one of the two the socket unit binds names no
@@ -148,10 +148,10 @@ class TestPlaneDetection(unittest.TestCase):
         property under test is unchanged -- the plane in the line is the
         accepting port, not the fd name.
         """
-        local = ("198.18.0.1", VM_INSPECT_PORT_CLEARTEXT)
+        local = ("198.18.0.1", INSPECT_PORT_CLEARTEXT)
         log = _serve_line(self, local)
         self.assertIn(_where("cleartext"), log)
-        self.assertIn(f"local=198.18.0.1:{VM_INSPECT_PORT_CLEARTEXT}", log)
+        self.assertIn(f"local=198.18.0.1:{INSPECT_PORT_CLEARTEXT}", log)
         self.assertIn("peer=192.0.2.1:1024", log)
 
 
@@ -174,9 +174,9 @@ class TestExplicitTimeout(unittest.TestCase):
         conn = _mock_conn()
         out = io.StringIO()
         listener = mod.Listener([_listener_with(
-            ("198.18.0.1", VM_INSPECT_PORT_CLEARTEXT))], out)
+            ("198.18.0.1", INSPECT_PORT_CLEARTEXT))], out)
         listener._handle(conn, ("192.0.2.1", 1024),
-                         _listener_with(("198.18.0.1", VM_INSPECT_PORT_CLEARTEXT)))
+                         _listener_with(("198.18.0.1", INSPECT_PORT_CLEARTEXT)))
         self.assertEqual(conn.settimeout.call_args_list[0],
                          unittest.mock.call(mod.CONNECTION_TIMEOUT))
         self.assertIsInstance(mod.CONNECTION_TIMEOUT, float)
@@ -188,9 +188,9 @@ class TestExplicitTimeout(unittest.TestCase):
         conn = _mock_conn()
         out = io.StringIO()
         listener = mod.Listener([_listener_with(
-            ("198.18.0.1", VM_INSPECT_PORT_TLS))], out, limit=0)
+            ("198.18.0.1", INSPECT_PORT_TLS))], out, limit=0)
         listener._handle(conn, ("192.0.2.1", 1024),
-                         _listener_with(("198.18.0.1", VM_INSPECT_PORT_TLS)))
+                         _listener_with(("198.18.0.1", INSPECT_PORT_TLS)))
         conn.settimeout.assert_called_once_with(mod.CONNECTION_TIMEOUT)
         conn.close.assert_called()
 
@@ -209,7 +209,7 @@ class TestCeiling(unittest.TestCase):
         # reject path runs with no admitted thread to race a slot release.
         mod = _mod()
         out = io.StringIO()
-        local = ("198.18.0.1", VM_INSPECT_PORT_CLEARTEXT)
+        local = ("198.18.0.1", INSPECT_PORT_CLEARTEXT)
         listener = mod.Listener([_listener_with(local)], out, limit=0)
         conns = [_mock_conn() for _ in range(2)]
         for c in conns:
@@ -228,7 +228,7 @@ class TestCeiling(unittest.TestCase):
         guest exactly as every other drop is, so a disposition total that
         omitted it would not account for every connection the guest saw end."""
         mod = _mod()
-        local = ("198.18.0.1", VM_INSPECT_PORT_CLEARTEXT)
+        local = ("198.18.0.1", INSPECT_PORT_CLEARTEXT)
         listener = mod.Listener([_listener_with(local)], io.StringIO(), limit=0)
         for _ in range(2):
             listener._handle(_mock_conn(), ("192.0.2.1", 1024),
@@ -263,7 +263,7 @@ class TestThreadStartFailure(unittest.TestCase):
 
     def _listener_that_cannot_start_threads(self, out, limit=1):
         mod = _mod()
-        local = ("198.18.0.1", VM_INSPECT_PORT_CLEARTEXT)
+        local = ("198.18.0.1", INSPECT_PORT_CLEARTEXT)
         listener = mod.Listener([_listener_with(local)], out, limit=limit)
         return mod, listener, local
 
@@ -317,7 +317,7 @@ class TestRejectionTally(unittest.TestCase):
     def test_the_shutdown_line_names_the_count(self):
         mod = _mod()
         out = io.StringIO()
-        local = ("198.18.0.1", VM_INSPECT_PORT_CLEARTEXT)
+        local = ("198.18.0.1", INSPECT_PORT_CLEARTEXT)
         listener = mod.Listener([_listener_with(local)], out, limit=0)
         for _ in range(3):
             listener._handle(_mock_conn(), ("192.0.2.1", 1024),
@@ -331,7 +331,7 @@ class TestRejectionTally(unittest.TestCase):
         mod = _mod()
         out = io.StringIO()
         listener = mod.Listener(
-            [_listener_with(("198.18.0.1", VM_INSPECT_PORT_CLEARTEXT))], out)
+            [_listener_with(("198.18.0.1", INSPECT_PORT_CLEARTEXT))], out)
         listener.log_summary()
         self.assertIn("stopped: 0 connection(s) rejected", out.getvalue())
 
@@ -533,25 +533,25 @@ class TestHostnameMatching(unittest.TestCase):
     def test_a_name_differing_only_in_case_matches(self):
         """DNS is case-insensitive and fnmatchcase is not, which is exactly
         why both sides are normalised before it is called."""
-        self.assertTrue(vm_hostname_match("EXAMPLE.COM", ["example.com"]))
-        self.assertTrue(vm_hostname_match("example.com", ["Example.COM"]))
+        self.assertTrue(hostname_match("EXAMPLE.COM", ["example.com"]))
+        self.assertTrue(hostname_match("example.com", ["Example.COM"]))
 
     def test_a_trailing_root_dot_matches(self):
         """`example.com.` and `example.com` are the same name; a guest that
         writes either spelling gets the same decision, or the spelling is the
         bypass."""
-        self.assertTrue(vm_hostname_match("example.com.", ["example.com"]))
+        self.assertTrue(hostname_match("example.com.", ["example.com"]))
 
     def test_the_apex_trap_is_preserved(self):
         """`*.example.com` does not authorise `example.com`. Documented in
         three tracked files and was matched this way by the retired proxy: widening
         it here would silently grant every existing config a destination its
         operator did not write down."""
-        self.assertFalse(vm_hostname_match("example.com", ["*.example.com"]))
-        self.assertTrue(vm_hostname_match("a.example.com", ["*.example.com"]))
+        self.assertFalse(hostname_match("example.com", ["*.example.com"]))
+        self.assertTrue(hostname_match("a.example.com", ["*.example.com"]))
 
     def test_an_empty_list_authorises_nothing(self):
-        self.assertFalse(vm_hostname_match("example.com", []))
+        self.assertFalse(hostname_match("example.com", []))
 
 
 class TestPolicyLoading(unittest.TestCase):
@@ -570,7 +570,7 @@ class TestPolicyLoading(unittest.TestCase):
         a listener reading a key the helper does not write is a policy that
         loads clean and authorises nothing."""
         mod = _mod()
-        path = self._write(json.dumps(vm_inspect_policy(
+        path = self._write(json.dumps(inspect_policy(
             {"hosts": ["example.com"], "tls": "splice"})))
         policy = mod.load_policy(path)
         self.assertEqual(policy.hosts, ("example.com",))
@@ -583,7 +583,7 @@ class TestPolicyLoading(unittest.TestCase):
         Each of those asserts that a key the LISTENER reads survives the trip,
         so a helper that stopped writing one fails. Nothing asserted the other
         direction: `load_policy` reads by `doc.get(...)` and ignores what it
-        does not know, so a key added to vm_inspect_policy and never wired into
+        does not know, so a key added to inspect_policy and never wired into
         the listener loads clean and authorises nothing -- silently, across two
         processes, which is the seam a unit gate is least likely to see.
 
@@ -593,7 +593,7 @@ class TestPolicyLoading(unittest.TestCase):
         decide deliberately whether the listener should be reading it.
 
         ASSERTED OVER BOTH WRITERS, not just the VM's. There are two renderers
-        -- vm_inspect_policy and container_inspect_policy -- and this only ever
+        -- inspect_policy and container_inspect_policy -- and this only ever
         checked one, so a key the CONTAINER writer emitted and the listener
         ignored would have loaded clean and authorised nothing, which is the
         same silence this test exists to break. It is their UNION that has to
@@ -612,7 +612,7 @@ class TestPolicyLoading(unittest.TestCase):
         drift comparison would then have to know to ignore one of its own keys.
         """
         mod = _mod()
-        doc = vm_inspect_policy({
+        doc = inspect_policy({
             "hosts": ["example.com"],
             "internal": [{"host": "nas.example.com", "reason": "nas"}],
             "splice": [{"host": "pinned.example.com", "reason": "pinned"}],
@@ -693,7 +693,7 @@ class TestPolicyLoading(unittest.TestCase):
         error, and no counter that moves to say so.
         """
         mod = _mod()
-        path = self._write(json.dumps(vm_inspect_policy(
+        path = self._write(json.dumps(inspect_policy(
             {"hosts": ["example.com"]})))
         self.assertIs(mod.load_policy(path).guest_agent, True)
 
@@ -725,7 +725,7 @@ class TestPolicyLoading(unittest.TestCase):
         misfiled as 'upstream unreachable' and the counter that exists to name
         the wildcard trap never moves."""
         mod = _mod()
-        path = self._write(json.dumps(vm_inspect_policy({
+        path = self._write(json.dumps(inspect_policy({
             "hosts": ["nas.example.com"], "tls": "splice",
             "internal": [{"host": "nas.example.com"}]})))
         policy = mod.load_policy(path)
@@ -736,7 +736,7 @@ class TestPolicyLoading(unittest.TestCase):
         reading a key the helper does not write governs nothing while the
         config says every request is constrained."""
         mod = _mod()
-        path = self._write(json.dumps(vm_inspect_policy({
+        path = self._write(json.dumps(inspect_policy({
             "hosts": ["a.example"],
             "policy": [{"host": "a.example", "methods": ["GET"],
                         "paths": ["/v2/*"]}]})))
@@ -757,7 +757,7 @@ class TestPolicyLoading(unittest.TestCase):
         permits.
         """
         mod = _mod()
-        path = self._write(json.dumps(vm_inspect_policy({
+        path = self._write(json.dumps(inspect_policy({
             "policy": [{"host": "a.example"}]})))
         entry, = mod.load_policy(path).policy
         self.assertIsNone(entry.methods)
@@ -769,7 +769,7 @@ class TestPolicyLoading(unittest.TestCase):
         offers `http/1.1` to a host the operator listed for h2, which fails as
         that one host being broken rather than as a key being ignored."""
         mod = _mod()
-        path = self._write(json.dumps(vm_inspect_policy({
+        path = self._write(json.dumps(inspect_policy({
             "hosts": ["grpc.example.com"],
             "http2": [{"host": "grpc.example.com", "reason": "gRPC"}]})))
         policy = mod.load_policy(path)
@@ -1094,7 +1094,7 @@ class TestPerHostSplice(unittest.TestCase):
         self.addCleanup(shutil.rmtree, d)
         path = os.path.join(d, "inspect.json")
         with open(path, "w") as f:
-            json.dump(vm_inspect_policy({
+            json.dump(inspect_policy({
                 "hosts": ["sum.golang.org"],
                 "splice": [{"host": "sum.golang.org", "reason": "a log"}]}), f)
         self.assertEqual(mod.load_policy(path).splice, ("sum.golang.org",))
@@ -1103,7 +1103,7 @@ class TestPerHostSplice(unittest.TestCase):
         """The document describes the FILE, not the file filtered through the
         mode -- so a listener restarted onto `inspect` reads a document that
         already says what the per-host list was."""
-        doc = vm_inspect_policy({
+        doc = inspect_policy({
             "tls": "splice", "hosts": ["sum.golang.org"],
             "splice": [{"host": "sum.golang.org", "reason": "a log"}]})
         self.assertEqual(doc["splice"], ["sum.golang.org"])
@@ -3139,7 +3139,7 @@ class TestInternalAttribution(unittest.TestCase):
                 return_value=[(2, 1, 6, "", ("10.0.0.9", 443))]):
             self.assertEqual(
                 listener._dial_failure_reason(
-                    mod.vm_normalise_hostname("Host.Example.")),
+                    mod.normalise_hostname("Host.Example.")),
                 "upstream unreachable")
 
 
@@ -3364,7 +3364,7 @@ class TestCallerIdentity(unittest.TestCase):
 
     def _handled(self, mod, caller_uid, own_uid=OWN_UID):
         """Drive one connection with the caller lookup answering `caller_uid`."""
-        local = ("198.18.0.1", VM_INSPECT_PORT_CLEARTEXT)
+        local = ("198.18.0.1", INSPECT_PORT_CLEARTEXT)
         out = io.StringIO()
         listener = mod.Listener([_listener_with(local)], out)
         conn = _mock_conn()
@@ -3419,7 +3419,7 @@ class TestCallerIdentity(unittest.TestCase):
         """A hardening check that can throw is worse than one that fails soft:
         it would turn this layer into an outage for the traffic it protects."""
         mod = _mod()
-        local = ("198.18.0.1", VM_INSPECT_PORT_CLEARTEXT)
+        local = ("198.18.0.1", INSPECT_PORT_CLEARTEXT)
         listener = mod.Listener([_listener_with(local)], io.StringIO())
         with unittest.mock.patch.object(mod, "peer_uid",
                                         side_effect=RuntimeError("boom")):
@@ -3432,7 +3432,7 @@ class TestCallerIdentity(unittest.TestCase):
         needs. With limit=0 every connection is over capacity, so whichever
         check runs first is the reason that gets recorded."""
         mod = _mod()
-        local = ("198.18.0.1", VM_INSPECT_PORT_CLEARTEXT)
+        local = ("198.18.0.1", INSPECT_PORT_CLEARTEXT)
         out = io.StringIO()
         listener = mod.Listener([_listener_with(local)], out, limit=0)
         with unittest.mock.patch("os.getuid", return_value=self.OWN_UID), \

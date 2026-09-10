@@ -83,7 +83,7 @@ class TestHelperArmsBothTables(unittest.TestCase):
         self.assertNotIn("vm_inspect_cgroup_filter_command", self.up)
 
     def test_up_clears_the_previous_instances_status_file(self):
-        self.assertIn("clear_status(vm_inspect_status_path(name))", self.up)
+        self.assertIn("clear_status(inspect_status_path(name))", self.up)
 
     def test_down_removes_elements_and_addresses_but_not_the_link(self):
         self.assertIn('vm_inspect_element_commands(uid, "delete")', self.down)

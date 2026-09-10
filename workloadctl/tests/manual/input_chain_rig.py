@@ -49,7 +49,7 @@ SKELETON = "/usr/share/workloadctl/workload-filter.nft"
 UID = 10000
 V4 = "198.18.1.0"          # inspect_address(10000).v4
 V6 = "2001:2::c612:100"    # ...v6
-PORT = 8080                # VM_INSPECT_PORT_CLEARTEXT
+PORT = 8080                # INSPECT_PORT_CLEARTEXT
 GROUP = 1000               # nflog_group(10000)
 SNAPLEN = 1500
 

@@ -3,7 +3,7 @@
 
 Split out of vm.py, where it was the last 1,800 lines -- BELOW every renderer
 that consumes it. That inversion is the reason for the cut, not the size: a
-reader following `vm_inspect_policy` down to see what a policy entry is had to
+reader following `inspect_policy` down to see what a policy entry is had to
 scroll a thousand lines PAST it, and a validator added near its neighbours
 here sat further from the constant it enforces than from code it has nothing
 to do with.
@@ -28,11 +28,11 @@ from config_parser import (BROKER_DEFAULT_AUTH_FORMAT,
                            parse_volume_spec, patterns_overlap,
                            validate_credential_entries,
                            validate_host_pattern)
-from egress_policy import (VM_INSPECT_ORIG_CLEARTEXT, VM_INSPECT_ORIG_TLS,
-                           VM_POLICY_METHODS, VM_POLICY_METHODS_REFUSED,
-                           VM_TLS_DEFAULT, VM_TLS_MODES, VmPolicyEntry,
-                           vm_hostname_match, vm_normalise_hostname,
-                           vm_policy_entries, vm_policy_governs)
+from egress_policy import (INSPECT_ORIG_CLEARTEXT, INSPECT_ORIG_TLS,
+                           POLICY_METHODS, POLICY_METHODS_REFUSED,
+                           TLS_DEFAULT, TLS_MODES, VmPolicyEntry,
+                           hostname_match, normalise_hostname,
+                           policy_entries, policy_governs)
 from workload_addr import (INSPECT_ADDR6_PREFIX, INSPECT_NETWORK,
                            RESOLVE_POLICY_FILE, RESOLVE_TTL,
                            inspect_address, reserved_range)
@@ -224,7 +224,7 @@ def parse_vm_allow(entry, *, filtered: bool = True) -> VmAllowEntry:
     # exactly as for the address form, since a name resolves to an address that
     # is redirected anyway. `egress = "filtered"` is the real condition, because
     # that is what puts the workload in the redirect's key at all.
-    if filtered and port in (VM_INSPECT_ORIG_CLEARTEXT, VM_INSPECT_ORIG_TLS):
+    if filtered and port in (INSPECT_ORIG_CLEARTEXT, INSPECT_ORIG_TLS):
         raise ValueError(
             f"{spec!r}: port {port} is redirected into this workload's egress "
             f"inspector before `allow` is consulted, so the element would be "
@@ -354,7 +354,7 @@ def vm_resolve_policy(net: dict, uid: int, resolved=None) -> dict:
         # Normalised on the way in, so the responder's lookup is one dict hit
         # against a name already in the form every match in this design is made
         # against -- and two spellings of one name cannot become two entries.
-        key = vm_normalise_hostname(entry.host)
+        key = normalise_hostname(entry.host)
         for addr in addresses:
             text = str(addr)
             if text not in static.setdefault(key, []):
@@ -365,7 +365,7 @@ def vm_resolve_policy(net: dict, uid: int, resolved=None) -> dict:
         "ttl": RESOLVE_TTL,
         "static": static,
         "hosts": vm_allowed_hosts(net),
-        "policy": [e.host for e in vm_policy_entries(net)],
+        "policy": [e.host for e in policy_entries(net)],
     }
 
 
@@ -382,7 +382,7 @@ def vm_policy_permits(host: str, method: str, path: str, entries) -> bool:
     asked about a host some entry governs.
     """
     return any(e.permits(method, path)
-               for e in vm_policy_governs(host, entries))
+               for e in policy_governs(host, entries))
 
 
 def _validate_host_reason_entries(entries, key: str, reason_clause: str):
@@ -490,13 +490,13 @@ def _validate_policy_methods(item, host: str) -> tuple[tuple | None, list[str]]:
                 f"one")
             continue
         name = token.upper()
-        if name in VM_POLICY_METHODS_REFUSED:
+        if name in POLICY_METHODS_REFUSED:
             errors.append(
                 f"[vm.network].policy: {host!r} names the method {token!r}, "
                 f"which this inspector never sees — "
-                f"{VM_POLICY_METHODS_REFUSED[name]}")
+                f"{POLICY_METHODS_REFUSED[name]}")
             continue
-        if name not in VM_POLICY_METHODS:
+        if name not in POLICY_METHODS:
             errors.append(
                 f"[vm.network].policy: {host!r} names {token!r}, which is not "
                 f"a registered HTTP method. A method that never matches denies "
@@ -857,7 +857,7 @@ def _validate_policy(net: dict, splice_hosts, http2_hosts, egress: str,
     # A copy-paste a reader will assume does something.
     seen: dict = {}
     for entry in entries:
-        key = (vm_normalise_hostname(entry.host),
+        key = (normalise_hostname(entry.host),
                None if entry.methods is None else tuple(sorted(set(entry.methods))),
                None if entry.paths is None else tuple(sorted(set(entry.paths))),
                entry.credential)
@@ -906,13 +906,13 @@ def _validate_apex_coverage(hosts, entries, key: str, consequence: str, *,
     named = [e for e in entries if e]
     for apex in literal:
         wildcard = f"*.{apex}"
-        if not any(vm_normalise_hostname(e) == vm_normalise_hostname(wildcard)
+        if not any(normalise_hostname(e) == normalise_hostname(wildcard)
                    for e in named):
             continue
         if not self_allowlisting and not any(
                 patterns_overlap(wildcard, pattern) for pattern in literal):
             continue
-        if any(vm_hostname_match(apex, (e,)) for e in named):
+        if any(hostname_match(apex, (e,)) for e in named):
             continue
         errors.append(
             f"[vm.network].{key}: {wildcard!r} does not cover the apex "
@@ -982,11 +982,11 @@ def _validate_egress(net: dict) -> list[str]:
                 f"config claimed the property of one that is not, which is the "
                 f"misreported confinement this layer exists to prevent. Use "
                 f"one of "
-                f"{', '.join(repr(m) for m in VM_TLS_MODES)} until then.")
-        elif tls not in VM_TLS_MODES:
+                f"{', '.join(repr(m) for m in TLS_MODES)} until then.")
+        elif tls not in TLS_MODES:
             errors.append(
                 f"[vm.network].tls must be one of "
-                f"{', '.join(repr(m) for m in VM_TLS_MODES)}, got {tls!r}")
+                f"{', '.join(repr(m) for m in TLS_MODES)}, got {tls!r}")
 
     # ADR 008 decision 2: splicing is a named exemption carrying a written
     # reason, never a default and never implicit. The per-host hatches enforce
@@ -1018,7 +1018,7 @@ def _validate_egress(net: dict) -> list[str]:
         # refuses -- a config that describes a confinement other than the one
         # it has, here by claiming a WEAKER one than is in force, which sends
         # a reviewer looking for an exposure that is not there.
-        effective = tls if tls is not None else VM_TLS_DEFAULT
+        effective = tls if tls is not None else TLS_DEFAULT
         errors.append(
             f"[vm.network].tls_reason is set but .tls is {effective!r} — the "
             f"key records why a WHOLE workload skips termination, and this "

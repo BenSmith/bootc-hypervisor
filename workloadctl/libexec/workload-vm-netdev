@@ -57,7 +57,7 @@ depends on nothing about the host.
 
 AND WHAT THAT RULE BECOMES ONCE THE WORKLOAD HAS A RESPONDER
 
-A workload matching `vm_uses_resolve` (filtered, not bridged, `resolver` not
+A workload matching `uses_resolve` (filtered, not bridged, `resolver` not
 "none") has its own synthesising responder on 127.130.x.y:53, and `--dns-host`
 points there instead of at a nameserver from /etc/resolv.conf. Three things
 change, and the middle one is the one that looks unchanged and is not.
@@ -134,7 +134,7 @@ from pathlib import Path
 
 sys.dont_write_bytecode = True
 
-from egress_policy import vm_uses_resolve
+from egress_policy import uses_resolve
 from workload_addr import resolve_address
 from workload_lib import load_workload_config, workload_env_dir
 
@@ -309,7 +309,7 @@ def build_dns_fragment(gateways: dict[int, str],
 def workload_config(name: str) -> dict:
     """This workload's parsed TOML, or {} if it cannot be read.
 
-    An empty dict is a workload that is not a VM as far as vm_uses_resolve is
+    An empty dict is a workload that is not a VM as far as uses_resolve is
     concerned, which lands on the no-responder path — the same assumption the
     old resolver_mode made when the file was unreadable.
     """
@@ -353,7 +353,7 @@ def main(argv):
         fragment = "dhcp-dns=off"
         notes = ['[vm.network].resolver = "none": the guest is given no '
                  'resolver']
-    elif vm_uses_resolve(config):
+    elif uses_resolve(config):
         try:
             responder = responder_address(name)
         except (KeyError, ValueError) as e:

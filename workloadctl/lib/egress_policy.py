@@ -67,11 +67,11 @@ from vm_defs import VM_EGRESS_DEFAULT, VM_SOCKET_DIR, vm_allowed_hosts
 # sibling scalar rather than a table because `tls` is a mode, not a list: a
 # polymorphic `tls` that was sometimes a string and sometimes a table would
 # make the commonest line in the section the one hardest to read.
-VM_TLS_MODES = ("splice", "inspect")
-VM_TLS_DEFAULT = "inspect"
+TLS_MODES = ("splice", "inspect")
+TLS_DEFAULT = "inspect"
 
 
-def vm_uses_inspect(config: dict) -> bool:
+def uses_inspect(config: dict) -> bool:
     """Whether this workload's egress is redirected into an inspector.
 
     The single source of the predicate that decides whether the inspect
@@ -109,10 +109,10 @@ def vm_uses_inspect(config: dict) -> bool:
 # the tests already import. It lives one rung down rather than being copied when
 # the container half needed it too, for that reason: the guest would pick which
 # normalisation it got by how it spelled the host.
-vm_normalise_hostname = normalise_hostname
+normalise_hostname = normalise_hostname
 
 
-def vm_hostname_control_character(host: str) -> str | None:
+def hostname_control_character(host: str) -> str | None:
     """The first control character in a name, or None if it carries none.
 
     A name read off the wire — an SNI, a DNS label — is bytes a guest chose,
@@ -141,7 +141,7 @@ def vm_hostname_control_character(host: str) -> str | None:
     return None
 
 
-def vm_hostname_match(host: str, patterns) -> bool:
+def hostname_match(host: str, patterns) -> bool:
     """Whether a hostname is authorised by a list of fnmatch patterns.
 
     `fnmatch.fnmatchcase`, not `fnmatch.fnmatch`. The plain form normalises its
@@ -157,10 +157,10 @@ def vm_hostname_match(host: str, patterns) -> bool:
     quietly widened it would silently grant every existing config a destination
     its operator did not write down.
     """
-    host = vm_normalise_hostname(host)
+    host = normalise_hostname(host)
     if not host:
         return False
-    return any(fnmatch.fnmatchcase(host, vm_normalise_hostname(p))
+    return any(fnmatch.fnmatchcase(host, normalise_hostname(p))
                for p in patterns)
 
 
@@ -170,8 +170,8 @@ def vm_hostname_match(host: str, patterns) -> bool:
 # lands here cleartext (the Host header carries the name) and one to 443 here
 # under TLS (the SNI in the ClientHello). The socket that accepted the
 # connection tells the inspector which it is, so SO_ORIGINAL_DST is not needed.
-VM_INSPECT_PORT_CLEARTEXT = 8080
-VM_INSPECT_PORT_TLS = 8443
+INSPECT_PORT_CLEARTEXT = 8080
+INSPECT_PORT_TLS = 8443
 
 
 # The two ORIGINAL ports the redirect matches and the map keys on: a guest dial
@@ -183,15 +183,15 @@ VM_INSPECT_PORT_TLS = 8443
 # the same two ports and the parse layer is below both; aliased here so that a
 # reader of this file finds the redirect's two ends -- the port dialled and the
 # port answered -- next to each other rather than one rung apart.
-VM_INSPECT_ORIG_CLEARTEXT = INSPECT_ORIG_CLEARTEXT
-VM_INSPECT_ORIG_TLS = INSPECT_ORIG_TLS
+INSPECT_ORIG_CLEARTEXT = INSPECT_ORIG_CLEARTEXT
+INSPECT_ORIG_TLS = INSPECT_ORIG_TLS
 
 
 # --- The responder knob, and [[vm.network.policy]] as parsed entries ---
-def vm_uses_resolve(config: dict) -> bool:
+def uses_resolve(config: dict) -> bool:
     """Whether this workload gets a synthesising responder.
 
-    Everything vm_uses_inspect requires (a VM, not bridged, filtered) plus
+    Everything uses_inspect requires (a VM, not bridged, filtered) plus
     `resolver` not being "none". One knob, one meaning, in both places: a
     responder under `egress = "open"` would answer every name with an inspector
     address that nothing redirects to, and one under `resolver = "none"` would
@@ -202,7 +202,7 @@ def vm_uses_resolve(config: dict) -> bool:
     # VM-only, and not an omission: a container resolves through the
     # host/podman resolver rather than a per-workload nameserver, so there is
     # no container analogue to extend this to.
-    if not vm_uses_inspect(config):
+    if not uses_inspect(config):
         return False
     net = (config.get("vm", {}) or {}).get("network", {}) or {}
     return net.get("resolver", "host") != "none"
@@ -222,7 +222,7 @@ def vm_uses_resolve(config: dict) -> bool:
 # which is refused on a terminated host and checked as a preface on an `http2`
 # one; permitting it by name would read as a way to allow h2 through `policy`,
 # which is exactly the thing `http2` carries a written reason for.
-VM_POLICY_METHODS = frozenset((
+POLICY_METHODS = frozenset((
     "ACL", "BASELINE-CONTROL", "BIND", "CHECKIN", "CHECKOUT", "COPY", "DELETE",
     "GET", "HEAD", "LABEL", "LINK", "LOCK", "MERGE", "MKACTIVITY",
     "MKCALENDAR", "MKCOL", "MKREDIRECTREF", "MKWORKSPACE", "MOVE", "OPTIONS",
@@ -232,7 +232,7 @@ VM_POLICY_METHODS = frozenset((
 ))
 
 
-VM_POLICY_METHODS_REFUSED = {
+POLICY_METHODS_REFUSED = {
     "CONNECT": "the inspector is transparent and is never sent a CONNECT; a "
                "guest reaches it by a redirect it cannot see",
     "PRI": "PRI is the HTTP/2 connection preface's method; h2 on a host is "
@@ -270,17 +270,17 @@ class VmPolicyEntry(NamedTuple):
         return True
 
 
-def vm_policy_entries(net: dict) -> list[VmPolicyEntry]:
+def policy_entries(net: dict) -> list[VmPolicyEntry]:
     """The [[vm.network.policy]] entries, normalised, in file order.
 
-    Shape-tolerant for the reason vm_internal_hosts is: validate_vm_network
+    Shape-tolerant for the reason internal_hosts is: validate_vm_network
     owns the shape and the boot generator skips a workload that does not
     validate.
     """
     return parse_policy_entries(net, VmPolicyEntry)
 
 
-def vm_policy_governs(host: str, entries) -> list[VmPolicyEntry]:
+def policy_governs(host: str, entries) -> list[VmPolicyEntry]:
     """The entries governing one hostname, which may be none.
 
     §3's composition rule lives here and is the thing to get right: a host with
@@ -297,7 +297,7 @@ def vm_policy_governs(host: str, entries) -> list[VmPolicyEntry]:
     to print the EFFECTIVE rules per host rather than the file's entries --
     owed, not built, so do not cite it to an operator as though it were.
     """
-    return [e for e in entries if vm_hostname_match(host, (e.host,))]
+    return [e for e in entries if hostname_match(host, (e.host,))]
 
 
 # --- The inspector's policy document (§7.7.1, §13) ---
@@ -314,15 +314,15 @@ def vm_policy_governs(host: str, entries) -> list[VmPolicyEntry]:
 # JSON rather than a bare line-per-pattern file — the shape the proxy's
 # hosts.allow had — because this document carries a mode as well as a list and
 # will carry more of both.
-VM_INSPECT_POLICY_FILE = "inspect.json"
+INSPECT_POLICY_FILE = "inspect.json"
 
 
-def vm_inspect_policy_path(name: str) -> str:
+def inspect_policy_path(name: str) -> str:
     """Where one workload's inspector reads its lists from."""
-    return f"{VM_SOCKET_DIR}/{name}/{VM_INSPECT_POLICY_FILE}"
+    return f"{VM_SOCKET_DIR}/{name}/{INSPECT_POLICY_FILE}"
 
 
-VM_INSPECT_STATUS_FILE = "inspect-status.json"
+INSPECT_STATUS_FILE = "inspect-status.json"
 
 
 # The `drop_reasons` keys `workloadctl diagnose` reads back out of the
@@ -359,8 +359,8 @@ VM_DROP_NOT_HTTP_POLICY = "not HTTP (policy entry)"
 # port repeats across the requests on one keep-alive connection and is reused
 # by the kernel after close, so it groups the wrong lines together and splits
 # the right ones apart.
-VM_INSPECT_LOG_ID_FIELD = "id"
-VM_INSPECT_LOG_REQ_FIELD = "req"
+INSPECT_LOG_ID_FIELD = "id"
+INSPECT_LOG_REQ_FIELD = "req"
 
 
 # The per-request record's field names, and the vocabularies of two of them.
@@ -380,8 +380,8 @@ VM_INSPECT_LOG_REQ_FIELD = "req"
 # exists to be evidence. What makes the honest value readable is
 # this field naming which credential rode along, so `host` says where the
 # request went and `credential` says why `upstream` is a loopback address.
-VM_INSPECT_RECORD_FIELDS = (
-    VM_INSPECT_LOG_ID_FIELD, VM_INSPECT_LOG_REQ_FIELD, "ts", "plane", "mode",
+INSPECT_RECORD_FIELDS = (
+    INSPECT_LOG_ID_FIELD, INSPECT_LOG_REQ_FIELD, "ts", "plane", "mode",
     "host", "method", "path", "query", "http", "decision", "reason", "status",
     "upstream", "credential", "duration_ms",
 )
@@ -391,18 +391,18 @@ VM_INSPECT_RECORD_FIELDS = (
 # value for "refused with an answer": whether the guest was told is carried
 # exactly by `status` being non-null, and a second spelling of one fact is free
 # to disagree with it.
-VM_INSPECT_RECORD_DECISIONS = ("forward", "drop")
+INSPECT_RECORD_DECISIONS = ("forward", "drop")
 
 
 # What the listener was doing with the connection, which is not the question
 # `plane` answers. `splice` and `h2` are the two connection-level records --
 # the paths that carry requests this design never decodes.
-VM_INSPECT_RECORD_MODES = ("forward", "terminate", "splice", "h2")
+INSPECT_RECORD_MODES = ("forward", "terminate", "splice", "h2")
 
 
 # The two planes a record can have arrived on, which is the port the guest
 # dialled and not what the listener then did with the connection.
-VM_INSPECT_RECORD_PLANES = ("tls", "cleartext")
+INSPECT_RECORD_PLANES = ("tls", "cleartext")
 
 
 # Every value the record's `reason` field can carry -- the listener's own
@@ -455,7 +455,7 @@ VM_DROP_NOT_PERMITTED = "not permitted by policy"
 VM_DROP_BROKER_UNREACHABLE = "credential broker unreachable"
 
 
-VM_INSPECT_RECORD_REASONS = (
+INSPECT_RECORD_REASONS = (
     VM_DROP_NOT_ALLOWLISTED,
     VM_DROP_NO_NAME,
     VM_DROP_UNREADABLE_REQUEST,
@@ -479,7 +479,7 @@ VM_INSPECT_RECORD_REASONS = (
 )
 
 
-def vm_inspect_status_path(name: str) -> str:
+def inspect_status_path(name: str) -> str:
     """Where one workload's inspector writes its counters.
 
     Two status files rather than one, and lib/egress_status.py carries the
@@ -487,7 +487,7 @@ def vm_inspect_status_path(name: str) -> str:
     processes atomically replacing one path leaves only the last writer's
     figures, silently.
     """
-    return f"{VM_SOCKET_DIR}/{name}/{VM_INSPECT_STATUS_FILE}"
+    return f"{VM_SOCKET_DIR}/{name}/{INSPECT_STATUS_FILE}"
 
 
 # WHERE THE PER-REQUEST RECORD GOES, and why it is not in the journal and not
@@ -531,8 +531,8 @@ def vm_inspect_status_path(name: str) -> str:
 # a KVM host measured what that costs -- EACCES on every record write, silent,
 # because the write may never raise. The search bit grants no read, so the ACL
 # argument one level up is intact: the directory still cannot be listed.
-VM_INSPECT_RECORD_ROOT = Path("/var/log/workloadctl/egress")
-VM_INSPECT_RECORD_FILE = "requests.log"
+INSPECT_RECORD_ROOT = Path("/var/log/workloadctl/egress")
+INSPECT_RECORD_FILE = "requests.log"
 
 
 # The per-workload directory is a systemd LogsDirectory=, whose names are
@@ -542,25 +542,25 @@ VM_INSPECT_RECORD_FILE = "requests.log"
 # fails EROFS under ProtectSystem=strict -- which the leaf caches already
 # taught us is swallowed by the per-connection OSError handler and reads as a
 # network fault.
-VM_LOG_BASE = Path("/var/log")
+LOG_BASE = Path("/var/log")
 
 
-def vm_inspect_record_dir(name: str) -> Path:
+def inspect_record_dir(name: str) -> Path:
     """Where one workload's per-request record lives."""
-    return VM_INSPECT_RECORD_ROOT / name
+    return INSPECT_RECORD_ROOT / name
 
 
-def vm_inspect_record_path(name: str) -> Path:
+def inspect_record_path(name: str) -> Path:
     """The record file itself."""
-    return vm_inspect_record_dir(name) / VM_INSPECT_RECORD_FILE
+    return inspect_record_dir(name) / INSPECT_RECORD_FILE
 
 
-def vm_inspect_logs_directory(name: str) -> str:
+def inspect_logs_directory(name: str) -> str:
     """The LogsDirectory= value for one workload's inspect service."""
-    return str(vm_inspect_record_dir(name).relative_to(VM_LOG_BASE))
+    return str(inspect_record_dir(name).relative_to(LOG_BASE))
 
 
-def vm_inspect_policy(net: dict) -> dict:
+def inspect_policy(net: dict) -> dict:
     """The inspector's policy document for one workload.
 
     `hosts` is `[vm.network].hosts` unchanged.
@@ -621,21 +621,21 @@ def vm_inspect_policy(net: dict) -> dict:
     future reader to treat one as data rather than as prose.
     """
     return {
-        "tls": net.get("tls", VM_TLS_DEFAULT),
+        "tls": net.get("tls", TLS_DEFAULT),
         "hosts": vm_allowed_hosts(net),
-        "internal": vm_internal_hosts(net),
-        "splice": vm_splice_hosts(net),
-        "http2": vm_http2_hosts(net),
+        "internal": internal_hosts(net),
+        "splice": splice_hosts(net),
+        "http2": http2_hosts(net),
         "policy": [
             {"host": e.host,
              "methods": None if e.methods is None else list(e.methods),
              "paths": None if e.paths is None else list(e.paths),
              **({"credential": e.credential} if e.credential else {})}
-            for e in vm_policy_entries(net)],
+            for e in policy_entries(net)],
     }
 
 
-def vm_inspect_policy_text(net: dict) -> str:
+def inspect_policy_text(net: dict) -> str:
     """The policy document as the exact bytes that land on disk.
 
     THE ONE RENDERER. `write_policy()` in libexec/workload-vm-inspect writes
@@ -651,14 +651,14 @@ def vm_inspect_policy_text(net: dict) -> str:
     a diff of a file that does not says `\\ No newline at end of file` on
     every hunk.
     """
-    return json.dumps(vm_inspect_policy(net), indent=2, sort_keys=True) + "\n"
+    return json.dumps(inspect_policy(net), indent=2, sort_keys=True) + "\n"
 
 
 # How much of the digest an operator is shown. Twelve hex characters is enough
 # to tell two documents apart by eye in a diagnostic line and short enough to
 # sit inside one; the full value stays in the status file, where the comparison
 # is actually made.
-VM_INSPECT_DIGEST_SHORT = 12
+INSPECT_DIGEST_SHORT = 12
 
 
 # The key the listener echoes its loaded document's digest under. Named here
@@ -666,7 +666,7 @@ VM_INSPECT_DIGEST_SHORT = 12
 # is `diagnose`, and a typo in either would read as "an older listener that
 # does not report a digest", which is the one state the check treats as
 # silence.
-VM_INSPECT_DIGEST_KEY = "policy_digest"
+INSPECT_DIGEST_KEY = "policy_digest"
 
 # Whether this workload has a QEMU guest agent to ask. Named here for the same
 # reason as the digest key above -- the writer is container_inspect_policy and
@@ -682,10 +682,10 @@ VM_INSPECT_DIGEST_KEY = "policy_digest"
 INSPECT_GUEST_AGENT_KEY = "guest_agent"
 
 
-def vm_inspect_policy_digest(text: str) -> str:
+def inspect_policy_digest(text: str) -> str:
     """The digest of one rendered policy document.
 
-    THE ONE PRODUCER, for the same reason vm_inspect_policy_text is: the
+    THE ONE PRODUCER, for the same reason inspect_policy_text is: the
     listener digests the bytes it loaded and `diagnose` digests the bytes on
     disk, and the two are compared for equality. A hashlib call at each end
     would be two definitions of that comparison, and the failure mode of a
@@ -700,12 +700,12 @@ def vm_inspect_policy_digest(text: str) -> str:
     return hashlib.sha256(text.encode()).hexdigest()
 
 
-def vm_inspect_digest_short(digest: str | None) -> str:
+def inspect_digest_short(digest: str | None) -> str:
     """A digest as it is shown to a person, or `unknown` for a missing one."""
-    return digest[:VM_INSPECT_DIGEST_SHORT] if digest else "unknown"
+    return digest[:INSPECT_DIGEST_SHORT] if digest else "unknown"
 
 
-def vm_internal_hosts(net: dict) -> list[str]:
+def internal_hosts(net: dict) -> list[str]:
     """The host names in [[vm.network.internal]], in file order.
 
     Shape-tolerant, while vm_internal_resolve two functions down is fatal on
@@ -733,7 +733,7 @@ def vm_internal_hosts(net: dict) -> list[str]:
     return _host_reason_hosts(net, "internal")
 
 
-def vm_splice_hosts(net: dict) -> list[str]:
+def splice_hosts(net: dict) -> list[str]:
     """The host patterns in [[vm.network.splice]], in file order.
 
     HLD §11's second escape hatch: one host that must not be terminated,
@@ -741,14 +741,14 @@ def vm_splice_hosts(net: dict) -> list[str]:
     whole workload -- is a different key and this list is not consulted under
     it, because there everything is spliced already.
 
-    Shape-tolerant for the reason vm_internal_hosts is: validate_vm_network
+    Shape-tolerant for the reason internal_hosts is: validate_vm_network
     owns the shape and the boot generator skips a workload that does not
     validate, so a malformed entry cannot reach here on the boot path.
     """
     return _host_reason_hosts(net, "splice")
 
 
-def vm_http2_hosts(net: dict) -> list[str]:
+def http2_hosts(net: dict) -> list[str]:
     """The host patterns in [[vm.network.http2]], in file order.
 
     HLD §8's narrow opt-in: a host here is offered `h2` on both legs and
@@ -762,7 +762,7 @@ def vm_http2_hosts(net: dict) -> list[str]:
     the preface and frame check on the listener's side: a connection here must
     actually speak h2. Read that half before widening this one.
 
-    Shape-tolerant for the reason vm_internal_hosts is.
+    Shape-tolerant for the reason internal_hosts is.
     """
     return _host_reason_hosts(net, "http2")
 

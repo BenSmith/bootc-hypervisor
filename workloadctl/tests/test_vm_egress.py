@@ -17,7 +17,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from egress_policy import VM_INSPECT_PORT_CLEARTEXT, VM_INSPECT_PORT_TLS
+from egress_policy import INSPECT_PORT_CLEARTEXT, INSPECT_PORT_TLS
 from vm import vm_filter_commands, vm_filter_delete_command
 from netfilter_state import (
     CONNTRACK_PRESSURE, conntrack_occupancy, nft_drop_counter,
@@ -902,8 +902,8 @@ class TestInspectorAddresses(unittest.TestCase):
     def test_listener_ports_are_unprivileged(self):
         # The inspector binds as the workload user, not root, so both ports
         # have to stay above net.ipv4.ip_unprivileged_port_start (1024).
-        self.assertGreater(VM_INSPECT_PORT_CLEARTEXT, 1024)
-        self.assertGreater(VM_INSPECT_PORT_TLS, 1024)
+        self.assertGreater(INSPECT_PORT_CLEARTEXT, 1024)
+        self.assertGreater(INSPECT_PORT_TLS, 1024)
 
 
 class TestProxySkeletonNamesAgree(unittest.TestCase):
@@ -1227,7 +1227,7 @@ class TestFilterHelper(unittest.TestCase):
         # Inside the resolver branch: a workload with no synthesising responder
         # has no such file, and clearing one unconditionally would claim a
         # producer that this workload does not run.
-        self.assertLess(up.index("vm_uses_resolve"),
+        self.assertLess(up.index("uses_resolve"),
                         up.index("clear_status"))
 
 class TestEgressDiagnose(unittest.TestCase):
@@ -2304,11 +2304,11 @@ class TestRung2Schema(unittest.TestCase):
         anything, and the property it gives -- one name checked per connection
         -- is weaker rather than wrong.
         """
-        from egress_policy import VM_TLS_DEFAULT, VM_TLS_MODES
-        self.assertEqual(VM_TLS_DEFAULT, "inspect")
-        self.assertIn(VM_TLS_DEFAULT, VM_TLS_MODES)
-        self.assertIn("splice", VM_TLS_MODES)
-        for mode in VM_TLS_MODES:
+        from egress_policy import TLS_DEFAULT, TLS_MODES
+        self.assertEqual(TLS_DEFAULT, "inspect")
+        self.assertIn(TLS_DEFAULT, TLS_MODES)
+        self.assertIn("splice", TLS_MODES)
+        for mode in TLS_MODES:
             # `splice` carries its reason here because it is now required to;
             # what this test asserts is that the mode is still ACCEPTED, and
             # the reason is the price of it rather than a second refusal.
@@ -2635,12 +2635,12 @@ class TestRung2Schema(unittest.TestCase):
     # --- methods and paths ---
 
     def test_a_lowercase_method_is_accepted_and_normalised(self):
-        from egress_policy import vm_policy_entries
+        from egress_policy import policy_entries
         self.assertEqual(self._egress({
             "hosts": ["a.example"],
             "policy": [{"host": "a.example", "methods": ["get"],
                         "paths": ["/*"]}]}), [])
-        entry, = vm_policy_entries({
+        entry, = policy_entries({
             "policy": [{"host": "a.example", "methods": ["get"]}]})
         self.assertEqual(entry.methods, ("GET",))
 
@@ -3583,15 +3583,15 @@ class TestInternalOkElements(unittest.TestCase):
         This runs at VM start, where raising on a typo turns it into a workload
         that does not boot -- long after the error was reportable.
         """
-        from egress_policy import vm_internal_hosts
+        from egress_policy import internal_hosts
         self.assertEqual(
-            vm_internal_hosts({"internal": [{"host": "git.local", "reason": "r"},
+            internal_hosts({"internal": [{"host": "git.local", "reason": "r"},
                                             {"reason": "no host"},
                                             "a bare string",
                                             {"host": "  "}]}),
             ["git.local"])
-        self.assertEqual(vm_internal_hosts({}), [])
-        self.assertEqual(vm_internal_hosts({"internal": "not a list"}), [])
+        self.assertEqual(internal_hosts({}), [])
+        self.assertEqual(internal_hosts({"internal": "not a list"}), [])
 
     def test_an_unresolvable_internal_name_raises_naming_the_failure(self):
         from vm import vm_internal_resolve
@@ -3849,7 +3849,7 @@ class TestRung6CredentialSchema(unittest.TestCase):
     def test_entries_are_read_shape_tolerantly(self):
         """Both readers run at VM start, where raising turns a typo into a
         workload that does not boot -- long after the error was reportable."""
-        from egress_policy import vm_policy_entries
+        from egress_policy import policy_entries
         from broker_config import vm_credential_entries
         self.assertEqual(vm_credential_entries({"credential": "not a list"}), [])
         self.assertEqual(vm_credential_entries({}), [])
@@ -3861,7 +3861,7 @@ class TestRung6CredentialSchema(unittest.TestCase):
                 {"name": "  ", "placeholder": "P", "env": "A"}]})],
             ["tok"])
         self.assertEqual(
-            [e.credential for e in vm_policy_entries({"policy": [
+            [e.credential for e in policy_entries({"policy": [
                 {"host": "a.example", "credential": "tok"},
                 {"host": "b.example"},
                 {"host": "c.example", "credential": "  "},
@@ -3881,8 +3881,8 @@ class TestRung6PolicyDocument(unittest.TestCase):
                                 "env": "A"}] if credential else []}
 
     def test_an_entry_with_a_credential_carries_its_name(self):
-        from egress_policy import vm_inspect_policy
-        self.assertEqual(vm_inspect_policy(self._net("tok"))["policy"][0]
+        from egress_policy import inspect_policy
+        self.assertEqual(inspect_policy(self._net("tok"))["policy"][0]
                          ["credential"], "tok")
 
     def test_an_entry_without_one_carries_no_key_at_all(self):
@@ -3893,15 +3893,15 @@ class TestRung6PolicyDocument(unittest.TestCase):
         digest of EVERY filtered VM on the fleet changes at upgrade, so every
         one of them reports drift and the report stops being read.
         """
-        from egress_policy import vm_inspect_policy
-        self.assertNotIn("credential", vm_inspect_policy(self._net(None))
+        from egress_policy import inspect_policy
+        self.assertNotIn("credential", inspect_policy(self._net(None))
                          ["policy"][0])
 
     def test_a_credential_free_document_is_byte_identical_across_the_change(self):
         """The concrete form of the rule above, in the bytes drift compares."""
-        from egress_policy import vm_inspect_policy_text
+        from egress_policy import inspect_policy_text
         self.assertEqual(
-            vm_inspect_policy_text(self._net(None)),
+            inspect_policy_text(self._net(None)),
             '{\n'
             '  "hosts": [\n'
             '    "api.example"\n'
@@ -3926,23 +3926,23 @@ class TestRung6PolicyDocument(unittest.TestCase):
     def test_the_digest_moves_for_a_credential_and_not_for_its_absence(self):
         """Asserted in BOTH directions, because only the second half fails if
         the key is emitted unconditionally."""
-        from egress_policy import (vm_inspect_policy_digest,
-                                   vm_inspect_policy_text)
-        bare = vm_inspect_policy_digest(vm_inspect_policy_text(self._net(None)))
-        with_cred = vm_inspect_policy_digest(
-            vm_inspect_policy_text(self._net("tok")))
+        from egress_policy import (inspect_policy_digest,
+                                   inspect_policy_text)
+        bare = inspect_policy_digest(inspect_policy_text(self._net(None)))
+        with_cred = inspect_policy_digest(
+            inspect_policy_text(self._net("tok")))
         self.assertNotEqual(bare, with_cred)
         self.assertEqual(
             bare,
-            vm_inspect_policy_digest(vm_inspect_policy_text(self._net(None))))
+            inspect_policy_digest(inspect_policy_text(self._net(None))))
 
     def test_no_address_placeholder_or_env_reaches_the_document(self):
         """D8. The listener derives the address from its own uid, and decides
         nothing by the other two -- carrying them would make the document
         non-deterministic w.r.t. the TOML or leak the fiction into a file the
         guest-facing process reads."""
-        from egress_policy import vm_inspect_policy_text
-        text = vm_inspect_policy_text(self._net("tok"))
+        from egress_policy import inspect_policy_text
+        text = inspect_policy_text(self._net("tok"))
         self.assertNotIn("127.129", text)
         self.assertNotIn("placeholder", text)
         self.assertNotIn('"env"', text)

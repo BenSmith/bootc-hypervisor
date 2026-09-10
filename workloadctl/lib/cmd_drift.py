@@ -16,7 +16,7 @@ import tomllib
 from pathlib import Path
 
 from egress_policy import (
-    VM_INSPECT_POLICY_FILE, vm_inspect_policy_text, vm_uses_inspect,
+    INSPECT_POLICY_FILE, inspect_policy_text, uses_inspect,
 )
 from vm_defs import VM_SOCKET_DIR
 from config_parser import container_uses_inspect
@@ -191,7 +191,7 @@ def _rendered_policy(name: str) -> str:
         raise RuntimeError(f"could not read {path}: {e}") from None
     # Each substrate renders through its own renderer. A container's `tls` is
     # computed from the three-rung ladder (no [[network.policy]] means
-    # "splice"); the VM renderer defaults it to VM_TLS_DEFAULT. Since drift is
+    # "splice"); the VM renderer defaults it to TLS_DEFAULT. Since drift is
     # a byte comparison, rendering a container through the VM one would report
     # every inspected container as drifted, permanently.
     #
@@ -200,9 +200,9 @@ def _rendered_policy(name: str) -> str:
     # so it would read as a whole file removed.
     if container_uses_inspect(config):
         return container_inspect_policy_text(config.get("network", {}) or {})
-    if not vm_uses_inspect(config):
+    if not uses_inspect(config):
         return ""
-    return vm_inspect_policy_text(config.get("vm", {}).get("network", {}) or {})
+    return inspect_policy_text(config.get("vm", {}).get("network", {}) or {})
 
 
 def collect_policy_drift(workload_name=None) -> list:
@@ -231,7 +231,7 @@ def collect_policy_drift(workload_name=None) -> list:
     # which is the wanted answer for a host that has never started a VM — so
     # there is no is_dir() guard to go stale.
     root = Path(POLICY_ROOT)
-    for policy_file in sorted(root.glob(f"*/{VM_INSPECT_POLICY_FILE}")):
+    for policy_file in sorted(root.glob(f"*/{INSPECT_POLICY_FILE}")):
         name = policy_file.parent.name
         if workload_name and name != workload_name:
             continue
@@ -249,7 +249,7 @@ def collect_policy_drift(workload_name=None) -> list:
             # belongs to whatever builds the renderer.
             continue
         if live_text != gen_text:
-            diffs.append((f"{name}/{VM_INSPECT_POLICY_FILE}", live_text, gen_text))
+            diffs.append((f"{name}/{INSPECT_POLICY_FILE}", live_text, gen_text))
     return diffs
 
 def cmd_drift(args, manager):

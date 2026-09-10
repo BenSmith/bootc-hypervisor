@@ -303,7 +303,7 @@ RECORD_ROOT = Path("/var/log/workloadctl/egress")
 # checkout against an INSTALLED workloadctl, and importing lib/ would measure
 # the checkout while every probe measures the install. A rename would fail the
 # pin in tests/test_cmd_egress.py first, which is where it belongs.
-LOG_ID_FIELD = "id"          # VM_INSPECT_LOG_ID_FIELD
+LOG_ID_FIELD = "id"          # INSPECT_LOG_ID_FIELD
 AUDIT_LOG = Path("/var/log/audit/audit.log")
 
 # The one already-documented, deliberately-ungranted denial (see

@@ -43,8 +43,8 @@ from config_parser import (
 from egress_ca import RESERVED_GUEST_ENV
 from egress_policy import (
     INSPECT_GUEST_AGENT_KEY,
-    VM_POLICY_METHODS, VM_POLICY_METHODS_REFUSED, vm_hostname_match,
-    vm_uses_inspect, vm_uses_resolve,
+    POLICY_METHODS, POLICY_METHODS_REFUSED, hostname_match,
+    uses_inspect, uses_resolve,
 )
 from nft_constants import (
     NFT_BIN, NFT_SET_ALLOW4, NFT_SET_ALLOW6, NFT_SET_FILTERED, NFT_TABLE,
@@ -960,30 +960,30 @@ def workload_run_files(config) -> list[WorkloadRunFile]:
         # exemptions.
         # G3 in the container egress-parity build spec: VM-only by
         # construction -- this whole block is inside `if config.is_vm:`. The
-        # container `else` branch below carries its own uses_inspect,
+        # container `else` branch below carries its own container_inspects,
         # sourced from container_uses_inspect (P1-7..P1-9).
-        uses_inspect = vm_uses_inspect(config.config)
+        vm_inspects = uses_inspect(config.config)
         files.append(WorkloadRunFile(
             run / f"workload-{name}-inspect.socket", "unit", "inspect-socket",
-            uses_inspect,
+            vm_inspects,
         ))
         files.append(WorkloadRunFile(
             run / f"workload-{name}-inspect.service", "unit", "inspect",
-            uses_inspect,
+            vm_inspects,
         ))
         # The synthesising responder, on the same superset terms one predicate
         # further in: everything the inspector needs, plus `resolver` not being
         # "none". Listed unconditionally so a workload that switches the knob
         # off has its stale units unlinked rather than left behind answering
         # for a guest that was told to ask nobody.
-        uses_resolve = vm_uses_resolve(config.config)
+        vm_resolves = uses_resolve(config.config)
         files.append(WorkloadRunFile(
             run / f"workload-{name}-resolve.socket", "unit", "resolve-socket",
-            uses_resolve,
+            vm_resolves,
         ))
         files.append(WorkloadRunFile(
             run / f"workload-{name}-resolve.service", "unit", "resolve",
-            uses_resolve,
+            vm_resolves,
         ))
         # The credential broker instance, superset semantics again: listed for
         # every VM so a workload that drops its last credential has the unit
@@ -1624,13 +1624,13 @@ def validate_container_network(net: dict, config: dict | None = None) -> list[st
                             f"token")
                         continue
                     name = token.upper()
-                    if name in VM_POLICY_METHODS_REFUSED:  # V5
+                    if name in POLICY_METHODS_REFUSED:  # V5
                         errors.append(
                             f"[network].policy: {host!r} names the method "
                             f"{token!r}, which this inspector never sees -- "
-                            f"{VM_POLICY_METHODS_REFUSED[name]}")
+                            f"{POLICY_METHODS_REFUSED[name]}")
                         continue
-                    if name not in VM_POLICY_METHODS:  # V5
+                    if name not in POLICY_METHODS:  # V5
                         errors.append(
                             f"[network].policy: {host!r} names {token!r}, "
                             f"which is not a registered HTTP method")
@@ -1760,7 +1760,7 @@ def validate_container_network(net: dict, config: dict | None = None) -> list[st
             wildcard = f"*.{apex}"
             if not any(e.host.strip().lower() == wildcard.lower() for e in policy_entries):
                 continue
-            if any(vm_hostname_match(apex, (e.host,)) for e in policy_entries):
+            if any(hostname_match(apex, (e.host,)) for e in policy_entries):
                 continue
             errors.append(
                 f"[network].policy: {wildcard!r} does not cover the apex "
@@ -1944,7 +1944,7 @@ def container_internal_resolve(host: str) -> list:
 def container_inspect_policy(net: dict) -> dict:
     """The inspector's policy document for one container workload.
 
-    Same JSON shape as vm_inspect_policy (lib/egress_policy.py) -- D6: the
+    Same JSON shape as inspect_policy (lib/egress_policy.py) -- D6: the
     listener binary (workload-vm-inspect-listener) does not change between
     substrates, so whichever wrote the file, it reads the same keys. `http2`
     is always empty: [[network.http2]] is deferred for containers (§5 of the
@@ -1986,7 +1986,7 @@ def container_inspect_policy(net: dict) -> dict:
 
 def container_inspect_policy_text(net: dict) -> str:
     """The policy document as the exact bytes that land on disk. Mirrors
-    vm_inspect_policy_text -- same formatting, so a future drift/digest
+    inspect_policy_text -- same formatting, so a future drift/digest
     comparison cannot disagree with itself over which substrate rendered the
     file."""
     import json

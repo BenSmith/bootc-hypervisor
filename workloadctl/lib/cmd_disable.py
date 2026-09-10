@@ -19,7 +19,7 @@ from cli_log import emit_result, error, info, json_enabled
 from config_parser import workload_root_dir
 from workload_lib import workload_enabled_marker, workload_run_files
 from substrate import get_substrate
-from egress_policy import vm_inspect_record_dir
+from egress_policy import inspect_record_dir
 from workloadctl_core import (
     WorkloadConfig,
     WorkloadManager,
@@ -350,7 +350,7 @@ def cmd_disable(args, manager: WorkloadManager):
         # and the one unit that says what happened is a different unit's
         # journal. Left behind, it stops a filtered workload from pulling its
         # own image and reads as a network fault.
-        record_dir = vm_inspect_record_dir(config.name)
+        record_dir = inspect_record_dir(config.name)
         if record_dir.exists():
             try:
                 info(f"  Removing egress record {record_dir}...")

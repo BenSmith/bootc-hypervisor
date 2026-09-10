@@ -3,7 +3,7 @@
 WHAT THESE PIN, and why each one is here rather than being obvious:
 
 The report exists because reading the file is NOT the same as knowing what
-applies. `vm_policy_governs()`'s docstring has said so since rung 3: host
+applies. `policy_governs()`'s docstring has said so since rung 3: host
 patterns union among themselves, so `*.example.com` and `api.example.com` both
 govern `api.example.com` and neither overrides the other. Every test below is
 either that composition rule as an operator would see it rendered, or one of the
@@ -27,7 +27,7 @@ import cmd_rules
 
 
 def doc(**over):
-    """A policy document with every key present, as vm_inspect_policy renders
+    """A policy document with every key present, as inspect_policy renders
     one. Written out rather than built by calling the renderer: a test that
     generated its input from the code under test's own upstream would follow a
     mistake there into a green run here."""
@@ -249,7 +249,7 @@ class DocumentSourceTest(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             path = Path(tmp) / "inspect.json"
             path.write_text(json.dumps(doc(hosts=["ondisk.example.com"])))
-            with mock.patch.object(cmd_rules, "vm_inspect_policy_path",
+            with mock.patch.object(cmd_rules, "inspect_policy_path",
                                    return_value=str(path)):
                 d, origin, got = cmd_rules.load_document("wl", self._config())
         self.assertEqual(origin, "disk")
@@ -261,7 +261,7 @@ class DocumentSourceTest(unittest.TestCase):
         fault -- `drift` makes the same distinction for the same reason."""
         with TemporaryDirectory() as tmp:
             path = Path(tmp) / "absent.json"
-            with mock.patch.object(cmd_rules, "vm_inspect_policy_path",
+            with mock.patch.object(cmd_rules, "inspect_policy_path",
                                    return_value=str(path)):
                 d, origin, got = cmd_rules.load_document("wl", self._config())
         self.assertEqual(origin, "config")
@@ -275,7 +275,7 @@ class DocumentSourceTest(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             path = Path(tmp) / "inspect.json"
             path.write_text("{not json")
-            with mock.patch.object(cmd_rules, "vm_inspect_policy_path",
+            with mock.patch.object(cmd_rules, "inspect_policy_path",
                                    return_value=str(path)):
                 with self.assertRaises(RuntimeError) as caught:
                     cmd_rules.load_document("wl", self._config())
@@ -286,7 +286,7 @@ class DocumentSourceTest(unittest.TestCase):
         neither gets EACCES. A bare `Permission denied` sends them to look at
         the file rather than at their own uid; `egress` says the same thing
         about the record for the same reason."""
-        with mock.patch.object(cmd_rules, "vm_inspect_policy_path",
+        with mock.patch.object(cmd_rules, "inspect_policy_path",
                                return_value="/p/x.json"), \
              mock.patch.object(cmd_rules.Path, "read_text",
                                side_effect=PermissionError(13, "denied")):
@@ -329,9 +329,9 @@ class CommandTest(unittest.TestCase):
         buf = io.StringIO()
         with mock.patch.object(cmd_rules, "load_config_or_exit",
                                return_value=self._config(net)), \
-             mock.patch.object(cmd_rules, "vm_uses_inspect",
+             mock.patch.object(cmd_rules, "uses_inspect",
                                return_value=uses_inspect), \
-             mock.patch.object(cmd_rules, "vm_inspect_policy_path",
+             mock.patch.object(cmd_rules, "inspect_policy_path",
                                return_value="/nonexistent/inspect.json"), \
              redirect_stdout(buf):
             code = cmd_rules.cmd_rules(args, mock.Mock())
@@ -359,7 +359,7 @@ class CommandTest(unittest.TestCase):
                       "network": {"hosts": ["a.example.com"]}}
         with mock.patch.object(cmd_rules, "load_config_or_exit",
                                return_value=cfg), \
-             mock.patch.object(cmd_rules, "vm_inspect_policy_path",
+             mock.patch.object(cmd_rules, "inspect_policy_path",
                                return_value="/nonexistent/inspect.json"), \
              redirect_stdout(buf):
             code = cmd_rules.cmd_rules(self._args(), mock.Mock())
@@ -380,7 +380,7 @@ class CommandTest(unittest.TestCase):
         cfg = mock.Mock()
         cfg.config = {"container": {"image": "localhost/app:latest"},
                       "network": {"hosts": ["a.example.com"]}}
-        with mock.patch.object(cmd_rules, "vm_inspect_policy_path",
+        with mock.patch.object(cmd_rules, "inspect_policy_path",
                                return_value="/nonexistent/inspect.json"):
             doc, origin, path = cmd_rules.load_document("wl", cfg)
         self.assertEqual(origin, "config")

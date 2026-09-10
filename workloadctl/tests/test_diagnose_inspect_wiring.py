@@ -133,7 +133,7 @@ class InspectCheckIsWiredTests(unittest.TestCase):
         hoisted out of `if config.is_vm:` in the same one. Either half alone
         is inert and the whole suite stays green: the check's substrate
         wording is unreachable behind the gate, and the hoist reports nothing
-        while the predicate still asks vm_uses_inspect(). Only calling the
+        while the predicate still asks uses_inspect(). Only calling the
         battery on a filtered CONTAINER config sees it.
         """
         self.assertIn("vm_inspect", self._names("app2"))

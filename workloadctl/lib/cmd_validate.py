@@ -20,7 +20,7 @@ from workload_lib import (
     GENERATOR_OWNED_DIRECTIVES,
 )
 from provisioning import shadowed_filecon_paths
-from egress_policy import vm_internal_hosts, vm_uses_inspect
+from egress_policy import internal_hosts, uses_inspect
 from broker_config import vm_credential_entries
 from vm import vm_internal_reserved_reason, vm_internal_resolve
 from vm_defs import parse_memory_mib, vm_mac_address, vm_mac_collisions
@@ -473,9 +473,9 @@ def validate_single(config: WorkloadConfig, manager: WorkloadManager, json_mode=
     # then (a resolver still coming up, a split-horizon zone), and a name that
     # passes here can fail then. This says "this entry would stop the guest
     # booting right now", which is worth knowing and is not a verdict.
-    if config.config.get("vm") and vm_uses_inspect(config.config):
+    if config.config.get("vm") and uses_inspect(config.config):
         net = config.config.get("vm", {}).get("network", {}) or {}
-        for host in vm_internal_hosts(net):
+        for host in internal_hosts(net):
             problem = None
             try:
                 addresses = _resolve_within(host, INTERNAL_RESOLVE_TIMEOUT)

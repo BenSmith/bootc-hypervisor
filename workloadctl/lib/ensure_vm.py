@@ -31,7 +31,7 @@ from workload_lib import (
     WORKLOAD_CONFIG_DIR, expand_volume_path, virtiofs_tags,
     workload_state_dir, replace_file_atomically,
 )
-from egress_policy import vm_uses_inspect
+from egress_policy import uses_inspect
 from egress_ca import (
     VM_CA_BUNDLE_AVAILABLE, CA_BUNDLE_PATH, CA_ENV_VARS, vm_ca_env,
     ca_cert_path,
@@ -951,7 +951,7 @@ def build_cloud_init_iso(pw, config: dict, name: str, config_path: Path | None =
         # runs for a VM. The container analogue is `ca_delivery`, and it
         # ASSERTS rather than verifies (R9); do not overclaim its
         # replacement by trying to fold it into this contract.
-        if (VM_CA_BUNDLE_AVAILABLE and vm_uses_inspect(config)
+        if (VM_CA_BUNDLE_AVAILABLE and uses_inspect(config)
                 and "ca" not in seed_provides
                 and CA_BUNDLE_PATH not in live):
             raise SeedContractError(
@@ -1083,7 +1083,7 @@ def build_cloud_init_iso(pw, config: dict, name: str, config_path: Path | None =
             # runs for a VM. The container equivalent is env injection into
             # the unit at ExecStartPre/generator time (G15), not a
             # cloud-init argument.
-            ca_cert=_read_vm_egress_ca(name) if vm_uses_inspect(config) else "",
+            ca_cert=_read_vm_egress_ca(name) if uses_inspect(config) else "",
         )
 
     # Pin the guest host key on the host (S1). Both provisioning paths have now

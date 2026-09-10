@@ -618,8 +618,8 @@ import threading
 import time
 
 from egress_policy import (
-    VM_DROP_BROKER_UNREACHABLE, VM_DROP_UNREACHABLE, VM_INSPECT_RECORD_FIELDS,
-    VmPolicyEntry, vm_inspect_policy, vm_inspect_policy_text,
+    VM_DROP_BROKER_UNREACHABLE, VM_DROP_UNREACHABLE, INSPECT_RECORD_FIELDS,
+    VmPolicyEntry, inspect_policy, inspect_policy_text,
 )
 from workload_addr import broker_listen_address
 import vm_inspect_figures
@@ -936,7 +936,7 @@ class TestTheRecordOfABrokeredRequest(_BrokerRig):
         self.assertIsNone(rec["credential"])
 
     def test_the_field_is_in_the_shared_vocabulary(self):
-        self.assertIn("credential", VM_INSPECT_RECORD_FIELDS)
+        self.assertIn("credential", INSPECT_RECORD_FIELDS)
         self.assertIn("credential", listener_mod().RECORD_FIELDS)
 
 
@@ -1015,7 +1015,7 @@ class TestTheListenerReadsTheCredentialFromTheDocument(unittest.TestCase):
         mod = listener_mod()
         with tempfile.TemporaryDirectory(prefix="policy-") as tmp:
             path = Path(tmp) / "policy.json"
-            path.write_text(vm_inspect_policy_text(net))
+            path.write_text(inspect_policy_text(net))
             return mod.load_policy(str(path))
 
     def test_the_credential_survives_the_round_trip(self):
@@ -1098,8 +1098,8 @@ class TestTheReasonIsPinnedAcrossTheTwoHalves(unittest.TestCase):
                          listener_mod().DROP_BROKER_UNREACHABLE)
 
     def test_egress_can_filter_on_it(self):
-        from egress_policy import VM_INSPECT_RECORD_REASONS
-        self.assertIn(VM_DROP_BROKER_UNREACHABLE, VM_INSPECT_RECORD_REASONS)
+        from egress_policy import INSPECT_RECORD_REASONS
+        self.assertIn(VM_DROP_BROKER_UNREACHABLE, INSPECT_RECORD_REASONS)
         self.assertIn(VM_DROP_BROKER_UNREACHABLE, listener_mod().DROP_REASONS)
 
 

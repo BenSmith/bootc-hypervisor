@@ -12,9 +12,9 @@ import unittest
 from pathlib import Path
 
 from egress_policy import (
-    VM_INSPECT_ORIG_CLEARTEXT, VM_INSPECT_ORIG_TLS, VM_INSPECT_PORT_CLEARTEXT,
-    VM_INSPECT_PORT_TLS, vm_inspect_policy, vm_inspect_policy_path,
-    VM_TLS_DEFAULT, vm_http2_hosts, vm_policy_entries, vm_policy_governs,
+    INSPECT_ORIG_CLEARTEXT, INSPECT_ORIG_TLS, INSPECT_PORT_CLEARTEXT,
+    INSPECT_PORT_TLS, inspect_policy, inspect_policy_path,
+    TLS_DEFAULT, http2_hosts, policy_entries, policy_governs,
 )
 from vm import (
     vm_inspect_cgroup, vm_inspect_cgroup_command,
@@ -57,17 +57,17 @@ class TestOriginalPorts(unittest.TestCase):
 
     def test_the_skeleton_matches_the_constants(self):
         text = PROXY_SKELETON_FILE.read_text()
-        self.assertIn(f"tcp dport {{ {VM_INSPECT_ORIG_CLEARTEXT}, "
-                      f"{VM_INSPECT_ORIG_TLS} }}", text)
-        self.assertEqual((VM_INSPECT_ORIG_CLEARTEXT, VM_INSPECT_ORIG_TLS),
+        self.assertIn(f"tcp dport {{ {INSPECT_ORIG_CLEARTEXT}, "
+                      f"{INSPECT_ORIG_TLS} }}", text)
+        self.assertEqual((INSPECT_ORIG_CLEARTEXT, INSPECT_ORIG_TLS),
                          (80, 443))
 
     def test_the_original_ports_are_not_the_listener_ports(self):
         """The key and the value select different things: the original port
         picks the listener port, so conflating the two would redirect a dial
         to 8080 and never match a dial to 80."""
-        self.assertNotEqual(VM_INSPECT_ORIG_CLEARTEXT, VM_INSPECT_PORT_CLEARTEXT)
-        self.assertNotEqual(VM_INSPECT_ORIG_TLS, VM_INSPECT_PORT_TLS)
+        self.assertNotEqual(INSPECT_ORIG_CLEARTEXT, INSPECT_PORT_CLEARTEXT)
+        self.assertNotEqual(INSPECT_ORIG_TLS, INSPECT_PORT_TLS)
 
 
 class TestMapElements(unittest.TestCase):
@@ -355,7 +355,7 @@ class TestHelperArmsBothTables(unittest.TestCase):
         at stop because a stop is not guaranteed to run."""
         source = (ROOT / "libexec" / "workload-vm-inspect").read_text()
         up = source[source.index("def up("):source.index("def down(")]
-        self.assertIn("clear_status(vm_inspect_status_path(name))", up)
+        self.assertIn("clear_status(inspect_status_path(name))", up)
 
     def test_down_removes_elements_and_addresses_but_not_the_link(self):
         source = (ROOT / "libexec" / "workload-vm-inspect").read_text()
@@ -414,7 +414,7 @@ class TestHelperArmsBothTables(unittest.TestCase):
         source = (ROOT / "libexec" / "workload-vm-inspect").read_text()
         down = source[source.index("def down("):source.index("def main(")]
         self.assertNotIn("vm_internal_resolve", down)
-        self.assertNotIn("vm_internal_hosts", down)
+        self.assertNotIn("internal_hosts", down)
 
     def test_up_writes_the_policy_before_it_arms_the_redirect(self):
         """The listener is socket-activated, so the guest's first dial can
@@ -446,7 +446,7 @@ class TestPolicyDocument(unittest.TestCase):
         Generating them from one source is what keeps a redirected connection
         and a proxied one making the same decision about the same name."""
         net = {"hosts": ["*.example.com", "git.local"]}
-        self.assertEqual(vm_inspect_policy(net)["hosts"], vm_allowed_hosts(net))
+        self.assertEqual(inspect_policy(net)["hosts"], vm_allowed_hosts(net))
 
     def test_internal_hosts_are_not_added_to_the_allowlist(self):
         """An `internal` entry names a host that is ALREADY on a list --
@@ -455,11 +455,11 @@ class TestPolicyDocument(unittest.TestCase):
         make it a second, quieter way to authorise a name."""
         net = {"hosts": ["git.local"],
                "internal": [{"host": "git.local", "reason": "the forge"}]}
-        self.assertEqual(vm_inspect_policy(net)["hosts"], ["git.local"])
+        self.assertEqual(inspect_policy(net)["hosts"], ["git.local"])
 
     def test_the_tls_mode_travels_with_the_lists(self):
-        self.assertEqual(vm_inspect_policy({})["tls"], VM_TLS_DEFAULT)
-        self.assertEqual(vm_inspect_policy({"tls": "splice"})["tls"], "splice")
+        self.assertEqual(inspect_policy({})["tls"], TLS_DEFAULT)
+        self.assertEqual(inspect_policy({"tls": "splice"})["tls"], "splice")
 
     def test_the_http2_list_is_carried_even_under_tls_splice(self):
         """The document describes the FILE, not the file filtered through the
@@ -469,8 +469,8 @@ class TestPolicyDocument(unittest.TestCase):
         the recovery contract says."""
         net = {"hosts": ["grpc.example.com"], "tls": "splice",
                "http2": [{"host": "grpc.example.com", "reason": "gRPC"}]}
-        self.assertEqual(vm_inspect_policy(net)["http2"], ["grpc.example.com"])
-        self.assertEqual(vm_http2_hosts(net), ["grpc.example.com"])
+        self.assertEqual(inspect_policy(net)["http2"], ["grpc.example.com"])
+        self.assertEqual(http2_hosts(net), ["grpc.example.com"])
 
     def test_http2_hosts_are_not_added_to_the_allowlist(self):
         """`http2` decides a PROTOCOL for a name already on a list, the way
@@ -480,13 +480,13 @@ class TestPolicyDocument(unittest.TestCase):
         to be."""
         net = {"hosts": ["grpc.example.com"],
                "http2": [{"host": "grpc.example.com", "reason": "gRPC"}]}
-        self.assertEqual(vm_inspect_policy(net)["hosts"], ["grpc.example.com"])
+        self.assertEqual(inspect_policy(net)["hosts"], ["grpc.example.com"])
 
     def test_the_policy_path_is_in_the_workloads_runtime_dir(self):
         """The same directory the retired proxy's config was written into, and for the same
         reason: /run does not exist when the boot generator runs, so writing at
         start is what makes an edited list apply on a plain restart."""
-        self.assertEqual(vm_inspect_policy_path("web"),
+        self.assertEqual(inspect_policy_path("web"),
                          f"{vm_runtime_dir('web')}/inspect.json")
 
 
@@ -499,7 +499,7 @@ class TestPolicyComposition(unittest.TestCase):
     """
 
     def _entries(self, *items):
-        return vm_policy_entries({"policy": list(items)})
+        return policy_entries({"policy": list(items)})
 
     def test_hosts_does_not_union_into_policy(self):
         """The reading a careless implementation falls into, and it silently
@@ -515,7 +515,7 @@ class TestPolicyComposition(unittest.TestCase):
         entries = self._entries({"host": "api.github.com",
                                  "methods": ["GET", "POST"],
                                  "paths": ["/repos/myorg/*"]})
-        self.assertTrue(vm_policy_governs("api.github.com", entries))
+        self.assertTrue(policy_governs("api.github.com", entries))
         self.assertFalse(
             vm_policy_permits("api.github.com", "GET", "/user", entries))
         self.assertTrue(vm_policy_permits(
@@ -525,7 +525,7 @@ class TestPolicyComposition(unittest.TestCase):
         """Step 3 of the algorithm: the caller falls back to `hosts`. The
         matcher says only that it has no rules of its own."""
         entries = self._entries({"host": "api.example.com"})
-        self.assertEqual(vm_policy_governs("cdn.example.com", entries), [])
+        self.assertEqual(policy_governs("cdn.example.com", entries), [])
 
     def test_methods_and_paths_inside_one_entry_are_a_cross_product(self):
         entries = self._entries({"host": "r.example",
@@ -576,7 +576,7 @@ class TestPolicyComposition(unittest.TestCase):
             {"host": "*.example.com", "methods": ["GET"], "paths": ["/*"]},
             {"host": "api.example.com", "methods": ["POST"],
              "paths": ["/v1/messages"]})
-        self.assertEqual(len(vm_policy_governs("api.example.com", entries)), 2)
+        self.assertEqual(len(policy_governs("api.example.com", entries)), 2)
         self.assertTrue(vm_policy_permits(
             "api.example.com", "GET", "/anything", entries))
 
@@ -613,7 +613,7 @@ class TestPolicyComposition(unittest.TestCase):
         widening trap. Collapsing them makes a single-entry host with no
         `paths` deny everything instead of permitting everything -- wrong in
         the safe direction, which is how it survives review."""
-        entry, = vm_policy_entries({"policy": [{"host": "a.example"}]})
+        entry, = policy_entries({"policy": [{"host": "a.example"}]})
         self.assertIsNone(entry.methods)
         self.assertIsNone(entry.paths)
         self.assertTrue(
@@ -622,7 +622,7 @@ class TestPolicyComposition(unittest.TestCase):
     def test_the_document_carries_absent_keys_as_null(self):
         """JSON has a word for the difference, so the document uses it rather
         than making the listener recover it from the schema."""
-        doc = vm_inspect_policy({"policy": [
+        doc = inspect_policy({"policy": [
             {"host": "a.example"},
             {"host": "b.example", "methods": ["GET"], "paths": ["/x"]}]})
         self.assertEqual(doc["policy"][0],

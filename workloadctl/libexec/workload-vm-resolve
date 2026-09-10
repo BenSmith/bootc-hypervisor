@@ -99,7 +99,7 @@ import time
 sys.dont_write_bytecode = True
 
 from egress_policy import (
-    vm_hostname_control_character, vm_hostname_match, vm_normalise_hostname,
+    hostname_control_character, hostname_match, normalise_hostname,
 )
 from vm import vm_resolve_status_path
 from vm_network_config import vm_resolve_policy_path
@@ -202,7 +202,7 @@ class Policy:
         # normalises, and doing it here too means a hand-edited policy file
         # cannot introduce a name that never matches anything.
         self.static = {
-            vm_normalise_hostname(name): tuple(addrs)
+            normalise_hostname(name): tuple(addrs)
             for name, addrs in static.items()
         }
         # Read to COUNT, never to answer. See vm_resolve_policy: synthesis is
@@ -236,8 +236,8 @@ class Policy:
         guest makes.
         """
         return (name in self.static
-                or vm_hostname_match(name, self.hosts)
-                or vm_hostname_match(name, self.policy))
+                or hostname_match(name, self.hosts)
+                or hostname_match(name, self.policy))
 
     def answers(self, name, qtype):
         """The addresses to answer `name`/`qtype` with, and where they came from.
@@ -298,14 +298,14 @@ def read_name(msg, offset):
     # is logged and written into the status document, where an LF ends the
     # record and makes the rest of it a second, fabricated entry. Refused at
     # the parse, so no log site has to remember; see
-    # vm_hostname_control_character. The character is named and the name is
+    # hostname_control_character. The character is named and the name is
     # not, so the refusal does not print what it is refusing.
-    ch = vm_hostname_control_character(name)
+    ch = hostname_control_character(name)
     if ch is not None:
         raise Malformed(
             f"label carries the control character {ch!r}, which forges a "
             f"line in this log")
-    return vm_normalise_hostname(name), offset
+    return normalise_hostname(name), offset
 
 
 def encode_name(name):

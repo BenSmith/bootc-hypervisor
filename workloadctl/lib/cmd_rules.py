@@ -1,14 +1,14 @@
 """
 cmd_rules — what the inspector's policy document actually says about a host.
 
-Rung 5 T6. `vm_policy_governs()`'s docstring has owed this report since rung 3,
+Rung 5 T6. `policy_governs()`'s docstring has owed this report since rung 3,
 in those words: because host patterns union among themselves, `*.example.com`
 and `api.example.com` both govern `api.example.com` and neither overrides the
 other, so the file's entries are not the effective rules and reading the file is
 not the same as knowing what applies.
 
-IT CALLS THE SHIPPED MATCHER; IT DOES NOT REIMPLEMENT ONE. `vm_policy_governs`
-and `vm_hostname_match` are already pure and already free of runtime state, so
+IT CALLS THE SHIPPED MATCHER; IT DOES NOT REIMPLEMENT ONE. `policy_governs`
+and `hostname_match` are already pure and already free of runtime state, so
 this runs on a host where the inspector is not running, and — more to the point
 — a report with its own copy of the composition rule could disagree with the
 listener while both looked right. §3's rule is that a host any policy entry
@@ -53,9 +53,9 @@ from cmd_validate import load_config_or_exit
 from config_parser import container_uses_inspect
 from workload_lib import container_inspect_policy
 from egress_policy import (
-    VM_TLS_DEFAULT, VM_TLS_MODES, VmPolicyEntry, vm_hostname_match,
-    vm_inspect_policy, vm_inspect_policy_path, vm_policy_governs,
-    vm_uses_inspect,
+    TLS_DEFAULT, TLS_MODES, VmPolicyEntry, hostname_match,
+    inspect_policy, inspect_policy_path, policy_governs,
+    uses_inspect,
 )
 
 # The fnmatch metacharacters. A name carrying any of them names no host, so it
@@ -67,7 +67,7 @@ _WILDCARD_CHARS = "*?["
 
 # The keys of the policy document whose values are host patterns, and the label
 # each gets in the report. Driven by a table rather than by four hand-written
-# blocks so that a key added to vm_inspect_policy() and not to this one shows up
+# blocks so that a key added to inspect_policy() and not to this one shows up
 # as an absent column rather than as a silently narrower report.
 _PATTERN_KEYS = (
     ("hosts", "hosts"),
@@ -141,7 +141,7 @@ def load_document(name: str, config) -> tuple:
         and it is the one that can differ from the TOML.
       * "config" -- rendered here from the TOML for a workload that has not
         started this boot, through that substrate's own renderer:
-        `[vm.network]` via vm_inspect_policy, `[network]` via
+        `[vm.network]` via inspect_policy, `[network]` via
         container_inspect_policy. A stopped workload has no document on
         either substrate, and that is its ordinary state, not a fault --
         `drift` makes the same distinction and for the same reason.
@@ -150,7 +150,7 @@ def load_document(name: str, config) -> tuple:
     before an edit holds the previous document in memory with both files
     agreeing; that door is T4's digest, and `diagnose` is where it is checked.
     """
-    path = Path(vm_inspect_policy_path(name))
+    path = Path(inspect_policy_path(name))
     try:
         text = path.read_text()
     except FileNotFoundError:
@@ -163,7 +163,7 @@ def load_document(name: str, config) -> tuple:
             net = config.config.get("network") or {}
             return container_inspect_policy(net), "config", None
         net = (config.config.get("vm") or {}).get("network") or {}
-        return vm_inspect_policy(net), "config", None
+        return inspect_policy(net), "config", None
     except PermissionError:
         # The remedy, not just the errno. The document is 0640 root:_wl-<name>
         # by write_policy(), so an operator who is neither is refused -- and a
@@ -201,15 +201,15 @@ def explain(doc: dict, host: str) -> dict:
     plainly names.
     """
     matched = {key: [p for p in (doc.get(key) or [])
-                     if vm_hostname_match(host, (p,))]
+                     if hostname_match(host, (p,))]
                for key, _label in _PATTERN_KEYS}
-    governing = vm_policy_governs(host, _entries(doc))
+    governing = policy_governs(host, _entries(doc))
     return {
         "host": host,
         "matched": matched,
         "governing": governing,
         "admitted": bool(matched["hosts"] or governing),
-        "tls": doc.get("tls", VM_TLS_DEFAULT),
+        "tls": doc.get("tls", TLS_DEFAULT),
     }
 
 
@@ -238,13 +238,13 @@ def tls_treatment(view: dict) -> str:
                     "`hosts` pattern and no policy entry admits it, and the "
                     "allowlist decision comes first")
         return "refused — the connection never reaches a TLS treatment"
-    if view["tls"] not in VM_TLS_MODES:
+    if view["tls"] not in TLS_MODES:
         # A mode this report does not know is not "terminated and parsed". The
         # fall-through below is written for `inspect`, and VM_TLS_UNBUILT exists
         # precisely because a third mode is expected -- so the default arm would
         # start describing it, wrongly and confidently, the day it lands.
         return (f"unknown — [vm.network].tls = {view['tls']!r} is not a mode "
-                f"this report knows ({', '.join(VM_TLS_MODES)}); what the "
+                f"this report knows ({', '.join(TLS_MODES)}); what the "
                 f"listener does with it is not described here")
     if view["tls"] == "splice":
         return ('spliced — [vm.network].tls = "splice" splices every admitted '
@@ -437,7 +437,7 @@ def cmd_rules(args, manager):
     # Both substrates reach the reader, each rendering through its own
     # renderer (see load_document). Routing this gate without that split
     # reports an effective `tls` the workload does not have.
-    if not (vm_uses_inspect(config.config)
+    if not (uses_inspect(config.config)
             or container_uses_inspect(config.config)):
         cli_log.error(
             f"{workload} has no inspected egress, so there is no policy "
