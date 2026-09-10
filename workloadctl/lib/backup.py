@@ -22,7 +22,7 @@ from secrets_template import auto_detect_credentials, CREDSTORE_DIR
 from service_runtime import restart_workload_service
 from substrate import BackupError
 from vm_defs import VM_SOCKET_DIR
-from vm_clock import CLOCK_RESYNCED, vm_resync_guest_clock_if_skewed
+from vm_clock import CLOCK_RESYNCED, resync_guest_clock_if_skewed
 from workload_lib import mount_points, workload_config_path
 
 
@@ -189,7 +189,7 @@ BACKUP_RESYNC_THRESHOLD_SECONDS = 1.0
 
 def _resync_after_pause(config, *, quiet: bool) -> None:
     """Best-effort `guest-set-time` for a VM whose vCPUs we just resumed."""
-    outcome = vm_resync_guest_clock_if_skewed(
+    outcome = resync_guest_clock_if_skewed(
         config.name, threshold=BACKUP_RESYNC_THRESHOLD_SECONDS)
     if outcome == CLOCK_RESYNCED and not quiet:
         info(f"  Reset the guest clock for '{config.name}' after the pause.")

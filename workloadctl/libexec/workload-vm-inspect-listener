@@ -135,7 +135,7 @@ from egress_policy import (
 from egress_ca import LeafRefused, vm_ca_cert_path, vm_ca_key_path
 from broker_config import VM_BROKER_INSTANCE_PORT
 from workload_addr import vm_broker_listen_address
-from vm_clock import vm_resync_guest_clock_if_skewed
+from vm_clock import resync_guest_clock_if_skewed
 from egress_mint import MintFailed, MintThrottled, Minter
 from egress_status import STATUS_TOP_N, BoundedCounts, write_status
 from peer_identity import local_endpoints, peer_uid
@@ -4611,7 +4611,7 @@ def build_minter(name, policy):
     # The substrate is read off the policy document rather than branched on
     # here, because D6 is that this binary does not differ between substrates.
     # The document differs; the binary reads the same keys from either.
-    clock_check = ((lambda: vm_resync_guest_clock_if_skewed(name))
+    clock_check = ((lambda: resync_guest_clock_if_skewed(name))
                    if policy.guest_agent else (lambda: None))
     return Minter(name, state_dir, clock_check=clock_check)
 

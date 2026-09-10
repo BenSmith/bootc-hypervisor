@@ -73,7 +73,7 @@ class TestReadingTheOffset(_ClockCase):
         ahead = time.time() + 42
         agent = self.use(_FakeAgent(
             {"guest-get-time": {"return": int(ahead * 1_000_000_000)}}))
-        self.assertAlmostEqual(vm_clock.vm_guest_clock_offset("wl"), 42,
+        self.assertAlmostEqual(vm_clock.guest_clock_offset("wl"), 42,
                                delta=1)
         self.assertTrue(agent.closed)
 
@@ -81,7 +81,7 @@ class TestReadingTheOffset(_ClockCase):
         behind = time.time() - 3600
         self.use(_FakeAgent(
             {"guest-get-time": {"return": int(behind * 1_000_000_000)}}))
-        self.assertAlmostEqual(vm_clock.vm_guest_clock_offset("wl"), -3600,
+        self.assertAlmostEqual(vm_clock.guest_clock_offset("wl"), -3600,
                                delta=1)
 
     def test_it_syncs_the_nonce_before_asking(self):
@@ -90,23 +90,23 @@ class TestReadingTheOffset(_ClockCase):
         # read would take it as the answer to a question it never asked.
         agent = self.use(_FakeAgent(
             {"guest-get-time": {"return": int(time.time() * 1e9)}}))
-        vm_clock.vm_guest_clock_offset("wl")
+        vm_clock.guest_clock_offset("wl")
         self.assertEqual(agent.sent[0][0], "guest-sync")
 
     def test_no_socket_is_not_an_error(self):
         self.use(_FakeAgent(), socket_exists=False)
-        self.assertIsNone(vm_clock.vm_guest_clock_offset("wl"))
+        self.assertIsNone(vm_clock.guest_clock_offset("wl"))
 
     def test_an_agent_that_never_answers_is_not_an_error(self):
         # A guest whose image lacks qemu-guest-agent is a supported
         # configuration -- QEMU accepts our connection either way, so this is
         # indistinguishable from a slow guest and must not raise.
         self.use(_FakeAgent(fail_on_connect=True))
-        self.assertIsNone(vm_clock.vm_guest_clock_offset("wl"))
+        self.assertIsNone(vm_clock.guest_clock_offset("wl"))
 
     def test_a_nonsense_reply_is_not_an_error(self):
         self.use(_FakeAgent({"guest-get-time": {"return": "soon"}}))
-        self.assertIsNone(vm_clock.vm_guest_clock_offset("wl"))
+        self.assertIsNone(vm_clock.guest_clock_offset("wl"))
 
 
 class TestSettingTheTime(_ClockCase):
@@ -121,18 +121,18 @@ class TestSettingTheTime(_ClockCase):
         every other symptom.
         """
         agent = self.use(_FakeAgent({"guest-set-time": {"return": {}}}))
-        self.assertTrue(vm_clock.vm_set_guest_time("wl", now=1_000.5))
+        self.assertTrue(vm_clock.set_guest_time("wl", now=1_000.5))
         command, arguments = agent.sent[-1]
         self.assertEqual(command, "guest-set-time")
         self.assertEqual(arguments, {"time": 1_000_500_000_000})
 
     def test_an_error_reply_is_a_failure_not_an_exception(self):
         self.use(_FakeAgent({"guest-set-time": {"error": {"desc": "no"}}}))
-        self.assertFalse(vm_clock.vm_set_guest_time("wl"))
+        self.assertFalse(vm_clock.set_guest_time("wl"))
 
     def test_no_agent_is_a_failure_not_an_exception(self):
         self.use(_FakeAgent(), socket_exists=False)
-        self.assertFalse(vm_clock.vm_set_guest_time("wl"))
+        self.assertFalse(vm_clock.set_guest_time("wl"))
 
 
 class TestTheSkewCheck(_ClockCase):
@@ -142,7 +142,7 @@ class TestTheSkewCheck(_ClockCase):
         agent = self.use(_FakeAgent(
             {"guest-get-time": {"return": int(time.time() * 1e9)},
              "guest-set-time": {"return": {}}}))
-        self.assertEqual(vm_clock.vm_resync_guest_clock_if_skewed("wl"),
+        self.assertEqual(vm_clock.resync_guest_clock_if_skewed("wl"),
                          vm_clock.CLOCK_OK)
         self.assertNotIn("guest-set-time", [c for c, _ in agent.sent])
 
@@ -151,14 +151,14 @@ class TestTheSkewCheck(_ClockCase):
         # minutes precisely so drift never reaches it and a pause always does.
         self.use(_FakeAgent(
             {"guest-get-time": {"return": int((time.time() + 30) * 1e9)}}))
-        self.assertEqual(vm_clock.vm_resync_guest_clock_if_skewed("wl"),
+        self.assertEqual(vm_clock.resync_guest_clock_if_skewed("wl"),
                          vm_clock.CLOCK_OK)
 
     def test_a_paused_guest_is_repaired(self):
         agent = self.use(_FakeAgent(
             {"guest-get-time": {"return": int((time.time() - 7200) * 1e9)},
              "guest-set-time": {"return": {}}}))
-        self.assertEqual(vm_clock.vm_resync_guest_clock_if_skewed("wl"),
+        self.assertEqual(vm_clock.resync_guest_clock_if_skewed("wl"),
                          vm_clock.CLOCK_RESYNCED)
         self.assertIn("guest-set-time", [c for c, _ in agent.sent])
 
@@ -172,21 +172,21 @@ class TestTheSkewCheck(_ClockCase):
         signal `diagnose` has to report it from.
         """
         self.use(_FakeAgent(), socket_exists=False)
-        self.assertEqual(vm_clock.vm_resync_guest_clock_if_skewed("wl"),
+        self.assertEqual(vm_clock.resync_guest_clock_if_skewed("wl"),
                          vm_clock.CLOCK_UNAVAILABLE)
 
     def test_a_repair_that_fails_is_distinguishable_from_one_not_attempted(self):
         self.use(_FakeAgent(
             {"guest-get-time": {"return": int((time.time() - 7200) * 1e9)},
              "guest-set-time": {"error": {"desc": "no"}}}))
-        self.assertEqual(vm_clock.vm_resync_guest_clock_if_skewed("wl"),
+        self.assertEqual(vm_clock.resync_guest_clock_if_skewed("wl"),
                          vm_clock.CLOCK_FAILED)
 
     def test_the_threshold_is_inside_the_backdate(self):
         # If it were not, the guard could pass on a guest whose next leaf is
         # already invalid -- the whole failure this unit removes.
         import egress_ca
-        self.assertLess(vm_clock.VM_CLOCK_SKEW_THRESHOLD_SECONDS,
+        self.assertLess(vm_clock.CLOCK_SKEW_THRESHOLD_SECONDS,
                         egress_ca.VM_CA_BACKDATE_SECONDS)
 
 
@@ -200,7 +200,7 @@ class TestBackupResyncsAfterResuming(unittest.TestCase):
     """
 
     def test_the_helper_resyncs(self):
-        with mock.patch.object(backup_mod, "vm_resync_guest_clock_if_skewed",
+        with mock.patch.object(backup_mod, "resync_guest_clock_if_skewed",
                                return_value=vm_clock.CLOCK_RESYNCED) as resync:
             backup_mod._resync_after_pause(mock.Mock(name_="x"), quiet=True)
         self.assertEqual(resync.call_count, 1)
@@ -208,7 +208,7 @@ class TestBackupResyncsAfterResuming(unittest.TestCase):
     def test_it_uses_its_own_threshold_and_not_the_mint_paths(self):
         """The mint path's five minutes would skip the pause this exists for.
 
-        VM_CLOCK_SKEW_THRESHOLD_SECONDS answers a different question -- is an
+        CLOCK_SKEW_THRESHOLD_SECONDS answers a different question -- is an
         arbitrary guest far enough out to be worth a round trip on a
         connection someone is waiting for. Here the pause is ours and its
         length is whatever the copy took, which for an ordinary disk is well
@@ -216,21 +216,21 @@ class TestBackupResyncsAfterResuming(unittest.TestCase):
         overwhelming majority of the backups it was written for, while its
         comment claimed the window had been narrowed to a round trip.
         """
-        with mock.patch.object(backup_mod, "vm_resync_guest_clock_if_skewed",
+        with mock.patch.object(backup_mod, "resync_guest_clock_if_skewed",
                                return_value=vm_clock.CLOCK_OK) as resync:
             backup_mod._resync_after_pause(mock.Mock(name_="x"), quiet=True)
         threshold = resync.call_args.kwargs["threshold"]
-        self.assertLess(threshold, vm_clock.VM_CLOCK_SKEW_THRESHOLD_SECONDS)
+        self.assertLess(threshold, vm_clock.CLOCK_SKEW_THRESHOLD_SECONDS)
         self.assertEqual(threshold,
                          backup_mod.BACKUP_RESYNC_THRESHOLD_SECONDS)
 
     def test_a_two_minute_pause_is_repaired_rather_than_tolerated(self):
         """The end-to-end shape of the number above, through the real check."""
-        with mock.patch.object(vm_clock, "vm_guest_clock_offset",
+        with mock.patch.object(vm_clock, "guest_clock_offset",
                                return_value=-120.0), \
-             mock.patch.object(vm_clock, "vm_set_guest_time",
+             mock.patch.object(vm_clock, "set_guest_time",
                                return_value=True) as setter:
-            outcome = vm_clock.vm_resync_guest_clock_if_skewed(
+            outcome = vm_clock.resync_guest_clock_if_skewed(
                 "wl", threshold=backup_mod.BACKUP_RESYNC_THRESHOLD_SECONDS)
         self.assertEqual(outcome, vm_clock.CLOCK_RESYNCED)
         self.assertEqual(setter.call_count, 1)

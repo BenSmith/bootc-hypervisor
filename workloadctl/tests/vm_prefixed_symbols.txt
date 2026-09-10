@@ -188,9 +188,6 @@ RENAME	egress_selinux.VM_SELINUX_MODULE
 RENAME	egress_selinux.VM_SOCKET_FCONTEXT_PATTERN
 RENAME	egress_selinux.VM_SOCKET_SELINUX_TYPE
 RENAME	egress_selinux.VM_SOCKET_SELINUX_TYPE_REAL
-RENAME	netfilter_state.vm_owned_elements
-RENAME	provisioning.VM_IMAGE_SELINUX_TYPE
-RENAME	provisioning.vm_fcontext_pattern
 RENAME	vm.VM_INSPECT_RECORD_SELINUX_TYPE
 RENAME	vm.VM_RESOLVE_STATUS_FILE
 RENAME	vm.vm_filter_delete_command
@@ -210,10 +207,6 @@ RENAME	vm.vm_internal_ok_list_commands
 RENAME	vm.vm_internal_ok_uid_elements
 RENAME	vm.vm_internal_reserved_reason
 RENAME	vm.vm_internal_resolve
-RENAME	vm_clock.VM_CLOCK_SKEW_THRESHOLD_SECONDS
-RENAME	vm_clock.vm_guest_clock_offset
-RENAME	vm_clock.vm_resync_guest_clock_if_skewed
-RENAME	vm_clock.vm_set_guest_time
 RENAME	vm_defs.VM_EGRESS_DEFAULT
 RENAME	vm_defs.VM_EGRESS_MODES
 RENAME	vm_defs.VM_INTERNAL_PREFIXES4

@@ -660,7 +660,7 @@ class TestPolicyLoading(unittest.TestCase):
                                   lambda d: os.path.join(d, "ca.key")), \
                 unittest.mock.patch.object(mod, "Minter",
                                   lambda *a, **kw: built.update(kw)), \
-                unittest.mock.patch.object(mod, "vm_resync_guest_clock_if_skewed",
+                unittest.mock.patch.object(mod, "resync_guest_clock_if_skewed",
                                   lambda name: "RESYNCED-SENTINEL"):
             mod.build_minter("w", mod.Policy(tls="inspect", hosts=(),
                                              guest_agent=False))

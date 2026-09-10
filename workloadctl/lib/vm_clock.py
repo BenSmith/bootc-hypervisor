@@ -81,7 +81,7 @@ GUEST_AGENT_TIMEOUT = 1.5
 # and would need about a year to reach it. A pause -- the case this exists for --
 # clears it immediately, since a pause short enough to stay under five minutes is
 # also short enough to be harmless.
-VM_CLOCK_SKEW_THRESHOLD_SECONDS = 300.0
+CLOCK_SKEW_THRESHOLD_SECONDS = 300.0
 
 
 def guest_agent_sync(qga: QMPClient, max_messages: int = 8) -> None:
@@ -140,7 +140,7 @@ def _connect(name: str) -> QMPClient | None:
         return None
 
 
-def vm_guest_clock_offset(name: str) -> float | None:
+def guest_clock_offset(name: str) -> float | None:
     """Seconds the guest's clock is ahead of the host's, or None if unknowable.
 
     Bracketed, then reported as the midpoint. The guest reads its clock
@@ -170,7 +170,7 @@ def vm_guest_clock_offset(name: str) -> float | None:
     return guest_ns / 1_000_000_000 - (t0 + t1) / 2
 
 
-def vm_set_guest_time(name: str, *, now: float | None = None) -> bool:
+def set_guest_time(name: str, *, now: float | None = None) -> bool:
     """Set the guest's clock from the host's. True if the guest confirmed it.
 
     THE EXPLICIT FORM ONLY -- see the module docstring. The no-argument form is
@@ -202,9 +202,9 @@ CLOCK_UNAVAILABLE = "unavailable"
 CLOCK_FAILED = "failed"
 
 
-def vm_resync_guest_clock_if_skewed(
+def resync_guest_clock_if_skewed(
         name: str, *,
-        threshold: float = VM_CLOCK_SKEW_THRESHOLD_SECONDS) -> str:
+        threshold: float = CLOCK_SKEW_THRESHOLD_SECONDS) -> str:
     """Repair the guest's clock if it has drifted past `threshold`.
 
     The mint path's clock check. Costs one local round trip and returns CLOCK_OK
@@ -215,9 +215,9 @@ def vm_resync_guest_clock_if_skewed(
     a guest with no agent -- a supported configuration -- into a guest with no
     egress, which is strictly worse than the skew this repairs.
     """
-    offset = vm_guest_clock_offset(name)
+    offset = guest_clock_offset(name)
     if offset is None:
         return CLOCK_UNAVAILABLE
     if abs(offset) <= threshold:
         return CLOCK_OK
-    return CLOCK_RESYNCED if vm_set_guest_time(name) else CLOCK_FAILED
+    return CLOCK_RESYNCED if set_guest_time(name) else CLOCK_FAILED

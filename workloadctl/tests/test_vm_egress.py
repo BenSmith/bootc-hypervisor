@@ -21,7 +21,7 @@ from egress_policy import VM_INSPECT_PORT_CLEARTEXT, VM_INSPECT_PORT_TLS
 from vm import vm_filter_commands, vm_filter_delete_command
 from netfilter_state import (
     CONNTRACK_PRESSURE, conntrack_occupancy, nft_drop_counter,
-    nft_element_counter, nft_set_elements, vm_owned_elements,
+    nft_element_counter, nft_set_elements, owned_elements,
 )
 from nft_constants import (
     NFT_MAP_INSPECT4, NFT_MAP_INSPECT6, NFT_SET_ALLOW4, NFT_SET_ALLOW6,
@@ -833,22 +833,22 @@ class TestOwnedElements(unittest.TestCase):
     """
 
     def test_membership_set_holds_bare_uids(self):
-        self.assertEqual(vm_owned_elements(10001, [10001, 10002]), ["10001"])
+        self.assertEqual(owned_elements(10001, [10001, 10002]), ["10001"])
 
     def test_allow_set_holds_concatenations(self):
         elems = [{"concat": [10001, "192.168.0.10", 22]},
                  {"concat": [10002, "192.168.0.11", 22]}]
-        self.assertEqual(vm_owned_elements(10001, elems),
+        self.assertEqual(owned_elements(10001, elems),
                          ["10001 . 192.168.0.10 . 22"])
 
     def test_a_sibling_workloads_elements_are_never_touched(self):
         """The failure this guards is a purge taking another VM offline."""
         elems = [{"concat": [10002, "10.0.0.1", 22]}]
-        self.assertEqual(vm_owned_elements(10001, elems), [])
+        self.assertEqual(owned_elements(10001, elems), [])
 
     def test_empty_and_missing_sets(self):
-        self.assertEqual(vm_owned_elements(10001, None), [])
-        self.assertEqual(vm_owned_elements(10001, []), [])
+        self.assertEqual(owned_elements(10001, None), [])
+        self.assertEqual(owned_elements(10001, []), [])
 
     def test_delete_command_batches_entries(self):
         argv = vm_filter_delete_command(
@@ -1883,7 +1883,7 @@ class TestInspectMapKeyShapes(unittest.TestCase):
 
     This is not defensive padding. A map element is a two-item [key, value]
     list, not a dict with "concat" at the top, so reading the inspect maps with
-    the *set* helper (vm_owned_elements) returns nothing and reports every
+    the *set* helper (owned_elements) returns nothing and reports every
     inspected VM as uninspected — a false alarm on every host. That exact
     mismatch already shipped once against the proxy map.
     """
@@ -1912,9 +1912,9 @@ class TestInspectMapKeyShapes(unittest.TestCase):
         # Pins the reason this helper exists at all: if this ever starts
         # returning the uid, the two readers have converged and the extra
         # helper can go.
-        from netfilter_state import vm_owned_elements
+        from netfilter_state import owned_elements
         self.assertEqual(
-            vm_owned_elements(10001, [[{"concat": [10001, 80]},
+            owned_elements(10001, [[{"concat": [10001, 80]},
                                        {"concat": ["198.18.1.1", 8080]}]]), [])
 
 

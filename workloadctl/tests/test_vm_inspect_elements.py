@@ -43,7 +43,7 @@ ALL_SETS = INSPECT_ACCEPT_SETS + INSPECT_SELF_SETS + INSPECT_GUARD_SETS
 class TestTheSetNamesAreTheOnesArmed(unittest.TestCase):
     """A presence check reading a name nothing arms says "armed" forever.
 
-    There is no counter behind this and no runtime tell: `vm_owned_elements`
+    There is no counter behind this and no runtime tell: `owned_elements`
     over a set that does not exist and over a set the uid is missing from are
     both empty, and the reader has already turned an unreadable set into
     silence one line earlier. So the only thing that can catch a drifted name
@@ -197,7 +197,7 @@ class TestTheReadCostsOneExec(unittest.TestCase):
         # bare inspector address and no uid at all, which is the whole reason
         # _inspect_filter_sets reads them on a second branch. A fixture that
         # gave them all the uid shape would let a reader that used
-        # vm_owned_elements on the guard sets pass here and report every real
+        # owned_elements on the guard sets pass here and report every real
         # host's guard as missing.
         addr = vm_inspect_address(uid)
         by_family = {NFT_SET_INSPECT_LIVE: str(addr.v4),

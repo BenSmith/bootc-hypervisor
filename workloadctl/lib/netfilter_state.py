@@ -18,7 +18,7 @@ no caller changed.
 Installed to /usr/libexec/workloadctl/netfilter_state.py.
 """
 
-def vm_owned_elements(uid: int, elems) -> list[str]:
+def owned_elements(uid: int, elems) -> list[str]:
     """Element expressions in one set's `nft -j` output that belong to `uid`.
 
     Two shapes, because `wl_filtered` holds a bare uid while the allow sets
@@ -94,7 +94,7 @@ def nft_element_counter(payload, uid: int) -> tuple[int, int] | None:
         {"elem": {"val": {"concat": [10000, "198.18.1.0"]},
                   "counter": {"packets": 12, "bytes": 720}}}
 
-    So `vm_owned_elements`, which matches the unwrapped shape, finds nothing in
+    So `owned_elements`, which matches the unwrapped shape, finds nothing in
     these sets and would report a workload with 12 dropped self-dials as having
     none. Verified against nft 1.1.6 rather than assumed.
 

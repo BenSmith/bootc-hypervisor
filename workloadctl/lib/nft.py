@@ -26,7 +26,7 @@ from vm import (vm_filter_delete_command, vm_internal_ok_delete_commands,
                 vm_internal_ok_list_commands, vm_internal_ok_uid_elements)
 from broker_config import (vm_inspect_link_address_commands,
                            vm_inspect_link_delete_commands)
-from netfilter_state import vm_owned_elements
+from netfilter_state import owned_elements
 
 
 def nft_json(*args, timeout: int = 10):
@@ -101,7 +101,7 @@ def purge_uid_elements(uid: int) -> int:
             payload = json.loads(listed.stdout)
         except ValueError:
             continue
-        owned = vm_owned_elements(uid, set_elements(payload))
+        owned = owned_elements(uid, set_elements(payload))
         if not owned:
             continue
         result = run(vm_filter_delete_command(set_name, owned))

@@ -29,7 +29,7 @@ carrying `counter` renders its elements WRAPPED:
     {"elem": {"val": {"concat": [10000, "198.18.1.0"]},
               "counter": {"packets": 12, "bytes": 720}}}
 
-An uncounted set renders them bare, `{"concat": [...]}`. `vm_owned_elements`
+An uncounted set renders them bare, `{"concat": [...]}`. `owned_elements`
 matches the bare shape, so it finds nothing at all in these sets. This rig
 reads a real incremented counter through the real reader, which is the only way
 to know the wrapped path was taken rather than assumed.

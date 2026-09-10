@@ -774,10 +774,10 @@ def _print_available_bundles(bundle: str):
 # blanket /var/lib/workloads rule applies: `virt_domain` has no read, write,
 # getattr or append on container_file_t, so a confined QEMU cannot use a disk
 # image labelled with it. svirt_image_t carries the full set.
-VM_IMAGE_SELINUX_TYPE = "svirt_image_t"
+IMAGE_SELINUX_TYPE = "svirt_image_t"
 
 
-def vm_fcontext_pattern(name: str) -> str:
+def fcontext_pattern(name: str) -> str:
     """The fcontext pattern covering one VM workload's whole tree."""
     return f"{workload_root_dir(name)}(/.*)?"
 
@@ -841,7 +841,7 @@ def apply_vm_fcontext(config: WorkloadConfig, action: str):
                            check=False, capture_output=True)
         if is_vm:
             subprocess.run(
-                ["semanage", "fcontext", "-d", vm_fcontext_pattern(config.name)],
+                ["semanage", "fcontext", "-d", fcontext_pattern(config.name)],
                 check=False, capture_output=True)
         return
 
@@ -851,7 +851,7 @@ def apply_vm_fcontext(config: WorkloadConfig, action: str):
 
     wanted = list(pki_patterns)
     if is_vm:
-        wanted = [(vm_fcontext_pattern(config.name), VM_IMAGE_SELINUX_TYPE)] + wanted
+        wanted = [(fcontext_pattern(config.name), IMAGE_SELINUX_TYPE)] + wanted
     registered_any = False
     for one, selinux_type in wanted:
         # Each rule is checked on its own rather than short-circuiting on the

@@ -212,7 +212,7 @@ shipped inert shipped inert at a seam.
 
 **The element shape is the trap.** A set carrying `counter` renders its
 elements wrapped, `{"elem": {"val": {"concat": [...]}, "counter": {...}}}`,
-where an uncounted set renders them bare. `vm_owned_elements` matches the bare
+where an uncounted set renders them bare. `owned_elements` matches the bare
 shape and so finds nothing at all in these sets. The rig reads a real
 incremented counter through the real reader, which is the only way to know the
 wrapped path was taken rather than assumed.

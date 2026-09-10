@@ -42,7 +42,7 @@ from workload_lib import (
     WORKLOADCTL_VERSION,
 )
 from provisioning import (
-    vm_fcontext_pattern,
+    fcontext_pattern,
     HOST_ARTIFACT_KINDS,
     HOST_SETUP_ARTIFACTS_ACTION,
     host_setup_artifacts,
@@ -67,7 +67,7 @@ from egress_selinux import (
 from broker_config import vm_broker_hosts
 from netfilter_state import (
     CONNTRACK_PRESSURE, conntrack_occupancy, nft_drop_counter,
-    nft_element_counter, nft_set_elements, vm_owned_elements,
+    nft_element_counter, nft_set_elements, owned_elements,
 )
 from nft_constants import (
     NFT_BIN, NFT_SET_ALLOW4, NFT_SET_ALLOW6, NFT_SET_FILTERED,
@@ -1107,7 +1107,7 @@ def vm_egress_check(config) -> tuple[str, bool, str] | None:
                 f"this VM is NOT filtered. It is rebuilt on the next start: "
                 f"systemctl restart workload-{config.name}.service")
 
-    armed = str(uid) in vm_owned_elements(uid, nft_set_elements(filtered))
+    armed = str(uid) in owned_elements(uid, nft_set_elements(filtered))
     if egress != "filtered":
         if armed:
             return ("vm_egress", False,
@@ -1150,7 +1150,7 @@ def vm_egress_check(config) -> tuple[str, bool, str] | None:
     for set_name in (NFT_SET_ALLOW4, NFT_SET_ALLOW6):
         payload = _nft_json("list", "set", *table, set_name)
         if payload:
-            allowed += vm_owned_elements(uid, nft_set_elements(payload))
+            allowed += owned_elements(uid, nft_set_elements(payload))
 
     # The drop counter is shared: one rule guarded on set membership serves
     # every filtered workload, so this is a host-wide total and saying
@@ -1276,7 +1276,7 @@ def container_resolver_check(config, *, nameservers=PROBE, armed=PROBE
             payload = _nft_json("list", "set", *NFT_TABLE.split(), set_name)
             if payload is None:
                 continue
-            for elem in vm_owned_elements(uid, nft_set_elements(payload)):
+            for elem in owned_elements(uid, nft_set_elements(payload)):
                 parts = [part.strip() for part in elem.split(" . ")]
                 if len(parts) == 3:
                     armed.add((parts[1], parts[2]))
@@ -1408,7 +1408,7 @@ def allow_drift_check(config) -> tuple[str, bool, str] | None:
         payload = _nft_json("list", "set", *table, set_name)
         if payload is None:
             continue
-        for elem in vm_owned_elements(uid, nft_set_elements(payload)):
+        for elem in owned_elements(uid, nft_set_elements(payload)):
             parts = [part.strip() for part in elem.split(" . ")]
             if len(parts) == 3:
                 armed.add((parts[1], parts[2]))
@@ -1568,7 +1568,7 @@ def _map_key_uid(elem) -> str | None:
         {"elem": {"key": {"concat": [10001, 80]}}}                    # counted
         "10001 . 80 : 198.18.1.1 . 8080"                              # fixture
 
-    vm_owned_elements handles a *set*'s concat and would return nothing for the
+    owned_elements handles a *set*'s concat and would return nothing for the
     first of these, because a map element is a two-item [key, value] list and
     not a dict with "concat" at the top. That exact mismatch already reported a
     working proxy redirect as missing once (see _proxy_map_keys); the inspect
@@ -2375,7 +2375,7 @@ INSPECT_SELF_SETS = (NFT_SET_INSPECT_SELF, NFT_SET_INSPECT_SELF6)
 #
 # Keyed on the address, not the uid: these sets hold a bare inspector address
 # so the guard can match a dial from a DIFFERENT uid, which is why they cannot
-# be read with vm_owned_elements like the four above.
+# be read with owned_elements like the four above.
 INSPECT_GUARD_SETS = (NFT_SET_INSPECT_LIVE, NFT_SET_INSPECT_LIVE6)
 
 
@@ -2406,9 +2406,9 @@ def _inspect_filter_sets(uid: int) -> dict:
     out = {}
     for set_name in INSPECT_ACCEPT_SETS + INSPECT_SELF_SETS:
         found, elements = _named_set_elements(payload, set_name)
-        out[set_name] = (bool(vm_owned_elements(uid, elements))
+        out[set_name] = (bool(owned_elements(uid, elements))
                          if found else None)
-    # The guard sets by address. vm_owned_elements asks "does any element name
+    # The guard sets by address. owned_elements asks "does any element name
     # this uid", and these elements name no uid at all -- run over them it
     # returns empty for a correctly armed workload, i.e. it would report the
     # guard missing on every host.
@@ -3117,7 +3117,7 @@ def collect_diagnose_checks(config, manager: WorkloadManager):
     # selinux_label_check.
     root_dir = workload_root_dir(config.name)
     if root_dir.exists():
-        pattern = (vm_fcontext_pattern(config.name) if config.is_vm else None)
+        pattern = (fcontext_pattern(config.name) if config.is_vm else None)
         passed, message, fix = selinux_label_check(
             _fcontext_rule_present(pattern), _selinux_type(root_dir),
             config.name, is_vm=config.is_vm)
