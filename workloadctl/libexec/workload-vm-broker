@@ -45,7 +45,7 @@ sys.dont_write_bytecode = True
 
 from broker_config import (
     container_uses_credentials, render_container_broker_config,
-    render_vm_broker_config, vm_broker_config_path, vm_uses_credentials,
+    render_vm_broker_config, broker_config_path, vm_uses_credentials,
 )
 from workload_lib import load_workload_config
 
@@ -94,7 +94,7 @@ def write_config(name: str) -> int:
               f"(or is not inspected), so it has no broker instance. This unit "
               f"is stale: `workloadctl reload {name}`", file=sys.stderr)
         return 1
-    path = vm_broker_config_path(name)
+    path = broker_config_path(name)
     path.parent.mkdir(parents=True, exist_ok=True)
     text = render(config, uid)
     # Written through a temporary and renamed, so a broker that is somehow

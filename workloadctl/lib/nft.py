@@ -24,8 +24,8 @@ from nft_constants import (NFT_BIN, NFT_SET_INTERNAL_OK4,
                            NFT_SET_INTERNAL_OK6, NFT_SETS, NFT_TABLE)
 from vm import (filter_delete_command, internal_ok_delete_commands,
                 internal_ok_list_commands, internal_ok_uid_elements)
-from broker_config import (vm_inspect_link_address_commands,
-                           vm_inspect_link_delete_commands)
+from broker_config import (inspect_link_address_commands,
+                           inspect_link_delete_commands)
 from netfilter_state import owned_elements
 
 
@@ -145,7 +145,7 @@ def add_listener_addresses(uid: int) -> None:
     nothing. An address that is already there is not a failure: the unit is
     restartable and a previous instance's address legitimately survives.
     """
-    for argv in vm_inspect_link_address_commands(uid):
+    for argv in inspect_link_address_commands(uid):
         result = run(argv)
         if result.returncode != 0 and "xist" not in result.stderr \
                 and "assigned" not in result.stderr:
@@ -160,7 +160,7 @@ def remove_listener_addresses(uid: int) -> None:
     shared and stay. Tolerates the address being absent: a start that died
     before adding it left nothing to remove, and a stop must not fail over it.
     """
-    for argv in vm_inspect_link_delete_commands(uid):
+    for argv in inspect_link_delete_commands(uid):
         result = run(argv)
         if result.returncode != 0 \
                 and "Cannot assign requested address" not in result.stderr:

@@ -23,7 +23,7 @@ from vm import (
     inspect_live_elements, inspect_self_elements,
 )
 from broker_config import (
-    vm_inspect_link_address_commands, vm_inspect_link_delete_commands,
+    inspect_link_address_commands, inspect_link_delete_commands,
 )
 from nft_constants import (
     NFT_BIN, NFT_MAP_INSPECT4, NFT_MAP_INSPECT6, NFT_PROXY_TABLE,
@@ -285,7 +285,7 @@ class TestLinkAddressCommands(unittest.TestCase):
     """The per-workload listener addresses on the shared dummy link."""
 
     def test_the_addresses_are_host_global_host_local(self):
-        v4, v6 = vm_inspect_link_address_commands(10004)
+        v4, v6 = inspect_link_address_commands(10004)
         self.assertEqual(v4, [IP_BIN, "addr", "add", "198.18.1.4/32",
                               "dev", ADVERTISED_IFACE])
         self.assertEqual(v6, [IP_BIN, "addr", "add", "2001:2::c612:104/128",
@@ -295,13 +295,13 @@ class TestLinkAddressCommands(unittest.TestCase):
         """A dummy link runs no DAD (measured 2026-08-19), so the flag
         changes nothing today; it states the intent and stays correct if the
         address moves to a link type that does run DAD."""
-        v4, v6 = vm_inspect_link_address_commands(10004)
+        v4, v6 = inspect_link_address_commands(10004)
         self.assertNotIn("nodad", v4)
         self.assertIn("nodad", v6)
 
     def test_the_delete_twin_removes_exactly_what_the_add_puts_on(self):
-        v4_add, v6_add = vm_inspect_link_address_commands(10004)
-        v4_del, v6_del = vm_inspect_link_delete_commands(10004)
+        v4_add, v6_add = inspect_link_address_commands(10004)
+        v4_del, v6_del = inspect_link_delete_commands(10004)
         # Same address, same dev, the verb flipped: a delete that named a
         # different prefix would leave the add's address on the link.
         self.assertEqual(v4_del, [IP_BIN, "addr", "del", "198.18.1.4/32",

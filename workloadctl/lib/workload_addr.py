@@ -507,7 +507,7 @@ def ensure_advertised_interface(run) -> None:
     """Create the dummy link the inspector's addresses hang on, idempotently.
 
     THE LINK ONLY. What it carries is each filtered workload's own inspector
-    addresses, put on by vm_inspect_link_address_commands -- so this creates
+    addresses, put on by inspect_link_address_commands -- so this creates
     the object those `ip addr add`s need to exist and nothing more. No address
     of its own: there is no advertised endpoint, and the name is historical,
     like nftables/workload-proxy.nft's.

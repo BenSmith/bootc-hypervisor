@@ -271,7 +271,7 @@ PROVIDER_PORT = 443     # not configurable: `upstream` is https://<host>
 # The broker's address family and port, spelled out rather than imported, for
 # INSPECT_V4_BASE's reason.
 BROKER_V4_BASE = (127, 129, 0, 0)   # BROKER_ADDR_BASE
-BROKER_PORT = 8081                  # VM_BROKER_INSTANCE_PORT
+BROKER_PORT = 8081                  # BROKER_INSTANCE_PORT
 
 # The header a generated instance uses when the workload names no convention.
 # Restated because a rig asserting `Authorization` against a default of

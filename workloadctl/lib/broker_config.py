@@ -40,13 +40,13 @@ from egress_policy import vm_policy_entries
 
 # The program the generated unit runs. One instance per workload, generated;
 # there is no host-wide unit for an operator to enable.
-VM_BROKER_BIN = "/usr/libexec/workloadctl/agent-broker"
+BROKER_BIN = "/usr/libexec/workloadctl/agent-broker"
 
 # The port every instance listens on. One value for all of them is safe here and
 # is not for the address: each instance binds an address of its own
 # (broker_listen_address), so two instances on the same port never collide,
 # and the inspector derives BOTH halves from the workload uid it already holds.
-VM_BROKER_INSTANCE_PORT = 8081
+BROKER_INSTANCE_PORT = 8081
 
 # Where the generated config lives (D2), as the unit's RuntimeDirectory= and as
 # the path the two readers -- the broker and its writer -- resolve.
@@ -65,21 +65,21 @@ VM_BROKER_INSTANCE_PORT = 8081
 # Only the derived config moves. The material stays in
 # /etc/credstore.encrypted/broker/<workload>/, which is operator-created,
 # encrypted, and has to survive a reboot.
-VM_BROKER_RUNTIME_SUBDIR = "workloadctl/broker"
-VM_BROKER_CONFIG_NAME = "broker.toml"
+BROKER_RUNTIME_SUBDIR = "workloadctl/broker"
+BROKER_CONFIG_NAME = "broker.toml"
 
 
-def vm_broker_runtime_directory(name: str) -> str:
+def broker_runtime_directory(name: str) -> str:
     """The unit's RuntimeDirectory= value (relative to /run, as systemd wants)."""
-    return f"{VM_BROKER_RUNTIME_SUBDIR}/{name}"
+    return f"{BROKER_RUNTIME_SUBDIR}/{name}"
 
 
-def vm_broker_config_dir(name: str) -> Path:
-    return Path("/run") / VM_BROKER_RUNTIME_SUBDIR / name
+def broker_config_dir(name: str) -> Path:
+    return Path("/run") / BROKER_RUNTIME_SUBDIR / name
 
 
-def vm_broker_config_path(name: str) -> Path:
-    return vm_broker_config_dir(name) / VM_BROKER_CONFIG_NAME
+def broker_config_path(name: str) -> Path:
+    return broker_config_dir(name) / BROKER_CONFIG_NAME
 
 
 # --- The credential table, and the blocks that name one ---
@@ -171,7 +171,7 @@ def vm_uses_credentials(config: dict) -> bool:
     return bool(vm_credential_entries(net))
 
 
-def vm_broker_credential(name: str, credential: str) -> tuple[Path, str]:
+def broker_credential(name: str, credential: str) -> tuple[Path, str]:
     """(ciphertext path, systemd credential id) for one workload's material.
 
     Asked of secrets_template rather than spelled here, because the id is the
@@ -317,7 +317,7 @@ def render_broker_config(name: str, uid: int, hosts, credentials) -> str:
         "# is rewritten from them at every start of the broker unit.",
         "",
         f"listen_address = {_toml_basic_string(broker_listen_address(uid))}",
-        f"listen_port = {VM_BROKER_INSTANCE_PORT}",
+        f"listen_port = {BROKER_INSTANCE_PORT}",
     ]
     # ONE TABLE PER HOST, not per policy entry, and the difference is a file
     # that parses. Splitting a host's rules across entries -- `/v1/*` for GET,
@@ -336,7 +336,7 @@ def render_broker_config(name: str, uid: int, hosts, credentials) -> str:
         if host in seen_hosts:
             continue
         seen_hosts.add(host)
-        _path, cred_id = vm_broker_credential(name, credential)
+        _path, cred_id = broker_credential(name, credential)
         lines += [
             "",
             f"[sandboxes.{_toml_basic_string(name)}."
@@ -420,7 +420,7 @@ def broker_upstream_addresses(hosts) -> list[str]:
     return seen
 
 
-def vm_host_resolver_addresses(resolv_conf: str = "/etc/resolv.conf") -> list[str]:
+def host_resolver_addresses(resolv_conf: str = "/etc/resolv.conf") -> list[str]:
     """The host's nameservers, for IPAddressAllow=.
 
     NOT optional, and not an optimisation: the broker resolves its own upstream
@@ -450,7 +450,7 @@ def vm_host_resolver_addresses(resolv_conf: str = "/etc/resolv.conf") -> list[st
     return found
 
 
-def vm_inspect_link_address_commands(uid: int) -> tuple[list[str], list[str]]:
+def inspect_link_address_commands(uid: int) -> tuple[list[str], list[str]]:
     """The `ip addr` argvs putting this workload's inspector addresses on the
     shared dummy link, (v4, v6).
 
@@ -472,7 +472,7 @@ def vm_inspect_link_address_commands(uid: int) -> tuple[list[str], list[str]]:
     return v4, v6
 
 
-def vm_inspect_link_delete_commands(uid: int) -> tuple[list[str], list[str]]:
+def inspect_link_delete_commands(uid: int) -> tuple[list[str], list[str]]:
     """The `ip addr del` argvs removing them again, (v4, v6).
 
     The per-workload addresses are removed on stop (unlike the shared link and

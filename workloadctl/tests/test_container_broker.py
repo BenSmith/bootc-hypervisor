@@ -27,10 +27,10 @@ from pathlib import Path
 from tests.test_generator import run_generator, write_config
 from vm import internal_ok_elements
 from broker_config import (
-    VM_BROKER_INSTANCE_PORT, container_broker_hosts,
+    BROKER_INSTANCE_PORT, container_broker_hosts,
     container_broker_upstream_addresses, container_uses_credentials,
     render_container_broker_config, render_vm_broker_config,
-    vm_broker_credential,
+    broker_credential,
 )
 from workload_addr import UID_MIN, broker_listen_address
 from workload_lib import validate_container_network
@@ -210,7 +210,7 @@ class TestTheRenderIsTheVmRender(unittest.TestCase):
         uid = UID_MIN + 3
         doc = tomllib.loads(render_container_broker_config(cred_config(), uid))
         self.assertEqual(doc["listen_address"], broker_listen_address(uid))
-        self.assertEqual(doc["listen_port"], VM_BROKER_INSTANCE_PORT)
+        self.assertEqual(doc["listen_port"], BROKER_INSTANCE_PORT)
         self.assertNotEqual(doc["listen_address"], "127.0.0.1")
 
     def test_two_policy_entries_for_one_host_render_one_table(self):
@@ -396,7 +396,7 @@ class TestTheGeneratedUnit(unittest.TestCase):
 
     def test_it_loads_the_material_under_its_seal_name(self):
         unit = self._generate("capp", SINGLE).read_text()
-        path, cred_id = vm_broker_credential("capp", "example-token")
+        path, cred_id = broker_credential("capp", "example-token")
         self.assertIn(f"LoadCredentialEncrypted={cred_id}:{path}", unit)
 
     def test_one_load_line_per_declared_credential_not_per_host(self):

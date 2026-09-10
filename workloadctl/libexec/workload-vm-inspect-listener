@@ -133,7 +133,7 @@ from egress_policy import (
     normalise_hostname, VmPolicyEntry, policy_governs,
 )
 from egress_ca import LeafRefused, ca_cert_path, ca_key_path
-from broker_config import VM_BROKER_INSTANCE_PORT
+from broker_config import BROKER_INSTANCE_PORT
 from workload_addr import broker_listen_address
 from vm_clock import resync_guest_clock_if_skewed
 from egress_mint import MintFailed, MintThrottled, Minter
@@ -4204,7 +4204,7 @@ class Listener:
                 raise OSError(str(exc)) from exc
             self._broker_address = addr
         sock = socket.create_connection(
-            (addr, VM_BROKER_INSTANCE_PORT), timeout=CONNECTION_TIMEOUT)
+            (addr, BROKER_INSTANCE_PORT), timeout=CONNECTION_TIMEOUT)
         sock.settimeout(RELAY_IDLE_TIMEOUT)
         return _Stream(sock)
 

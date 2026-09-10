@@ -30,11 +30,11 @@ from pathlib import Path
 
 from egress_ca import CA_ENV_VARS
 from egress_ca import RESERVED_GUEST_ENV
-from broker_config import (VM_BROKER_BIN, VM_BROKER_INSTANCE_PORT,
-                           render_vm_broker_config, vm_broker_config_path,
-                           vm_broker_credential, vm_broker_hosts,
+from broker_config import (BROKER_BIN, BROKER_INSTANCE_PORT,
+                           render_vm_broker_config, broker_config_path,
+                           broker_credential, vm_broker_hosts,
                            vm_broker_upstream_addresses, vm_credential_entries,
-                           vm_credential_env, vm_host_resolver_addresses,
+                           vm_credential_env, host_resolver_addresses,
                            vm_uses_credentials)
 from vm import internal_ok_elements
 from vm_network_config import (
@@ -118,7 +118,7 @@ class TestTheGeneratedConfig(unittest.TestCase):
 
     def test_the_port_is_the_instance_port(self):
         self.assertEqual(tomllib.loads(self.render())["listen_port"],
-                         VM_BROKER_INSTANCE_PORT)
+                         BROKER_INSTANCE_PORT)
 
     def test_the_sandbox_key_is_the_workload_name(self):
         """The broker resolves a caller's uid to a workload NAME and looks it
@@ -130,7 +130,7 @@ class TestTheGeneratedConfig(unittest.TestCase):
         row = tomllib.loads(self.render())["sandboxes"]["agent"]["hosts"][
             "api.example.test"]
         self.assertEqual(row["upstream"], "https://api.example.test")
-        _path, cred_id = vm_broker_credential("agent", "example-token")
+        _path, cred_id = broker_credential("agent", "example-token")
         self.assertEqual(row["credential"], cred_id)
         self.assertEqual(row["placeholder"], "sk-000000PLACEHOLDER")
 
@@ -164,7 +164,7 @@ class TestTheGeneratedConfig(unittest.TestCase):
         self.assertEqual(row["placeholder"], 'a"b\\c')
 
     def test_the_config_path_is_under_the_units_runtime_directory(self):
-        self.assertEqual(str(vm_broker_config_path("agent")),
+        self.assertEqual(str(broker_config_path("agent")),
                          "/run/workloadctl/broker/agent/broker.toml")
 
 
@@ -179,18 +179,18 @@ class TestTheCredentialId(unittest.TestCase):
 
     def test_it_matches_what_the_cli_seals_under(self):
         from secrets_template import credential_path
-        path, cred_id = vm_broker_credential("agent", "example-token")
+        path, cred_id = broker_credential("agent", "example-token")
         expected_path, expected_id = credential_path(
             Path("/etc/credstore.encrypted"), "broker/agent/example-token")
         self.assertEqual((path, cred_id), (expected_path, expected_id))
 
     def test_it_carries_the_workload_name(self):
-        _path, cred_id = vm_broker_credential("agent", "example-token")
+        _path, cred_id = broker_credential("agent", "example-token")
         self.assertEqual(cred_id, "broker-agent-example-token")
 
     def test_two_workloads_get_different_ids_for_one_credential_name(self):
-        _p1, a = vm_broker_credential("one", "token")
-        _p2, b = vm_broker_credential("two", "token")
+        _p1, a = broker_credential("one", "token")
+        _p2, b = broker_credential("two", "token")
         self.assertNotEqual(a, b)
 
 
@@ -233,7 +233,7 @@ class TestTheGeneratedUnit(unittest.TestCase):
     def test_the_resolver_is_allowed(self):
         """Not optional: without it the broker's own lookups die, which
         presents as the provider being down."""
-        resolvers = vm_host_resolver_addresses()
+        resolvers = host_resolver_addresses()
         unit = self.unit()
         for addr in resolvers:
             self.assertIn(f"IPAddressAllow={addr}", unit)
@@ -279,8 +279,8 @@ class TestTheGeneratedUnit(unittest.TestCase):
         self.assertIn("RuntimeDirectoryMode=0700", unit)
 
     def test_it_execs_the_packaged_broker_against_the_generated_config(self):
-        self.assertIn(f'ExecStart={VM_BROKER_BIN} '
-                      f'"{vm_broker_config_path("agent")}"', self.unit())
+        self.assertIn(f'ExecStart={BROKER_BIN} '
+                      f'"{broker_config_path("agent")}"', self.unit())
 
 
 class TestTheVmUnitWaitsForIt(unittest.TestCase):
@@ -535,7 +535,7 @@ class TestTheHelperWritesTheConfig(unittest.TestCase):
                         ignore_errors=True)
         self.path = self.tmp / "broker.toml"
         self.enterContext(mock.patch.object(
-            self.mod, "vm_broker_config_path", lambda name: self.path))
+            self.mod, "broker_config_path", lambda name: self.path))
         self.enterContext(mock.patch.object(
             self.mod.pwd, "getpwnam",
             lambda user: type("pw", (), {"pw_uid": UID_MIN + 5})))
@@ -789,7 +789,7 @@ class TestTheBrokeredRequestGoesToTheBroker(_BrokerRig):
             self._policy([BROKERED]), _GET_BROKERED, responses=[_OK])
         self.assertEqual(len(dialled), 1)
         addr, _ = dialled[0]
-        self.assertEqual(addr, (BROKER_ADDR, VM_BROKER_INSTANCE_PORT))
+        self.assertEqual(addr, (BROKER_ADDR, BROKER_INSTANCE_PORT))
         self.assertNotEqual(addr[0], "127.0.0.1")
         self.assertNotEqual(addr[0], "api.provider")
 
@@ -1076,7 +1076,7 @@ class TestTheBrokerAddressComesFromTheUid(unittest.TestCase):
             listener._dial_broker("api.provider")
         dial.assert_called_once()
         self.assertEqual(dial.call_args[0][0],
-                         (BROKER_ADDR, VM_BROKER_INSTANCE_PORT))
+                         (BROKER_ADDR, BROKER_INSTANCE_PORT))
 
     def test_it_is_derived_once_and_kept(self):
         mod = listener_mod()
@@ -1120,7 +1120,7 @@ class TestTheSelinuxRuleShipsWithTheDial(unittest.TestCase):
         wins over unreserved_port_t. Moving the port silently invalidates the
         rule above -- so the constant is pinned to the number the comment was
         written about."""
-        self.assertEqual(VM_BROKER_INSTANCE_PORT, 8081)
+        self.assertEqual(BROKER_INSTANCE_PORT, 8081)
         self.assertIn("8081 is", CIL.read_text())
 
 

@@ -97,17 +97,6 @@ KEEP	vm_ptp.vm_ptp_kvm_seed_files
 KEEP	workload_addr.VM_RESOLVE_LISTENER_BIN
 
 # RENAME -- shared, and the prefix misleads: 202 symbols.
-RENAME	broker_config.VM_BROKER_BIN
-RENAME	broker_config.VM_BROKER_CONFIG_NAME
-RENAME	broker_config.VM_BROKER_INSTANCE_PORT
-RENAME	broker_config.VM_BROKER_RUNTIME_SUBDIR
-RENAME	broker_config.vm_broker_config_dir
-RENAME	broker_config.vm_broker_config_path
-RENAME	broker_config.vm_broker_credential
-RENAME	broker_config.vm_broker_runtime_directory
-RENAME	broker_config.vm_host_resolver_addresses
-RENAME	broker_config.vm_inspect_link_address_commands
-RENAME	broker_config.vm_inspect_link_delete_commands
 RENAME	cmd_diagnose.vm_confinement_check
 RENAME	cmd_diagnose.vm_egress_check
 RENAME	cmd_diagnose.vm_inspect_check

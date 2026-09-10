@@ -29,9 +29,9 @@ from egress_policy import (
 from egress_ca import denial_dir, leaf_dir
 from vm import inspect_cgroup_command, inspect_cgroup_filter_command
 from broker_config import (
-    VM_BROKER_BIN, vm_uses_credentials, vm_broker_config_path,
-    vm_broker_credential, vm_broker_hosts, vm_broker_runtime_directory,
-    vm_broker_upstream_addresses, vm_host_resolver_addresses,
+    BROKER_BIN, vm_uses_credentials, broker_config_path,
+    broker_credential, vm_broker_hosts, broker_runtime_directory,
+    vm_broker_upstream_addresses, host_resolver_addresses,
 )
 from vm_defs import (
     VM_REBOOT_EXIT_CODE, VM_GUEST_UID, VM_GUEST_AGENT_PORT, SIDECAR_SLICE,
@@ -933,7 +933,7 @@ def generate_vm_broker_service(config, uid: int, *, before: str = None,
     # and removes it on stop, so the file is readable by the broker, unreadable
     # by the workload uid, and gone when the broker is -- no chown of ours, and
     # no way to serve the previous boot's credential set.
-    svc.set("RuntimeDirectory", vm_broker_runtime_directory(name))
+    svc.set("RuntimeDirectory", broker_runtime_directory(name))
     svc.set("RuntimeDirectoryMode", "0700")
     # NOT `+` prefixed. This runs unprivileged, as the instance's own dynamic
     # user, which is what makes the file it writes owned by that user; it needs
@@ -943,7 +943,7 @@ def generate_vm_broker_service(config, uid: int, *, before: str = None,
     # a broker serving the wrong credentials or none.
     svc.add("ExecStartPre",
             f"/usr/libexec/workloadctl/workload-vm-broker config {dq(name)}")
-    svc.add("ExecStart", f"{VM_BROKER_BIN} {dq(str(vm_broker_config_path(name)))}")
+    svc.add("ExecStart", f"{BROKER_BIN} {dq(str(broker_config_path(name)))}")
     svc.blank()
     # One line per DECLARED credential, not per credential-backed host: two
     # hosts may share one, and loading it twice under one id is an error.
@@ -956,7 +956,7 @@ def generate_vm_broker_service(config, uid: int, *, before: str = None,
         if credential in seen_credentials:
             continue
         seen_credentials.append(credential)
-        path, cred_id = vm_broker_credential(name, credential)
+        path, cred_id = broker_credential(name, credential)
         svc.add("LoadCredentialEncrypted", f"{cred_id}:{path}")
     svc.blank()
     # No persistent identity: the broker owns no files and needs no home. This
@@ -1016,7 +1016,7 @@ def generate_vm_broker_service(config, uid: int, *, before: str = None,
     # instance binds, and the stub resolver a systemd-resolved host puts at
     # 127.0.0.53.
     svc.add("IPAddressAllow", "localhost")
-    for addr in vm_host_resolver_addresses():
+    for addr in host_resolver_addresses():
         svc.add("IPAddressAllow", addr)
     # Resolved at generation time, because systemd will not resolve a name in
     # this directive. Stale on a moved record like every other resolve-at-start
