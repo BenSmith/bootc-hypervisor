@@ -18,8 +18,8 @@ Installed to /usr/libexec/workloadctl/vm.py.
 import ipaddress
 import socket
 
-from egress_policy import (INSPECT_ORIG_CLEARTEXT, INSPECT_ORIG_TLS,
-                           INSPECT_PORT_CLEARTEXT, INSPECT_PORT_TLS)
+from config_parser import INSPECT_ORIG_CLEARTEXT, INSPECT_ORIG_TLS
+from egress_policy import INSPECT_PORT_CLEARTEXT, INSPECT_PORT_TLS
 from netfilter_state import nft_set_elements
 from nft_constants import (both_families, split_by_family, NFT_BIN,
                            NFT_PAIR_ALLOW, NFT_PAIR_INSPECT_DST,

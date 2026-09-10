@@ -11,8 +11,9 @@ the builder's own output.
 import unittest
 from pathlib import Path
 
+from config_parser import INSPECT_ORIG_CLEARTEXT, INSPECT_ORIG_TLS
 from egress_policy import (
-    INSPECT_ORIG_CLEARTEXT, INSPECT_ORIG_TLS, INSPECT_PORT_CLEARTEXT,
+    INSPECT_PORT_CLEARTEXT,
     INSPECT_PORT_TLS, vm_inspect_policy, inspect_policy_path,
     TLS_DEFAULT, http2_hosts, vm_policy_entries, policy_governs,
 )

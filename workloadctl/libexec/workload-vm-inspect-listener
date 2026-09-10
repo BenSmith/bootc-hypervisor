@@ -125,12 +125,15 @@ from typing import NamedTuple
 
 sys.dont_write_bytecode = True
 
+from config_parser import (
+    INSPECT_ORIG_CLEARTEXT, INSPECT_ORIG_TLS, normalise_hostname,
+)
 from egress_policy import (
-    INSPECT_GUEST_AGENT_KEY, INSPECT_ORIG_CLEARTEXT, INSPECT_ORIG_TLS, INSPECT_PORT_CLEARTEXT,
+    INSPECT_GUEST_AGENT_KEY, INSPECT_PORT_CLEARTEXT,
     INSPECT_PORT_TLS, TLS_DEFAULT, hostname_control_character,
     hostname_match, INSPECT_DIGEST_KEY, inspect_policy_digest,
     inspect_policy_path, inspect_record_path, inspect_status_path,
-    normalise_hostname, VmPolicyEntry, policy_governs,
+    VmPolicyEntry, policy_governs,
 )
 from egress_ca import LeafRefused, ca_cert_path, ca_key_path
 from broker_config import BROKER_INSTANCE_PORT

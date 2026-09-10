@@ -48,7 +48,7 @@ from collections import OrderedDict
 from pathlib import Path
 from typing import NamedTuple
 
-from egress_policy import normalise_hostname
+from config_parser import normalise_hostname
 from egress_ca import (
     DENIAL_DIR_NAME, LEAF_DIR_NAME, LEAF_RENEW_WITHIN_SECONDS, LeafRefused,
     ca_cert_path, ca_key_path, leaf_openssl_argv,

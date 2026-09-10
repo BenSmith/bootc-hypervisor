@@ -98,9 +98,8 @@ import time
 
 sys.dont_write_bytecode = True
 
-from egress_policy import (
-    hostname_control_character, hostname_match, normalise_hostname,
-)
+from config_parser import normalise_hostname
+from egress_policy import hostname_control_character, hostname_match
 from vm import vm_resolve_status_path
 from vm_network_config import vm_resolve_policy_path
 from workload_addr import RESOLVE_TTL

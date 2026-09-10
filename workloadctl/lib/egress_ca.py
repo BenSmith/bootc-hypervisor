@@ -25,8 +25,8 @@ import ipaddress
 import time
 from pathlib import Path
 
-from config_parser import workload_root_dir
-from egress_policy import normalise_hostname, vm_uses_inspect
+from config_parser import normalise_hostname, workload_root_dir
+from egress_policy import vm_uses_inspect
 
 
 # Where the guest finds the CA whose certificates the inspector's spliced

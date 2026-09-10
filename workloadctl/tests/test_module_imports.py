@@ -238,5 +238,168 @@ class TestASharedModuleIsNotShadowedByItsCaller(unittest.TestCase):
         self.assertEqual(collisions, [], "\n".join(collisions))
 
 
+class TestANameIsImportedFromTheModuleThatDefinesIt(unittest.TestCase):
+    """Every `from M import N` in the tree names an M that actually defines N.
+
+    The consumer half of the facade rule, and the half NO_RE_EXPORTS above
+    cannot reach. That check asks whether a module imports a name it never
+    uses, which finds a facade only when the facade has no other reason to
+    hold the name. Two shapes slip past it:
+
+      * a name the module BOTH uses and republishes. egress_policy imported
+        config_parser.normalise_hostname because its own matcher calls it, and
+        five other files then imported it from egress_policy. Every one of
+        them read as a normal import and the unused-import scan had nothing
+        to report.
+      * an explicit alias, `X = X`, which the scan counts as a use of X and a
+        reader counts as a definition. Three of those existed here, left by
+        the vm_ prefix strip turning `VM_X = X` into a self-assignment: inert,
+        since the import above already bound the name, and invisible to
+        everything.
+
+    What both cost is the same thing NO_RE_EXPORTS exists to prevent -- a
+    reader who finds `egress_policy.normalise_hostname` cannot tell which
+    module owns it, and `mock.patch` on the wrong one rebinds a copy. Asking
+    the question from the importing side needs no list of suspect modules: a
+    module either defines the name or it is passing on someone else's.
+
+    Module-level `try`/`if` bodies count as definitions -- workload_lib binds
+    WORKLOADCTL_VERSION from `_version` in a try and to "0-dev" in the except,
+    and that IS its definition, not a re-export of one.
+    """
+
+    SCANNED = ("lib", "libexec", "generators", "bin", "tests")
+
+    @staticmethod
+    def _module_level_names(body):
+        names = set()
+        for node in body:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef,
+                                 ast.ClassDef)):
+                names.add(node.name)
+            elif isinstance(node, ast.Assign):
+                for target in node.targets:
+                    if isinstance(target, ast.Name):
+                        names.add(target.id)
+            elif isinstance(node, ast.AnnAssign) \
+                    and isinstance(node.target, ast.Name):
+                names.add(node.target.id)
+            elif isinstance(node, ast.Try):
+                for arm in (node.body, node.orelse, node.finalbody,
+                            *(h.body for h in node.handlers)):
+                    names |= TestANameIsImportedFromTheModuleThatDefinesIt \
+                        ._module_level_names(arm)
+            elif isinstance(node, ast.If):
+                for arm in (node.body, node.orelse):
+                    names |= TestANameIsImportedFromTheModuleThatDefinesIt \
+                        ._module_level_names(arm)
+        return names
+
+    @classmethod
+    def _sources(cls):
+        """Every Python file in the tree, including the extensionless ones.
+
+        The entrypoints are the reason this walks paths rather than importing:
+        `libexec/workload-vm-inspect-listener` has no `.py`, is invisible to
+        `_lib_modules()`, and importing it runs its argv parsing.
+
+        An extensionless file is taken as Python only if it says so in a
+        shebang. `generators/` also holds a systemd unit and a shell
+        generator, and feeding either to `ast.parse` raises rather than
+        reporting a finding -- a guard that errors on an unrelated file is one
+        that gets narrowed until it sees nothing.
+        """
+        for directory in cls.SCANNED:
+            for path in sorted((REPO_ROOT / directory).rglob("*")):
+                if not path.is_file():
+                    continue
+                if path.suffix == ".py":
+                    yield path
+                elif path.suffix == "" and path.parent.name in cls.SCANNED:
+                    first = path.read_text(errors="replace").split("\n", 1)[0]
+                    if first.startswith("#!") and "python" in first:
+                        yield path
+
+    @classmethod
+    def _defines(cls):
+        return {p.stem: cls._module_level_names(ast.parse(p.read_text()).body)
+                for p in LIB.glob("*.py")}
+
+    def test_the_sweep_sees_the_tree(self):
+        """Guards the guard, on both halves.
+
+        A walk that matched nothing, or a definition scan that returned empty
+        sets, both make the check below vacuous -- and an empty definition set
+        fails LOUDLY rather than silently, so it is the walk that needs
+        pinning.
+        """
+        sources = list(self._sources())
+        self.assertGreater(len(sources), 100, len(sources))
+        self.assertIn("workload-vm-inspect-listener",
+                      [p.name for p in sources])
+        defines = self._defines()
+        self.assertGreater(len(defines), 30, sorted(defines))
+        self.assertIn("normalise_hostname", defines["config_parser"])
+        self.assertNotIn("normalise_hostname", defines["egress_policy"])
+
+    def test_a_module_level_try_counts_as_a_definition(self):
+        """workload_lib really does bind its version that way, so a scan that
+        ignored `try` bodies would report a false violation on four files --
+        the shape that gets a guard disabled rather than fixed."""
+        self.assertIn("WORKLOADCTL_VERSION", self._defines()["workload_lib"])
+
+    def test_the_check_would_see_a_pass_through(self):
+        """Measured, not reasoned: the exact shape found in egress_policy."""
+        body = ast.parse("from config_parser import normalise_hostname\n"
+                         "normalise_hostname = normalise_hostname\n").body
+        self.assertIn("normalise_hostname", self._module_level_names(body))
+        self.assertEqual(
+            self._module_level_names(
+                ast.parse("from config_parser import x\n").body), set())
+
+    def test_no_module_level_name_is_assigned_to_itself(self):
+        """`X = X` is the one way to defeat the check below.
+
+        A module that re-exports through an alias DOES define the name, as far
+        as any scan is concerned, so the pass-through check goes quiet. It is
+        also the exact residue the vm_ prefix strip left: `VM_X = X` became
+        `X = X`, which changes nothing at runtime because the import above
+        already bound X, and reads to a human as a deliberate definition.
+        Three sat in egress_policy under comments explaining an aliasing that
+        no longer existed.
+        """
+        offenders = []
+        for path in self._sources():
+            for node in ast.walk(ast.parse(path.read_text())):
+                if isinstance(node, ast.Assign) and len(node.targets) == 1 \
+                        and isinstance(node.targets[0], ast.Name) \
+                        and isinstance(node.value, ast.Name) \
+                        and node.targets[0].id == node.value.id:
+                    offenders.append(
+                        f"{path.relative_to(REPO_ROOT)}:{node.lineno} assigns "
+                        f"{node.value.id} to itself; if it is a re-export, "
+                        f"delete it, and if it is not, it does nothing")
+        self.assertEqual(offenders, [], "\n".join(offenders))
+
+    def test_no_name_is_imported_from_a_module_that_passes_it_on(self):
+        defines = self._defines()
+        offenders = []
+        for path in self._sources():
+            rel = path.relative_to(REPO_ROOT)
+            for node in ast.walk(ast.parse(path.read_text())):
+                if not isinstance(node, ast.ImportFrom) \
+                        or node.module not in defines \
+                        or path.stem == node.module:
+                    continue
+                for alias in node.names:
+                    if alias.name != "*" \
+                            and alias.name not in defines[node.module]:
+                        offenders.append(
+                            f"{rel}:{node.lineno} imports {alias.name} from "
+                            f"{node.module}, which does not define it; import "
+                            f"it from the module that does")
+        self.assertEqual(offenders, [], "\n".join(offenders))
+
+
 if __name__ == "__main__":
     unittest.main()

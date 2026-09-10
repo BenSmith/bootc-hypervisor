@@ -25,13 +25,14 @@ from typing import NamedTuple
 
 from config_parser import (BROKER_DEFAULT_AUTH_FORMAT,
                            BROKER_DEFAULT_AUTH_HEADER,
+                           INSPECT_ORIG_CLEARTEXT, INSPECT_ORIG_TLS,
+                           normalise_hostname,
                            parse_volume_spec, patterns_overlap,
                            validate_credential_entries,
                            validate_host_pattern)
-from egress_policy import (INSPECT_ORIG_CLEARTEXT, INSPECT_ORIG_TLS,
-                           POLICY_METHODS, POLICY_METHODS_REFUSED,
+from egress_policy import (POLICY_METHODS, POLICY_METHODS_REFUSED,
                            TLS_DEFAULT, TLS_MODES, VmPolicyEntry,
-                           hostname_match, normalise_hostname,
+                           hostname_match,
                            vm_policy_entries, policy_governs)
 from workload_addr import (INSPECT_ADDR6_PREFIX, INSPECT_NETWORK,
                            RESOLVE_POLICY_FILE, RESOLVE_TTL,

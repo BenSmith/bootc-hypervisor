@@ -30,8 +30,7 @@ import json
 from pathlib import Path
 from typing import NamedTuple
 
-from config_parser import (INSPECT_ORIG_CLEARTEXT, INSPECT_ORIG_TLS,
-                           normalise_hostname, parse_policy_entries)
+from config_parser import normalise_hostname, parse_policy_entries
 from vm_defs import EGRESS_DEFAULT, SOCKET_DIR, vm_allowed_hosts
 
 
@@ -105,11 +104,12 @@ def vm_uses_inspect(config: dict) -> bool:
 # Both substrates and three entrypoints ask the same questions of a name, and a
 # second answer to "what is this name" is a name the guest can spell twice.
 
-# config_parser.normalise_hostname, under the name the listener, egress_mint and
-# the tests already import. It lives one rung down rather than being copied when
-# the container half needed it too, for that reason: the guest would pick which
-# normalisation it got by how it spelled the host.
-normalise_hostname = normalise_hostname
+# The normalisation itself is config_parser.normalise_hostname, imported above.
+# It lives one rung down rather than being copied when the container half needed
+# it too, for that reason: a second answer would let the guest pick which
+# normalisation it got by how it spelled the host. Callers import it from
+# config_parser, not from here -- this module used to re-export it, and a name
+# with two homes is the thing this section exists to prevent.
 
 
 def hostname_control_character(host: str) -> str | None:
@@ -179,12 +179,11 @@ INSPECT_PORT_TLS = 8443
 # never appear in an element value, which is why the constants live beside the
 # listener ports they select.
 #
-# Defined in config_parser, because the container half of the design redirects
-# the same two ports and the parse layer is below both; aliased here so that a
-# reader of this file finds the redirect's two ends -- the port dialled and the
-# port answered -- next to each other rather than one rung apart.
-INSPECT_ORIG_CLEARTEXT = INSPECT_ORIG_CLEARTEXT
-INSPECT_ORIG_TLS = INSPECT_ORIG_TLS
+# They are defined in config_parser, because the container half of the design
+# redirects the same two ports and the parse layer is below both. Import them
+# from there: this module used to alias them so a reader found the redirect's
+# two ends next to each other, and the cost of that convenience was two names
+# answering from two modules.
 
 
 # --- The responder knob, and [[vm.network.policy]] as parsed entries ---
