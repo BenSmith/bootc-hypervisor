@@ -1,7 +1,8 @@
 # The per-request record written by each inspected workload's egress
 # inspector -- VM and container alike. One tree, one glob: the record path is
-# keyed by workload name and nothing else (vm.py's vm_inspect_record_dir), and
-# the listener under it is the same binary on both substrates.
+# keyed by workload name and nothing else (egress_policy.py's
+# inspect_record_dir), and the listener under it is the same binary on both
+# substrates.
 #
 # ROTATION IS LOGROTATE'S, NOT OURS. Writing our own was considered and
 # rejected: it is a solved problem with a packaged solution, and the failure

@@ -147,7 +147,7 @@ add set inet workload_filter wl_egress_cg { typeof socket cgroupv2 level 2 ; }
 # range and it becomes exactly what this set exists to refuse: a destination no
 # guest can legitimately want. An operator whose site really does route
 # TEST-NET-1 internally writes a [[vm.network.internal]] exemption, which is
-# only writable because lib/vm_defs.py's VM_INTERNAL_PREFIXES4 carries the same
+# only writable because lib/vm_defs.py's INTERNAL_PREFIXES4 carries the same
 # addition -- the drop and its escape hatch are the one list stated twice.
 add set inet workload_filter wl_internal4 { type ipv4_addr ; flags interval ; }
 add set inet workload_filter wl_internal6 { type ipv6_addr ; flags interval ; }
@@ -248,7 +248,7 @@ add rule inet workload_filter output meta skuid . ip6 daddr . th dport @wl_allow
 # 2001:2::/48), where it would otherwise be accepted ahead of the guard that
 # exists to refuse exactly it. Refused in the schema and again in the helper
 # that arms the element, in both families, including an entry written as a name
-# that RESOLVES into one — see vm_allow_reserved_reason in
+# that RESOLVES into one — see allow_reserved_reason in
 # lib/vm_network_config.py.
 add rule inet workload_filter output meta skuid . ip  daddr . th dport @wl_inspect_dst  accept
 add rule inet workload_filter output meta skuid . ip6 daddr . th dport @wl_inspect_dst6 accept

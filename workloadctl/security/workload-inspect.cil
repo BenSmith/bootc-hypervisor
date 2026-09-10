@@ -285,7 +285,7 @@
 ; UNLABELED port the only grant available would have been unreserved_port_t --
 ; name_connect to every non-system port on the box, from the one domain whose
 ; entire value is that its outbound reach is narrow. A future change to
-; VM_BROKER_INSTANCE_PORT has to check `semanage port -l` for the new number
+; BROKER_INSTANCE_PORT has to check `semanage port -l` for the new number
 ; and accept whatever it widens.
 ;
 ; (`semanage port -l` needs root. Without it, it fails with "SELinux policy is
@@ -403,7 +403,7 @@
 ; replace the anchor the guest was SEEDED with, which no restart recovers --
 ; only a re-provision), and the leaf caches are read-write because minting into
 ; them is the job. lib/provisioning.py registers the fcontext rules, with the
-; patterns from egress_ca.vm_pki_fcontext_patterns; a filecon here would land
+; patterns from egress_ca.pki_fcontext_patterns; a filecon here would land
 ; in the base file_contexts and be shadowed by file_contexts.local.
 (type wlinspect_ca_t)
 (roletype object_r wlinspect_ca_t)
@@ -485,7 +485,7 @@
 ; write, and inventing one would mean shipping a filecon that fights the base
 ; policy for a binary this package does not own. What bounds the grant is
 ; therefore the domain and not the rule: this process runs one argv, built by
-; vm_leaf_openssl_argv from a name vm_leaf_san has already refused every
+; leaf_openssl_argv from a name leaf_san has already refused every
 ; character openssl's extension parser could read as a delimiter. Re-read that
 ; boundary before adding any second subprocess here.
 (allow wlinspect_t bin_t (file (execute_no_trans)))
@@ -535,7 +535,7 @@
 ; shadowed only under a path workloadctl registers via semanage; that set is
 ; provisioning.LOCAL_FCONTEXT_ROOTS -- /var/lib/workloads and /run/workload-vm
 ; -- and /var/log is in neither. One glob also covers every workload, so unlike
-; vm_pki_fcontext_patterns there is nothing per-workload to register at enable
+; pki_fcontext_patterns there is nothing per-workload to register at enable
 ; or to remove at disable.
 (type wlinspect_log_t)
 (roletype object_r wlinspect_log_t)
