@@ -642,8 +642,10 @@ from egress_policy import (
 from workload_addr import broker_listen_address
 import egress_relay
 from egress_upstream import Upstream
+import inspect_http
 import inspect_listener
 from inspect_listener import Listener
+from inspect_http import serve_cleartext
 import inspect_figures
 
 LISTENER = Path(__file__).resolve().parent.parent / "libexec" / "workload-inspect-listener"
@@ -769,7 +771,7 @@ class _BrokerRig(unittest.TestCase):
                     egress_relay, "CONNECTION_TIMEOUT", 0.20), \
                 unittest.mock.patch.object(
                     egress_relay, "RELAY_IDLE_TIMEOUT", 0.75):
-            listener._serve_cleartext(ours, _where())
+            serve_cleartext(listener.inspection, ours, _where())
         for _, _, pump in dialled:
             pump.join(timeout=3.0)
         records = []
@@ -888,7 +890,7 @@ class TestTheRefusalWhenTheBrokerIsDown(_BrokerRig):
         it would attribute a dead broker to whatever api.provider resolves to,
         and would pay a synchronous getaddrinfo for the wrong answer."""
         with unittest.mock.patch.object(
-                inspect_listener, "dial_failure_reason") as failure:
+                inspect_http, "dial_failure_reason") as failure:
             self._serve(self._policy([BROKERED]), _GET_BROKERED, refuse=True)
         failure.assert_not_called()
 
@@ -896,7 +898,7 @@ class TestTheRefusalWhenTheBrokerIsDown(_BrokerRig):
         """The guard for the test above: the generic path must keep the
         behaviour the broker path opts out of."""
         with unittest.mock.patch.object(
-                inspect_listener, "dial_failure_reason",
+                inspect_http, "dial_failure_reason",
                 return_value=DROP_UNREACHABLE) as failure:
             self._serve(self._policy([PLAIN]), _GET_PLAIN, refuse=True)
         failure.assert_called_once()

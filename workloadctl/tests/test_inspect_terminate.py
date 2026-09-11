@@ -55,6 +55,7 @@ import egress_upstream
 from egress_upstream import tls_failure
 import inspect_listener
 from inspect_listener import MAX_CONNECTIONS, Listener, build_minter
+from inspect_http import serve_one_request
 from egress_record import (
     DROP_INTERNAL,
     DROP_NOT_H2,
@@ -1955,7 +1956,8 @@ class TestARedialThatCannotBeVerifiedSaysSo(TerminationCase):
         guest.sendall(b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
         with unittest.mock.patch.object(
                 listener.inspection.upstream, "connection_for", side_effect=exc):
-            listener._serve_one_request(
+            serve_one_request(
+                listener.inspection,
                 _Stream(ours), ours, _where("tls").request(1),
                 {}, True)
         return listener, guest.recv(65536), out.getvalue()

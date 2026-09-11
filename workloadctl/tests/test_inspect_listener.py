@@ -40,8 +40,10 @@ from http_framing import (
 import egress_record
 import egress_relay
 import egress_upstream
+import inspect_http
 import inspect_listener
-from inspect_listener import Ceiling, INTERIM_MAX, Listener, build_minter
+from inspect_http import INTERIM_MAX, serve_cleartext
+from inspect_listener import Ceiling, Listener, build_minter
 import sd_listen
 from egress_upstream import (
     ALPN_H2, BROKER_UPSTREAM_KEY, UPSTREAM_ALPN, UPSTREAMS_MAX,
@@ -1419,7 +1421,7 @@ class _CleartextRig(unittest.TestCase):
                     egress_relay, "RELAY_IDLE_TIMEOUT", 2.0), \
                 unittest.mock.patch.object(
                     egress_relay, "CONNECTION_TIMEOUT", 2.0):
-            listener._serve_cleartext(ours, _where("cleartext"))
+            serve_cleartext(listener.inspection, ours, _where("cleartext"))
         ours.close()
         for _, _, pump in dialled:
             pump.join(timeout=3.0)
@@ -2096,8 +2098,8 @@ class TestCleartextPerRequest(unittest.TestCase):
 
         with unittest.mock.patch.object(Listener, "_is_http",
                                         lambda *a, **k: True), \
-             unittest.mock.patch.object(Listener, "_serve_one_request",
-                                        one_request):
+             unittest.mock.patch("inspect_http.serve_one_request",
+                                 one_request):
             listener._serve_terminated(object(), where, "a.example", None)
         self.assertEqual(seen["upstreams"], {},
                          "a None upstream was seeded into the pool")
@@ -2107,8 +2109,8 @@ class TestCleartextPerRequest(unittest.TestCase):
         origin, far = self._pair()
         with unittest.mock.patch.object(Listener, "_is_http",
                                         lambda *a, **k: True), \
-             unittest.mock.patch.object(Listener, "_serve_one_request",
-                                        one_request):
+             unittest.mock.patch("inspect_http.serve_one_request",
+                                 one_request):
             listener._serve_terminated(object(), where, "a.example",
                                        _Stream(origin))
         self.assertEqual(list(seen["upstreams"]), ["a.example"])
@@ -2369,12 +2371,12 @@ class TestCleartextTimeouts(unittest.TestCase):
         with unittest.mock.patch.object(
                 socket, "create_connection", side_effect=dial), \
                 unittest.mock.patch.object(
-                    inspect_listener, "copy_body", watched_copy_body), \
+                    inspect_http, "copy_body", watched_copy_body), \
                 unittest.mock.patch.object(
                     egress_relay, "CONNECTION_TIMEOUT", self.CONNECTION), \
                 unittest.mock.patch.object(
                     egress_relay, "RELAY_IDLE_TIMEOUT", self.IDLE):
-            listener._serve_cleartext(ours, _where("cleartext"))
+            serve_cleartext(listener.inspection, ours, _where("cleartext"))
         elapsed = time.monotonic() - started
         for pump in pumps:
             pump.join(timeout=3.0)
@@ -2638,7 +2640,7 @@ class TestCleartextUpstreamFailure(unittest.TestCase):
         with unittest.mock.patch.object(
                 socket, "create_connection",
                 side_effect=OSError("Name or service not known")):
-            listener._serve_cleartext(ours, _where("cleartext"))
+            serve_cleartext(listener.inspection, ours, _where("cleartext"))
         ours.close()
         log, got = out.getvalue(), _read_all(guest)
         self.assertIn("upstream unreachable", log)
@@ -2880,11 +2882,13 @@ class TestCounters(unittest.TestCase):
         # or every entry in it would count as its own use and the guard would
         # assert nothing. (It was the tuple's own definition before the
         # reasons moved to egress_record; same hazard, one file over.)
-        # Two files, because the upstream leg names its own refusals where
-        # it decides them (egress_upstream) and the listener names the rest.
+        # Three files, because the upstream leg names its own refusals where
+        # it decides them (egress_upstream), the request loop names the
+        # per-request ones (inspect_http) and the listener names the rest.
         source = "\n".join(
             re.sub(r"from egress_record import \([^)]*\)", "", f.read_text())
-            for f in (LISTENER_LIB, ROOT / "lib" / "egress_upstream.py"))
+            for f in (LISTENER_LIB, ROOT / "lib" / "inspect_http.py",
+                      ROOT / "lib" / "egress_upstream.py"))
         self.assertNotIn("from egress_record import (", source)
         named = {arg.strip() for arg in
                  re.findall(r"record_drop\(\s*([^,)]+)", source)

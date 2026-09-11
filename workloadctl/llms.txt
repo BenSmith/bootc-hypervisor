@@ -476,7 +476,8 @@ lib/egress_status.py               # Egress inspector state derivation (both sub
 lib/vm_metrics.py                  # VM metric collectors (QMP balloon/vCPU, qemu cgroup) shared by the exporter and `stats`
 lib/egress_mint.py                 # Per-workload egress CA and leaf minting
 lib/vm_clock.py                    # Host-side guest clock resync on mint cache miss
-lib/inspect_listener.py            # The inspector: the accept loop, the connection ceiling, and the two planes (splice/terminate on 443, per-request authorisation on 80)
+lib/inspect_listener.py            # The inspector: the accept loop, the connection ceiling, and the TLS plane (splice/terminate on 443); the cleartext plane is one call into inspect_http
+lib/inspect_http.py                # The per-request loop: authorise by Host, relay what passes, refuse the rest; run by the cleartext plane and inside every terminated TLS session
 lib/inspect_scope.py               # What every connection decision is made against: one workload's policy, counters, record, upstream pool and minter
 lib/inspect_counters.py            # The listener's figures: writer of inspect-status.json, read by inspect_figures
 lib/inspect_figures.py             # FIGURES table: the single producer behind doctor and the exporter
