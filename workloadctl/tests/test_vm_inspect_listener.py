@@ -1,4 +1,4 @@
-"""workload-vm-inspect-listener: the socket-activated listener, rung 1.
+"""workload-inspect-listener: the socket-activated listener, rung 1.
 
 The listener only logs (the inspector design, §7.7.1): a
 connection arrives, one line is written, the connection is closed. These tests
@@ -30,7 +30,7 @@ from egress_policy import (
 from workload_addr import INSPECT_LISTENER_BIN
 
 ROOT = Path(__file__).resolve().parent.parent
-LISTENER_FILE = ROOT / "libexec" / "workload-vm-inspect-listener"
+LISTENER_FILE = ROOT / "libexec" / "workload-inspect-listener"
 
 
 _MOD = None
@@ -45,7 +45,7 @@ def _mod():
     checks for. Caching keeps the class identity stable across the test."""
     global _MOD
     if _MOD is None:
-        _MOD = load_script("libexec/workload-vm-inspect-listener")
+        _MOD = load_script("libexec/workload-inspect-listener")
     return _MOD
 
 
@@ -392,10 +392,10 @@ class TestInstalledPath(unittest.TestCase):
 
     def test_the_spec_installs_the_listener_at_the_vm_constant_path(self):
         self.assertEqual(INSPECT_LISTENER_BIN,
-                         "/usr/libexec/workloadctl/workload-vm-inspect-listener")
+                         "/usr/libexec/workloadctl/workload-inspect-listener")
         spec = (ROOT / "rpm" / "workloadctl.spec").read_text()
-        self.assertIn("%{_libexecdir}/workloadctl/workload-vm-inspect-listener", spec)
-        self.assertIn("libexec/workload-vm-inspect-listener", spec)
+        self.assertIn("%{_libexecdir}/workloadctl/workload-inspect-listener", spec)
+        self.assertIn("libexec/workload-inspect-listener", spec)
 
     def test_the_listener_source_has_no_literal_listener_ports(self):
         """The plane comes from the lib/ constants, never a hardcoded 8080 or
@@ -2069,7 +2069,7 @@ class TestCleartextPerRequest(unittest.TestCase):
         handshake against a minted leaf. What the behavioural half can reach is
         the consequence, and that is the test below.
         """
-        source = (ROOT / "libexec" / "workload-vm-inspect-listener").read_text()
+        source = (ROOT / "libexec" / "workload-inspect-listener").read_text()
         fn = source[source.index("def _serve_tls_inspect("):
                     source.index("def _bump_answer(")]
         self.assertIn("credential_for(host)", fn)

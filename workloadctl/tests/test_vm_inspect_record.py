@@ -44,7 +44,7 @@ def _mod():
     """The listener module, loaded once — see test_vm_inspect_listener._mod."""
     global _MOD
     if _MOD is None:
-        _MOD = load_script("libexec/workload-vm-inspect-listener")
+        _MOD = load_script("libexec/workload-inspect-listener")
     return _MOD
 
 
@@ -953,7 +953,7 @@ class TestTheH2BlindSpotIsCounted(unittest.TestCase):
         self.assertEqual(counters.h2_unrecorded, 1)
 
     def test_the_h2_relay_increments_it(self):
-        source = (ROOT / "libexec" / "workload-vm-inspect-listener").read_text()
+        source = (ROOT / "libexec" / "workload-inspect-listener").read_text()
         body = source[source.index("def _serve_h2("):
                       source.index("def _drop_not_h2(")]
         self.assertIn("record_h2_unrecorded()", body)

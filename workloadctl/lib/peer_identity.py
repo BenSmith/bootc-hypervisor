@@ -1,6 +1,6 @@
 """Who owns the far end of an accepted TCP connection?
 
-Shared by `libexec/agent-broker` and `libexec/workload-vm-inspect-listener`,
+Shared by `libexec/agent-broker` and `libexec/workload-inspect-listener`,
 which both need to answer the same question about a caller and had no business
 answering it two ways. Extracted from the broker, where it was first written
 and where its edge cases were paid for.

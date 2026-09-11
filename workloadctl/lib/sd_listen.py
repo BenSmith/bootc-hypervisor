@@ -1,7 +1,7 @@
 """Recovering the listeners a .socket unit passed in.
 
 Shared by the two programs that are socket-activated and never bind:
-`libexec/workload-vm-inspect-listener` and `libexec/workload-vm-resolve`.
+`libexec/workload-inspect-listener` and `libexec/workload-vm-resolve`.
 Both take their sockets from systemd and refuse to open one of their own --
 but for different reasons, which is why `refusal` is a parameter rather than
 a sentence written here. The listener's bind must stay in the inherited fd to

@@ -127,7 +127,7 @@
 (typeattributeset file_type (wlinspect_exec_t))
 (typeattributeset exec_type (wlinspect_exec_t))
 (typeattributeset entry_type (wlinspect_exec_t))
-(filecon "/usr/libexec/workloadctl/workload-vm-inspect-listener" file (system_u object_r wlinspect_exec_t ((s0) (s0))))
+(filecon "/usr/libexec/workloadctl/workload-inspect-listener" file (system_u object_r wlinspect_exec_t ((s0) (s0))))
 
 ; Straight out of systemd, like wlproxy_t and unlike QEMU: the module declares
 ; the transition itself, so the unit's ExecStart is the plain script path.

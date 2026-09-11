@@ -99,7 +99,7 @@ LEAF_CACHE_MAX = 1024
 # use it. With N connection slots, N distinct names can be checked out at once,
 # and only the N+1'th insert can evict something nobody holds.
 #
-# This was 128, which is exactly workload-vm-inspect-listener's MAX_CONNECTIONS
+# This was 128, which is exactly workload-inspect-listener's MAX_CONNECTIONS
 # and therefore exactly one entry short of the invariant: 128 concurrent
 # denials for distinct names could evict the oldest of themselves. The failure
 # was a handshake that died on a missing file and was reported as the guest not

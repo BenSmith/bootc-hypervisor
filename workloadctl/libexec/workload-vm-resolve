@@ -509,7 +509,7 @@ def error_response(query, rcode):
 def inherited_listening_sockets():
     """Recover the sockets systemd passed in, or fail loudly.
 
-    The mechanics are shared with workload-vm-inspect-listener
+    The mechanics are shared with workload-inspect-listener
     (lib/sd_listen.py); what is ours is the reason a fallback bind is refused.
     Port 53 is privileged and this process is not, so a fallback would not fail
     -- it would succeed on some other port that nothing forwards to.

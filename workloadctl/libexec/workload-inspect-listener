@@ -1,6 +1,6 @@
 #!/usr/bin/python3
 """
-workload-vm-inspect-listener: the socket-activated listener, the transparent
+workload-inspect-listener: the socket-activated listener, the transparent
 egress inspector (the inspector design, §7.7.1).
 
 Rung 1 built the shape — the socket, the concurrency, the timeout discipline —

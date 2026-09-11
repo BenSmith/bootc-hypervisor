@@ -190,7 +190,7 @@ class TestPostunScriptlet(unittest.TestCase):
             ["semodule -r workload-vm",
              "restorecon /usr/libexec/virtiofsd",
              "semodule -r workload-inspect",
-             "restorecon /usr/libexec/workloadctl/workload-vm-inspect-listener",
+             "restorecon /usr/libexec/workloadctl/workload-inspect-listener",
              "semodule -r workload-resolve",
              "restorecon /usr/libexec/workloadctl/workload-vm-resolve"])
 

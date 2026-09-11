@@ -46,7 +46,7 @@ Requires:       openssl
 # There is deliberately NO proxy dependency here. Through rung 1 this was a hard
 # `Requires: tinyproxy`, because a VM declaring [vm.network].hosts was filtered
 # default-deny with its own proxy as the only route out. Rung 2 replaced that
-# with a transparent redirect into workload-vm-inspect-listener, which is
+# with a transparent redirect into workload-inspect-listener, which is
 # shipped by this package and has no dependency outside the standard library --
 # so hostname policy now needs nothing installed that this package does not
 # install itself. On upgrade, dnf leaves tinyproxy on the host as a package
@@ -134,8 +134,8 @@ install -Dpm 0755 %{_sourcedir}/libexec/workload-vm-netdev \
     %{buildroot}%{_libexecdir}/workloadctl/workload-vm-netdev
 install -Dpm 0755 %{_sourcedir}/libexec/workload-vm-inspect \
     %{buildroot}%{_libexecdir}/workloadctl/workload-vm-inspect
-install -Dpm 0755 %{_sourcedir}/libexec/workload-vm-inspect-listener \
-    %{buildroot}%{_libexecdir}/workloadctl/workload-vm-inspect-listener
+install -Dpm 0755 %{_sourcedir}/libexec/workload-inspect-listener \
+    %{buildroot}%{_libexecdir}/workloadctl/workload-inspect-listener
 install -Dpm 0755 %{_sourcedir}/libexec/workload-vm-resolve \
     %{buildroot}%{_libexecdir}/workloadctl/workload-vm-resolve
 install -Dpm 0755 %{_sourcedir}/libexec/workload-broker-config \
@@ -416,7 +416,7 @@ fi
 # every one of them an entrypoint into this domain (see the module header).
 if [ -x /usr/sbin/semodule ] && [ -f %{_datadir}/workloadctl/workload-inspect.cil ]; then
     if semodule -i %{_datadir}/workloadctl/workload-inspect.cil 2>/dev/null; then
-        restorecon /usr/libexec/workloadctl/workload-vm-inspect-listener 2>/dev/null || :
+        restorecon /usr/libexec/workloadctl/workload-inspect-listener 2>/dev/null || :
     fi
 fi
 # The synthesising responder's domain, on the same terms and for the same
@@ -495,7 +495,7 @@ if [ $1 -eq 0 ]; then
         semodule -r workload-vm 2>/dev/null || :
         restorecon /usr/libexec/virtiofsd 2>/dev/null || :
         semodule -r workload-inspect 2>/dev/null || :
-        restorecon /usr/libexec/workloadctl/workload-vm-inspect-listener 2>/dev/null || :
+        restorecon /usr/libexec/workloadctl/workload-inspect-listener 2>/dev/null || :
         semodule -r workload-resolve 2>/dev/null || :
         restorecon /usr/libexec/workloadctl/workload-vm-resolve 2>/dev/null || :
     fi
@@ -520,7 +520,7 @@ fi
 %{_libexecdir}/workloadctl/workload-vm-netdev
 %{_libexecdir}/workloadctl/workload-vm-notify
 %{_libexecdir}/workloadctl/workload-vm-inspect
-%{_libexecdir}/workloadctl/workload-vm-inspect-listener
+%{_libexecdir}/workloadctl/workload-inspect-listener
 %{_libexecdir}/workloadctl/workload-vm-resolve
 %{_libexecdir}/workloadctl/workload-broker-config
 %{_libexecdir}/workloadctl/workload-vm-qmp

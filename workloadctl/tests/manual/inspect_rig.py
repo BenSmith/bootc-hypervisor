@@ -63,7 +63,7 @@ restart.
 
 WHAT THE DOMAIN CHECKS ARE FOR
 
-workload-vm-inspect-listener carries a filecon and a type_transition, so it
+workload-inspect-listener carries a filecon and a type_transition, so it
 should be wlinspect_t. workload-vm-resolve carries neither, so it entrypoints
 bin_t from init_t with nothing to retype it and runs in PID 1's own domain --
 a process terminating guest-supplied DNS packets, unconfined by the boundary
@@ -258,7 +258,7 @@ def preflight():
     if Path("/proc/self/uid_map").read_text().split()[1] != "0":
         sys.exit("run as root")
     for p in (BASE_IMAGE, Path("/usr/libexec/workloadctl/workload-vm-inspect"),
-              Path("/usr/libexec/workloadctl/workload-vm-inspect-listener")):
+              Path("/usr/libexec/workloadctl/workload-inspect-listener")):
         if not p.exists():
             sys.exit(f"missing {p}")
     if not Path("/dev/kvm").exists():

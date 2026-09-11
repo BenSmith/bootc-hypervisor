@@ -102,7 +102,7 @@ credential:
 flowchart TD
   IS["workload-web-inspect.socket<br/>binds 198.18.1.4:8080 / :8443"]
   RS["workload-web-resolve.socket<br/>binds 127.130.0.4:53 — VM only"]
-  ISVC["workload-web-inspect.service<br/>workload-vm-inspect-listener"]
+  ISVC["workload-web-inspect.service<br/>workload-inspect-listener"]
   RSVC["workload-web-resolve.service"]
   BR["workload-web-broker.service<br/>DynamicUser, 127.129.0.4:8081"]
   HEAD["head unit<br/>VM: workload-web.service<br/>container single: the container unit<br/>pod/bridge: -pod / -net unit"]
@@ -241,7 +241,7 @@ uid-keyed element builders take nothing but a uid.
 ```mermaid
 flowchart TB
   subgraph shared["Shared, byte-for-byte"]
-    LST["workload-vm-inspect-listener<br/>TLS termination, SNI/Host policy, broker dial"]
+    LST["workload-inspect-listener<br/>TLS termination, SNI/Host policy, broker dial"]
     NFT2["inet workload_filter + inet workload_proxy skeletons"]
     BRK["libexec/agent-broker + workload-broker-config config"]
     PI["lib/peer_identity.py — caller identified by the uid owning the far end"]

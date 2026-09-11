@@ -631,7 +631,7 @@ from egress_policy import (
 from workload_addr import broker_listen_address
 import inspect_figures
 
-LISTENER = Path(__file__).resolve().parent.parent / "libexec" / "workload-vm-inspect-listener"
+LISTENER = Path(__file__).resolve().parent.parent / "libexec" / "workload-inspect-listener"
 CIL = Path(__file__).resolve().parent.parent / "security" / "workload-inspect.cil"
 
 _LISTENER_MOD = None
@@ -640,7 +640,7 @@ _LISTENER_MOD = None
 def listener_mod():
     global _LISTENER_MOD
     if _LISTENER_MOD is None:
-        _LISTENER_MOD = load_script("libexec/workload-vm-inspect-listener")
+        _LISTENER_MOD = load_script("libexec/workload-inspect-listener")
     return _LISTENER_MOD
 
 

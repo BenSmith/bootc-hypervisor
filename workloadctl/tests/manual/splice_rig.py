@@ -72,7 +72,7 @@ import time
 sys.dont_write_bytecode = True
 
 LIBDIR = "/usr/libexec/workloadctl"
-LISTENER = f"{LIBDIR}/workload-vm-inspect-listener"
+LISTENER = f"{LIBDIR}/workload-inspect-listener"
 NS = "wlspl"
 
 # The throwaway workload this rig pretends to be. It never becomes a real

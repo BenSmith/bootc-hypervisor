@@ -3,7 +3,7 @@ they emit them into.
 
 WHY THIS IS A SHARED MODULE AND NOT PART OF EITHER PROCESS
 
-The inspector (`workload-vm-inspect-listener`) and the synthesising responder
+The inspector (`workload-inspect-listener`) and the synthesising responder
 (`workload-vm-resolve`) are separate socket-activated services with separate
 lifetimes: a guest that resolves a name and never dials it runs one of them and
 not the other. They both have figures to report, and both need the same two

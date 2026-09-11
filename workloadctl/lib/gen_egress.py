@@ -49,7 +49,7 @@ def generate_inspect_socket(config, user_name: str, uid: int, *,
     workload-container-inspect). It has no default: the caller is the
     substrate, and a default would make this module name one of them. D6's
     "the binary does not change" is about the LISTENER
-    (workload-vm-inspect-listener, ExecStart below in
+    (workload-inspect-listener, ExecStart below in
     generate_inspect_service) -- the arming helper is not that binary.
 
     The listener is a systemd socket unit, not a process that opens its own

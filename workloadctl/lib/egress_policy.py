@@ -6,7 +6,7 @@ One subsystem, one file: the TLS mode, the hostname-matching rule, the parsed
 `[[network.policy]]` entries, the JSON document the listener reads, and the
 vocabulary of the per-request record it writes. Every name here is spelled at
 least twice -- once by the code that renders or arms, once by the code that
-reads back -- and several a third time by `libexec/workload-vm-inspect-listener`,
+reads back -- and several a third time by `libexec/workload-inspect-listener`,
 which is extension-less and so cannot be imported from lib/ at all. That third
 spelling is the reason a constant here is a constant rather than a literal:
 a drift between the two files turns a real refusal into a figure that reads
@@ -345,7 +345,7 @@ INSPECT_STATUS_FILE = "inspect-status.json"
 # inspector's status document.
 #
 # SECOND DEFINITIONS OF STRINGS THE LISTENER OWNS, and stated here for the
-# reason broker_listen_address's twin is: `libexec/workload-vm-inspect-listener` is an
+# reason broker_listen_address's twin is: `libexec/workload-inspect-listener` is an
 # extension-less entrypoint, so nothing in lib/ can import it. A reader either
 # restates the key or matches on a substring -- and a substring is worse, since
 # `not HTTP` is a prefix of `not HTTP (policy entry)` and `host does not match

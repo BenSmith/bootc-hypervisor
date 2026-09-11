@@ -3,7 +3,7 @@ cmd_egress — read back the per-request record the inspector writes.
 
 Rung 5 T2. The record itself is T1's: one JSON object per line in
 `/var/log/workloadctl/egress/<name>/requests.log`, `0600` under a `0700`
-directory, written by `libexec/workload-vm-inspect-listener`. This is the only
+directory, written by `libexec/workload-inspect-listener`. This is the only
 reader of it.
 
 BOTH SUBSTRATES, one tree. The listener is the same binary for a filtered

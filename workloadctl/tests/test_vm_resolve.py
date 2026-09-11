@@ -859,7 +859,7 @@ class TestNoUpstream(unittest.TestCase):
         """This file contains no socket.socket() call of any kind.
 
         The one constructor it relies on moved to lib/sd_listen.py when the
-        activation mechanics were shared with workload-vm-inspect-listener.
+        activation mechanics were shared with workload-inspect-listener.
         The invariant did not move with it, which is the whole point of
         splitting this into two assertions: the property is that THIS program
         never creates a socket, and a file with zero constructors states that

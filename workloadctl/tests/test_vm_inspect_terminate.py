@@ -1,4 +1,4 @@
-"""workload-vm-inspect-listener: the terminated TLS plane (rung 3 T5, T6).
+"""workload-inspect-listener: the terminated TLS plane (rung 3 T5, T6).
 
 Rung 2's plane spliced: it read a name and replayed the guest's own bytes. This
 one TERMINATES -- the listener completes the guest's handshake with a leaf its
@@ -48,7 +48,7 @@ _MOD = None
 def _mod():
     global _MOD
     if _MOD is None:
-        _MOD = load_script("libexec/workload-vm-inspect-listener")
+        _MOD = load_script("libexec/workload-inspect-listener")
     return _MOD
 
 

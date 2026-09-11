@@ -280,7 +280,7 @@ class TestTheValuePinnedConstants(unittest.TestCase):
         import workload_addr
         self.assertEqual(
             workload_addr.INSPECT_LISTENER_BIN,
-            "/usr/libexec/workloadctl/workload-vm-inspect-listener")
+            "/usr/libexec/workloadctl/workload-inspect-listener")
 
 
 if __name__ == "__main__":

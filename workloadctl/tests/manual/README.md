@@ -383,7 +383,7 @@ Loud, at least, unlike the status write. Note that no sibling grant includes
 `rename`, which `os.replace` needs — copying `workload-proxy.cil`'s block
 verbatim gives a half-grant that reaches the replace and fails there.
 
-**Domains.** `workload-vm-inspect-listener` has a filecon and a
+**Domains.** `workload-inspect-listener` has a filecon and a
 `type_transition` and should be `wlinspect_t`. `workload-vm-resolve` has
 neither, so it entrypoints `bin_t` from `init_t` with nothing to retype it and
 runs in PID 1's own domain — a process terminating guest-supplied DNS packets,

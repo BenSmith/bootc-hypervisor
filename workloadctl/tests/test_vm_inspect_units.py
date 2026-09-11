@@ -7,7 +7,7 @@ generator reads, so a drift between the constant and the rendered unit is a
 failure.
 
 These were written before the listener program existed, when no functional test
-could have caught any of it. It exists now (libexec/workload-vm-inspect-listener,
+could have caught any of it. It exists now (libexec/workload-inspect-listener,
 tests/test_vm_inspect_listener.py), which is why the unit numbers the original
 docstring cited are gone: rung 2 reuses those labels for different work, and a
 stale "T5a" reads as a live forward reference to it.
@@ -423,7 +423,7 @@ class TestSidecarHardening(unittest.TestCase):
     def test_the_inspectors_task_ceiling_covers_its_connection_ceiling(self):
         """One thread per connection, so a TasksMax below MAX_CONNECTIONS is a
         listener that refuses connections it counted as admitted."""
-        listener = load_script("libexec/workload-vm-inspect-listener")
+        listener = load_script("libexec/workload-inspect-listener")
         tasks = [l for l in self.inspect.splitlines()
                  if l.startswith("TasksMax=")]
         self.assertEqual(len(tasks), 1)

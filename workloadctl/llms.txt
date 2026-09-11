@@ -148,7 +148,7 @@ Stopping the umbrella tears everything down (`PartOf=`). The CLI accepts `<workl
 
 ## VM workloads
 
-A TOML with a top-level `[vm]` section (mutually exclusive with `[container]`/`[[containers]]`) runs as a raw QEMU/KVM virtual machine under a systemd unit, via `VMSubstrate` and the `libexec/workload-vm-*` helpers (`workload-vm-build-disk`, `workload-vm-qmp`, `workload-vm-shutdown`, `workload-vm-notify`, `workload-vm-netdev`, `workload-vm-filter`, `workload-vm-inspect`, `workload-vm-inspect-listener`, `workload-vm-resolve`). It gets the same dedicated user, the same generated units and the same verbs a container workload does.
+A TOML with a top-level `[vm]` section (mutually exclusive with `[container]`/`[[containers]]`) runs as a raw QEMU/KVM virtual machine under a systemd unit, via `VMSubstrate` and the `libexec/workload-vm-*` helpers (`workload-vm-build-disk`, `workload-vm-qmp`, `workload-vm-shutdown`, `workload-vm-notify`, `workload-vm-netdev`, `workload-vm-filter`, `workload-vm-inspect`, `workload-vm-resolve`). It gets the same dedicated user, the same generated units and the same verbs a container workload does.
 
 - **Disks** — a writable `system.qcow2` built once from the image source (rebuildable, with generational `system.qcow2.gen-N` rollback, `rollback_keep + 1` retained) plus an optional durable `data.qcow2`. `update`/`reprovision` rebuilds `system.qcow2`; `rollback` restores the previous generation. The image source is a cloud image by URL + checksum, a `local_image`, or a bootc `image` reference.
 - **Boot/seed** — UEFI/OVMF firmware; cloud-init seed ISO from `[vm.cloud_init]` (user-data template + `template_vars`); a per-instance SSH key for CLI access. CLI verbs reach a VM over SSH (`exec`/`shell`/`cp`) or QMP (`incant`, lifecycle, `capture`), not podman.
@@ -207,7 +207,7 @@ The property the whole arrangement exists to guarantee: a guest rewound 7200 s �
 
 ### Hostname policy: transparent egress inspection
 
-`[vm.network].hosts` gives one VM its own **egress inspector** — a socket-activated listener (`libexec/workload-vm-inspect-listener`) running as `_wl-<name>`, confined by `security/workload-inspect.cil` — plus a **synthesising DNS responder** (`libexec/workload-vm-resolve`, `security/workload-resolve.cil`). **The guest is told nothing.** It dials 80 and 443 the way it would on any network and a DNAT keyed on the workload uid lands it on its own inspector, which reads the `Host` header (forward, or 403) or the ClientHello's SNI. Enforcement is at the **name** and never at an address — resolving the list to addresses at rule-install time races DNS, breaks on CDN churn, and opens everything sharing an address. A connection carrying no readable name is dropped, not guessed at.
+`[vm.network].hosts` gives one VM its own **egress inspector** — a socket-activated listener (`libexec/workload-inspect-listener`) running as `_wl-<name>`, confined by `security/workload-inspect.cil` — plus a **synthesising DNS responder** (`libexec/workload-vm-resolve`, `security/workload-resolve.cil`). **The guest is told nothing.** It dials 80 and 443 the way it would on any network and a DNAT keyed on the workload uid lands it on its own inspector, which reads the `Host` header (forward, or 403) or the ClientHello's SNI. Enforcement is at the **name** and never at an address — resolving the list to addresses at rule-install time races DNS, breaks on CDN churn, and opens everything sharing an address. A connection carrying no readable name is dropped, not guessed at.
 
 Patterns are **fnmatch, not a DNS suffix match**, with an apex trap: `*.example.com` requires something before the dot and does not cover `example.com`. A wildcard whose parent is a registration domain anyone can create records under (`*.github.io`, `*.pages.dev`) is **warned** and never an error — the list of such parents cannot be exhaustive, and a stale copy shipped in an RPM that hard-failed a valid config would be worse than a line of output.
 
@@ -475,7 +475,8 @@ generators/workload-generate       # Python script run by workload-generate.serv
 libexec/workload-ensure-user       # Per-workload user setup (ExecStartPre)
 libexec/workload-write-env         # EnvironmentFile rendering (incl. ${SECRET:name})
 libexec/workload-vm-*              # VM helpers: build-disk, qmp, shutdown, notify, netdev, filter,
-                                   #   inspect, inspect-listener, resolve
+                                   #   inspect, resolve
+libexec/workload-inspect-listener  # The egress inspector itself: socket-activated, both substrates
 libexec/workload-broker-config     # Writes one broker instance's broker.toml (ExecStartPre, either substrate)
 libexec/agent-broker               # The credential broker: a whole standalone program, not a helper
 libexec/workload-pcap              # Capture runner (SIGTERM → SystemExit)
