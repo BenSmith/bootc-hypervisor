@@ -71,13 +71,12 @@ import secrets
 import selectors
 import socket
 import ssl
-import sys
 import threading
 import time
 
 from config_parser import normalise_hostname
 from egress_plane import TLS, plane_for_port
-from egress_policy import INSPECT_DIGEST_KEY, Policy
+from egress_policy import INSPECT_DIGEST_KEY
 from egress_ca import LeafRefused, ca_cert_path, ca_key_path
 from tls_hello import HelloUnreadable, read_client_hello
 from http_framing import (
@@ -95,16 +94,16 @@ from egress_record import (
     DROP_NOT_ALLOWLISTED, DROP_NOT_H2, DROP_NOT_HTTP, DROP_NOT_HTTP_POLICY,
     DROP_NOT_PERMITTED, DROP_NO_NAME, DROP_RELAY_FAILED, DROP_THROTTLED,
     DROP_TIMED_OUT, DROP_UNREADABLE_REQUEST, LOG_ID_FIELD,
-    Record, RequestLog, Where, format_endpoint,
+    Record, Where, format_endpoint,
 )
 from egress_relay import relay
 import egress_relay
 from egress_status import write_status
 from egress_upstream import (
-    ALPN_H2, BROKER_UPSTREAM_KEY, UPSTREAM_ALPN, Upstream, dial_failure_reason,
+    ALPN_H2, BROKER_UPSTREAM_KEY, UPSTREAM_ALPN, dial_failure_reason,
     tls_failure,
 )
-from inspect_counters import Counters
+from inspect_scope import Inspection
 from peer_identity import local_endpoints, peer_uid
 from vm_clock import resync_guest_clock_if_skewed
 from workload_lib import workload_state_dir
@@ -212,41 +211,14 @@ class Listener:
                  status_path=None, minter=None, record_path=None,
                  broker_address=None):
         self._sockets = list(sockets)
-        self._out = out if out is not None else sys.stdout
         self._ceiling = Ceiling(limit)
         self._stop = threading.Event()
         # None means "count but never write", which is what the tests want and
-        # also what a listener started without a workload name would do. The
-        # counters exist either way: a figure that only accumulates when
-        # someone is watching is a figure nobody can trust.
+        # also what a listener started without a workload name would do.
         self._status_path = status_path
-        # An empty policy is a legal configuration and NOT a default: the
-        # entrypoint will not construct a Listener without one. The fallback
-        # exists so the tests that only exercise the shape need not invent a
-        # policy.
-        # `splice`, NOT TLS_DEFAULT. This fallback is a test convenience,
-        # and the product default terminates -- which needs a CA, a minter and a
-        # state directory none of the shape tests have. Naming the weaker mode
-        # here is the honest version of that: a Listener built with no policy is
-        # explicitly not exercising the default, rather than exercising it with
-        # half its machinery missing.
-        self._policy = policy if policy is not None else Policy(
-            tls="splice", hosts=())
-        self.counters = Counters(self._policy)
-        # None means "build no record", the same convention _status_path uses
-        # and for the same reason: the shape tests construct a Listener
-        # with no workload name and no directory to write into, and a
-        # diagnostic that made those impossible would be a diagnostic that
-        # decides which tests can exist.
-        self.record = RequestLog(
-            record_path, out=self._out,
-            on_failure=self.counters.record_write_failure)
-        # None under `tls = "splice"`, and the entrypoint refuses to start
-        # without one under `tls = "inspect"`. Not defaulted here: a Listener that
-        # terminated with no minter would have no leaf to present and would
-        # fail every guest handshake while reporting itself healthy.
-        self._minter = minter
-        self._upstream = Upstream(broker_address)
+        self.inspection = Inspection(
+            policy, out=out, minter=minter, record_path=record_path,
+            broker_address=broker_address)
 
     def stop(self):
         """Ask the accept loop to end; called from the SIGTERM handler."""
@@ -309,7 +281,7 @@ class Listener:
         if plane is None:
             # Not a port the socket unit binds, so not a listener of ours:
             # there is no plane to serve it on and none a record could name.
-            self._log(
+            self.inspection.log(
                 f"rejected {LOG_ID_FIELD}={cid} local={format_endpoint(local)} "
                 f"peer={format_endpoint(peer)} reason='not an inspect port'")
             conn.close()
@@ -341,11 +313,11 @@ class Listener:
             # unresolved, which is handled below.
             caller = None
         if caller is not None and caller != os.getuid():
-            self._log(
+            self.inspection.log(
                 f"rejected {LOG_ID_FIELD}={cid} plane={plane.label} "
                 f"local={format_endpoint(local)} peer={format_endpoint(peer)} caller_uid={caller} "
                 f"reason='{DROP_FOREIGN_CALLER}'")
-            self.counters.record_drop(DROP_FOREIGN_CALLER)
+            self.inspection.counters.record_drop(DROP_FOREIGN_CALLER)
             conn.close()
             return
         # `None` means the lookup could not name the owner -- a row that had
@@ -360,17 +332,17 @@ class Listener:
             # routine race -- the row can leave the table before we read it --
             # and it would carry a connection id, putting entries in the log an
             # operator joins on for connections that were served normally.
-            self.counters.record_caller_unresolved()
+            self.inspection.counters.record_caller_unresolved()
         if not self._ceiling.admit():
             # Reject rather than queue: close now, count it, spawn no thread.
-            self._log(
+            self.inspection.log(
                 f"rejected {LOG_ID_FIELD}={cid} plane={plane.label} local={format_endpoint(local)} "
                 f"peer={format_endpoint(peer)} reason='connection ceiling reached'")
             # Counted as a drop as well as a rejection. The guest saw a closed
             # connection, which is the same thing every other drop reason gives
             # it, and a disposition total that omitted these would not add up
             # to the connections that were accepted.
-            self.counters.record_drop(DROP_CEILING)
+            self.inspection.counters.record_drop(DROP_CEILING)
             conn.close()
             return
         # Daemon, as the broker's ThreadingMixIn: a SIGTERM that stops the
@@ -390,10 +362,10 @@ class Listener:
                 daemon=True).start()
         except RuntimeError as exc:
             self._ceiling.release(refused=True)
-            self._log(
+            self.inspection.log(
                 f"rejected {LOG_ID_FIELD}={cid} plane={plane.label} local={format_endpoint(local)} "
                 f"peer={format_endpoint(peer)} reason='cannot start thread: {exc}'")
-            self.counters.record_drop(DROP_CEILING)
+            self.inspection.counters.record_drop(DROP_CEILING)
             conn.close()
 
     def _serve(self, conn, peer, local, plane, cid):
@@ -420,22 +392,6 @@ class Listener:
             conn.close()
             self._ceiling.release()
 
-    def _connection_record(self, where, mode, *, host=None, decision,
-                           reason=None, status=None):
-        """One record for a whole connection, where there are no requests.
-
-        THE RECORD'S COVERAGE IS THE COUNTERS' COVERAGE. Every path that calls
-        record_drop, record_splice or record_termination writes a line, or the
-        file answers "what did this guest do" with a subset and a reader has no
-        way to know which subset. Two of these are the paths §11 names --
-        `splice` and `h2` relay bytes this process never decodes -- and the
-        rest are decisions taken at the front of a TLS connection, before there
-        is a request to attach anything to.
-        """
-        rec = Record(self.record, where, mode, host=host)
-        rec.set(decision=decision, reason=reason, status=status)
-        rec.emit()
-
     def _serve_tls(self, conn, where):
         """Peek, match, and then act by mode.
 
@@ -458,47 +414,47 @@ class Listener:
         # it. A consuming read here would leave a spliced host's own hello
         # already off the socket, and the splice property is that the origin
         # completes its handshake with the guest's bytes.
-        inspect = self._policy.tls == "inspect"
-        if inspect and self._minter is None:
+        inspect = self.inspection.policy.tls == "inspect"
+        if inspect and self.inspection.minter is None:
             # Unreachable through the entrypoint, which refuses to start in
             # this state.
             # Kept anyway and LOUD: a Listener that terminated without a minter
             # would fail every guest handshake with an opaque certificate error,
             # which is the one failure this whole path exists to avoid, and a
             # test that constructed one would otherwise get it silently.
-            self.counters.record_drop(DROP_MINT_FAILED)
-            self._connection_record(where, "terminate", decision="drop",
-                                    reason=DROP_MINT_FAILED)
-            self._log(f"drop {where} reason='could not mint a leaf: this "
-                      f"listener has no minter'")
+            self.inspection.counters.record_drop(DROP_MINT_FAILED)
+            self.inspection.connection_record(where, "terminate", decision="drop",
+                                              reason=DROP_MINT_FAILED)
+            self.inspection.log(f"drop {where} reason='could not mint a leaf: this "
+                                f"listener has no minter'")
             return
         try:
             raw, hello = read_client_hello(conn, peek=inspect)
         except HelloUnreadable as exc:
-            self.counters.record_unreadable_hello()
-            self.counters.record_drop(DROP_NO_NAME)
-            self._connection_record(where, "terminate", decision="drop",
-                                    reason=DROP_NO_NAME)
-            self._log(f"drop {where} reason='no readable name: {exc}'")
+            self.inspection.counters.record_unreadable_hello()
+            self.inspection.counters.record_drop(DROP_NO_NAME)
+            self.inspection.connection_record(where, "terminate", decision="drop",
+                                              reason=DROP_NO_NAME)
+            self.inspection.log(f"drop {where} reason='no readable name: {exc}'")
             return
         if not hello.server_name:
             # The tripwire runs BEFORE the drop and with on_a_list False: a
             # hello that withholds SNI matched nothing, and if it also carried
             # ECH that is the strongest form of the signal, not an absent one.
-            self.counters.record_hello(hello, False)
-            self.counters.record_drop(DROP_NO_NAME)
-            self._connection_record(where, "terminate", decision="drop",
-                                    reason=DROP_NO_NAME)
-            self._log(f"drop {where} reason='no readable name: the "
-                      f"ClientHello carries no server_name extension'")
+            self.inspection.counters.record_hello(hello, False)
+            self.inspection.counters.record_drop(DROP_NO_NAME)
+            self.inspection.connection_record(where, "terminate", decision="drop",
+                                              reason=DROP_NO_NAME)
+            self.inspection.log(f"drop {where} reason='no readable name: the "
+                                f"ClientHello carries no server_name extension'")
             return
         host = normalise_hostname(hello.server_name)
         # `admits`, not a bare `hosts` match: a [[vm.network.policy]] entry
         # allowlists its own host, so a workload whose entire allowlist is
         # written as policy entries would otherwise lose every connection at
         # the front, before the request its rules were written about exists.
-        allowed = self._policy.admits(host)
-        self.counters.record_hello(hello, allowed)
+        allowed = self.inspection.policy.admits(host)
+        self.inspection.counters.record_hello(hello, allowed)
         # THE ALLOWLIST DECISION COMES FIRST, and the parenthesisation is what
         # says so. A name on the splice list and on no allowlist is refused,
         # not spliced -- and on a terminating listener it is refused the way
@@ -507,15 +463,15 @@ class Listener:
         # `splice` PATTERN can cover names `hosts` does not (`*.example.com`
         # spliced, one name of it allowlisted), and validation cannot catch
         # that because the pattern does match allowlisted names.
-        if inspect and not (allowed and self._policy.splices(host)):
+        if inspect and not (allowed and self.inspection.policy.splices(host)):
             self._serve_tls_inspect(conn, where, host, allowed)
             return
         if not allowed:
-            self.counters.record_drop(DROP_NOT_ALLOWLISTED, host)
-            self._connection_record(where, "splice", host=host,
-                                    decision="drop",
-                                    reason=DROP_NOT_ALLOWLISTED)
-            self._log(f"drop {where} host={host} reason='not allowlisted'")
+            self.inspection.counters.record_drop(DROP_NOT_ALLOWLISTED, host)
+            self.inspection.connection_record(where, "splice", host=host,
+                                              decision="drop",
+                                              reason=DROP_NOT_ALLOWLISTED)
+            self.inspection.log(f"drop {where} host={host} reason='not allowlisted'")
             return
         # Dial the NAME, never an address (§7.4). The address the guest aimed
         # at is this inspector's own listener anyway -- the redirect already
@@ -526,11 +482,11 @@ class Listener:
             upstream = socket.create_connection(
                 (host, TLS.guest_port), timeout=egress_relay.CONNECTION_TIMEOUT)
         except OSError as exc:
-            reason = dial_failure_reason(host, self._policy.internal)
-            self.counters.record_drop(reason, host)
-            self._connection_record(where, "splice", host=host,
-                                    decision="drop", reason=reason)
-            self._log(f"drop {where} host={host} reason='{reason}: {exc}'")
+            reason = dial_failure_reason(host, self.inspection.policy.internal)
+            self.inspection.counters.record_drop(reason, host)
+            self.inspection.connection_record(where, "splice", host=host,
+                                              decision="drop", reason=reason)
+            self.inspection.log(f"drop {where} host={host} reason='{reason}: {exc}'")
             return
         try:
             # The buffered hello, unmodified and before anything else. This is
@@ -546,10 +502,10 @@ class Listener:
             # being broken by the exemption that was supposed to fix it.
             if not inspect:
                 upstream.sendall(raw)
-            self.counters.record_splice()
-            self._log(f"splice {where} host={host}"
-                      f"{' per-host' if inspect else ''}")
-            rec = Record(self.record, where, "splice", host=host)
+            self.inspection.counters.record_splice()
+            self.inspection.log(f"splice {where} host={host}"
+                                f"{' per-host' if inspect else ''}")
+            rec = Record(self.inspection.record, where, "splice", host=host)
             rec.dialled(upstream)
             rec.set(decision="forward")
             try:
@@ -597,7 +553,7 @@ class Listener:
         # whatever came back. With the non-HTTP fallback gone there is also
         # nothing to sniff -- the only thing that ever needed a protocol
         # discovered after the fact was the relay path §8 deleted.
-        h2 = self._policy.speaks_h2(host)
+        h2 = self.inspection.policy.speaks_h2(host)
         # A BROKERED HOST IS NOT DIALLED HERE AT ALL, and the §6 invariant above
         # survives that: the offer is still chosen from configuration, it is
         # simply always `http/1.1` -- the broker leg is cleartext HTTP/1.1, and
@@ -617,9 +573,9 @@ class Listener:
         # have reached the broker fine, and a private origin behind a CA this
         # host does not hold failed them permanently.
         #
-        # The mint does not need it either: `self._minter.leaf(host, ...)` takes
+        # The mint does not need it either: `self.inspection.minter.leaf(host, ...)` takes
         # the name and nothing else.
-        brokered = allowed and self._policy.credential_for(host) is not None
+        brokered = allowed and self.inspection.policy.credential_for(host) is not None
         if brokered:
             h2 = False
         if not allowed:
@@ -632,13 +588,13 @@ class Listener:
             pass  # no upstream leg at connection time; see above
         else:
             try:
-                upstream = self._upstream.dial_tls(
+                upstream = self.inspection.upstream.dial_tls(
                     host, ALPN_H2 if h2 else UPSTREAM_ALPN)
             except ssl.SSLError as exc:
                 reason, text = tls_failure(host, exc)
                 refusal = (reason, 502, "Bad Gateway", text)
             except OSError as exc:
-                reason = dial_failure_reason(host, self._policy.internal)
+                reason = dial_failure_reason(host, self.inspection.policy.internal)
                 refusal = (reason, 502, "Bad Gateway",
                            f"{host} could not be reached: {exc}")
             else:
@@ -684,23 +640,23 @@ class Listener:
             # because the next connection to it is expected to succeed and
             # should not pay for a mint. Only a name policy refused goes in the
             # denial set, which is the set a flood can fill.
-            leaf = self._minter.leaf(host, denied=not allowed)
+            leaf = self.inspection.minter.leaf(host, denied=not allowed)
         except MintThrottled:
             # Nothing legible can be delivered without a leaf, so this is the
             # one outcome that closes on the guest. It is reachable only after
             # the bucket has been emptied, which honest traffic does not do.
-            self.counters.record_drop(DROP_THROTTLED, host)
-            self._connection_record(where, "terminate", host=host,
-                                    decision="drop", reason=DROP_THROTTLED)
-            self._log(f"drop {where} host={host} reason='mint rationed: the "
-                      f"leaf bucket is empty'")
+            self.inspection.counters.record_drop(DROP_THROTTLED, host)
+            self.inspection.connection_record(where, "terminate", host=host,
+                                              decision="drop", reason=DROP_THROTTLED)
+            self.inspection.log(f"drop {where} host={host} reason='mint rationed: the "
+                                f"leaf bucket is empty'")
             return
         except (LeafRefused, MintFailed) as exc:
-            self.counters.record_drop(DROP_MINT_FAILED, host)
-            self._connection_record(where, "terminate", host=host,
-                                    decision="drop", reason=DROP_MINT_FAILED)
-            self._log(f"drop {where} host={host} "
-                      f"reason='could not mint a leaf: {exc}'")
+            self.inspection.counters.record_drop(DROP_MINT_FAILED, host)
+            self.inspection.connection_record(where, "terminate", host=host,
+                                              decision="drop", reason=DROP_MINT_FAILED)
+            self.inspection.log(f"drop {where} host={host} "
+                                f"reason='could not mint a leaf: {exc}'")
             return
         finally:
             # The upstream leg is open by now on the allowed path -- except a
@@ -737,21 +693,21 @@ class Listener:
             # say so if it ever does: it means that sizing is wrong, and no
             # other line would ever tell anyone.
             if not leaf.path.exists():
-                self.counters.record_drop(DROP_MINT_FAILED, host)
-                self._connection_record(where, "terminate", host=host,
-                                        decision="drop",
-                                        reason=DROP_MINT_FAILED)
-                self._log(f"drop {where} host={host} reason='the leaf minted "
-                          f"for this connection was evicted before it could be "
-                          f"presented: {exc}. This is a cache-sizing fault, "
-                          f"not a trust one -- the leaf cache must hold more "
-                          f"entries than there are connection slots'")
+                self.inspection.counters.record_drop(DROP_MINT_FAILED, host)
+                self.inspection.connection_record(where, "terminate", host=host,
+                                                  decision="drop",
+                                                  reason=DROP_MINT_FAILED)
+                self.inspection.log(f"drop {where} host={host} reason='the leaf minted "
+                                    f"for this connection was evicted before it could be "
+                                    f"presented: {exc}. This is a cache-sizing fault, "
+                                    f"not a trust one -- the leaf cache must hold more "
+                                    f"entries than there are connection slots'")
                 if upstream is not None:
                     upstream.sock.close()
                 return
-            self.counters.record_drop(DROP_RELAY_FAILED, host)
-            self._connection_record(where, "terminate", host=host,
-                                    decision="drop", reason=DROP_RELAY_FAILED)
+            self.inspection.counters.record_drop(DROP_RELAY_FAILED, host)
+            self.inspection.connection_record(where, "terminate", host=host,
+                                              decision="drop", reason=DROP_RELAY_FAILED)
             # NAMES BOTH SHAPES. "A guest provisioned before this workload had
             # a CA does not trust it and must be re-seeded" is true for a VM
             # instance whose seed predates the CA, and actively misleading for
@@ -770,21 +726,21 @@ class Listener:
             # that did not complete and nothing about how the client was built
             # -- so it names both and the remedy each one needs, rather than
             # guessing and being confidently wrong for one substrate.
-            self._log(f"drop {where} host={host} reason='the client did not "
-                      f"complete the handshake: {exc}. It did not trust the "
-                      f"leaf this workload minted, which has two shapes and "
-                      f"they need different remedies. (1) A client that COULD "
-                      f"be given the CA and was not: a VM instance seeded "
-                      f"before this workload had one, which cloud-init will "
-                      f"not revisit and which must be re-seeded; or a "
-                      f"container whose ca_delivery route is absent or wrong. "
-                      f"(2) A client that CANNOT be given it at all because "
-                      f"its trust store is embedded in the image and it reads "
-                      f"none of the CA environment variables -- a JVM, or "
-                      f"anything on rustls. For (2) there is no CA route to "
-                      f"fix: add {host} to [[network.splice]] "
-                      f"([[vm.network.splice]] for a VM) so the connection is "
-                      f"spliced rather than terminated, or change the image'")
+            self.inspection.log(f"drop {where} host={host} reason='the client did not "
+                                f"complete the handshake: {exc}. It did not trust the "
+                                f"leaf this workload minted, which has two shapes and "
+                                f"they need different remedies. (1) A client that COULD "
+                                f"be given the CA and was not: a VM instance seeded "
+                                f"before this workload had one, which cloud-init will "
+                                f"not revisit and which must be re-seeded; or a "
+                                f"container whose ca_delivery route is absent or wrong. "
+                                f"(2) A client that CANNOT be given it at all because "
+                                f"its trust store is embedded in the image and it reads "
+                                f"none of the CA environment variables -- a JVM, or "
+                                f"anything on rustls. For (2) there is no CA route to "
+                                f"fix: add {host} to [[network.splice]] "
+                                f"([[vm.network.splice]] for a VM) so the connection is "
+                                f"spliced rather than terminated, or change the image'")
             if upstream is not None:
                 upstream.sock.close()
             return
@@ -795,23 +751,23 @@ class Listener:
         try:
             if refusal is not None:
                 reason, status, phrase, text = refusal
-                self.counters.record_drop(reason, host)
-                self.counters.record_bump()
+                self.inspection.counters.record_drop(reason, host)
+                self.inspection.counters.record_bump()
                 # THE MOST COMMON DENIAL ON THIS PLANE, and it never reaches
                 # _serve_request: the decision was taken from the server name
                 # before the guest's handshake completed, so there is no
                 # request to hang it on. Without this the record's terminated
                 # plane holds every allowed request and no refused one.
-                self._connection_record(where, "terminate", host=host,
-                                        decision="drop", reason=reason,
-                                        status=status)
-                self._log(f"bump {where} host={host} status={status} "
-                          f"reason='{reason}: {text}'")
+                self.inspection.connection_record(where, "terminate", host=host,
+                                                  decision="drop", reason=reason,
+                                                  status=status)
+                self.inspection.log(f"bump {where} host={host} status={status} "
+                                    f"reason='{reason}: {text}'")
                 self._bump_answer(tls_conn, status, phrase, text)
                 return
-            self.counters.record_termination()
-            self._log(f"terminate {where} host={host}"
-                      f"{' h2' if h2 else ''}")
+            self.inspection.counters.record_termination()
+            self.inspection.log(f"terminate {where} host={host}"
+                                f"{' h2' if h2 else ''}")
             if h2:
                 self._serve_h2(tls_conn, where, host, upstream)
             else:
@@ -887,7 +843,7 @@ class Listener:
         # rather than letting the file be silent about a connection that
         # carried requests. `h2_unrecorded` beside it is the count a reader
         # needs before concluding a guest made no requests.
-        rec = Record(self.record, where, "h2", host=host)
+        rec = Record(self.inspection.record, where, "h2", host=host)
         rec.dialled(upstream.sock)
         try:
             client = _Stream(tls_conn)
@@ -895,22 +851,22 @@ class Listener:
             try:
                 preface = client.read_exactly(len(H2_PREFACE))
             except (RequestUnreadable, OSError) as exc:
-                self.counters.record_drop(DROP_NOT_H2, host)
+                self.inspection.counters.record_drop(DROP_NOT_H2, host)
                 rec.set(decision="drop", reason=DROP_NOT_H2)
-                self._log(f"drop {where} host={host} reason='not HTTP/2: the "
-                          f"connection preface never arrived ({exc}); drop the "
-                          f"[[vm.network.http2]] entry for {host}, or move it "
-                          f"to [[vm.network.splice]]'")
+                self.inspection.log(f"drop {where} host={host} reason='not HTTP/2: the "
+                                    f"connection preface never arrived ({exc}); drop the "
+                                    f"[[vm.network.http2]] entry for {host}, or move it "
+                                    f"to [[vm.network.splice]]'")
                 return
             if preface != H2_PREFACE:
-                self.counters.record_drop(DROP_NOT_H2, host)
+                self.inspection.counters.record_drop(DROP_NOT_H2, host)
                 rec.set(decision="drop", reason=DROP_NOT_H2)
-                self._log(f"drop {where} host={host} reason='not HTTP/2: "
-                          f"{preface[:8]!r} is not the connection preface, and "
-                          f"{host} is in [[vm.network.http2]]. Either it does not "
-                          f"speak h2 -- drop the entry -- or it speaks something "
-                          f"this cannot police, and belongs in "
-                          f"[[vm.network.splice]] instead'")
+                self.inspection.log(f"drop {where} host={host} reason='not HTTP/2: "
+                                    f"{preface[:8]!r} is not the connection preface, and "
+                                    f"{host} is in [[vm.network.http2]]. Either it does not "
+                                    f"speak h2 -- drop the entry -- or it speaks something "
+                                    f"this cannot police, and belongs in "
+                                    f"[[vm.network.splice]] instead'")
                 return
             framing = H2Framing()
             # Everything the preface read pulled in past its own 24 bytes. It is
@@ -935,10 +891,10 @@ class Listener:
                 if early:
                     tls_conn.sendall(early)
             except OSError as exc:
-                self.counters.record_drop(DROP_RELAY_FAILED, host)
+                self.inspection.counters.record_drop(DROP_RELAY_FAILED, host)
                 rec.set(decision="drop", reason=DROP_RELAY_FAILED)
-                self._log(f"drop {where} host={host} "
-                          f"reason='relay failed: {exc}'")
+                self.inspection.log(f"drop {where} host={host} "
+                                    f"reason='relay failed: {exc}'")
                 return
             try:
                 relay(tls_conn, upstream.sock,
@@ -948,15 +904,15 @@ class Listener:
                 rec.set(decision="drop", reason=DROP_NOT_H2)
                 return
             except OSError as exc:
-                self.counters.record_drop(DROP_RELAY_FAILED, host)
+                self.inspection.counters.record_drop(DROP_RELAY_FAILED, host)
                 rec.set(decision="drop", reason=DROP_RELAY_FAILED)
-                self._log(f"drop {where} host={host} "
-                          f"reason='relay failed: {exc}'")
+                self.inspection.log(f"drop {where} host={host} "
+                                    f"reason='relay failed: {exc}'")
                 return
             # The session ran. Recorded as a forward and counted as a blind
             # spot in the same breath, because both are true of it.
             rec.set(decision="forward")
-            self.counters.record_h2_unrecorded()
+            self.inspection.counters.record_h2_unrecorded()
             if not framing.aligned:
                 # Counted, and the session is over either way -- but silence
                 # here would make a stream that stopped framing halfway
@@ -971,11 +927,11 @@ class Listener:
             upstream.sock.close()
 
     def _drop_not_h2(self, where, host, exc):
-        self.counters.record_drop(DROP_NOT_H2, host)
-        self._log(f"drop {where} host={host} reason='not HTTP/2: {exc}. "
-                  f"{host} is in [[vm.network.http2]] and this session did not "
-                  f"speak h2; drop the entry, or move the host to "
-                  f"[[vm.network.splice]]'")
+        self.inspection.counters.record_drop(DROP_NOT_H2, host)
+        self.inspection.log(f"drop {where} host={host} reason='not HTTP/2: {exc}. "
+                            f"{host} is in [[vm.network.http2]] and this session did not "
+                            f"speak h2; drop the entry, or move the host to "
+                            f"[[vm.network.splice]]'")
 
     def _serve_terminated(self, tls_conn, where, host, upstream):
         """Authorise every request inside one terminated session.
@@ -1051,12 +1007,12 @@ class Listener:
             return True
         # Asked of the policy, not of the request: there is no request. See
         # Policy.governs.
-        if self._policy.governs(host):
-            self.counters.record_drop(DROP_NOT_HTTP_POLICY, host)
-            self._connection_record(where, "terminate", host=host,
-                                    decision="drop",
-                                    reason=DROP_NOT_HTTP_POLICY)
-            self._log(
+        if self.inspection.policy.governs(host):
+            self.inspection.counters.record_drop(DROP_NOT_HTTP_POLICY, host)
+            self.inspection.connection_record(where, "terminate", host=host,
+                                              decision="drop",
+                                              reason=DROP_NOT_HTTP_POLICY)
+            self.inspection.log(
                 f"drop {where} host={host} reason='not HTTP (policy entry): "
                 f"this session was terminated and {start[:8]!r} does not begin "
                 f"a request line, so the [[vm.network.policy]] entry for "
@@ -1065,13 +1021,13 @@ class Listener:
                 f"entry AND that policy entry deleted -- validate refuses both "
                 f"on one host'")
             return False
-        self.counters.record_drop(DROP_NOT_HTTP, host)
-        self._connection_record(where, "terminate", host=host,
-                                decision="drop", reason=DROP_NOT_HTTP)
-        self._log(f"drop {where} host={host} reason='not HTTP: this session "
-                  f"was terminated and {start[:8]!r} does not begin a request "
-                  f"line. Add {host} to [[vm.network.splice]] if it needs to "
-                  f"keep end-to-end TLS'")
+        self.inspection.counters.record_drop(DROP_NOT_HTTP, host)
+        self.inspection.connection_record(where, "terminate", host=host,
+                                          decision="drop", reason=DROP_NOT_HTTP)
+        self.inspection.log(f"drop {where} host={host} reason='not HTTP: this session "
+                            f"was terminated and {start[:8]!r} does not begin a request "
+                            f"line. Add {host} to [[vm.network.splice]] if it needs to "
+                            f"keep end-to-end TLS'")
         return False
 
     def _serve_cleartext(self, conn, where):
@@ -1123,7 +1079,7 @@ class Listener:
         connection reaching its bound, and a guest that closed between
         requests -- and Record.emit writes nothing for those.
         """
-        rec = Record(self.record, where,
+        rec = Record(self.inspection.record, where,
                       "terminate" if pinned_host is not None else "forward")
         try:
             return self._serve_request(client, conn, where, upstreams, first,
@@ -1172,16 +1128,16 @@ class Listener:
                 # connection nobody was using. Logged all the same -- the guest
                 # sees a closed connection either way, and an operator staring
                 # at one wants to know which end let go and why.
-                self._log(f"close {where} reason='{exc}'")
+                self.inspection.log(f"close {where} reason='{exc}'")
                 return False
-            self.counters.record_drop(DROP_TIMED_OUT)
+            self.inspection.counters.record_drop(DROP_TIMED_OUT)
             rec.set(decision="drop", reason=DROP_TIMED_OUT)
-            self._log(f"drop {where} reason='timed out: {exc}'")
+            self.inspection.log(f"drop {where} reason='timed out: {exc}'")
             return False
         except RequestUnreadable as exc:
-            self.counters.record_drop(DROP_UNREADABLE_REQUEST)
+            self.inspection.counters.record_drop(DROP_UNREADABLE_REQUEST)
             rec.set(decision="drop", reason=DROP_UNREADABLE_REQUEST)
-            self._log(f"drop {where} reason='unreadable request: {exc}'")
+            self.inspection.log(f"drop {where} reason='unreadable request: {exc}'")
             return False
         if not head:
             return False                # the guest closed between requests
@@ -1194,12 +1150,12 @@ class Listener:
             # No 403 here and no host in the line: this is not a policy
             # decision, and reporting it as one would put a name we could not
             # read into the same bucket as a name we refused.
-            self.counters.record_drop(DROP_UNREADABLE_REQUEST)
+            self.inspection.counters.record_drop(DROP_UNREADABLE_REQUEST)
             # No host, no method and no path: the head is exactly what could
             # not be read, so the record says so by carrying none of them
             # rather than by guessing at a name out of bytes we refused.
             rec.set(decision="drop", reason=DROP_UNREADABLE_REQUEST, status=400)
-            self._log(f"drop {where} reason='unreadable request: {exc}'")
+            self.inspection.log(f"drop {where} reason='unreadable request: {exc}'")
             send_response(conn, 400, "Bad Request", str(exc), close=True)
             return False
         if pinned_host is not None and req.host != pinned_host:
@@ -1210,31 +1166,31 @@ class Listener:
             # there on its own merits.
             #
             reason = self._binding_reason(req.host)
-            self.counters.record_drop(reason, req.host)
+            self.inspection.counters.record_drop(reason, req.host)
             rec.request(req)
             rec.set(decision="drop", reason=reason, status=421)
             listed = " (allowlisted)" if (
                 reason is DROP_MISDIRECTED_LISTED) else ""
-            self._log(f"drop {where} host={req.host} reason='host does not "
-                      f"match the server name {pinned_host}{listed}'")
+            self.inspection.log(f"drop {where} host={req.host} reason='host does not "
+                                f"match the server name {pinned_host}{listed}'")
             return self._refuse(
                 client, conn, req, 421, "Misdirected Request",
                 f"this session was established for {pinned_host}, not "
                 f"{req.host}")
-        if not self._policy.admits(req.host):
+        if not self.inspection.policy.admits(req.host):
             # A STATUS is speakable on 80, unlike 443 -- there is no session to
             # be inside, so the guest gets a real 403 rather than a connection
             # that closed for reasons it cannot see. What it does NOT get is a
             # body naming the host or the allowlist: that reason is recorded for
             # the operator (the journal line and the record below), never handed
             # to the guest, whose only use for it is to learn it is filtered.
-            self.counters.record_drop(DROP_NOT_ALLOWLISTED, req.host)
+            self.inspection.counters.record_drop(DROP_NOT_ALLOWLISTED, req.host)
             rec.request(req)
             rec.set(decision="drop", reason=DROP_NOT_ALLOWLISTED, status=403)
-            self._log(f"drop {where} host={req.host} reason='not allowlisted'")
+            self.inspection.log(f"drop {where} host={req.host} reason='not allowlisted'")
             return self._refuse(
                 client, conn, req, 403, "Forbidden", POLICY_REFUSAL_BODY)
-        if not self._policy.permits(req.host, req.method, req.path):
+        if not self.inspection.policy.permits(req.host, req.method, req.path):
             # A SECOND refusal and a second reason, never merged into the one
             # above -- FOR THE OPERATOR. The host IS allowlisted (written down on
             # purpose) and what was refused is the method or the path; an
@@ -1243,11 +1199,11 @@ class Listener:
             # guest is told neither: it gets the same generic 403 as an unlisted
             # host, because the one thing it could do with the distinction is
             # learn it is behind a policy and start mapping the shape of it.
-            self.counters.record_drop(DROP_NOT_PERMITTED, req.host)
+            self.inspection.counters.record_drop(DROP_NOT_PERMITTED, req.host)
             rec.request(req)
             rec.set(decision="drop", reason=DROP_NOT_PERMITTED, status=403)
-            self._log(f"drop {where} host={req.host} method={req.method} "
-                      f"reason='not permitted by policy'")
+            self.inspection.log(f"drop {where} host={req.host} method={req.method} "
+                                f"reason='not permitted by policy'")
             return self._refuse(
                 client, conn, req, 403, "Forbidden", POLICY_REFUSAL_BODY)
         # An HTTP/1.0 request is the one we tell the origin to close (see
@@ -1269,11 +1225,11 @@ class Listener:
         # decides nothing about the request: policy was applied above, on the
         # same terms as an unbrokered host, so a credential cannot widen what a
         # guest may ask for -- it only changes who attaches the authorisation.
-        credential = self._policy.credential_for(req.host)
+        credential = self.inspection.policy.credential_for(req.host)
         if credential:
             rec.set(credential=credential)
         try:
-            up = self._upstream.connection_for(
+            up = self.inspection.upstream.connection_for(
                 req.host, upstreams, reusable=not transient,
                 # A KEY OF ITS OWN FOR THE BROKER LEG, and this is not tidiness.
                 # `_serve_terminated` seeds the pool with the ORIGIN connection
@@ -1285,9 +1241,9 @@ class Listener:
                 # the placeholder. No unit test sees it, because none seeds
                 # the pool the way a terminated session does.
                 key=BROKER_UPSTREAM_KEY + req.host if credential else req.host,
-                dial=self._upstream.dial_broker if credential
-                else (self._upstream.dial_tls if pinned_host is not None
-                      else self._upstream.dial_cleartext))
+                dial=self.inspection.upstream.dial_broker if credential
+                else (self.inspection.upstream.dial_tls if pinned_host is not None
+                      else self.inspection.upstream.dial_cleartext))
         except ssl.SSLError as exc:
             # BEFORE the OSError arm: ssl.SSLError IS an OSError, so a single
             # generic arm reported a certificate that would not verify as a
@@ -1300,10 +1256,10 @@ class Listener:
             # same sentence -- the one naming the host's own trust anchor,
             # which is the only thing an operator can act on.
             reason, text = tls_failure(req.host, exc)
-            self.counters.record_drop(reason, req.host)
+            self.inspection.counters.record_drop(reason, req.host)
             rec.set(decision="drop", reason=reason, status=502)
-            self._log(f"drop {where} host={req.host} "
-                      f"reason='{reason}: {exc}'")
+            self.inspection.log(f"drop {where} host={req.host} "
+                                f"reason='{reason}: {exc}'")
             return self._refuse(client, conn, req, 502, "Bad Gateway", text)
         except OSError as exc:
             # THE BROKER LEG GETS ITS OWN REASON AND ITS OWN SENTENCE, and does
@@ -1323,18 +1279,18 @@ class Listener:
                         f"dial presents exactly like a broker that is down.")
             else:
                 reason = dial_failure_reason(
-                    req.host, self._policy.internal)
+                    req.host, self.inspection.policy.internal)
                 text = f"{req.host} could not be reached: {exc}"
-            self.counters.record_drop(reason, req.host)
+            self.inspection.counters.record_drop(reason, req.host)
             rec.set(decision="drop", reason=reason, status=502)
-            self._log(f"drop {where} host={req.host} "
-                      f"reason='{reason}: {exc}'")
+            self.inspection.log(f"drop {where} host={req.host} "
+                                f"reason='{reason}: {exc}'")
             return self._refuse(client, conn, req, 502, "Bad Gateway", text)
         if credential:
             # After the dial and not before it: a request whose broker never
             # answered carried no credential, and counting it above would
             # report a key as used on a request that reached nobody.
-            self.counters.record_credentialed(req.host, credential)
+            self.inspection.counters.record_credentialed(req.host, credential)
         # Authorised: the socket leaves the decision timeout and joins the
         # relay's. Everything from here is transfer -- a body up, a body back
         # -- and transfer is bounded by idleness, not by a five-second clock
@@ -1378,11 +1334,11 @@ class Listener:
                 # possibility without asserting it, which is the same choice the
                 # TLS 1.2 arm of tls_failure makes for the same
                 # reason.
-                self.counters.record_drop(DROP_RELAY_FAILED, req.host)
+                self.inspection.counters.record_drop(DROP_RELAY_FAILED, req.host)
                 rec.set(decision="drop", reason=DROP_RELAY_FAILED, status=502)
-                self._log(f"drop {where} host={req.host} "
-                          f"reason='relay failed before the head was sent: "
-                          f"{exc}'")
+                self.inspection.log(f"drop {where} host={req.host} "
+                                    f"reason='relay failed before the head was sent: "
+                                    f"{exc}'")
                 return self._refuse(
                     client, conn, req, 502, "Bad Gateway",
                     f"the request to {req.host} was not delivered: the "
@@ -1411,9 +1367,9 @@ class Listener:
             # machine per connection, and the failure is bounded, loud and rare
             # where a half-built pump would be none of the three.
             copy_body(client, up.sock, req.framing)
-            self.counters.record_forward()
+            self.inspection.counters.record_forward()
             rec.set(decision="forward")
-            self._log(f"forward {where} host={req.host} method={req.method}")
+            self.inspection.log(f"forward {where} host={req.host} method={req.method}")
             keep = self._relay_response(up, client, conn, req, where, rec)
             if credential and rec.fields.get("status") in (401, 403):
                 # §11's second named failure, and the reason it is counted
@@ -1423,10 +1379,10 @@ class Listener:
                 # record, not from a second parse: `_relay_response` has
                 # already put the FINAL status there, past any interim head,
                 # so there is one definition of what the origin said.
-                self.counters.record_credential_unauthorized()
+                self.inspection.counters.record_credential_unauthorized()
             return keep
         except (RequestUnreadable, OSError) as exc:
-            self.counters.record_drop(DROP_RELAY_FAILED, req.host)
+            self.inspection.counters.record_drop(DROP_RELAY_FAILED, req.host)
             # OVERWRITES the `forward` set above, and follows the counter,
             # which does the same. A relay that broke mid-exchange is counted
             # as a drop, so recording it as a forward would put the record and
@@ -1434,8 +1390,8 @@ class Listener:
             # if a head had already come back, which is how a reader tells a
             # relay that failed before the answer from one that failed after.
             rec.set(decision="drop", reason=DROP_RELAY_FAILED)
-            self._log(f"drop {where} host={req.host} "
-                      f"reason='relay failed: {exc}'")
+            self.inspection.log(f"drop {where} host={req.host} "
+                                f"reason='relay failed: {exc}'")
             return False
         finally:
             # A transient upstream is in no map, so _serve_cleartext's own
@@ -1494,9 +1450,9 @@ class Listener:
                 # lost. Logged all the same, because "policy stopped applying
                 # here" is not something an operator should have to infer from
                 # a byte count.
-                self._log(f"upgrade {where} host={req.host} "
-                          f"reason='switched protocols; per-request policy no "
-                          f"longer applies to this connection'")
+                self.inspection.log(f"upgrade {where} host={req.host} "
+                                    f"reason='switched protocols; per-request policy no "
+                                    f"longer applies to this connection'")
                 # Anything EITHER side read past the message boundary belongs
                 # to the tunnel and goes across before the relay starts, or the
                 # stream is delivered out of order. Both directions, which for
@@ -1562,10 +1518,10 @@ class Listener:
             # `admits`, not a `hosts` match: a redirect to a host named only
             # by a `policy` entry is allowlisted, and a note saying otherwise
             # would send the operator to add a name that is already there.
-            if not self._policy.admits(target):
-                self._log(f"note {where} host={req.host} reason='redirected to "
-                          f"{target}, which is not allowlisted'")
-            elif path is not None and self._policy.governs(target):
+            if not self.inspection.policy.admits(target):
+                self.inspection.log(f"note {where} host={req.host} reason='redirected to "
+                                    f"{target}, which is not allowlisted'")
+            elif path is not None and self.inspection.policy.governs(target):
                 self._note_policy_redirect(status, target, path, req, where)
 
     def _note_policy_redirect(self, status, target, path, req, where):
@@ -1602,12 +1558,12 @@ class Listener:
             # 300, 304, 305: a Location here does not describe a request the
             # guest is about to repeat, so there is no verdict to predict.
             return
-        if any(self._policy.permits(target, method, path)
+        if any(self.inspection.policy.permits(target, method, path)
                for method in set(methods)):
             return
-        self._log(f"note {where} host={req.host} reason='redirected to "
-                  f"{target}{path}, which its [[vm.network.policy]] entry does "
-                  f"not permit'")
+        self.inspection.log(f"note {where} host={req.host} reason='redirected to "
+                            f"{target}{path}, which its [[vm.network.policy]] entry does "
+                            f"not permit'")
 
     def _binding_reason(self, host):
         """Which of the two §4 binding figures a mismatched name lands in.
@@ -1624,7 +1580,7 @@ class Listener:
         connection is gone and the name with it. The log line carries the name
         either way; the figure is what has to arrive already split.
         """
-        if self._policy.admits(host):
+        if self.inspection.policy.admits(host):
             return DROP_MISDIRECTED_LISTED
         return DROP_MISDIRECTED
 
@@ -1660,7 +1616,7 @@ class Listener:
 
     def status(self) -> dict:
         """This listener's counters, as they would be written right now."""
-        snap = self.counters.snapshot(open_now=self._ceiling.held,
+        snap = self.inspection.counters.snapshot(open_now=self._ceiling.held,
                                       refused=self.rejected)
         # The digest of the document THIS PROCESS loaded. It is not a
         # counter and it never moves, which is exactly why it belongs here:
@@ -1671,8 +1627,8 @@ class Listener:
         # when non-empty would make "no digest" and "an older listener"
         # indistinguishable to the reader, and the reader treats one of those
         # as silence.
-        snap[INSPECT_DIGEST_KEY] = self._policy.digest
-        if self._minter is not None:
+        snap[INSPECT_DIGEST_KEY] = self.inspection.policy.digest
+        if self.inspection.minter is not None:
             # The minter's own figures, live sizes and CA identity included.
             # `hits` against `mints` says whether the working set is doing its
             # job; the `denied_*` subsets say which half of the traffic is
@@ -1680,7 +1636,7 @@ class Listener:
             # workload under sustained abuse stopped getting readable 403s;
             # and `clock_unavailable` is the only thing that says the
             # mint-time clock remedy is inert in this guest.
-            snap["mint"] = self._minter.snapshot()
+            snap["mint"] = self.inspection.minter.snapshot()
         return snap
 
     def write_status(self):
@@ -1703,7 +1659,7 @@ class Listener:
         try:
             write_status(self._status_path, self.status())
         except (OSError, TypeError, ValueError) as exc:
-            self._log(f"WARNING: could not write {self._status_path}: {exc}")
+            self.inspection.log(f"WARNING: could not write {self._status_path}: {exc}")
 
     def log_summary(self):
         """One line, at shutdown, naming what was refused.
@@ -1712,10 +1668,7 @@ class Listener:
         time, because it is what distinguishes "the ceiling never fired" from
         "nothing was logged about it".
         """
-        self._log(f"stopped: {self.rejected} connection(s) rejected")
-
-    def _log(self, line):
-        print(line, file=self._out, flush=True)
+        self.inspection.log(f"stopped: {self.rejected} connection(s) rejected")
 
 
 def build_minter(name, policy):

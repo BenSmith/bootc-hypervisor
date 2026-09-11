@@ -614,13 +614,13 @@ class TestTheListenerHoldsOne(unittest.TestCase):
     def test_a_failure_shows_up_in_the_status_document(self):
         listener = Listener([], io.StringIO(),
                                 record_path="/nonexistent/dir/requests.log")
-        self.addCleanup(listener.record.close)
+        self.addCleanup(listener.inspection.record.close)
         self.assertEqual(
-            listener.counters.snapshot(open_now=0, refused=0)["record_failures"],
+            listener.inspection.counters.snapshot(open_now=0, refused=0)["record_failures"],
             0)
-        listener.record.write({"id": "a"})
+        listener.inspection.record.write({"id": "a"})
         self.assertEqual(
-            listener.counters.snapshot(open_now=0, refused=0)["record_failures"],
+            listener.inspection.counters.snapshot(open_now=0, refused=0)["record_failures"],
             1)
 
     def test_the_counter_exists_even_when_nothing_is_written(self):
@@ -629,7 +629,7 @@ class TestTheListenerHoldsOne(unittest.TestCase):
         unconditional."""
         listener = Listener([], io.StringIO())
         self.assertIn("record_failures",
-                      listener.counters.snapshot(open_now=0, refused=0))
+                      listener.inspection.counters.snapshot(open_now=0, refused=0))
 
 
 # ---------------------------------------------------------------------------
@@ -661,7 +661,7 @@ class _Records(_Harness):
         with ctx:
             listener._serve(ours, peer, local, plane_for_port(local[1]),
                             secrets.token_hex(6))
-        listener.record.close()
+        listener.inspection.record.close()
         return out.getvalue(), self._records()
 
     def _records(self):
@@ -891,7 +891,7 @@ class TestTheConnectionLevelRecords(_Records):
                 socket, "create_connection", side_effect=self._origin(b"")):
             listener._serve(ours, ("192.0.2.1", 1024), TLS_LOCAL, TLS,
                             secrets.token_hex(6))
-        listener.record.close()
+        listener.inspection.record.close()
         records = self._records()
         self.assertEqual(len(records), 1, records)
         rec = records[0]
@@ -909,7 +909,7 @@ class TestTheConnectionLevelRecords(_Records):
         guest.shutdown(socket.SHUT_WR)
         listener._serve(ours, ("192.0.2.1", 1024), TLS_LOCAL, TLS,
                         secrets.token_hex(6))
-        listener.record.close()
+        listener.inspection.record.close()
         records = self._records()
         self.assertEqual(len(records), 1, records)
         self.assertEqual(records[0]["decision"], "drop")
@@ -941,7 +941,7 @@ class TestTheH2BlindSpotIsCounted(unittest.TestCase):
         body = source[source.index("def _serve_h2("):
                       source.index("def _drop_not_h2(")]
         self.assertIn("record_h2_unrecorded()", body)
-        self.assertIn('Record(self.record, where, "h2"', body)
+        self.assertIn('Record(self.inspection.record, where, "h2"', body)
 
 
 class TestTheRecordNeverKillsARequest(_Records):
@@ -964,4 +964,4 @@ class TestTheRecordNeverKillsARequest(_Records):
             listener._serve(ours, ("192.0.2.1", 1024), CLEARTEXT_LOCAL, CLEARTEXT,
                             secrets.token_hex(6))
         self.assertIn("forward ", out.getvalue())
-        self.assertEqual(listener.counters.record_failures, 1)
+        self.assertEqual(listener.inspection.counters.record_failures, 1)

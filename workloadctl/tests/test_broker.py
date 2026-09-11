@@ -784,7 +784,7 @@ class _BrokerRig(unittest.TestCase):
             pass
         self.answer = answer
         return (out.getvalue(), [(addr, bytes(buf)) for addr, buf, _ in dialled],
-                listener.counters.snapshot(open_now=0, refused=0), records)
+                listener.inspection.counters.snapshot(open_now=0, refused=0), records)
 
 
 def _where():

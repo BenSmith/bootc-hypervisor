@@ -1262,7 +1262,7 @@ class TestHttp2AlpnSelection(unittest.TestCase):
         mod = _mod()
         listener = Listener([], io.StringIO(),
                                 policy=self._policy(mod, http2=("grpc.example",)))
-        self.assertIsNot(listener._upstream._ctx, listener._upstream._ctx_h2)
+        self.assertIsNot(listener.inspection.upstream._ctx, listener.inspection.upstream._ctx_h2)
         self.assertEqual(UPSTREAM_ALPN, ("http/1.1",))
         self.assertEqual(ALPN_H2, ("h2",))
 
@@ -1335,7 +1335,7 @@ class TestLogInjection(unittest.TestCase):
         ours.settimeout(2.0)
         listener._serve_tls(ours, _where("tls"))
         snapshot = json.dumps(
-            listener.counters.snapshot(open_now=0, refused=0))
+            listener.inspection.counters.snapshot(open_now=0, refused=0))
         self.assertNotIn("evil.example", snapshot)
 
     def test_every_control_character_is_refused_not_only_the_newline(self):
@@ -1651,8 +1651,8 @@ class TestPolicyEnforcement(_CleartextRig):
         listener = Listener(
             [], out, policy=self._policy(
                 [], ("a.example", ("GET",), ("/v2/*",))))
-        listener.counters.record_drop(DROP_NOT_PERMITTED, "a.example")
-        snap = listener.counters.snapshot(open_now=0, refused=0)
+        listener.inspection.counters.record_drop(DROP_NOT_PERMITTED, "a.example")
+        snap = listener.inspection.counters.snapshot(open_now=0, refused=0)
         self.assertEqual(snap["drop_reasons"][DROP_NOT_PERMITTED], 1)
         self.assertNotIn(DROP_UNCLASSIFIED, snap.get("drop_reasons", {}))
 
@@ -2043,7 +2043,7 @@ class TestCleartextPerRequest(unittest.TestCase):
         upstreams = {}
         with unittest.mock.patch.object(socket, "create_connection",
                                         return_value=near):
-            up = listener._upstream.connection_for("a.example", upstreams,
+            up = listener.inspection.upstream.connection_for("a.example", upstreams,
                                         reusable=False)
         self.assertIs(up.sock, near)
         self.assertEqual({}, upstreams)
@@ -2071,7 +2071,7 @@ class TestCleartextPerRequest(unittest.TestCase):
         self.assertIn("credential_for(host)", fn)
         # Decided BEFORE the dial, or the dial has already happened.
         self.assertLess(fn.index("credential_for(host)"),
-                        fn.index("self._upstream.dial_tls("))
+                        fn.index("self.inspection.upstream.dial_tls("))
         # And the offer stays a configuration decision: h2 is forced off rather
         # than read off an origin connection that no longer exists.
         self.assertIn("h2 = False", fn)
@@ -2142,7 +2142,7 @@ class TestCleartextPerRequest(unittest.TestCase):
             dialled.append((host, near))
             return _Stream(near)
 
-        up = listener._upstream.connection_for(
+        up = listener.inspection.upstream.connection_for(
             "a.example", upstreams,
             key=BROKER_UPSTREAM_KEY + "a.example", dial=dial)
         self.assertEqual([h for h, _ in dialled], ["a.example"],
@@ -2170,9 +2170,9 @@ class TestCleartextPerRequest(unittest.TestCase):
             return _Stream(near)
 
         key = BROKER_UPSTREAM_KEY + "a.example"
-        first = listener._upstream.connection_for(
+        first = listener.inspection.upstream.connection_for(
             "a.example", upstreams, key=key, dial=dial)
-        second = listener._upstream.connection_for(
+        second = listener.inspection.upstream.connection_for(
             "a.example", upstreams, key=key, dial=dial)
         self.assertEqual(dialled, ["a.example"])
         self.assertIs(first.sock, second.sock)
@@ -2379,7 +2379,7 @@ class TestCleartextTimeouts(unittest.TestCase):
         for pump in pumps:
             pump.join(timeout=3.0)
         return (out.getvalue(),
-                listener.counters.snapshot(open_now=0, refused=0), elapsed)
+                listener.inspection.counters.snapshot(open_now=0, refused=0), elapsed)
 
     def _drops(self, snapshot):
         return {k: v for k, v in snapshot["drop_reasons"].items() if v}
@@ -2724,23 +2724,23 @@ class TestEchTripwire(unittest.TestCase):
         mod, listener, _ = self._listener(["allowed.example"])
         self._serve(listener, _hello_bytes(
             _ech_extension(), server_name="allowed.example"))
-        self.assertEqual(listener.counters.ech_seen, 1)
-        self.assertEqual(listener.counters.ech_alarm, 0)
+        self.assertEqual(listener.inspection.counters.ech_seen, 1)
+        self.assertEqual(listener.inspection.counters.ech_alarm, 0)
 
     def test_an_unlisted_ech_hello_moves_both(self):
         mod, listener, _ = self._listener(["allowed.example"])
         self._serve(listener, _hello_bytes(
             _ech_extension(), server_name="denied.example"))
-        self.assertEqual(listener.counters.ech_seen, 1)
-        self.assertEqual(listener.counters.ech_alarm, 1)
+        self.assertEqual(listener.inspection.counters.ech_seen, 1)
+        self.assertEqual(listener.inspection.counters.ech_alarm, 1)
 
     def test_an_ech_hello_with_no_sni_counts_toward_the_alarm(self):
         """The stronger form of the signal, not a weaker one: the extension
         was there and the name matched nothing at all."""
         _, listener, _ = self._listener(["allowed.example"])
         self._serve(listener, _hello_bytes(_ech_extension(), server_name=None))
-        self.assertEqual(listener.counters.ech_seen, 1)
-        self.assertEqual(listener.counters.ech_alarm, 1)
+        self.assertEqual(listener.inspection.counters.ech_seen, 1)
+        self.assertEqual(listener.inspection.counters.ech_alarm, 1)
 
     def test_a_hello_without_the_extension_moves_neither(self):
         """Including one that is refused. The tripwire is about ECH, not about
@@ -2748,8 +2748,8 @@ class TestEchTripwire(unittest.TestCase):
         allowlist rather than the guest's TLS stack."""
         _, listener, _ = self._listener(["allowed.example"])
         self._serve(listener, _hello_bytes(server_name="denied.example"))
-        self.assertEqual(listener.counters.ech_seen, 0)
-        self.assertEqual(listener.counters.ech_alarm, 0)
+        self.assertEqual(listener.inspection.counters.ech_seen, 0)
+        self.assertEqual(listener.inspection.counters.ech_alarm, 0)
 
     def test_ordinary_grease_extensions_do_not_count_as_ech(self):
         """RFC 8701 GREASE on other codepoints is not ECH. Counting it would
@@ -2758,7 +2758,7 @@ class TestEchTripwire(unittest.TestCase):
         self._serve(listener, _hello_bytes(
             _grease_extension() + _grease_extension(0x1a1a),
             server_name="allowed.example"))
-        self.assertEqual(listener.counters.ech_seen, 0)
+        self.assertEqual(listener.inspection.counters.ech_seen, 0)
 
     def test_an_unreadable_hello_moves_no_ech_figure(self):
         """The extension list comes from the parse. Bytes that did not parse
@@ -2766,16 +2766,16 @@ class TestEchTripwire(unittest.TestCase):
         the capability count and make the alarm's denominator a fiction."""
         _, listener, _ = self._listener(["allowed.example"])
         self._serve(listener, b"GET / HTTP/1.1\r\n\r\n")
-        self.assertEqual(listener.counters.ech_seen, 0)
-        self.assertEqual(listener.counters.ech_alarm, 0)
+        self.assertEqual(listener.inspection.counters.ech_seen, 0)
+        self.assertEqual(listener.inspection.counters.ech_alarm, 0)
 
     def test_the_fixture_lights_the_alarm_when_its_name_is_unlisted(self):
         """End to end on the real capture rather than a hand-built hello."""
         _, listener, _ = self._listener(["allowed.example"])
         raw = (ROOT / "tests" / "fixtures" / "ech-clienthello.bin").read_bytes()
         self._serve(listener, raw)
-        self.assertEqual(listener.counters.ech_seen, 1)
-        self.assertEqual(listener.counters.ech_alarm, 1)
+        self.assertEqual(listener.inspection.counters.ech_seen, 1)
+        self.assertEqual(listener.inspection.counters.ech_alarm, 1)
 
 
 class TestCounters(unittest.TestCase):
@@ -2807,7 +2807,7 @@ class TestCounters(unittest.TestCase):
         """A total that did not include the ceiling's rejections would not
         account for every connection the guest saw closed."""
         _, listener, _ = self._listener()
-        c = listener.counters
+        c = listener.inspection.counters
         c.record_drop("not allowlisted", "a.example")
         c.record_drop("no readable name")
         c.record_drop("connection ceiling reached")
@@ -2820,7 +2820,7 @@ class TestCounters(unittest.TestCase):
         added to the log and not to this map degrades to unattributed rather
         than to invisible."""
         _, listener, _ = self._listener()
-        listener.counters.record_drop("something new")
+        listener.inspection.counters.record_drop("something new")
         self.assertEqual(listener.status()["dispositions"]["dropped"], 1)
 
     def test_an_unknown_reason_still_reconciles_the_two_maps(self):
@@ -2829,8 +2829,8 @@ class TestCounters(unittest.TestCase):
         operator reconciling the two against a number that lost rows, with
         nothing in the file to say a row had been lost."""
         _, listener, _ = self._listener()
-        listener.counters.record_drop("not allowlisted", "a.example")
-        listener.counters.record_drop("something new")
+        listener.inspection.counters.record_drop("not allowlisted", "a.example")
+        listener.inspection.counters.record_drop("something new")
         snap = listener.status()
         self.assertEqual(snap["drop_reasons"]["(unclassified)"], 1)
         self.assertEqual(sum(snap["drop_reasons"].values()),
@@ -2841,7 +2841,7 @@ class TestCounters(unittest.TestCase):
         zero is a line an operator learns to skip -- which is the line that
         matters on the one build where it does not. Same argument as (other)."""
         _, listener, _ = self._listener()
-        listener.counters.record_drop("not allowlisted", "a.example")
+        listener.inspection.counters.record_drop("not allowlisted", "a.example")
         self.assertNotIn("(unclassified)",
                          listener.status()["drop_reasons"])
 
@@ -2952,7 +2952,7 @@ class TestCounters(unittest.TestCase):
         list behind it.
         """
         mod, listener, _ = self._listener()
-        policy = listener._policy
+        policy = listener.inspection.policy
         lists = {f for f in Policy._fields
                  if isinstance(getattr(policy, f), tuple)}
         self.assertIn("policy", lists)      # the derivation found something
@@ -2971,14 +2971,14 @@ class TestCounters(unittest.TestCase):
         explosion on the HOST, through the exporter."""
         _, listener, _ = self._listener()
         for i in range(200):
-            listener.counters.record_drop("internal destination", f"h{i}.example")
+            listener.inspection.counters.record_drop("internal destination", f"h{i}.example")
         snap = listener.status()
         self.assertLessEqual(len(snap["internal_refusals"]), 21)
         self.assertEqual(snap["internal_refusals_total"], 200)
 
     def test_a_splice_is_counted_as_a_splice(self):
         _, listener, _ = self._listener()
-        listener.counters.record_splice()
+        listener.inspection.counters.record_splice()
         self.assertEqual(listener.status()["dispositions"]["spliced"], 1)
 
     def test_every_per_host_reason_has_its_own_map(self):
@@ -2987,7 +2987,7 @@ class TestCounters(unittest.TestCase):
         figure has to say which host, not only how many."""
         mod, listener, _ = self._listener()
         for reason in PER_HOST_REASONS:
-            listener.counters.record_drop(reason, "named.example")
+            listener.inspection.counters.record_drop(reason, "named.example")
         per_host = listener.status()["per_host"]
         self.assertEqual(sorted(per_host), sorted(PER_HOST_REASONS))
         for reason in PER_HOST_REASONS:
@@ -3000,7 +3000,7 @@ class TestCounters(unittest.TestCase):
         mod, listener, _ = self._listener()
         self.assertNotIn(DROP_NOT_ALLOWLISTED, PER_HOST_REASONS)
         self.assertNotIn(DROP_MISDIRECTED, PER_HOST_REASONS)
-        listener.counters.record_drop(DROP_NOT_ALLOWLISTED, "a.example")
+        listener.inspection.counters.record_drop(DROP_NOT_ALLOWLISTED, "a.example")
         self.assertNotIn(DROP_NOT_ALLOWLISTED,
                          listener.status()["per_host"])
 
@@ -3010,7 +3010,7 @@ class TestCounters(unittest.TestCase):
         and WHICH pair of names a client is coalescing is the whole question."""
         mod, listener, _ = self._listener()
         self.assertIn(DROP_MISDIRECTED_LISTED, PER_HOST_REASONS)
-        listener.counters.record_drop(DROP_MISDIRECTED_LISTED,
+        listener.inspection.counters.record_drop(DROP_MISDIRECTED_LISTED,
                                       "other.example")
         self.assertEqual(
             listener.status()["per_host"][DROP_MISDIRECTED_LISTED],
@@ -3021,8 +3021,8 @@ class TestCounters(unittest.TestCase):
         assumption in §4, and one bucket cannot say which. Both are counted,
         both under their own reason, and neither lands on a policy figure."""
         mod, listener, _ = self._listener()
-        listener.counters.record_drop(DROP_MISDIRECTED, "evil.example")
-        listener.counters.record_drop(DROP_MISDIRECTED_LISTED,
+        listener.inspection.counters.record_drop(DROP_MISDIRECTED, "evil.example")
+        listener.inspection.counters.record_drop(DROP_MISDIRECTED_LISTED,
                                       "other.example")
         reasons = listener.status()["drop_reasons"]
         self.assertEqual(reasons[DROP_MISDIRECTED], 1)
@@ -3042,9 +3042,9 @@ class TestCounters(unittest.TestCase):
     def test_the_splice_candidates_are_countable_per_host(self):
         """The two reasons whose remedy is `tls = "splice"` on the workload."""
         mod, listener, _ = self._listener()
-        listener.counters.record_drop(DROP_CLIENT_CERT, "mtls.example")
-        listener.counters.record_drop(DROP_NOT_HTTP, "pg.example")
-        listener.counters.record_drop(DROP_NOT_HTTP, "pg.example")
+        listener.inspection.counters.record_drop(DROP_CLIENT_CERT, "mtls.example")
+        listener.inspection.counters.record_drop(DROP_NOT_HTTP, "pg.example")
+        listener.inspection.counters.record_drop(DROP_NOT_HTTP, "pg.example")
         per_host = listener.status()["per_host"]
         self.assertEqual(per_host[DROP_CLIENT_CERT], {"mtls.example": 1})
         self.assertEqual(per_host[DROP_NOT_HTTP], {"pg.example": 2})
@@ -3053,7 +3053,7 @@ class TestCounters(unittest.TestCase):
         """A top-N can lose WHICH names; it must never lose HOW MANY."""
         mod, listener, _ = self._listener()
         for i in range(200):
-            listener.counters.record_drop(DROP_UNVERIFIED, f"h{i}.example")
+            listener.inspection.counters.record_drop(DROP_UNVERIFIED, f"h{i}.example")
         snap = listener.status()
         self.assertLessEqual(len(snap["per_host"][DROP_UNVERIFIED]), 21)
         self.assertEqual(snap["per_host_totals"][DROP_UNVERIFIED], 200)
@@ -3062,7 +3062,7 @@ class TestCounters(unittest.TestCase):
         """Not every refusal knows a name -- a ceiling rejection has none --
         and inventing a key for it would be a host that never existed."""
         mod, listener, _ = self._listener()
-        listener.counters.record_drop(DROP_NOT_HTTP)
+        listener.inspection.counters.record_drop(DROP_NOT_HTTP)
         snap = listener.status()
         self.assertEqual(snap["per_host"][DROP_NOT_HTTP], {})
         self.assertEqual(snap["drop_reasons"][DROP_NOT_HTTP], 1)
@@ -3144,7 +3144,7 @@ class TestStatusFile(unittest.TestCase):
 
     def test_it_writes_the_counters(self):
         _, listener = self._listener(self.path)
-        listener.counters.record_splice()
+        listener.inspection.counters.record_splice()
         listener.write_status()
         doc = json.loads(Path(self.path).read_text())
         self.assertEqual(doc["dispositions"]["spliced"], 1)
@@ -3154,7 +3154,7 @@ class TestStatusFile(unittest.TestCase):
         """A figure that only accumulates when someone is watching is a figure
         nobody can trust."""
         _, listener = self._listener(None)
-        listener.counters.record_splice()
+        listener.inspection.counters.record_splice()
         listener.write_status()
         self.assertEqual(listener.status()["dispositions"]["spliced"], 1)
 
