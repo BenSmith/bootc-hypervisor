@@ -640,6 +640,7 @@ from egress_policy import (
     vm_inspect_policy_text,
 )
 from workload_addr import broker_listen_address
+import egress_relay
 import inspect_figures
 
 LISTENER = Path(__file__).resolve().parent.parent / "libexec" / "workload-inspect-listener"
@@ -762,8 +763,10 @@ class _BrokerRig(unittest.TestCase):
 
         with unittest.mock.patch.object(
                 socket, "create_connection", side_effect=dial), \
-                unittest.mock.patch.object(mod, "CONNECTION_TIMEOUT", 0.20), \
-                unittest.mock.patch.object(mod, "RELAY_IDLE_TIMEOUT", 0.75):
+                unittest.mock.patch.object(
+                    egress_relay, "CONNECTION_TIMEOUT", 0.20), \
+                unittest.mock.patch.object(
+                    egress_relay, "RELAY_IDLE_TIMEOUT", 0.75):
             listener._serve_cleartext(ours, _where())
         for _, _, pump in dialled:
             pump.join(timeout=3.0)

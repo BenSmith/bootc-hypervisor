@@ -82,22 +82,10 @@ countable failure instead. The threads are daemons, as the broker's
 ThreadingMixIn sets them, so a SIGTERM that stops the accept loop does not
 wait on the connections it already took.
 
-Every accepted socket gets an explicit timeout before it is touched, none of
-them the stdlib default. Two numbers, not one: CONNECTION_TIMEOUT bounds every
-wait up to and including a decision, and RELAY_IDLE_TIMEOUT bounds every wait
-after one. They cannot be the same number — a peek that waited as long as a
-long-lived tunnel is idle gives a guest a cheap way to pin all 128 slots, and a
-tunnel held to the peek's timeout is cut mid-download every time the far end
-pauses.
-
-BOTH planes spend both numbers, and the cleartext one is where the boundary is
-easy to get wrong. There, the decision is per REQUEST, so the socket returns to
-CONNECTION_TIMEOUT at the top of each one and moves to RELAY_IDLE_TIMEOUT the
-moment a request is authorised. The wait BETWEEN requests on a kept-alive
-connection is the third case and takes the idle number: a guest holding a
-connection open to use again is not a guest failing to say what it wants, and
-bounding that wait at the decision timeout would both break keep-alive and
-report each break as a request that could not be read.
+Every accepted socket gets an explicit timeout before it is touched, and the
+two numbers it moves between -- one bounding every wait up to a decision, one
+bounding every wait after -- are egress_relay's, which says why they cannot
+be one number and which wait on the cleartext plane takes which.
 """
 
 import ipaddress
@@ -122,9 +110,10 @@ from egress_policy import (
 from egress_ca import LeafRefused, ca_cert_path, ca_key_path
 from tls_hello import HelloUnreadable, read_client_hello
 from http_framing import (
-    DRAIN_MAX, RELAY_CHUNK, H2_PREFACE, H2Framing, NotH2, ReadTimedOut,
+    RELAY_CHUNK, H2_PREFACE, H2Framing, NotH2, ReadTimedOut,
     RequestUnreadable, _Stream, _get_all, _is_count, _split_response_head,
-    copy_body, http_response, is_http_request_start, response_framing,
+    copy_body, drain, is_http_request_start, response_framing,
+    send_response,
 )
 from http_target import SCHEME_HTTP, SCHEME_HTTPS, redirect_target
 from http_request import parse_request, rebuild_request
@@ -141,6 +130,8 @@ from egress_record import (
     DROP_UNREACHABLE, DROP_UNREADABLE_REQUEST, DROP_UNVERIFIED, LOG_ID_FIELD,
     Record, RequestLog, Where, format_endpoint,
 )
+from egress_relay import relay
+import egress_relay
 from egress_status import write_status
 from inspect_counters import Counters
 from peer_identity import local_endpoints, peer_uid
@@ -150,11 +141,10 @@ from sd_listen import (
 from workload_lib import workload_state_dir
 
 
-# --- concurrency and timeout, module-local ---
+# --- concurrency, module-local ---
 #
-# Nothing else in the tree reads these, and lib/ holds only what two programs
-# must agree on — the ports and the binary path — so the knobs live here,
-# beside the loop that spends them.
+# Nothing else in the tree reads these, so the knobs live beside the loop that
+# spends them.
 
 # The ceiling on simultaneously-handled connections. Sized well above a guest's
 # legitimate concurrency (a browser is a handful of connections per origin,
@@ -162,20 +152,6 @@ from workload_lib import workload_state_dir
 # cost of being tight is a workload that reaches nothing. Past it a connection
 # is refused, not queued.
 MAX_CONNECTIONS = 128
-
-# The timeout on an accepted socket up to and including the decision, in
-# seconds. It bounds the ClientHello peek and the upstream connect, which are
-# the only reads made before a connection is either spliced or closed. Short on
-# purpose: a connection that has not said what it wants is holding one of
-# MAX_CONNECTIONS slots for nothing.
-CONNECTION_TIMEOUT = 5.0
-
-# The timeout both sockets carry once a connection is spliced, in seconds. It is
-# an IDLE bound, not a lifetime: the relay loop rearms it on every direction of
-# traffic, so a long download is fine and a tunnel nobody is using is not. It
-# must be larger than CONNECTION_TIMEOUT — see the docstring for why the two
-# cannot be one number.
-RELAY_IDLE_TIMEOUT = 120.0
 
 
 # How many 1xx interim responses one request may collect before the exchange is
@@ -256,7 +232,7 @@ def inherited_listening_sockets():
 # even that there is a policy to be on the wrong side of. A body that named the
 # allowlist, the egress policy, or the tool would turn a single refused request
 # into a reliable "you are sandboxed" oracle, answerable before the guest looked
-# at one certificate; a bare status does not. See _answer for the same reasoning
+# at one certificate; a bare status does not. See http_framing.send_response for the same reasoning
 # applied to a tool-name prefix.
 POLICY_REFUSAL_BODY = "Forbidden"
 
@@ -424,7 +400,7 @@ class Listener:
         # admitted or not, and before the ceiling is consulted. Both planes
         # read as their first act, so this is the number that bounds a guest
         # that connects and then says nothing.
-        conn.settimeout(CONNECTION_TIMEOUT)
+        conn.settimeout(egress_relay.CONNECTION_TIMEOUT)
         # The accepting port, from getsockname() on the inherited fd — the fd
         # name cannot distinguish the planes under Accept=no (module docstring).
         local = listen_sock.getsockname()
@@ -656,7 +632,7 @@ class Listener:
         # the policy authorised rather than one the guest chose.
         try:
             upstream = socket.create_connection(
-                (host, TLS.guest_port), timeout=CONNECTION_TIMEOUT)
+                (host, TLS.guest_port), timeout=egress_relay.CONNECTION_TIMEOUT)
         except OSError as exc:
             reason = self._dial_failure_reason(host)
             self.counters.record_drop(reason, host)
@@ -685,7 +661,7 @@ class Listener:
             rec.dialled(upstream)
             rec.set(decision="forward")
             try:
-                self._relay(conn, upstream)
+                relay(conn, upstream)
             finally:
                 # A NAMED EXEMPTION SHOULD BE VISIBLE IN THE RECORD AS ONE.
                 # There is no path, no method and no status here and there
@@ -969,7 +945,7 @@ class Listener:
             _Stream(tls_conn).read_head()
         except (RequestUnreadable, OSError):
             pass
-        self._answer(tls_conn, status, phrase, text, close=True)
+        send_response(tls_conn, status, phrase, text, close=True)
 
     def _wrap_guest(self, conn, leaf, alpn=UPSTREAM_ALPN):
         """Complete the guest's handshake as the origin it dialled.
@@ -993,7 +969,7 @@ class Listener:
         key to turn it off.
         """
         sock = socket.create_connection(
-            (host, TLS.guest_port), timeout=CONNECTION_TIMEOUT)
+            (host, TLS.guest_port), timeout=egress_relay.CONNECTION_TIMEOUT)
         try:
             ctx = (self._upstream_ctx_h2 if alpn == ALPN_H2
                    else self._upstream_ctx)
@@ -1006,7 +982,7 @@ class Listener:
         except BaseException:
             ssock.close()
             raise
-        ssock.settimeout(RELAY_IDLE_TIMEOUT)
+        ssock.settimeout(egress_relay.RELAY_IDLE_TIMEOUT)
         return _Stream(ssock, prefill=early)
 
     def _early_upstream_bytes(self, ssock):
@@ -1113,7 +1089,7 @@ class Listener:
         rec.dialled(upstream.sock)
         try:
             client = _Stream(tls_conn)
-            tls_conn.settimeout(CONNECTION_TIMEOUT)
+            tls_conn.settimeout(egress_relay.CONNECTION_TIMEOUT)
             try:
                 preface = client.read_exactly(len(H2_PREFACE))
             except (RequestUnreadable, OSError) as exc:
@@ -1163,7 +1139,7 @@ class Listener:
                           f"reason='relay failed: {exc}'")
                 return
             try:
-                self._relay(tls_conn, upstream.sock,
+                relay(tls_conn, upstream.sock,
                             on_client_bytes=framing.feed)
             except NotH2 as exc:
                 self._drop_not_h2(where, host, exc)
@@ -1262,7 +1238,7 @@ class Listener:
         merged figure would leave that operator with a number they cannot act
         on, and the split is the entire reason §11 asked for this counter.
         """
-        conn.settimeout(CONNECTION_TIMEOUT)
+        conn.settimeout(egress_relay.CONNECTION_TIMEOUT)
         start = client.peek_start(
             until=lambda buf: is_http_request_start(buf) is not None)
         if is_http_request_start(start) is not False:
@@ -1433,10 +1409,10 @@ class Listener:
         # and a policy to apply against it; the relay's idle bound is not the
         # bound for that, and the idle_timeout below overrides this one for the
         # only wait it should apply to.
-        conn.settimeout(CONNECTION_TIMEOUT)
+        conn.settimeout(egress_relay.CONNECTION_TIMEOUT)
         try:
             head = client.read_head(
-                idle_timeout=None if first else RELAY_IDLE_TIMEOUT)
+                idle_timeout=None if first else egress_relay.RELAY_IDLE_TIMEOUT)
         except ReadTimedOut as exc:
             if exc.idle:
                 # Not a drop and not counted as one: an idle kept-alive
@@ -1472,7 +1448,7 @@ class Listener:
             # rather than by guessing at a name out of bytes we refused.
             rec.set(decision="drop", reason=DROP_UNREADABLE_REQUEST, status=400)
             self._log(f"drop {where} reason='unreadable request: {exc}'")
-            self._answer(conn, 400, "Bad Request", str(exc), close=True)
+            send_response(conn, 400, "Bad Request", str(exc), close=True)
             return False
         if pinned_host is not None and req.host != pinned_host:
             # Not a policy refusal and deliberately not counted as one: the name
@@ -1612,7 +1588,7 @@ class Listener:
         # that would cut a large download at the first pause on either end and
         # count it as `relay failed`. The upstream socket is set to the same
         # number where it is opened, and the TLS plane's splice sets both.
-        conn.settimeout(RELAY_IDLE_TIMEOUT)
+        conn.settimeout(egress_relay.RELAY_IDLE_TIMEOUT)
         # The address a policy NAME became, resolved by this process and known
         # to nobody else -- §11's other half of the join.
         rec.dialled(up.sock)
@@ -1815,15 +1791,15 @@ class Listener:
                 raise OSError(str(exc)) from exc
             self._broker_address = addr
         sock = socket.create_connection(
-            (addr, BROKER_INSTANCE_PORT), timeout=CONNECTION_TIMEOUT)
-        sock.settimeout(RELAY_IDLE_TIMEOUT)
+            (addr, BROKER_INSTANCE_PORT), timeout=egress_relay.CONNECTION_TIMEOUT)
+        sock.settimeout(egress_relay.RELAY_IDLE_TIMEOUT)
         return _Stream(sock)
 
     def _dial_upstream_cleartext(self, host):
         """A plain connection to an authorised name, as a _Stream."""
         sock = socket.create_connection(
-            (host, CLEARTEXT.guest_port), timeout=CONNECTION_TIMEOUT)
-        sock.settimeout(RELAY_IDLE_TIMEOUT)
+            (host, CLEARTEXT.guest_port), timeout=egress_relay.CONNECTION_TIMEOUT)
+        sock.settimeout(egress_relay.RELAY_IDLE_TIMEOUT)
         return _Stream(sock)
 
     def _relay_response(self, up, client, conn, req, where="", rec=None):
@@ -1918,7 +1894,7 @@ class Listener:
 
     def _relay_upgraded(self, conn, up_sock):
         """Move an upgraded connection's bytes both ways, then end it."""
-        self._relay(conn, up_sock)
+        relay(conn, up_sock)
         return False
 
     def _note_redirect(self, status, headers, req, where):
@@ -2020,99 +1996,10 @@ class Listener:
         """
         keep = not req.wants_close and not req.expects_continue
         if keep:
-            keep = self._drain(client, req.framing)
-        self._answer(conn, status, reason, text, close=not keep)
+            keep = drain(client, req.framing)
+        send_response(conn, status, reason, text, close=not keep)
         return keep
 
-    def _drain(self, client, framing):
-        """Read a refused request's body to its end. False if it was too much.
-
-        Draining is a service to the connection, not an obligation: a guest
-        that answers a refusal with a gigabyte gets the connection closed
-        rather than the courtesy of having it all read.
-        """
-        if framing.kind == "none":
-            return True
-        if framing.kind == "length" and framing.length > DRAIN_MAX:
-            return False
-        try:
-            copy_body(client, None, framing)
-        except (RequestUnreadable, OSError):
-            return False
-        return True
-
-    def _answer(self, conn, status, reason, text, *, close):
-        # NO TOOL NAME IN A GUEST-FACING BODY. A `workloadctl: ` prefix here
-        # would ride every refusal and announce -- in one refused request,
-        # before the guest inspected a single certificate -- that its egress
-        # is mediated and by what. The status line is an ordinary origin
-        # answer; the body is the only place an identity could leak, so it
-        # carries none. What an operator needs is in the journal and the
-        # per-request record, neither of which the guest can read.
-        try:
-            conn.sendall(http_response(status, reason, f"{text}\n", close=close))
-        except OSError:
-            pass
-
-    def _relay(self, client, upstream, on_client_bytes=None):
-        """Move bytes both ways until either side closes or goes idle.
-
-        Both sockets are moved off the handshake timeout onto the idle one
-        first: up to here the numbers bounded a decision, and from here they
-        bound a tunnel.
-
-        `on_client_bytes`, when given, sees every byte read from `client`
-        BEFORE it is forwarded, and may raise to end the relay. That ordering
-        is what lets a check refuse a chunk without the origin seeing it; note
-        that the h2 framing check can only make use of it for what it can spot
-        WITHIN a chunk, which is less than it looks (see H2Framing). Only the
-        guest's
-        direction is offered, and that is a decision rather than an omission:
-        the origin is a name this workload allowlisted, reached over a fully
-        verified session, so checking its framing could only break a working
-        host on our own parser's opinion.
-        """
-        for s in (client, upstream):
-            s.settimeout(RELAY_IDLE_TIMEOUT)
-        peer = {client: upstream, upstream: client}
-        sel = selectors.DefaultSelector()
-        sel.register(client, selectors.EVENT_READ)
-        sel.register(upstream, selectors.EVENT_READ)
-        try:
-            while True:
-                # BYTES INSIDE A TLS ENGINE ARE INVISIBLE TO select(). A record
-                # that has been read off the kernel and decrypted leaves nothing
-                # for the kernel to report, so a relay that only ever selected
-                # would sit idle holding a complete frame until the idle timeout
-                # cut it. Reachable on the terminated plane in two ways: a
-                # `101` handing an upgraded TLS connection to this loop, and an
-                # [[vm.network.http2]] host, where BOTH legs are TLS and every
-                # frame arrives through an engine.
-                buffered = [s for s in (client, upstream)
-                            if getattr(s, "pending", None) and s.pending()]
-                if buffered:
-                    ready = buffered
-                else:
-                    events = sel.select(timeout=RELAY_IDLE_TIMEOUT)
-                    if not events:
-                        return                  # idle: nothing either way
-                    ready = [key.fileobj for key, _ in events]
-                for sock in ready:
-                    data = sock.recv(RELAY_CHUNK)
-                    if data and on_client_bytes is not None and sock is client:
-                        # Before the forward, so a stream this refuses does not
-                        # reach the origin at all.
-                        on_client_bytes(data)
-                    if not data:
-                        # A close in either direction ends the whole splice.
-                        # Half-close forwarding would be more faithful to TCP,
-                        # but it also keeps a slot and a thread alive on a
-                        # direction the guest has already abandoned; the
-                        # ceiling is the reason to prefer the simpler end.
-                        return
-                    peer[sock].sendall(data)
-        finally:
-            sel.close()
 
     @property
     def rejected(self) -> int:

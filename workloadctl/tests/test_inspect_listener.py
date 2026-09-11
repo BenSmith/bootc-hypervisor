@@ -38,6 +38,7 @@ from http_framing import (
     RequestUnreadable, _Stream, copy_body,
 )
 import egress_record
+import egress_relay
 from egress_record import (
     DROP_CEILING,
     DROP_CLIENT_CERT,
@@ -216,8 +217,8 @@ class TestExplicitTimeout(unittest.TestCase):
         listener._handle(conn, ("192.0.2.1", 1024),
                          _listener_with(("198.18.0.1", CLEARTEXT.inspect_port)))
         self.assertEqual(conn.settimeout.call_args_list[0],
-                         unittest.mock.call(mod.CONNECTION_TIMEOUT))
-        self.assertIsInstance(mod.CONNECTION_TIMEOUT, float)
+                         unittest.mock.call(egress_relay.CONNECTION_TIMEOUT))
+        self.assertIsInstance(egress_relay.CONNECTION_TIMEOUT, float)
 
     def test_the_timeout_is_set_even_when_the_connection_is_rejected(self):
         """The timeout is a ceiling the peek inherits, so it lands on the socket
@@ -229,7 +230,8 @@ class TestExplicitTimeout(unittest.TestCase):
             ("198.18.0.1", TLS.inspect_port))], out, limit=0)
         listener._handle(conn, ("192.0.2.1", 1024),
                          _listener_with(("198.18.0.1", TLS.inspect_port)))
-        conn.settimeout.assert_called_once_with(mod.CONNECTION_TIMEOUT)
+        conn.settimeout.assert_called_once_with(
+            egress_relay.CONNECTION_TIMEOUT)
         conn.close.assert_called()
 
 
@@ -1411,8 +1413,10 @@ class _CleartextRig(unittest.TestCase):
         # not a sleep-shaped constant in every case.
         with unittest.mock.patch.object(
                 socket, "create_connection", side_effect=dial), \
-                unittest.mock.patch.object(mod, "RELAY_IDLE_TIMEOUT", 2.0), \
-                unittest.mock.patch.object(mod, "CONNECTION_TIMEOUT", 2.0):
+                unittest.mock.patch.object(
+                    egress_relay, "RELAY_IDLE_TIMEOUT", 2.0), \
+                unittest.mock.patch.object(
+                    egress_relay, "CONNECTION_TIMEOUT", 2.0):
             listener._serve_cleartext(ours, _where("cleartext"))
         ours.close()
         for _, _, pump in dialled:
@@ -2373,9 +2377,9 @@ class TestCleartextTimeouts(unittest.TestCase):
                 socket, "create_connection", side_effect=dial), \
                 unittest.mock.patch.object(mod, "copy_body", watched_copy_body), \
                 unittest.mock.patch.object(
-                    mod, "CONNECTION_TIMEOUT", self.CONNECTION), \
+                    egress_relay, "CONNECTION_TIMEOUT", self.CONNECTION), \
                 unittest.mock.patch.object(
-                    mod, "RELAY_IDLE_TIMEOUT", self.IDLE):
+                    egress_relay, "RELAY_IDLE_TIMEOUT", self.IDLE):
             listener._serve_cleartext(ours, _where("cleartext"))
         elapsed = time.monotonic() - started
         for pump in pumps:

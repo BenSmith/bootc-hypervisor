@@ -600,6 +600,38 @@ def http_response(status, reason, body_text, *, close):
     return head.encode("ascii") + body
 
 
+def drain(client, framing):
+    """Read a refused request's body to its end. False if it was too much.
+
+    Draining is a service to the connection, not an obligation: a guest
+    that answers a refusal with a gigabyte gets the connection closed
+    rather than the courtesy of having it all read.
+    """
+    if framing.kind == "none":
+        return True
+    if framing.kind == "length" and framing.length > DRAIN_MAX:
+        return False
+    try:
+        copy_body(client, None, framing)
+    except (RequestUnreadable, OSError):
+        return False
+    return True
+
+
+def send_response(conn, status, reason, text, *, close):
+    # NO TOOL NAME IN A GUEST-FACING BODY. A `workloadctl: ` prefix here
+    # would ride every refusal and announce -- in one refused request,
+    # before the guest inspected a single certificate -- that its egress
+    # is mediated and by what. The status line is an ordinary origin
+    # answer; the body is the only place an identity could leak, so it
+    # carries none. What an operator needs is in the journal and the
+    # per-request record, neither of which the guest can read.
+    try:
+        conn.sendall(http_response(status, reason, f"{text}\n", close=close))
+    except OSError:
+        pass
+
+
 # --- HTTP/2, as far as a relay that decodes nothing can check it ---
 
 # The HTTP/2 connection preface (RFC 9113 §3.4): the exact 24 bytes every h2
