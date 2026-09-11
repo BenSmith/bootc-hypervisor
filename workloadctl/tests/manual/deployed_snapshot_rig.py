@@ -181,13 +181,24 @@ def self_check(before_tree, after_tree, configs):
     mutation is a directive added to the setup service every workload gets, so
     the correct answer is "all of them", not "most of them".
     """
-    gen = after_tree / "generators" / "workload-generate"
-    original = gen.read_text()
+    # The setup service is rendered wherever the generator keeps it -- it has
+    # lived in the entrypoint and in lib/gen_common.py -- so the anchor is
+    # located by content, not by path. A path would read "anchor missing" for
+    # a move, which is the same verdict as a real deletion.
     anchor = 'svc.set("RemainAfterExit", "yes")'
-    if anchor not in original:
+    context = "systemd-sysusers"
+    gen = None
+    for cand in (after_tree / "lib" / "gen_common.py",
+                 after_tree / "generators" / "workload-generate"):
+        if cand.exists() and anchor in cand.read_text() and context in cand.read_text():
+            gen = cand
+            break
+    if gen is None:
         record("self-check: the mutation anchor still exists", False,
-               f"{anchor!r} not found -- the rig cannot verify itself")
+               f"{anchor!r} beside {context!r} found in no candidate file -- "
+               "the rig cannot verify itself")
         return
+    original = gen.read_text()
     # Re-indent to the anchor's own column. A probe pasted at column 0 is an
     # IndentationError, and the generator then emits nothing at all -- which
     # this rig would report as 18 broken configs rather than as a rig bug.
