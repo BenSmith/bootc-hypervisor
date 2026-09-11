@@ -27,6 +27,7 @@ from pathlib import Path
 import vm_metrics
 import exporter_collect
 import exporter_render
+import exporter_textfile
 import workload_metrics
 
 from tests import REPO_ROOT, load_script, script_env
@@ -523,13 +524,8 @@ class TestMetricsLiveCollection(unittest.TestCase):
 
 
 def _load_exporter():
-    """Load the workload-exporter module object (for direct function calls)."""
-    orig_argv = sys.argv[:]
-    sys.argv = [EXPORTER_SCRIPT]  # PORT = int(sys.argv[1]) guard
-    try:
-        return load_script("libexec/workload-exporter")
-    finally:
-        sys.argv = orig_argv
+    """The entrypoint module, for the rows that run main()."""
+    return load_script("libexec/workload-exporter")
 
 
 class TestVMCgroupMetrics(unittest.TestCase):
@@ -1081,7 +1077,7 @@ class TestWriteMetrics(unittest.TestCase):
     def setUp(self):
         from unittest import mock
         self.mock = mock
-        self.mod = _load_exporter()
+        self.mod = exporter_textfile
 
     def test_writes_expected_contents_and_creates_parent(self):
         with tempfile.TemporaryDirectory() as d:
@@ -1127,7 +1123,7 @@ class TestDiskProducer(unittest.TestCase):
     def setUp(self):
         from unittest import mock
         self.mock = mock
-        self.mod = _load_exporter()
+        self.mod = exporter_textfile
 
     def test_parse_args_disk_flag_and_path(self):
         self.assertEqual(self.mod.parse_args(["prog"]), (False, None))
@@ -1168,32 +1164,63 @@ class TestDiskProducer(unittest.TestCase):
             self.assertTrue(mode & stat.S_IROTH)
 
 
-class TestMain(unittest.TestCase):
+class TestEntrypointWiring(unittest.TestCase):
+    """main(argv) end to end: argv to a textfile on disk.
+
+    Nothing below main() is patched. The config dir is real and holds one
+    enabled workload, so the fast pass discovers it (through workload_lib's
+    call-time accessor) and the row proves the shim hands argv's mode and
+    path to the producer that owns them. Each row was verified red by
+    making main() ignore --disk and by making it drop the positional path.
+    """
+
     def setUp(self):
         from unittest import mock
         self.mock = mock
         self.mod = _load_exporter()
+        self.config_dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.config_dir, ignore_errors=True)
+        write_config(self.config_dir, "app", """
+[workload]
+name = "app"
+[container]
+image = "x"
+""")
+        self.env = self.mock.patch.dict(
+            os.environ, {"WORKLOAD_CONFIG_DIR": self.config_dir})
+        self.env.start()
+        self.addCleanup(self.env.stop)
 
-    def test_main_writes_output_path(self):
+    def test_fast_mode_writes_the_named_path(self):
         with tempfile.TemporaryDirectory() as d:
             out = Path(d) / "workloads.prom"
-            with self.mock.patch.object(self.mod, "OUTPUT_PATH", out), \
-                 self.mock.patch.object(self.mod, "collect_all", return_value=[]):
-                self.mod.main()
-            self.assertTrue(out.exists())
-            self.assertIn("workload_enabled_total 0", out.read_text())
+            self.assertEqual(self.mod.main(["prog", str(out)]), 0)
+            body = out.read_text()
+        self.assertIn("workload_enabled_total 1", body)
+        self.assertIn('workload_active{workload="app"}', body)
+        self.assertNotIn("workload_disk_bytes", body)
 
-    def test_main_disk_mode_writes_disk_textfile(self):
+    def test_disk_mode_writes_the_disk_textfile(self):
         with tempfile.TemporaryDirectory() as d:
             out = Path(d) / "workloads-disk.prom"
-            with self.mock.patch.object(self.mod, "DISK_MODE", True), \
-                 self.mock.patch.object(self.mod, "OUTPUT_PATH", out), \
-                 self.mock.patch.object(self.mod, "collect_disk",
-                                        return_value=[("app", 4096)]):
-                self.mod.main()
-            self.assertTrue(out.exists())
-            self.assertIn('workload_disk_bytes{workload="app"} 4096',
-                          out.read_text())
+            with self.mock.patch.object(
+                    exporter_collect, "get_workload_disk_bytes",
+                    return_value=4096):
+                self.assertEqual(self.mod.main(["prog", "--disk", str(out)]), 0)
+            body = out.read_text()
+        self.assertIn('workload_disk_bytes{workload="app"} 4096', body)
+        self.assertNotIn("workload_enabled_total", body)
+
+    def test_no_path_means_the_per_mode_default(self):
+        with tempfile.TemporaryDirectory() as d, \
+             self.mock.patch.object(
+                 exporter_textfile, "DEFAULT_OUTPUT", Path(d) / "f.prom"), \
+             self.mock.patch.object(
+                 exporter_textfile, "DEFAULT_DISK_OUTPUT", Path(d) / "d.prom"):
+            self.mod.main(["prog"])
+            self.assertTrue((Path(d) / "f.prom").exists())
+            self.assertFalse((Path(d) / "d.prom").exists())
+
 
 
 if __name__ == "__main__":
