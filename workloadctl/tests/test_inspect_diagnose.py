@@ -25,9 +25,9 @@ from unittest import mock
 from cmd_diagnose import (
     _binding_fragments, _named_hosts, _not_http_fragments,
 )
-from egress_policy import (
-    VM_DROP_MISDIRECTED, VM_DROP_MISDIRECTED_LISTED, VM_DROP_NOT_HTTP,
-    VM_DROP_NOT_HTTP_POLICY,
+from egress_record import (
+    DROP_MISDIRECTED, DROP_MISDIRECTED_LISTED, DROP_NOT_HTTP,
+    DROP_NOT_HTTP_POLICY, DROP_REASONS, PER_HOST_REASONS,
 )
 import inspect_figures as figures_mod
 from egress_status import OTHER_KEY
@@ -35,44 +35,31 @@ from egress_status import OTHER_KEY
 from tests.test_inspect_listener import _mod
 
 
-class TestTheKeysAgreeWithTheListener(unittest.TestCase):
-    """A rename in the listener has to fail here rather than turn a figure
-    into a permanent zero. Zero is a legal value for every one of these, so
-    nothing at runtime distinguishes a key that stopped matching from a
-    refusal that never fired."""
-
-    def test_each_key_is_the_listeners_own_string(self):
-        mod = _mod()
-        for ours, theirs in (
-                (VM_DROP_MISDIRECTED, "DROP_MISDIRECTED"),
-                (VM_DROP_MISDIRECTED_LISTED, "DROP_MISDIRECTED_LISTED"),
-                (VM_DROP_NOT_HTTP, "DROP_NOT_HTTP"),
-                (VM_DROP_NOT_HTTP_POLICY, "DROP_NOT_HTTP_POLICY")):
-            self.assertEqual(ours, getattr(mod, theirs), theirs)
+class TestTheKeysDiagnoseReads(unittest.TestCase):
+    """The four keys `diagnose` reads by name are one definition shared with
+    the listener now, so nothing pins them against each other. What is still
+    worth pinning is the SHAPE each message assumes of its key."""
 
     def test_every_key_read_here_is_one_the_listener_reports(self):
-        """Restating a string the listener never writes is the same permanent
-        zero one step earlier, and it survives the equality test above if the
-        constant it was copied from is itself unused."""
-        mod = _mod()
-        for key in (VM_DROP_MISDIRECTED, VM_DROP_MISDIRECTED_LISTED,
-                    VM_DROP_NOT_HTTP, VM_DROP_NOT_HTTP_POLICY):
-            self.assertIn(key, mod.DROP_REASONS)
+        """A key `diagnose` reads that the listener never writes is a figure
+        that reads zero forever, and zero is a legal value."""
+        for key in (DROP_MISDIRECTED, DROP_MISDIRECTED_LISTED,
+                    DROP_NOT_HTTP, DROP_NOT_HTTP_POLICY):
+            self.assertIn(key, DROP_REASONS)
 
     def test_the_two_per_host_figures_are_actually_per_host(self):
         """Both messages name hosts. A reason with no per-host map would leave
         `_named_hosts` reading an absent key forever, and the message would
         render an empty parenthesis rather than the list it promises."""
-        mod = _mod()
-        for key in (VM_DROP_MISDIRECTED_LISTED, VM_DROP_NOT_HTTP,
-                    VM_DROP_NOT_HTTP_POLICY):
-            self.assertIn(key, mod.PER_HOST_REASONS)
+        for key in (DROP_MISDIRECTED_LISTED, DROP_NOT_HTTP,
+                    DROP_NOT_HTTP_POLICY):
+            self.assertIn(key, PER_HOST_REASONS)
 
     def test_the_unlisted_binding_half_has_no_per_host_map(self):
         """Its keys are guest-chosen and unbounded, which is why it is absent
         -- so the message for it must not promise a list. Pinned so that
         adding one later forces this message to be revisited."""
-        self.assertNotIn(VM_DROP_MISDIRECTED, _mod().PER_HOST_REASONS)
+        self.assertNotIn(DROP_MISDIRECTED, PER_HOST_REASONS)
 
 
 class TestNamedHosts(unittest.TestCase):
@@ -101,11 +88,11 @@ class TestTheBindingFigureIsTwoReadings(unittest.TestCase):
 
     def test_a_quiet_workload_says_nothing(self):
         self.assertEqual(_binding_fragments({"drop_reasons": {
-            VM_DROP_MISDIRECTED: 0, VM_DROP_MISDIRECTED_LISTED: 0}}), [])
+            DROP_MISDIRECTED: 0, DROP_MISDIRECTED_LISTED: 0}}), [])
 
     def test_the_unlisted_half_is_named_as_evidence_not_a_setting(self):
         (line,) = _binding_fragments(
-            {"drop_reasons": {VM_DROP_MISDIRECTED: 3}})
+            {"drop_reasons": {DROP_MISDIRECTED: 3}})
         self.assertIn("3 request(s)", line)
         self.assertIn("NO list", line)
         self.assertIn("evidence", line)
@@ -113,8 +100,8 @@ class TestTheBindingFigureIsTwoReadings(unittest.TestCase):
 
     def test_the_allowlisted_half_names_the_hosts_and_calls_it_benign(self):
         (line,) = _binding_fragments({
-            "drop_reasons": {VM_DROP_MISDIRECTED_LISTED: 2},
-            "per_host": {VM_DROP_MISDIRECTED_LISTED: {"cdn.example": 2}},
+            "drop_reasons": {DROP_MISDIRECTED_LISTED: 2},
+            "per_host": {DROP_MISDIRECTED_LISTED: {"cdn.example": 2}},
         })
         self.assertIn("coalescing", line)
         self.assertIn("cdn.example (2)", line)
@@ -125,9 +112,9 @@ class TestTheBindingFigureIsTwoReadings(unittest.TestCase):
         coalescing client as an intrusion, and an alarm that fires on ordinary
         traffic stops being read."""
         lines = _binding_fragments({
-            "drop_reasons": {VM_DROP_MISDIRECTED: 1,
-                             VM_DROP_MISDIRECTED_LISTED: 1},
-            "per_host": {VM_DROP_MISDIRECTED_LISTED: {"cdn.example": 1}},
+            "drop_reasons": {DROP_MISDIRECTED: 1,
+                             DROP_MISDIRECTED_LISTED: 1},
+            "per_host": {DROP_MISDIRECTED_LISTED: {"cdn.example": 1}},
         })
         self.assertEqual(len(lines), 2)
         self.assertIn("evidence", lines[0])
@@ -137,7 +124,7 @@ class TestTheBindingFigureIsTwoReadings(unittest.TestCase):
         """The count is exact and the map is best-effort; a report that
         crashed without one would lose the figure to protect the detail."""
         (line,) = _binding_fragments(
-            {"drop_reasons": {VM_DROP_MISDIRECTED_LISTED: 2}})
+            {"drop_reasons": {DROP_MISDIRECTED_LISTED: 2}})
         self.assertIn("2 request(s)", line)
         self.assertNotIn("()", line)
 
@@ -146,7 +133,7 @@ class TestTheNonHttpFigureIsTheSpliceList(unittest.TestCase):
 
     def test_a_quiet_workload_says_nothing(self):
         self.assertEqual(_not_http_fragments({"per_host_totals": {
-            VM_DROP_NOT_HTTP: 0, VM_DROP_NOT_HTTP_POLICY: 0}}), [])
+            DROP_NOT_HTTP: 0, DROP_NOT_HTTP_POLICY: 0}}), [])
 
     def test_a_total_with_no_map_behind_it_drops_the_list_not_the_line(self):
         """Both halves render the hosts in parentheses, and an absent map made
@@ -158,7 +145,7 @@ class TestTheNonHttpFigureIsTheSpliceList(unittest.TestCase):
         honest output is the sentence without the list rather than a blank
         where the list was promised.
         """
-        for reason in (VM_DROP_NOT_HTTP, VM_DROP_NOT_HTTP_POLICY):
+        for reason in (DROP_NOT_HTTP, DROP_NOT_HTTP_POLICY):
             with self.subTest(reason=reason):
                 (line,) = _not_http_fragments({"per_host_totals": {reason: 3}})
                 self.assertNotIn("()", line)
@@ -166,8 +153,8 @@ class TestTheNonHttpFigureIsTheSpliceList(unittest.TestCase):
 
     def test_the_plain_half_names_splice_and_the_host(self):
         (line,) = _not_http_fragments({
-            "per_host_totals": {VM_DROP_NOT_HTTP: 4},
-            "per_host": {VM_DROP_NOT_HTTP: {"smtp.example": 4}},
+            "per_host_totals": {DROP_NOT_HTTP: 4},
+            "per_host": {DROP_NOT_HTTP: {"smtp.example": 4}},
         })
         self.assertIn("smtp.example (4)", line)
         self.assertIn("[[vm.network.splice]]", line)
@@ -179,8 +166,8 @@ class TestTheNonHttpFigureIsTheSpliceList(unittest.TestCase):
         only `splice` would send an operator to type something validate
         rejects."""
         (line,) = _not_http_fragments({
-            "per_host_totals": {VM_DROP_NOT_HTTP_POLICY: 1},
-            "per_host": {VM_DROP_NOT_HTTP_POLICY: {"api.example": 1}},
+            "per_host_totals": {DROP_NOT_HTTP_POLICY: 1},
+            "per_host": {DROP_NOT_HTTP_POLICY: {"api.example": 1}},
         })
         self.assertIn("api.example (1)", line)
         self.assertIn("[[vm.network.policy]]", line)
@@ -189,10 +176,10 @@ class TestTheNonHttpFigureIsTheSpliceList(unittest.TestCase):
 
     def test_the_two_halves_are_two_sentences(self):
         lines = _not_http_fragments({
-            "per_host_totals": {VM_DROP_NOT_HTTP: 1,
-                                VM_DROP_NOT_HTTP_POLICY: 1},
-            "per_host": {VM_DROP_NOT_HTTP: {"smtp.example": 1},
-                         VM_DROP_NOT_HTTP_POLICY: {"api.example": 1}},
+            "per_host_totals": {DROP_NOT_HTTP: 1,
+                                DROP_NOT_HTTP_POLICY: 1},
+            "per_host": {DROP_NOT_HTTP: {"smtp.example": 1},
+                         DROP_NOT_HTTP_POLICY: {"api.example": 1}},
         })
         self.assertEqual(len(lines), 2)
         self.assertIn("smtp.example", lines[0])
@@ -207,8 +194,8 @@ class TestTheNonHttpFigureIsTheSpliceList(unittest.TestCase):
         traffic a guest pushed into `(other)`, which is the traffic a guest
         filling the map with cheap names is trying to hide."""
         (line,) = _not_http_fragments({
-            "per_host_totals": {VM_DROP_NOT_HTTP: 50},
-            "per_host": {VM_DROP_NOT_HTTP: {"a.example": 1, OTHER_KEY: 49}},
+            "per_host_totals": {DROP_NOT_HTTP: 50},
+            "per_host": {DROP_NOT_HTTP: {"a.example": 1, OTHER_KEY: 49}},
         })
         self.assertIn("50 connection(s)", line)
         self.assertIn("49 more", line)
@@ -237,11 +224,11 @@ class TestTheFiguresReachTheLine(unittest.TestCase):
 
     def test_both_figures_are_on_the_line(self):
         name, ok, detail = self._line({
-            "drop_reasons": {VM_DROP_MISDIRECTED: 1,
-                             VM_DROP_MISDIRECTED_LISTED: 1},
-            "per_host": {VM_DROP_MISDIRECTED_LISTED: {"cdn.example": 1},
-                         VM_DROP_NOT_HTTP: {"smtp.example": 2}},
-            "per_host_totals": {VM_DROP_NOT_HTTP: 2},
+            "drop_reasons": {DROP_MISDIRECTED: 1,
+                             DROP_MISDIRECTED_LISTED: 1},
+            "per_host": {DROP_MISDIRECTED_LISTED: {"cdn.example": 1},
+                         DROP_NOT_HTTP: {"smtp.example": 2}},
+            "per_host_totals": {DROP_NOT_HTTP: 2},
         })
         self.assertEqual(name, "vm_inspect")
         self.assertIn("NO list", detail)
@@ -254,7 +241,7 @@ class TestTheFiguresReachTheLine(unittest.TestCase):
         broken by a guest behaving badly -- a red line would send an operator
         hunting for a setting that already did its job."""
         _, ok, detail = self._line(
-            {"drop_reasons": {VM_DROP_MISDIRECTED: 99}})
+            {"drop_reasons": {DROP_MISDIRECTED: 99}})
         self.assertTrue(ok, detail)
 
     def test_a_quiet_workload_gets_the_ordinary_line(self):
@@ -277,7 +264,7 @@ class TestTheFiguresReachTheLine(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "inspect-status.json"
             path.write_text(json.dumps(
-                {"drop_reasons": {VM_DROP_MISDIRECTED: 7}}))
+                {"drop_reasons": {DROP_MISDIRECTED: 7}}))
             # Patched on inspect_figures, not on cmd_diagnose: rung 5 T8
             # moved the single read of this document there, because `doctor`
             # and the exporter became readers of it too and three parses with

@@ -624,9 +624,16 @@ import socket
 import threading
 import time
 
+from egress_record import (
+    DROP_BROKER_UNREACHABLE,
+    DROP_REASONS,
+    DROP_UNREACHABLE,
+    RECORD_FIELDS,
+)
 from egress_policy import (
-    VM_DROP_BROKER_UNREACHABLE, VM_DROP_UNREACHABLE, INSPECT_RECORD_FIELDS,
-    VmPolicyEntry, vm_inspect_policy, vm_inspect_policy_text,
+    VmPolicyEntry,
+    vm_inspect_policy,
+    vm_inspect_policy_text,
 )
 from workload_addr import broker_listen_address
 import inspect_figures
@@ -774,7 +781,7 @@ class _BrokerRig(unittest.TestCase):
 
 def _where():
     mod = listener_mod()
-    return mod._Where(f"{mod.LOG_ID_FIELD}=abc plane=cleartext",
+    return mod.Where(f"{mod.LOG_ID_FIELD}=abc plane=cleartext",
                       cid="abc", plane="cleartext")
 
 
@@ -842,9 +849,9 @@ class TestTheRefusalWhenTheBrokerIsDown(_BrokerRig):
         merged reason is a filter that cannot select this failure."""
         log, _, snap, _ = self._serve(
             self._policy([BROKERED]), _GET_BROKERED, refuse=True)
-        self.assertEqual(snap["drop_reasons"][VM_DROP_BROKER_UNREACHABLE], 1)
-        self.assertEqual(snap["drop_reasons"][VM_DROP_UNREACHABLE], 0)
-        self.assertIn(VM_DROP_BROKER_UNREACHABLE, log)
+        self.assertEqual(snap["drop_reasons"][DROP_BROKER_UNREACHABLE], 1)
+        self.assertEqual(snap["drop_reasons"][DROP_UNREACHABLE], 0)
+        self.assertIn(DROP_BROKER_UNREACHABLE, log)
 
     def test_the_guest_is_told_the_request_was_not_sent(self):
         """A silent close is the one outcome this listener argues against at
@@ -885,7 +892,7 @@ class TestTheRefusalWhenTheBrokerIsDown(_BrokerRig):
         mod = listener_mod()
         with unittest.mock.patch.object(
                 mod.Listener, "_dial_failure_reason",
-                return_value=VM_DROP_UNREACHABLE) as failure:
+                return_value=DROP_UNREACHABLE) as failure:
             self._serve(self._policy([PLAIN]), _GET_PLAIN, refuse=True)
         failure.assert_called_once()
 
@@ -943,8 +950,8 @@ class TestTheRecordOfABrokeredRequest(_BrokerRig):
         self.assertIsNone(rec["credential"])
 
     def test_the_field_is_in_the_shared_vocabulary(self):
-        self.assertIn("credential", INSPECT_RECORD_FIELDS)
-        self.assertIn("credential", listener_mod().RECORD_FIELDS)
+        self.assertIn("credential", RECORD_FIELDS)
+        self.assertIn("credential", RECORD_FIELDS)
 
 
 class TestTheCredentialFigures(_BrokerRig):
@@ -974,7 +981,7 @@ class TestTheCredentialFigures(_BrokerRig):
         _, _, snap, _ = self._serve(
             self._policy([BROKERED]), _GET_BROKERED, refuse=True)
         self.assertEqual(snap["credentialed"], 0)
-        self.assertEqual(snap["drop_reasons"][VM_DROP_BROKER_UNREACHABLE], 1)
+        self.assertEqual(snap["drop_reasons"][DROP_BROKER_UNREACHABLE], 1)
 
     def test_a_401_from_the_origin_is_counted(self):
         """§11's second named failure, and the reason it is a counter rather
@@ -1095,19 +1102,12 @@ class TestTheBrokerAddressComesFromTheUid(unittest.TestCase):
         self.assertEqual(listener._broker_address, BROKER_ADDR)
 
 
-class TestTheReasonIsPinnedAcrossTheTwoHalves(unittest.TestCase):
-    """lib/egress_policy.py restates the listener's string because the listener is an
-    extension-less entrypoint nothing in lib/ can import. Restating is only
-    safe with the pin."""
-
-    def test_the_string_is_the_same_on_both_sides(self):
-        self.assertEqual(VM_DROP_BROKER_UNREACHABLE,
-                         listener_mod().DROP_BROKER_UNREACHABLE)
+class TestTheReasonIsSelectable(unittest.TestCase):
+    """`workloadctl egress --reason` validates against DROP_REASONS, so a
+    reason outside it is a refusal nobody can ask about."""
 
     def test_egress_can_filter_on_it(self):
-        from egress_policy import INSPECT_RECORD_REASONS
-        self.assertIn(VM_DROP_BROKER_UNREACHABLE, INSPECT_RECORD_REASONS)
-        self.assertIn(VM_DROP_BROKER_UNREACHABLE, listener_mod().DROP_REASONS)
+        self.assertIn(DROP_BROKER_UNREACHABLE, DROP_REASONS)
 
 
 class TestTheSelinuxRuleShipsWithTheDial(unittest.TestCase):
@@ -1174,7 +1174,7 @@ class TestWhatDiagnoseSaysAboutBrokeredTraffic(unittest.TestCase):
 
     def test_a_dead_broker_points_at_the_unit_and_at_audit_log(self):
         out = self._fragments(
-            drop_reasons={VM_DROP_BROKER_UNREACHABLE: 4}, credentialed=0)
+            drop_reasons={DROP_BROKER_UNREACHABLE: 4}, credentialed=0)
         self.assertEqual(len(out), 1)
         self.assertIn("broker.service", out[0])
         self.assertIn("audit.log", out[0])

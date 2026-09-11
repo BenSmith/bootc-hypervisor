@@ -1,16 +1,14 @@
 #!/usr/bin/env python3
-"""What a filtered workload is allowed to reach, and the words its inspector
-answers in.
+"""What a filtered workload is allowed to reach.
 
 One subsystem, one file: the TLS mode, the hostname-matching rule, the parsed
-`[[network.policy]]` entries, the JSON document the listener reads, and the
-vocabulary of the per-request record it writes. Every name here is spelled at
-least twice -- once by the code that renders or arms, once by the code that
-reads back -- and several a third time by `libexec/workload-inspect-listener`,
-which is extension-less and so cannot be imported from lib/ at all. That third
-spelling is the reason a constant here is a constant rather than a literal:
-a drift between the two files turns a real refusal into a figure that reads
-zero, which is indistinguishable from a refusal that never fired.
+`[[network.policy]]` entries, the JSON document the listener reads, and where
+the listener's documents live. Every name here is spelled at least twice --
+once by the code that renders or arms, once by the code that reads back --
+which is the reason a constant here is a constant rather than a literal: a
+drift between the two turns a real refusal into a figure that reads zero,
+which is indistinguishable from a refusal that never fired. What the listener
+refuses WITH, and the record it writes, are egress_record's.
 
 Both substrates. The `vm_`/`VM_` prefixes record which one came first, not who
 is served -- containers adopted the same listener and the same document.
@@ -339,160 +337,6 @@ def inspect_policy_path(name: str) -> str:
 
 
 INSPECT_STATUS_FILE = "inspect-status.json"
-
-
-# The `drop_reasons` keys `workloadctl diagnose` reads back out of the
-# inspector's status document.
-#
-# SECOND DEFINITIONS OF STRINGS THE LISTENER OWNS, and stated here for the
-# reason broker_listen_address's twin is: `libexec/workload-inspect-listener` is an
-# extension-less entrypoint, so nothing in lib/ can import it. A reader either
-# restates the key or matches on a substring -- and a substring is worse, since
-# `not HTTP` is a prefix of `not HTTP (policy entry)` and `host does not match
-# the server name` is a prefix of its allowlisted twin. Both splits exist
-# BECAUSE the two halves need different operator responses, so a reader that
-# merges them by prefix reports the opposite of what the split was for.
-#
-# tests/test_inspect_diagnose.py pins each of these against the listener's
-# own constant. That pin is what makes restating them safe: a rename over there
-# fails a test here, rather than turning a figure into a permanent zero that
-# reads exactly like a refusal that never fired.
-VM_DROP_MISDIRECTED = "host does not match the server name"
-VM_DROP_MISDIRECTED_LISTED = "host does not match the server name (allowlisted)"
-VM_DROP_NOT_HTTP = "not HTTP"
-VM_DROP_NOT_HTTP_POLICY = "not HTTP (policy entry)"
-
-
-# The two field names that tie one of the inspector's journal lines to the
-# per-request record written beside it. Second definitions for the same reason
-# the four keys above are, and pinned the same way by
-# tests/test_inspect_record.py, which asserts each against the listener's
-# own LOG_ID_FIELD/LOG_REQ_FIELD.
-#
-# `id` is per CONNECTION and `req` is the ordinal within it, so a reader
-# selecting on `id` alone gets every decision taken on one connection in order.
-# Neither can be replaced by `peer=`, which the listener also logs: a source
-# port repeats across the requests on one keep-alive connection and is reused
-# by the kernel after close, so it groups the wrong lines together and splits
-# the right ones apart.
-INSPECT_LOG_ID_FIELD = "id"
-INSPECT_LOG_REQ_FIELD = "req"
-
-
-# The per-request record's field names, and the vocabularies of two of them.
-# MORE SECOND DEFINITIONS OF LISTENER STRINGS, for the reason the VM_DROP_*
-# keys above are: the record is written by an extension-less entrypoint nothing
-# in lib/ can import, and the reader that renders it lives here. Restating them
-# is safe only because tests/test_inspect_record.py pins each against the
-# listener's own constant -- without that pin a renamed field turns a column
-# into a permanent blank, which reads exactly like a guest that did nothing.
-#
-# `credential` is the NAME of the credstore material the request was brokered
-# with, or null on a request that was not brokered -- never the material, and
-# never an address. It is here because `upstream` is honestly the broker's
-# address on a brokered request: `upstream` is documented as the address
-# actually dialled, and recording the origin there instead would put a second,
-# false definition of "what this request touched" into the one document that
-# exists to be evidence. What makes the honest value readable is
-# this field naming which credential rode along, so `host` says where the
-# request went and `credential` says why `upstream` is a loopback address.
-INSPECT_RECORD_FIELDS = (
-    INSPECT_LOG_ID_FIELD, INSPECT_LOG_REQ_FIELD, "ts", "plane", "mode",
-    "host", "method", "path", "query", "http", "decision", "reason", "status",
-    "upstream", "credential", "duration_ms",
-)
-
-
-# `forward` and `drop`, the journal's own verbs, and deliberately no third
-# value for "refused with an answer": whether the guest was told is carried
-# exactly by `status` being non-null, and a second spelling of one fact is free
-# to disagree with it.
-INSPECT_RECORD_DECISIONS = ("forward", "drop")
-
-
-# What the listener was doing with the connection, which is not the question
-# `plane` answers. `splice` and `h2` are the two connection-level records --
-# the paths that carry requests this design never decodes.
-INSPECT_RECORD_MODES = ("forward", "terminate", "splice", "h2")
-
-
-# The two planes a record can have arrived on, which is the port the guest
-# dialled and not what the listener then did with the connection.
-INSPECT_RECORD_PLANES = ("tls", "cleartext")
-
-
-# Every value the record's `reason` field can carry -- the listener's own
-# DROP_REASONS, restated whole rather than the four VM_DROP_* keys `diagnose`
-# happened to need.
-#
-# THE WHOLE SET, because `workloadctl egress --reason` validates against it.
-# A closed set is the point: a reason value that matches nothing renders
-# identically to a guest that never hit that refusal, so `--reason
-# "not allowed"` for `not allowlisted` would print an empty report and an
-# operator would conclude the denial never happened. Validated, it is an
-# argparse error naming the valid values instead.
-#
-# This matters more since the guest-facing refusal body was made generic: the
-# guest is told nothing about WHY, so `reason` here is the only place a
-# not-allowlisted denial is distinguishable from a not-permitted one.
-#
-# tests/test_cmd_egress.py pins this against the listener's DROP_REASONS in both
-# directions -- a reason the listener writes and this omits is a filter that
-# cannot select a real refusal, and one this carries that the listener never
-# writes is a filter that always returns nothing.
-VM_DROP_NOT_ALLOWLISTED = "not allowlisted"
-VM_DROP_NO_NAME = "no readable name"
-VM_DROP_UNREADABLE_REQUEST = "unreadable request"
-VM_DROP_UNREACHABLE = "upstream unreachable"
-VM_DROP_INTERNAL = "internal destination"
-VM_DROP_CEILING = "connection ceiling reached"
-# Connection-level like the ceiling, and refused before any byte is read: the
-# caller's uid is not this workload's. The listener identifies callers through
-# lib/peer_identity.py; `workload_filter` is the primary control and this is
-# the layer behind it.
-VM_DROP_FOREIGN_CALLER = "caller is not this workload"
-VM_DROP_RELAY_FAILED = "relay failed"
-VM_DROP_TIMED_OUT = "timed out"
-VM_DROP_UNVERIFIED = "upstream certificate unverified"
-VM_DROP_CLIENT_CERT = "upstream wants a client certificate"
-VM_DROP_THROTTLED = "mint rationed"
-VM_DROP_MINT_FAILED = "could not mint a leaf"
-VM_DROP_NOT_H2 = "not HTTP/2"
-VM_DROP_NOT_PERMITTED = "not permitted by policy"
-# NOT VM_DROP_UNREACHABLE. "the provider is down" and "this workload's
-# credential broker is down" need different operator responses -- the first is
-# somebody else's outage, the second is a unit on this host that failed to
-# start, or an SELinux rule missing from security/workload-inspect.cil, which
-# is the failure that module's own "THE UPSTREAM DIAL" block records as "a
-# policy gap wearing a network error's clothes". Merged into the generic
-# reason, such an AVC is indistinguishable from a provider outage, and
-# `workloadctl egress --reason` -- which validates against this closed set --
-# would have no filter that selects it.
-VM_DROP_BROKER_UNREACHABLE = "credential broker unreachable"
-
-
-INSPECT_RECORD_REASONS = (
-    VM_DROP_NOT_ALLOWLISTED,
-    VM_DROP_NO_NAME,
-    VM_DROP_UNREADABLE_REQUEST,
-    VM_DROP_UNREACHABLE,
-    VM_DROP_INTERNAL,
-    VM_DROP_CEILING,
-    VM_DROP_FOREIGN_CALLER,
-    VM_DROP_RELAY_FAILED,
-    VM_DROP_TIMED_OUT,
-    VM_DROP_UNVERIFIED,
-    VM_DROP_CLIENT_CERT,
-    VM_DROP_MISDIRECTED,
-    VM_DROP_MISDIRECTED_LISTED,
-    VM_DROP_THROTTLED,
-    VM_DROP_MINT_FAILED,
-    VM_DROP_NOT_HTTP,
-    VM_DROP_NOT_HTTP_POLICY,
-    VM_DROP_NOT_H2,
-    VM_DROP_NOT_PERMITTED,
-    VM_DROP_BROKER_UNREACHABLE,
-)
 
 
 def inspect_status_path(name: str) -> str:

@@ -59,7 +59,7 @@ def _where(plane="tls", cid="0" * 12):
     loops ask it for each request's ordinal. Tests that enter at _serve_tls or
     _serve_cleartext skip _serve, so they build one here.
     """
-    return _mod()._Where(f"{_mod().LOG_ID_FIELD}={cid} plane={plane}",
+    return _mod().Where(f"{_mod().LOG_ID_FIELD}={cid} plane={plane}",
                          cid=cid, plane=plane)
 
 

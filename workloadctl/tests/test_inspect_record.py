@@ -14,6 +14,7 @@ lines share it, and two connections do not.
 
 import importlib
 from tests import load_script
+import contextlib
 import io
 import json
 import os
@@ -27,11 +28,19 @@ import unittest
 import unittest.mock
 from pathlib import Path
 
+from egress_record import (
+    LOG_ID_FIELD,
+    LOG_REQ_FIELD,
+    RECORD_DECISIONS,
+    RECORD_FIELDS,
+    RECORD_MODES,
+)
 from egress_policy import (
-    INSPECT_LOG_ID_FIELD, INSPECT_LOG_REQ_FIELD,
-    INSPECT_RECORD_DECISIONS, INSPECT_RECORD_FIELDS,
-    INSPECT_RECORD_MODES, INSPECT_RECORD_FILE, INSPECT_RECORD_ROOT,
-    inspect_logs_directory, inspect_record_dir, inspect_record_path,
+    INSPECT_RECORD_FILE,
+    INSPECT_RECORD_ROOT,
+    inspect_logs_directory,
+    inspect_record_dir,
+    inspect_record_path,
 )
 from nft_elements import INSPECT_RECORD_SELINUX_TYPE
 
@@ -89,28 +98,6 @@ class _Harness(unittest.TestCase):
 
     def _lines(self, log):
         return [ln for ln in log.splitlines() if ln.strip()]
-
-
-class TestTheFieldNamesAreShared(unittest.TestCase):
-    """lib/ restates what this entrypoint emits, because lib/ cannot import an
-    extension-less script. The restatement is only safe while a rename over
-    there fails a test here — otherwise the reader keeps looking for a field
-    nobody emits any more and reports every join as a miss."""
-
-    def test_the_id_field_name_matches(self):
-        self.assertEqual(_mod().LOG_ID_FIELD, INSPECT_LOG_ID_FIELD)
-
-    def test_the_request_field_name_matches(self):
-        self.assertEqual(_mod().LOG_REQ_FIELD, INSPECT_LOG_REQ_FIELD)
-
-    def test_the_record_field_names_match(self):
-        self.assertEqual(_mod().RECORD_FIELDS, INSPECT_RECORD_FIELDS)
-
-    def test_the_decision_vocabulary_matches(self):
-        self.assertEqual(_mod().RECORD_DECISIONS, INSPECT_RECORD_DECISIONS)
-
-    def test_the_mode_vocabulary_matches(self):
-        self.assertEqual(_mod().RECORD_MODES, INSPECT_RECORD_MODES)
 
 
 class TestEveryLineCarriesTheId(_Harness):
@@ -664,7 +651,7 @@ class _Records(_Harness):
         guest.shutdown(socket.SHUT_WR)
         ctx = (unittest.mock.patch.object(
                    socket, "create_connection", side_effect=origin)
-               if origin else unittest.mock.patch.object(mod, "_fmt", mod._fmt))
+               if origin else contextlib.nullcontext())
         with ctx:
             listener._serve(ours, peer, local, mod.plane_for_port(local[1]),
                             mod.secrets.token_hex(6))
@@ -705,7 +692,7 @@ class TestTheRecordOfAnAllowedRequest(_Records):
         """A field absent and a field null are different facts. A reader that
         has to tell "not measured" from "measured as nothing" cannot, if the
         writer drops keys whose value is None."""
-        self.assertEqual(sorted(self._one()), sorted(INSPECT_RECORD_FIELDS))
+        self.assertEqual(sorted(self._one()), sorted(RECORD_FIELDS))
 
     def test_the_decision_and_mode(self):
         rec = self._one()
@@ -800,9 +787,9 @@ class TestTheRecordOfAnAllowedRequest(_Records):
             b"GET / HTTP/1.1\r\nHost: ok.example\r\nConnection: close\r\n\r\n",
             policy=mod.Policy(tls="splice", hosts=("ok.example",)),
             origin=self._origin())
-        self.assertEqual(records[0][INSPECT_LOG_ID_FIELD],
+        self.assertEqual(records[0][LOG_ID_FIELD],
                          ID.search(log).group(1))
-        self.assertEqual(records[0][INSPECT_LOG_REQ_FIELD], 1)
+        self.assertEqual(records[0][LOG_REQ_FIELD], 1)
 
 
 class TestNoHeaderOrBodyEverReachesIt(_Records):
@@ -915,7 +902,7 @@ class TestTheConnectionLevelRecords(_Records):
         self.assertEqual(rec["host"], "ok.example")
         self.assertIsNone(rec["path"], "a splice decodes nothing")
         self.assertIsNone(rec["status"])
-        self.assertIsNone(rec[INSPECT_LOG_REQ_FIELD])
+        self.assertIsNone(rec[LOG_REQ_FIELD])
 
     def test_a_hello_with_no_name_is_recorded(self):
         mod = _mod()
@@ -957,7 +944,7 @@ class TestTheH2BlindSpotIsCounted(unittest.TestCase):
         body = source[source.index("def _serve_h2("):
                       source.index("def _drop_not_h2(")]
         self.assertIn("record_h2_unrecorded()", body)
-        self.assertIn('_Record(self.record, where, "h2"', body)
+        self.assertIn('Record(self.record, where, "h2"', body)
 
 
 class TestTheRecordNeverKillsARequest(_Records):

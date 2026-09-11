@@ -136,10 +136,14 @@ class TestTheTableIsReadable(unittest.TestCase):
     def test_the_table_is_where_this_thinks_it_is(self):
         self.assertTrue(TABLE.is_file(), TABLE)
 
-    def test_both_verdicts_are_populated(self):
-        keep, rename = _table()
+    def test_the_keep_verdict_is_populated(self):
+        """KEEP only. RENAME reached zero on 2026-09-11 when the last twenty
+        -- egress_policy's second copies of the listener's drop reasons --
+        moved to egress_record; an empty RENAME set is the campaign's end
+        state, not a parse failure, and the KEEP floor is what still tells
+        the two apart."""
+        keep, _ = _table()
         self.assertGreater(len(keep), 10, keep)
-        self.assertGreater(len(rename), 10, rename)
 
     def test_discovery_finds_symbols(self):
         """Non-empty, and a subset of the wider sweep it is a filter on.

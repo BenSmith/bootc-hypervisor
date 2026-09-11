@@ -50,13 +50,24 @@ from provisioning import (
 )
 from validation import uses_host_userns
 from nft import nft_json
+from egress_record import (
+    DROP_BROKER_UNREACHABLE,
+    DROP_MISDIRECTED,
+    DROP_MISDIRECTED_LISTED,
+    DROP_NOT_HTTP,
+    DROP_NOT_HTTP_POLICY,
+)
 from egress_policy import (
-    INSPECT_DIGEST_KEY, inspect_policy_digest, inspect_policy_path,
-    inspect_digest_short, INSPECT_DIGEST_SHORT,
-    INSPECT_PORT_CLEARTEXT, INSPECT_PORT_TLS,
-    TLS_DEFAULT, vm_uses_inspect, VM_DROP_MISDIRECTED,
-    VM_DROP_MISDIRECTED_LISTED, VM_DROP_BROKER_UNREACHABLE, VM_DROP_NOT_HTTP,
-    VM_DROP_NOT_HTTP_POLICY, uses_resolve,
+    INSPECT_DIGEST_KEY,
+    inspect_policy_digest,
+    inspect_policy_path,
+    inspect_digest_short,
+    INSPECT_DIGEST_SHORT,
+    INSPECT_PORT_CLEARTEXT,
+    INSPECT_PORT_TLS,
+    TLS_DEFAULT,
+    vm_uses_inspect,
+    uses_resolve,
 )
 from egress_ca import CA_EXPIRY_WARN_DAYS, ca_cert_path
 from egress_selinux import (
@@ -1691,7 +1702,7 @@ def _credential_usage_fragments(status) -> list[str]:
             f"current, and that the guest is sending the `placeholder` this "
             f"workload declares rather than a key of its own")
     brokered = status.get("credentialed")
-    dropped = (status.get("drop_reasons") or {}).get(VM_DROP_BROKER_UNREACHABLE)
+    dropped = (status.get("drop_reasons") or {}).get(DROP_BROKER_UNREACHABLE)
     if isinstance(dropped, int) and dropped:
         out.append(
             f"{dropped} request(s) to a brokered host were dropped because "
@@ -1761,7 +1772,7 @@ def _binding_fragments(status) -> list[str]:
     reasons = status.get("drop_reasons") or {}
     per_host = status.get("per_host") or {}
     out = []
-    unlisted = reasons.get(VM_DROP_MISDIRECTED)
+    unlisted = reasons.get(DROP_MISDIRECTED)
     if isinstance(unlisted, int) and unlisted:
         out.append(
             f"{unlisted} request(s) inside an authorised session named a host "
@@ -1769,9 +1780,9 @@ def _binding_fragments(status) -> list[str]:
             f"reusing a session it was given to reach a name it was not. "
             f"Nothing here is misconfigured: read this as evidence, not as a "
             f"setting to change")
-    listed = reasons.get(VM_DROP_MISDIRECTED_LISTED)
+    listed = reasons.get(DROP_MISDIRECTED_LISTED)
     if isinstance(listed, int) and listed:
-        hosts = _named_hosts(per_host.get(VM_DROP_MISDIRECTED_LISTED))
+        hosts = _named_hosts(per_host.get(DROP_MISDIRECTED_LISTED))
         where = f" ({hosts})" if hosts else ""
         out.append(
             f"{listed} request(s) reused one session across two allowlisted "
@@ -1799,7 +1810,7 @@ def _not_http_fragments(status) -> list[str]:
     per_host = status.get("per_host") or {}
     totals = status.get("per_host_totals") or {}
     out = []
-    plain = totals.get(VM_DROP_NOT_HTTP)
+    plain = totals.get(DROP_NOT_HTTP)
     if isinstance(plain, int) and plain:
         # Guarded the way _binding_fragments guards its own, and for the reason
         # that half already knew: a total with no map behind it renders `()`,
@@ -1808,16 +1819,16 @@ def _not_http_fragments(status) -> list[str]:
         # thing is the sentence without the list rather than a blank where the
         # list was promised.
         where = f" ({hosts})" if (hosts := _named_hosts(
-            per_host.get(VM_DROP_NOT_HTTP))) else ""
+            per_host.get(DROP_NOT_HTTP))) else ""
         out.append(
             f"{plain} connection(s) were closed because the host did not speak "
             f"HTTP{where} — if that is what those hosts really are, each "
             f"needs a [[vm.network.splice]] entry to pass through inspected by "
             f"name instead")
-    governed = totals.get(VM_DROP_NOT_HTTP_POLICY)
+    governed = totals.get(DROP_NOT_HTTP_POLICY)
     if isinstance(governed, int) and governed:
         where = f" ({hosts})" if (hosts := _named_hosts(
-            per_host.get(VM_DROP_NOT_HTTP_POLICY))) else ""
+            per_host.get(DROP_NOT_HTTP_POLICY))) else ""
         out.append(
             f"{governed} connection(s) were closed for not speaking HTTP on "
             f"hosts a [[vm.network.policy]] entry names{where} — those "

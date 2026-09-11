@@ -1,8 +1,8 @@
 # Every vm_/VM_-prefixed public symbol defined in lib/, classified.
 #
-# THE PREFIX IS A CLAIM, AND FOR MOST OF THESE IT IS FALSE. The egress stack,
+# THE PREFIX IS A CLAIM, AND FOR MOST OF THESE IT WAS FALSE. The egress stack,
 # the CA, hostname policy, inspection records, the nft constants and uid
-# addressing all live in vm-named symbols and are used by the container path
+# addressing all lived in vm-named symbols and were used by the container path
 # just as much. A reader who trusts the prefix concludes a shared thing is the
 # VM's; someone editing on that belief changes container behaviour without
 # knowing it.
@@ -109,24 +109,5 @@ KEEP	vm_ptp.vm_ptp_kvm_runcmd_lines
 KEEP	vm_ptp.vm_ptp_kvm_seed_files
 KEEP	workload_addr.VM_RESOLVE_LISTENER_BIN
 
-# RENAME -- shared, and the prefix misleads: 202 symbols.
-RENAME	egress_policy.VM_DROP_BROKER_UNREACHABLE
-RENAME	egress_policy.VM_DROP_CEILING
-RENAME	egress_policy.VM_DROP_CLIENT_CERT
-RENAME	egress_policy.VM_DROP_FOREIGN_CALLER
-RENAME	egress_policy.VM_DROP_INTERNAL
-RENAME	egress_policy.VM_DROP_MINT_FAILED
-RENAME	egress_policy.VM_DROP_MISDIRECTED
-RENAME	egress_policy.VM_DROP_MISDIRECTED_LISTED
-RENAME	egress_policy.VM_DROP_NOT_ALLOWLISTED
-RENAME	egress_policy.VM_DROP_NOT_H2
-RENAME	egress_policy.VM_DROP_NOT_HTTP
-RENAME	egress_policy.VM_DROP_NOT_HTTP_POLICY
-RENAME	egress_policy.VM_DROP_NOT_PERMITTED
-RENAME	egress_policy.VM_DROP_NO_NAME
-RENAME	egress_policy.VM_DROP_RELAY_FAILED
-RENAME	egress_policy.VM_DROP_THROTTLED
-RENAME	egress_policy.VM_DROP_TIMED_OUT
-RENAME	egress_policy.VM_DROP_UNREACHABLE
-RENAME	egress_policy.VM_DROP_UNREADABLE_REQUEST
-RENAME	egress_policy.VM_DROP_UNVERIFIED
+# RENAME -- shared, and the prefix misleads. 202 symbols when this table was
+# written; none now. The section stays so a new one has somewhere to go.
