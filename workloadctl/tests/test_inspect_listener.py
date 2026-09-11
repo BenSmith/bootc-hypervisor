@@ -41,7 +41,7 @@ import egress_record
 import egress_relay
 import egress_upstream
 import inspect_listener
-from inspect_listener import Ceiling, INTERIM_MAX, Listener
+from inspect_listener import Ceiling, INTERIM_MAX, Listener, build_minter
 import sd_listen
 from egress_upstream import (
     ALPN_H2, BROKER_UPSTREAM_KEY, UPSTREAM_ALPN, UPSTREAMS_MAX,
@@ -392,11 +392,10 @@ class TestSocketActivation(unittest.TestCase):
             return mod.inherited_listening_sockets()
 
     def test_a_pid_that_is_not_ours_is_refused(self):
-        mod = _mod()
         with self.assertRaises(NotSocketActivated) as ctx:
             self._recover({"LISTEN_PID": "999999", "LISTEN_FDS": "4"})
         self.assertIn("999999", str(ctx.exception))
-        self.assertIn(str(mod.os.getpid()), str(ctx.exception))
+        self.assertIn(str(os.getpid()), str(ctx.exception))
 
     def test_an_absent_listen_fds_is_refused(self):
         with self.assertRaises(NotSocketActivated) as ctx:
@@ -676,29 +675,32 @@ class TestPolicyLoading(unittest.TestCase):
         None where there is no agent, and a real vm_clock call where there is
         -- rather than that a flag arrived.
         """
-        mod = _mod()
         state = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, state)
         for path in (os.path.join(state, "ca.crt"),
                      os.path.join(state, "ca.key")):
             open(path, "w").close()
         built = {}
-        with unittest.mock.patch.object(mod, "workload_state_dir",
-                               lambda name: state), \
-                unittest.mock.patch.object(mod, "ca_cert_path",
-                                  lambda d: os.path.join(d, "ca.crt")), \
-                unittest.mock.patch.object(mod, "ca_key_path",
-                                  lambda d: os.path.join(d, "ca.key")), \
-                unittest.mock.patch.object(mod, "Minter",
-                                  lambda *a, **kw: built.update(kw)), \
-                unittest.mock.patch.object(mod, "resync_guest_clock_if_skewed",
-                                  lambda name: "RESYNCED-SENTINEL"):
-            mod.build_minter("w", Policy(tls="inspect", hosts=(),
+        with unittest.mock.patch.object(
+                inspect_listener, "workload_state_dir", lambda name: state), \
+                unittest.mock.patch.object(
+                    inspect_listener, "ca_cert_path",
+                    lambda d: os.path.join(d, "ca.crt")), \
+                unittest.mock.patch.object(
+                    inspect_listener, "ca_key_path",
+                    lambda d: os.path.join(d, "ca.key")), \
+                unittest.mock.patch.object(
+                    inspect_listener, "Minter",
+                    lambda *a, **kw: built.update(kw)), \
+                unittest.mock.patch.object(
+                    inspect_listener, "resync_guest_clock_if_skewed",
+                    lambda name: "RESYNCED-SENTINEL"):
+            build_minter("w", Policy(tls="inspect", hosts=(),
                                              guest_agent=False))
             self.assertIsNone(built["clock_check"]())
 
             built.clear()
-            mod.build_minter("w", Policy(tls="inspect", hosts=(),
+            build_minter("w", Policy(tls="inspect", hosts=(),
                                              guest_agent=True))
             self.assertEqual(built["clock_check"](), "RESYNCED-SENTINEL")
 

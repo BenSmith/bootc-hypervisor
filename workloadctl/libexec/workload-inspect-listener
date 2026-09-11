@@ -29,7 +29,6 @@ listener a guest is redirected into. So a missing environment is a loud
 failure, never a second path.
 """
 
-import os
 import signal
 import sys
 
@@ -39,14 +38,10 @@ from egress_policy import (
     inspect_policy_path, inspect_record_path, inspect_status_path,
     load_policy,
 )
-from egress_ca import ca_cert_path, ca_key_path
-from vm_clock import resync_guest_clock_if_skewed
-from egress_mint import Minter
-from inspect_listener import Listener
+from inspect_listener import Listener, build_minter
 from sd_listen import NotSocketActivated
 from sd_listen import (
     inherited_listening_sockets as sd_inherited_listening_sockets)
-from workload_lib import workload_state_dir
 
 
 def inherited_listening_sockets():
@@ -60,47 +55,6 @@ def inherited_listening_sockets():
     return sd_inherited_listening_sockets(
         refusal=(", because a fallback bind would move the bind out of the "
                  "inherited fd and back into the workload SELinux domain"))
-
-
-def build_minter(name, policy):
-    """A Minter for a terminating workload, or None. Raises if it cannot.
-
-    The CA is checked HERE rather than at the first mint. It is made by
-    `workload-vm-inspect up` before this process is ever socket-activated, so
-    its absence is a provisioning failure, and a provisioning failure that
-    surfaces as one refused connection an hour after boot is a provisioning
-    failure nobody attributes.
-    """
-    if policy.tls != "inspect":
-        return None
-    state_dir = workload_state_dir(name)
-    cert = ca_cert_path(state_dir)
-    key = ca_key_path(state_dir)
-    for path in (cert, key):
-        if not os.path.exists(path):
-            raise FileNotFoundError(
-                f"tls = 'inspect' terminates, which needs this workload's "
-                f"egress CA, and {path} is not there")
-    # The clock check is the guest-clock remedy, and it is passed explicitly
-    # because Minter refuses to be built without one. It runs on a mint MISS only, so a
-    # guest cannot make the guest agent be dialled more often than it can make
-    # us mint.
-    #
-    # `lambda: None` WHERE THERE IS NO AGENT TO ASK, which is Minter's own
-    # documented way of saying a caller decided against the remedy rather than
-    # forgot it. A container has no QEMU guest agent, so the check could only
-    # ever fail: it dialled a socket that has never existed on that substrate,
-    # once per mint miss, and counted every attempt into `clock_unavailable` --
-    # a figure whose published meaning is that the remedy is INERT IN THIS
-    # GUEST. Structurally guaranteed on a container, so it reported a broken
-    # remedy where there is simply no such remedy, and nothing went red.
-    #
-    # The substrate is read off the policy document rather than branched on
-    # here, because this binary does not differ between substrates (ADR 009).
-    # The document differs; the binary reads the same keys from either.
-    clock_check = ((lambda: resync_guest_clock_if_skewed(name))
-                   if policy.guest_agent else (lambda: None))
-    return Minter(name, state_dir, clock_check=clock_check)
 
 
 def main(argv=None):

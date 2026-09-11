@@ -54,7 +54,7 @@ from http_framing import (
 import egress_upstream
 from egress_upstream import tls_failure
 import inspect_listener
-from inspect_listener import MAX_CONNECTIONS, Listener
+from inspect_listener import MAX_CONNECTIONS, Listener, build_minter
 from egress_record import (
     DROP_INTERNAL,
     DROP_NOT_H2,
@@ -1110,19 +1110,18 @@ class TestTheStartRefusesWhatItCannotDo(unittest.TestCase):
         surfaced as a single refused connection an hour after boot is a
         provisioning failure nobody attributes.
         """
-        mod = _mod()
         with tempfile.TemporaryDirectory() as tmp:
             with unittest.mock.patch.object(
-                    mod, "workload_state_dir", lambda n: Path(tmp)):
+                    inspect_listener, "workload_state_dir",
+                    lambda n: Path(tmp)):
                 with self.assertRaises(FileNotFoundError) as caught:
-                    mod.build_minter("demo", Policy(tls="inspect",
+                    build_minter("demo", Policy(tls="inspect",
                                                         hosts=("a.example",)))
         self.assertIn("egress CA", str(caught.exception))
 
     def test_splice_needs_no_minter(self):
-        mod = _mod()
         self.assertIsNone(
-            mod.build_minter("demo", Policy(tls="splice", hosts=())))
+            build_minter("demo", Policy(tls="splice", hosts=())))
 
     def test_a_terminating_listener_with_no_minter_drops_loudly(self):
         """Unreachable through main(), and it still must not be silent.
