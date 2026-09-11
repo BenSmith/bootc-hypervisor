@@ -449,7 +449,7 @@ class Minter:
             # prevent is still possible and nothing else says so. It is read
             # from the inspector's status document (`mint.clock_unavailable`),
             # which is where every figure in here surfaces. Rung 5 gave that
-            # document its readers: `vm_inspect_figures` parses it once, and
+            # document its readers: `inspect_figures` parses it once, and
             # `doctor` and `workload-exporter` render what it returns --
             # `workload_vm_inspect_clock_unavailable_total` is this counter.
             "clock_resyncs": 0, "clock_unavailable": 0, "clock_failed": 0,

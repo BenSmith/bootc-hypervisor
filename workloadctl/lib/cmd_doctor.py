@@ -18,7 +18,7 @@ from cmd_drift import collect_drift, collect_policy_drift
 from cmd_validate import report_config_load_failure
 from substrate import get_substrate
 from egress_policy import inspect_digest_short
-from vm_inspect_figures import (
+from inspect_figures import (
     drop_reasons,
     figure_lines,
     figures,
@@ -206,7 +206,7 @@ def cmd_doctor(args, manager):
     # Routed through the substrate predicate (G6 in the container
     # egress-parity build spec) rather than uses_inspect() directly: the
     # figures below are read purely off the on-disk status JSON keyed by
-    # workload name (vm_inspect_figures.read_inspect_status/read_resolve_status),
+    # workload name (inspect_figures.read_inspect_status/read_resolve_status),
     # which carries nothing VM-specific, so this block already generalises.
     if get_substrate(config, manager).uses_inspect():
         status = read_inspect_status(name)

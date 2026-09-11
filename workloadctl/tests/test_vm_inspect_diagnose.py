@@ -29,7 +29,7 @@ from egress_policy import (
     VM_DROP_MISDIRECTED, VM_DROP_MISDIRECTED_LISTED, VM_DROP_NOT_HTTP,
     VM_DROP_NOT_HTTP_POLICY,
 )
-import vm_inspect_figures as figures_mod
+import inspect_figures as figures_mod
 from egress_status import OTHER_KEY
 
 from tests.test_vm_inspect_listener import _mod
@@ -278,7 +278,7 @@ class TestTheFiguresReachTheLine(unittest.TestCase):
             path = Path(tmp) / "inspect-status.json"
             path.write_text(json.dumps(
                 {"drop_reasons": {VM_DROP_MISDIRECTED: 7}}))
-            # Patched on vm_inspect_figures, not on cmd_diagnose: rung 5 T8
+            # Patched on inspect_figures, not on cmd_diagnose: rung 5 T8
             # moved the single read of this document there, because `doctor`
             # and the exporter became readers of it too and three parses with
             # three ideas of what a malformed document means is the thing that

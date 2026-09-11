@@ -95,7 +95,7 @@ from vm_provision import (
 )
 from podman import PodmanError
 from workloadctl_core import WorkloadManager, require_root
-from vm_inspect_figures import read_inspect_status
+from inspect_figures import read_inspect_status
 from substrate import service_active
 from cmd_validate import load_config_or_exit
 from pcap import PCAP_CHAINS, pcap_unit_name
@@ -1617,7 +1617,7 @@ def _inspect_status(name: str) -> dict | None:
     is silence on this line rather than a traceback over the twenty other
     checks that were about to run.
 
-    The body moved to `vm_inspect_figures.read_inspect_status` at rung 5 T8,
+    The body moved to `inspect_figures.read_inspect_status` at rung 5 T8,
     when `doctor` and the exporter became readers of the same file. The name
     stays because it is what this module's checks call and what their tests
     patch; what it must not become is a second parse of the same document with

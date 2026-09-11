@@ -27,7 +27,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 import cmd_doctor
-import vm_inspect_figures as fig
+import inspect_figures as fig
 
 from tests import load_script
 

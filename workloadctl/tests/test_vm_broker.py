@@ -621,7 +621,7 @@ from egress_policy import (
     VmPolicyEntry, vm_inspect_policy, vm_inspect_policy_text,
 )
 from workload_addr import broker_listen_address
-import vm_inspect_figures
+import inspect_figures
 
 LISTENER = Path(__file__).resolve().parent.parent / "libexec" / "workload-vm-inspect-listener"
 CIL = Path(__file__).resolve().parent.parent / "security" / "workload-inspect.cil"
@@ -998,7 +998,7 @@ class TestTheCredentialFigures(_BrokerRig):
         _, _, snap, _ = self._serve(
             self._policy([BROKERED]), _GET_BROKERED, responses=[_UNAUTHORIZED])
         for key in ("credentialed", "credential_unauthorized"):
-            figure = vm_inspect_figures.FIGURES_BY_KEY[key]
+            figure = inspect_figures.FIGURES_BY_KEY[key]
             self.assertEqual(len(figure.path), 1)
             self.assertIn(figure.path[0], snap)
             self.assertEqual(snap[figure.path[0]], 1)

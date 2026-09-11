@@ -552,7 +552,7 @@ nothing to `doctor`'s problem count, because a guest being denied is the filter
 working. The inspector's actual faults arrive through the setup checks.
 
 The same figures are published by `workload-exporter` for scraping, from the
-same producer — `lib/vm_inspect_figures.py` — so the two cannot disagree. Every
+same producer — `lib/inspect_figures.py` — so the two cannot disagree. Every
 series is labelled `workload="<name>"`, and only filtered VMs get any:
 
 | Series | Meaning |
@@ -571,7 +571,7 @@ series is labelled `workload="<name>"`, and only filtered VMs get any:
 | `workload_vm_resolve_synthesised_total` / `_static_total` / `_nodata_total` / `_unlisted_total` | What the synthesising resolver answered |
 
 That table is a selection, not the whole surface — the full set, with its help
-text, is the `FIGURES` table in `lib/vm_inspect_figures.py`, which is what both
+text, is the `FIGURES` table in `lib/inspect_figures.py`, which is what both
 `doctor` and the exporter walk.
 
 There is deliberately **no** published total for connections or for drops: both

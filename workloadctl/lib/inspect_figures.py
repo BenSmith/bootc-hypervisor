@@ -1,5 +1,5 @@
 """
-vm_inspect_figures — the inspector's counters, derived once, rendered by two.
+inspect_figures — the inspector's counters, derived once, rendered by two.
 
 Rung 5 T8/T9, and decision 9 is the whole of its shape: T8 and T9 RENDER, they
 do not compute. `doctor` prints these figures for a person and the exporter
