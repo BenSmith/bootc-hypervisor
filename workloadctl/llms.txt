@@ -484,6 +484,7 @@ lib/egress_mint.py                 # Per-workload egress CA and leaf minting
 lib/vm_clock.py                    # Host-side guest clock resync on mint cache miss
 lib/vm_netdev.py                   # One VM's passt DNS fragment: the three-way decision (none / responder / host) and the EnvironmentFile write
 lib/vm_disk_generations.py         # system.qcow2 generations: rotate the live disk out, prune beyond rollback_keep
+lib/vm_image_fetch.py              # A cloud image fetched and sha256-verified into the workload's .image-cache (any urllib scheme, file:// included)
 lib/passt_dns_host.py              # What the host has: default gateway and first nameserver per family
 lib/passt_dns_fragment.py          # What the guest is told: the netdev DNS fragment builders and the per-family rule
 lib/inspect_listener.py            # The inspector process: the accept loop, the connection ceiling, the plane from the accepting port, and the status file; each plane is one call into inspect_tls or inspect_http

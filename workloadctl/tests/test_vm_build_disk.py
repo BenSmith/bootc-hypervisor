@@ -15,6 +15,7 @@ from pathlib import Path
 from unittest import mock
 
 import vm_disk_generations
+import vm_image_fetch
 import workload_lib
 from tests import load_script
 
@@ -102,7 +103,6 @@ class TestRotateGenerations(unittest.TestCase):
 
 class TestVerifyChecksum(unittest.TestCase):
     def setUp(self):
-        self.mod = _load_script()
         self.tmp = tempfile.mkdtemp()
         self.f = Path(self.tmp) / "img.qcow2"
         self.f.write_bytes(b"hello world")
@@ -114,25 +114,24 @@ class TestVerifyChecksum(unittest.TestCase):
 
     def test_matching_checksum_passes(self):
         # Should not raise.
-        self.mod.verify_checksum(self.f, f"sha256:{self.digest}")
+        vm_image_fetch.verify_checksum(self.f, f"sha256:{self.digest}")
 
     def test_uppercase_expected_is_normalized(self):
-        self.mod.verify_checksum(self.f, f"sha256:{self.digest.upper()}")
+        vm_image_fetch.verify_checksum(self.f, f"sha256:{self.digest.upper()}")
 
     def test_mismatch_raises(self):
         with self.assertRaises(ValueError) as cm:
-            self.mod.verify_checksum(self.f, "sha256:" + "0" * 64)
+            vm_image_fetch.verify_checksum(self.f, "sha256:" + "0" * 64)
         self.assertIn("mismatch", str(cm.exception).lower())
 
     def test_unsupported_algorithm_raises(self):
         with self.assertRaises(ValueError) as cm:
-            self.mod.verify_checksum(self.f, f"md5:{self.digest}")
+            vm_image_fetch.verify_checksum(self.f, f"md5:{self.digest}")
         self.assertIn("sha256", str(cm.exception))
 
 
 class TestLoadConfig(unittest.TestCase):
     def setUp(self):
-        self.mod = _load_script()
         self.tmp = tempfile.mkdtemp()
 
     def tearDown(self):
@@ -141,7 +140,6 @@ class TestLoadConfig(unittest.TestCase):
 
 class TestDownloadCloudImage(unittest.TestCase):
     def setUp(self):
-        self.mod = _load_script()
         self.tmp = tempfile.mkdtemp()
         self.home = Path(self.tmp)
         self.payload = b"cloud-image-bytes"
@@ -186,8 +184,8 @@ class TestDownloadCloudImage(unittest.TestCase):
         cache = self.home / ".image-cache"
         cache.mkdir(parents=True)
         (cache / "img.qcow2").write_bytes(self.payload)
-        with mock.patch.object(self.mod.urllib.request, "urlopen") as urlopen:
-            path = self.mod.download_cloud_image(
+        with mock.patch.object(vm_image_fetch.urllib.request, "urlopen") as urlopen:
+            path = vm_image_fetch.download_cloud_image(
                 "http://h/img.qcow2", self.checksum, self.home)
         urlopen.assert_not_called()
         self.assertEqual(path.name, "img.qcow2")
@@ -196,42 +194,42 @@ class TestDownloadCloudImage(unittest.TestCase):
         cache = self.home / ".image-cache"
         cache.mkdir(parents=True)
         (cache / "img.qcow2").write_bytes(b"stale")
-        with mock.patch.object(self.mod.urllib.request, "urlopen",
+        with mock.patch.object(vm_image_fetch.urllib.request, "urlopen",
                                return_value=self._fake_response(self.payload)):
-            path = self.mod.download_cloud_image(
+            path = vm_image_fetch.download_cloud_image(
                 "http://h/img.qcow2", self.checksum, self.home)
         self.assertEqual(path.read_bytes(), self.payload)
 
     def test_fresh_download_verifies_and_saves(self):
-        with mock.patch.object(self.mod.urllib.request, "urlopen",
+        with mock.patch.object(vm_image_fetch.urllib.request, "urlopen",
                                return_value=self._fake_response(self.payload)):
-            path = self.mod.download_cloud_image(
+            path = vm_image_fetch.download_cloud_image(
                 "http://h/img.qcow2", self.checksum, self.home)
         self.assertTrue(path.exists())
         self.assertEqual(path.read_bytes(), self.payload)
 
     def test_download_error_becomes_runtimeerror(self):
-        with mock.patch.object(self.mod.urllib.request, "urlopen",
+        with mock.patch.object(vm_image_fetch.urllib.request, "urlopen",
                                side_effect=urllib.error.URLError("boom")):
             with self.assertRaises(RuntimeError):
-                self.mod.download_cloud_image(
+                vm_image_fetch.download_cloud_image(
                     "http://h/img.qcow2", self.checksum, self.home)
 
     def test_missing_content_length_still_downloads(self):
         """No Content-Length just means no progress percentage."""
-        with mock.patch.object(self.mod.urllib.request, "urlopen",
+        with mock.patch.object(vm_image_fetch.urllib.request, "urlopen",
                                return_value=self._fake_response(
                                    self.payload, content_length=None)):
-            path = self.mod.download_cloud_image(
+            path = vm_image_fetch.download_cloud_image(
                 "http://h/img.qcow2", self.checksum, self.home)
         self.assertEqual(path.read_bytes(), self.payload)
 
     def test_malformed_content_length_still_downloads(self):
         """A junk header must not abort a download that is otherwise fine."""
-        with mock.patch.object(self.mod.urllib.request, "urlopen",
+        with mock.patch.object(vm_image_fetch.urllib.request, "urlopen",
                                return_value=self._fake_response(
                                    self.payload, content_length="not-a-number")):
-            path = self.mod.download_cloud_image(
+            path = vm_image_fetch.download_cloud_image(
                 "http://h/img.qcow2", self.checksum, self.home)
         self.assertEqual(path.read_bytes(), self.payload)
 
@@ -247,7 +245,6 @@ class TestDownloadCloudImageFileURL(unittest.TestCase):
     """
 
     def setUp(self):
-        self.mod = _load_script()
         self.tmp = tempfile.mkdtemp()
         self.home = Path(self.tmp) / "home"
         self.home.mkdir()
@@ -261,7 +258,7 @@ class TestDownloadCloudImageFileURL(unittest.TestCase):
         shutil.rmtree(self.tmp)
 
     def test_file_url_downloads_and_verifies(self):
-        path = self.mod.download_cloud_image(
+        path = vm_image_fetch.download_cloud_image(
             self.src.as_uri(), self.checksum, self.home)
         self.assertEqual(path.read_bytes(), self.payload)
         self.assertEqual(path, self.home / ".image-cache" / "img.qcow2")
@@ -269,17 +266,17 @@ class TestDownloadCloudImageFileURL(unittest.TestCase):
     def test_file_url_checksum_mismatch_is_rejected(self):
         bad = "sha256:" + hashlib.sha256(b"different").hexdigest()
         with self.assertRaises(ValueError):
-            self.mod.download_cloud_image(self.src.as_uri(), bad, self.home)
+            vm_image_fetch.download_cloud_image(self.src.as_uri(), bad, self.home)
 
     def test_missing_file_url_becomes_runtimeerror(self):
         missing = (Path(self.tmp) / "absent.qcow2").as_uri()
         with self.assertRaises(RuntimeError):
-            self.mod.download_cloud_image(missing, self.checksum, self.home)
+            vm_image_fetch.download_cloud_image(missing, self.checksum, self.home)
 
     def test_no_tempfile_left_behind_after_failure(self):
         missing = (Path(self.tmp) / "absent.qcow2").as_uri()
         with self.assertRaises(RuntimeError):
-            self.mod.download_cloud_image(missing, self.checksum, self.home)
+            vm_image_fetch.download_cloud_image(missing, self.checksum, self.home)
         leftovers = list((self.home / ".image-cache").glob("*.tmp"))
         self.assertEqual(leftovers, [])
 
