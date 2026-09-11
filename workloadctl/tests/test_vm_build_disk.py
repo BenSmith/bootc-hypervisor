@@ -14,6 +14,7 @@ import urllib.error
 from pathlib import Path
 from unittest import mock
 
+import vm_disk_generations
 import workload_lib
 from tests import load_script
 
@@ -24,7 +25,6 @@ def _load_script():
 
 class TestRotateGenerations(unittest.TestCase):
     def setUp(self):
-        self.mod = _load_script()
         self.tmp = tempfile.mkdtemp()
         self.home = Path(self.tmp)
 
@@ -43,13 +43,13 @@ class TestRotateGenerations(unittest.TestCase):
         )
 
     def test_no_system_disk_is_noop(self):
-        result = self.mod.rotate_generations(self.home, keep=2)
+        result = vm_disk_generations.rotate_generations(self.home, keep=2)
         self.assertIsNone(result)
         self.assertEqual(self._gens(), [])
 
     def test_first_rotation_creates_gen_1(self):
         self._make("system.qcow2", b"v1")
-        result = self.mod.rotate_generations(self.home, keep=2)
+        result = vm_disk_generations.rotate_generations(self.home, keep=2)
         self.assertEqual(result, self.home / "system.qcow2.gen-1")
         self.assertEqual(self._gens(), [1])
         self.assertFalse((self.home / "system.qcow2").exists())
@@ -60,7 +60,7 @@ class TestRotateGenerations(unittest.TestCase):
         self._make("system.qcow2.gen-1")
         self._make("system.qcow2.gen-2")
         self._make("system.qcow2")
-        result = self.mod.rotate_generations(self.home, keep=10)
+        result = vm_disk_generations.rotate_generations(self.home, keep=10)
         self.assertEqual(result, self.home / "system.qcow2.gen-3")
         self.assertEqual(self._gens(), [1, 2, 3])
 
@@ -71,7 +71,7 @@ class TestRotateGenerations(unittest.TestCase):
         for n in (1, 2, 3):
             self._make(f"system.qcow2.gen-{n}", f"old-{n}".encode())
         self._make("system.qcow2", b"current")
-        result = self.mod.rotate_generations(self.home, keep=2)
+        result = vm_disk_generations.rotate_generations(self.home, keep=2)
         self.assertEqual(result, self.home / "system.qcow2.gen-4")
         gens = self._gens()
         # Must include the new one (4) and not have grown beyond keep+1
@@ -86,7 +86,7 @@ class TestRotateGenerations(unittest.TestCase):
         # next build fails, so it must not be pruned.
         self._make("system.qcow2.gen-1", b"old")
         self._make("system.qcow2", b"current")
-        result = self.mod.rotate_generations(self.home, keep=1)
+        result = vm_disk_generations.rotate_generations(self.home, keep=1)
         self.assertEqual(result, self.home / "system.qcow2.gen-2")
         self.assertTrue(result.exists(), "freshly rotated gen must survive pruning")
 
@@ -95,7 +95,7 @@ class TestRotateGenerations(unittest.TestCase):
         # parsing or get pruned by it.
         (self.home / "system.qcow2.gen-keep").write_bytes(b"unrelated")
         self._make("system.qcow2", b"v1")
-        result = self.mod.rotate_generations(self.home, keep=2)
+        result = vm_disk_generations.rotate_generations(self.home, keep=2)
         self.assertEqual(result, self.home / "system.qcow2.gen-1")
         self.assertTrue((self.home / "system.qcow2.gen-keep").exists())
 

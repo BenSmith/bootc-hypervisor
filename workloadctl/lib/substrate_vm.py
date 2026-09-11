@@ -625,7 +625,7 @@ class VMSubstrate(Substrate):
     @staticmethod
     def _prune_generations(home_dir: Path, keep: int, exempt: int) -> None:
         """Keep at most `keep` generations older than `exempt`, matching the
-        update-path rotation (rotate_generations in workload-vm-build-disk):
+        update-path rotation (vm_disk_generations.rotate_generations):
         `exempt` (the freshly rotated-out disk) is always retained as the primary
         restore point, so `keep + 1` gen files survive in total."""
         gens = VMSubstrate._generation_numbers(home_dir, exclude=exempt)
