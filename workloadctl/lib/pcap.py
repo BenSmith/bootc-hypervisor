@@ -826,11 +826,11 @@ def build_plan(config, *, vantages: list[str], snaplen: dict[str, int],
                      pcap_rule_commands(uid, snaplen[vantage], direction)]
             reader = " ".join(tcpdump_argv(
                 uid, snaplen[vantage],
-                write=_vantage_path(write, vantage, len(vantages)), bpf=bpf,
+                write=vantage_path(write, vantage, len(vantages)), bpf=bpf,
                 buffer_kib=plan.buffer_kib))
             plan.steps.append((vantage, detail[vantage], rules + [reader]))
         else:
-            path = _vantage_path(write, vantage, len(vantages)) or "(none)"
+            path = vantage_path(write, vantage, len(vantages)) or "(none)"
             if config.is_vm:
                 staging = guest_staging_path(config.name)
                 obj = filter_dump_object(0, staging, snaplen[vantage])
@@ -853,7 +853,7 @@ def build_plan(config, *, vantages: list[str], snaplen: dict[str, int],
     return plan
 
 
-def _vantage_path(write: str | None, vantage: str, count: int) -> str | None:
+def vantage_path(write: str | None, vantage: str, count: int) -> str | None:
     """With more than one vantage, -w PATH is a directory."""
     if not write or write == "-":
         return write

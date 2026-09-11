@@ -56,7 +56,7 @@ from pcap import (
     PCAP_CHAINS, VANTAGE_GUEST, VANTAGE_HOST, PcapFormatError, filter_dump_id,
     filter_dump_object, guest_staging_path, log_rule_handles, log_rule_packets,
     pcap_delete_command, pcap_first_timestamp, pcap_packet_count,
-    pcap_rule_commands, pcap_shift_timestamps, tcpdump_argv,
+    pcap_rule_commands, pcap_shift_timestamps, tcpdump_argv, vantage_path,
 )
 from nft_constants import NFT_BIN, NFT_TABLE, NFT_SKELETON
 from config_parser import SOCKET_DIR
@@ -143,7 +143,7 @@ def report_completeness(plan: dict) -> None:
     matched = matched_packets(plan["uid"])
     if matched is None:
         return
-    path = _path_for(plan, VANTAGE_HOST)
+    path = vantage_path(plan["write"], VANTAGE_HOST, len(plan["vantages"]))
     if not path or path == "-" or not os.path.exists(path):
         log(f"  Host vantage: {matched} packets matched")
         return
@@ -441,7 +441,7 @@ def main(argv):
         if VANTAGE_HOST in vantages:
             host_up(plan)
         if VANTAGE_GUEST in vantages:
-            path = _path_for(plan, VANTAGE_GUEST)
+            path = vantage_path(plan["write"], VANTAGE_GUEST, len(plan["vantages"]))
             if plan["substrate"].startswith("VM"):
                 object_id = guest_vm_up(name, plan)
                 if object_id is None:
@@ -462,7 +462,7 @@ def main(argv):
     finally:
         if object_id:
             guest_vm_down(name, object_id)
-            _finalize_guest(name, _path_for(plan, VANTAGE_GUEST), started)
+            _finalize_guest(name, vantage_path(plan["write"], VANTAGE_GUEST, len(plan["vantages"])), started)
         for reader in readers:
             _terminate(reader)
         if VANTAGE_HOST in vantages:
@@ -472,19 +472,10 @@ def main(argv):
             host_down(plan["uid"])
 
 
-def _path_for(plan: dict, vantage: str) -> str | None:
-    write = plan.get("write")
-    if not write or write == "-":
-        return write
-    if len(plan["vantages"]) > 1:
-        return f"{write.rstrip('/')}/{vantage}.pcap"
-    return write
-
-
 def _host_reader(plan: dict) -> subprocess.Popen:
     argv = tcpdump_argv(
         plan["uid"], plan["snaplen"][VANTAGE_HOST],
-        write=_path_for(plan, VANTAGE_HOST),
+        write=vantage_path(plan["write"], VANTAGE_HOST, len(plan["vantages"])),
         packet_count=plan.get("packet_count"),
         rotate_size=plan.get("rotate_size"),
         file_count=plan.get("file_count"),
@@ -521,7 +512,7 @@ def _wait(readers: list[subprocess.Popen], plan: dict) -> None:
     path has no `-C` of its own — so poll st_size on whatever files exist.
     """
     max_size = plan.get("max_size_bytes") or 0
-    paths = [p for p in (_path_for(plan, v) for v in plan["vantages"])
+    paths = [p for p in (vantage_path(plan["write"], v, len(plan["vantages"])) for v in plan["vantages"])
              if p and p != "-"]
     while True:
         for reader in readers:
