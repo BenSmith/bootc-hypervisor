@@ -29,7 +29,8 @@ from nft_constants import (both_families, split_by_family, NFT_BIN,
                            NFT_SET_FILTERED, NFT_SET_INSPECT_CG, NFT_TABLE)
 from config_parser import SOCKET_DIR
 from nft_constants import INTERNAL_PREFIXES4, INTERNAL_PREFIXES6, SIDECAR_SLICE
-from vm_network_config import allow_reserved_reason, vm_allow_resolved
+from vm_network_config import vm_allow_resolved
+from workload_addr import allow_reserved_reason
 from workload_addr import inspect_address
 
 

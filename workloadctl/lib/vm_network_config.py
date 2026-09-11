@@ -33,10 +33,10 @@ from config_parser import (BROKER_DEFAULT_AUTH_FORMAT,
 from egress_policy import (POLICY_METHODS, POLICY_METHODS_REFUSED,
                            TLS_DEFAULT, TLS_MODES, VmPolicyEntry,
                            hostname_match,
-                           vm_policy_entries, policy_governs)
-from workload_addr import (INSPECT_ADDR6_PREFIX, INSPECT_NETWORK,
-                           RESOLVE_POLICY_FILE, RESOLVE_TTL,
-                           inspect_address, reserved_range)
+                           vm_policy_entries)
+from workload_addr import (RESOLVE_POLICY_FILE, RESOLVE_TTL,
+                           allow_reserved_reason, inspect_address,
+                           reserved_range)
 from egress_ca import RESERVED_GUEST_ENV
 from broker_config import VmCredential
 from config_parser import SOCKET_DIR
@@ -97,41 +97,6 @@ class VmAllowEntry(NamedTuple):
     host: str | None
     port: int
     reason: str
-
-
-def allow_reserved_reason(
-        addr: ipaddress.IPv4Address | ipaddress.IPv6Address) -> str | None:
-    """Why this address may not appear in `allow`, or None if it may.
-
-    The inspector's listener ranges are the one destination range an `allow`
-    entry must never name. `allow` is evaluated *first* in the filter chain,
-    deliberately -- it is also the escape hatch for the internal-destination
-    drop -- which puts it ahead of the guard rule whose whole job is to stop
-    one workload reaching another workload's inspector. An element here is
-    therefore not a bypass of the guard so much as a replacement for it: the
-    connection is accepted, lands on a policy point that applies someone
-    else's allowlist, and is re-originated as someone else's uid.
-
-    It takes an operator to write one, which makes this a foot-gun rather than
-    a hole -- and a refusal is what lets the chain keep `allow` at the front
-    (HLD detail §3, §7.2.5).
-
-    Both families, because the ranges are derived from one number: refusing the
-    v4 and not the v6 refuses half of every address, and the half that survives
-    is the one clients try first.
-    """
-    if isinstance(addr, ipaddress.IPv4Address):
-        network = INSPECT_NETWORK
-    else:
-        network = INSPECT_ADDR6_PREFIX
-    if addr not in network:
-        return None
-    return (f"{addr} is inside {network}, the egress inspector's own listener "
-            f"range. `allow` is matched ahead of the rule that stops one "
-            f"workload reaching another's inspector, so an entry here lands on "
-            f"a policy point enforcing a different workload's allowlist and "
-            f"re-originates as a different workload's uid. Reach the service "
-            f"through the inspector by name instead")
 
 
 # The [vm.network] keys that are scalars rather than sub-tables. Used only to
@@ -376,22 +341,6 @@ def vm_resolve_policy(net: dict, uid: int, resolved=None) -> dict:
         "hosts": vm_allowed_hosts(net),
         "policy": [e.host for e in vm_policy_entries(net)],
     }
-
-
-def policy_permits(host: str, method: str, path: str, entries) -> bool:
-    """Whether the governing entries permit one request. Union, not precedence.
-
-    Every entry either permits something or does nothing, so REORDERING THE
-    FILE CANNOT CHANGE WHAT IS ALLOWED. Two consequences follow and both look
-    like bugs: there is no way to subtract -- a narrower entry cannot carve an
-    exception out of a wider one -- and a specific entry does not override a
-    general one.
-
-    The caller decides what an empty governing set means; this function is only
-    asked about a host some entry governs.
-    """
-    return any(e.permits(method, path)
-               for e in policy_governs(host, entries))
 
 
 def _validate_host_reason_entries(entries, key: str, reason_clause: str):

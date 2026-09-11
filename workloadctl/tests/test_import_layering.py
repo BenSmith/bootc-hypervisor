@@ -64,8 +64,7 @@ UPWARD_EDGES = {}
 It held three `workload_lib` -> `vm` imports until the shared plane existed to
 import instead: `vm_uses_credentials`/`container_uses_credentials` now come
 from `broker_config`, the nft set and table names from `nft_constants`, and
-`allow_reserved_reason` from `vm_network_config` -- which `workload_lib` is
-allowed to name, because a substrate module is above it, not below.
+`allow_reserved_reason` from `workload_addr`, beside the ranges it refuses.
 
 `workload_lib` still has exactly one deferred import of ours, `from
 workloadctl_core import WorkloadUserNotFound`. That one is not a layering

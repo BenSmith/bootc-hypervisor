@@ -30,7 +30,8 @@ from nft_constants import (
     NFT_SET_INSPECT_LIVE, NFT_SET_INSPECT_LIVE6, NFT_SET_INTERNAL4,
     NFT_SET_INTERNAL6, NFT_SET_EGRESS_CG, NFT_SKELETON,
 )
-from vm_network_config import parse_vm_allow, allow_reserved_reason
+from vm_network_config import parse_vm_allow
+from workload_addr import allow_reserved_reason
 from workload_addr import (UID_MAX, UID_MIN, INSPECT_ADDR6_PREFIX,
                            INSPECT_NETWORK, inspect_address,
                            resolve_address)

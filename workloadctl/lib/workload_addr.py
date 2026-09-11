@@ -531,3 +531,38 @@ def ensure_advertised_interface(run) -> None:
     if result.returncode != 0:
         raise RuntimeError(
             f"could not bring up {ADVERTISED_IFACE}: {result.stderr.strip()}")
+
+
+def allow_reserved_reason(
+        addr: ipaddress.IPv4Address | ipaddress.IPv6Address) -> str | None:
+    """Why this address may not appear in `allow`, or None if it may.
+
+    The inspector's listener ranges are the one destination range an `allow`
+    entry must never name. `allow` is evaluated *first* in the filter chain,
+    deliberately -- it is also the escape hatch for the internal-destination
+    drop -- which puts it ahead of the guard rule whose whole job is to stop
+    one workload reaching another workload's inspector. An element here is
+    therefore not a bypass of the guard so much as a replacement for it: the
+    connection is accepted, lands on a policy point that applies someone
+    else's allowlist, and is re-originated as someone else's uid.
+
+    It takes an operator to write one, which makes this a foot-gun rather than
+    a hole -- and a refusal is what lets the chain keep `allow` at the front
+    (HLD detail §3, §7.2.5).
+
+    Both families, because the ranges are derived from one number: refusing the
+    v4 and not the v6 refuses half of every address, and the half that survives
+    is the one clients try first.
+    """
+    if isinstance(addr, ipaddress.IPv4Address):
+        network = INSPECT_NETWORK
+    else:
+        network = INSPECT_ADDR6_PREFIX
+    if addr not in network:
+        return None
+    return (f"{addr} is inside {network}, the egress inspector's own listener "
+            f"range. `allow` is matched ahead of the rule that stops one "
+            f"workload reaching another's inspector, so an entry here lands on "
+            f"a policy point enforcing a different workload's allowlist and "
+            f"re-originates as a different workload's uid. Reach the service "
+            f"through the inspector by name instead")

@@ -34,7 +34,7 @@ from nft_constants import (
 )
 from config_parser import runtime_dir
 from vm_defs import vm_allowed_hosts
-from vm_network_config import policy_permits
+from egress_policy import policy_permits
 from workload_addr import IP_BIN, ADVERTISED_IFACE
 
 ROOT = Path(__file__).resolve().parent.parent
