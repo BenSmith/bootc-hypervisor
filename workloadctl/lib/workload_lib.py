@@ -1862,7 +1862,7 @@ def validate_container_network(net: dict, config: dict | None = None) -> list[st
 # the internal-destination exemptions, the cgroup exemptions) live in
 # lib/nft_elements.py and take nothing but a uid and already-resolved addresses -- no
 # VM-specific state -- so they are reused verbatim for containers (imported
-# directly by libexec/workload-container-filter and lib/inspect_arm.py). What
+# directly by lib/filter_arm.py and lib/inspect_arm.py). What
 # differs, and what lives here, is
 # resolving and shaping the CONTAINER schema's own entry types
 # (ContainerAllowEntry keeps `host`/`address`/`port` apart, where VmAllowEntry

@@ -5,97 +5,28 @@ egress policy.
 
 Usage: workload-container-filter <up|down> <name>
 
-Container counterpart of workload-vm-filter (P1-8 in the container
-egress-parity build spec). `up` runs as an ExecStartPre, `down` as the
-matching ExecStopPost, on the one unit that pod/bridge mode orders BEFORE
-every member container: the container's own unit in `single` mode, and the
-pod-create/network-create head unit (`workload-<name>-pod.service` /
-`-net.service`) in `pod`/`bridge`. NOT the umbrella -- it carries `After=`
-its members, so arming there ran only once every container was already up
-and the workload spent the whole of member startup unfiltered. See
-_head_unit()'s docstring in generators/workload-generate. Both operate on set
-*elements* in the shared `inet workload_filter` table; neither ever touches a
-rule. See workload-vm-filter's module docstring for why this has to be a
-script and not a handful of ExecStartPre lines -- the allowlist-edit /
-stale-element argument applies unchanged, and the purge that answers it is
-now literally the same function (nft.purge_uid_elements).
+`up` runs as an ExecStartPre, `down` as the matching ExecStopPost, on the one
+unit that pod/bridge mode orders BEFORE every member container: the
+container's own unit in `single` mode, and the pod-create/network-create head
+unit (`workload-<name>-pod.service` / `-net.service`) in `pod`/`bridge`. NOT
+the umbrella -- it carries `After=` its members, so arming there would run
+only once every container was already up, and the workload would spend the
+whole of member startup unfiltered. See _head_unit()'s docstring in
+lib/gen_container.py.
 
-WHAT DIFFERS FROM workload-vm-filter
-
-- No bridge check. Containers have no VM-style bridge escape hatch; the one
-  topology where uid attribution might not hold (`[network] mode = "host"`)
-  is excluded upstream, in container_uses_inspect() itself, pending the P0-1
-  hardware spike -- so by the time this script runs, "has a trigger" already
-  means "uid attribution holds".
-- No resolver. There is no per-workload synthesising DNS responder for
-  containers (D7) -- a container resolves through the host's own resolver --
-  so there is no answer document to write here.
-- The gate is container_uses_inspect(), not `egress == "filtered"`: presence
-  of a trigger ([network].hosts, [[network.allow]], or [[network.policy]]) is
-  the whole statement for containers (R3 -- no default-deny, no `egress`
-  key).
-
-EXIT CODES: same convention as workload-vm-filter, and the same code --
-helper_main.run_helper. `up` fails loudly, `down` is tolerant.
+The program is lib/filter_arm.py, which is one body for both substrates; this
+file is main(), bound to its container substrate.
 """
-import pwd
 import sys
 
 sys.dont_write_bytecode = True
 
-from helper_main import log, run, run_helper, up_down_main
-from nft import purge_uid_elements
-from nft_constants import NFT_BIN, NFT_SKELETON
-from config_parser import container_allow_entries, container_uses_inspect
-from workload_lib import (
-    container_allow_resolved, container_filter_commands,
-    load_workload_config,
-)
-
-
-def workload_uid(name: str) -> int:
-    return pwd.getpwnam(f"_wl-{name}").pw_uid
-
-
-
-def up(name: str) -> int:
-    uid = workload_uid(name)
-    config = load_workload_config(name)
-    net = config.get("network", {}) or {}
-
-    # Not tolerant: everything below depends on the table existing. Same
-    # not-tolerant choice workload-vm-filter makes, for the same reason.
-    run([NFT_BIN, "-f", NFT_SKELETON], check=True)
-
-    stale = purge_uid_elements(uid)
-    if stale:
-        log(f"  Cleared {stale} stale element(s) for uid {uid}")
-
-    if not container_uses_inspect(config):
-        log(f"  {name} has no [network] trigger: not filtered")
-        return 0
-
-    allow = container_allow_entries(net)
-    resolved = container_allow_resolved(allow)
-    for argv in container_filter_commands(uid, allow, "add", resolved):
-        run(argv, check=True)
-    log(f"  Filtered uid {uid} with {len(allow)} allow entr"
-        f"{'y' if len(allow) == 1 else 'ies'}")
-    return 0
-
-
-def down(name: str) -> int:
-    try:
-        uid = workload_uid(name)
-    except KeyError:
-        # The user is already gone; nothing can be armed.
-        return 0
-    purge_uid_elements(uid)
-    return 0
+from filter_arm import CONTAINER, down, up
+from helper_main import run_helper, up_down_main
 
 
 def main(argv):
-    return up_down_main(argv, up, down)
+    return up_down_main(argv, lambda name: up(CONTAINER, name), down)
 
 
 if __name__ == "__main__":

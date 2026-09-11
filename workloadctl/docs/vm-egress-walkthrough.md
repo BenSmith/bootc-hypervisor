@@ -114,7 +114,7 @@ what is still configured and leave the dropped entry armed — permitting traffi
 the config no longer permits, silently, until the host reboots. Verified on
 nftables 1.1.6. The purge makes the armed state a function of the current config
 alone, rather than of the config plus every config it ever had
-(`libexec/workload-vm-filter:11-28`).
+(`lib/filter_arm.py`, module docstring).
 
 **The VM then boots knowing none of this.** Its cloud-config carries no proxy
 variables, no resolver address and nothing else about egress. Through rung 1 it

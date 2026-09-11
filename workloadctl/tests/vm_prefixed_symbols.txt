@@ -49,7 +49,7 @@
 # outlives the rename: change either constant's spelling freely, never what it
 # holds. TestTheValuePinnedConstants pins both strings.
 
-# KEEP -- the prefix is accurate: 58 symbols.
+# KEEP -- the prefix is accurate: 59 symbols.
 KEEP	vm_network_config.VM_ALLOW_ADDR_RE
 KEEP	vm_network_config.VM_ALLOW_NAME_RE
 KEEP	vm_network_config.VM_NETWORK_SCALARS
@@ -75,6 +75,7 @@ KEEP	broker_config.vm_broker_hosts
 KEEP	broker_config.vm_broker_upstream_addresses
 KEEP	broker_config.vm_credential_entries
 KEEP	broker_config.vm_uses_credentials
+KEEP	filter_arm.vm_after_arm
 KEEP	egress_policy.vm_inspect_policy
 KEEP	egress_policy.vm_inspect_policy_text
 KEEP	egress_policy.vm_policy_entries

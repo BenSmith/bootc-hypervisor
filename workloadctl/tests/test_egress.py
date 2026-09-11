@@ -16,6 +16,9 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
+import dataclasses
+import io
+from contextlib import redirect_stderr
 
 from egress_plane import PLANES
 from nft_elements import vm_filter_commands, filter_delete_command
@@ -989,13 +992,16 @@ class TestUnitWiring(unittest.TestCase):
             self.assertEqual(self._hooks(text), [], name)
 
 
-class TestFilterHelper(unittest.TestCase):
-    """libexec/workload-vm-filter -- arming and disarming one workload."""
+class _FilterFixture:
+    """nft faked at helper_main.subprocess.run, the answer document
+    redirected into a tmpdir, and the workload uid pinned."""
+
+    sub = None
 
     @classmethod
     def setUpClass(cls):
-        from tests import load_script
-        cls.mod = load_script("libexec/workload-vm-filter")
+        import filter_arm
+        cls.mod = filter_arm
 
     def setUp(self):
         self.calls = []
@@ -1057,10 +1063,24 @@ class TestFilterHelper(unittest.TestCase):
         self.addCleanup(p.stop)
 
     def _net(self, **cfg):
-        self._patch("network_config", lambda name: cfg)
+        self._patch("load_workload_config",
+                    lambda name: {"vm": {"network": cfg}})
 
     def _adds(self):
         return [c for c in self.calls if len(c) > 1 and c[1] == "add"]
+
+    def _deletes(self):
+        return [c for c in self.calls if len(c) > 1 and c[1] == "delete"]
+
+
+class TestFilterHelper(_FilterFixture, unittest.TestCase):
+    """lib/filter_arm.py under its VM substrate -- arming and disarming one
+    workload."""
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        cls.sub = cls.mod.VM
 
     # --- the responder's answer document, written here ---
 
@@ -1071,7 +1091,7 @@ class TestFilterHelper(unittest.TestCase):
         thing to assert is that the write happens at all."""
         from workload_addr import RESOLVE_TTL, inspect_address
         self._net(egress="filtered", allow=[])
-        self.mod.up("vm1")
+        self.mod.up(self.sub, "vm1")
         doc = self._resolve_document()
         self.assertEqual(doc["address"], inspect_address(10001).v4)
         self.assertEqual(doc["address6"], inspect_address(10001).v6)
@@ -1082,7 +1102,7 @@ class TestFilterHelper(unittest.TestCase):
         responder runs as _wl-<name> and must read it, and one workload's
         answers are not another's to enumerate."""
         self._net(egress="filtered", allow=[])
-        self.mod.up("vm1")
+        self.mod.up(self.sub, "vm1")
         self.assertEqual(os.stat(self.policy_path).st_mode & 0o777, 0o640)
         self.assertEqual(self.chowned, [(self.policy_path + ".tmp", 0, 10001)])
 
@@ -1092,10 +1112,10 @@ class TestFilterHelper(unittest.TestCase):
         entry = SimpleNamespace(address=None, host="git.local", port=2222,
                                 reason="forge")
         resolved = [(entry, [ipaddress.IPv4Address("192.0.2.9")])]
-        self._patch("vm_allow_resolved", lambda allow: resolved)
+        sub = dataclasses.replace(self.sub, resolved=lambda allow: resolved)
         self._net(egress="filtered",
                   allow=[{"address": "git.local:2222", "reason": "forge"}])
-        self.mod.up("vm1")
+        self.mod.up(sub, "vm1")
         self.assertEqual(self._resolve_document()["static"],
                          {"git.local": ["192.0.2.9"]})
         armed = [c for c in self._adds() if c[-2] == "wl_allow4"]
@@ -1106,43 +1126,40 @@ class TestFilterHelper(unittest.TestCase):
         responder unit, so a document for one would be a file nothing reads
         holding a policy nobody applied."""
         self._net(egress="filtered", allow=[], resolver="none")
-        self.mod.up("vm1")
+        self.mod.up(self.sub, "vm1")
         self.assertFalse(os.path.exists(self.policy_path))
 
     def test_open_egress_writes_no_document(self):
         self._net(egress="open", allow=[])
-        self.mod.up("vm1")
+        self.mod.up(self.sub, "vm1")
         self.assertFalse(os.path.exists(self.policy_path))
 
     def test_a_bridged_vm_writes_no_document(self):
         self._net(bridge="br0", allow=[])
-        self.mod.up("vm1")
+        self.mod.up(self.sub, "vm1")
         self.assertFalse(os.path.exists(self.policy_path))
-
-    def _deletes(self):
-        return [c for c in self.calls if len(c) > 1 and c[1] == "delete"]
 
     def test_up_applies_the_skeleton_before_touching_elements(self):
         self._net(egress="filtered", allow=[allow_entry("10.0.0.1:22")])
-        self.mod.up("vm1")
+        self.mod.up(self.sub, "vm1")
         self.assertIn("-f", self.calls[0])
         self.assertIn(NFT_SKELETON, self.calls[0])
 
     def test_up_arms_the_uid_and_its_allowlist(self):
         self._net(egress="filtered", allow=[allow_entry("10.0.0.1:22")])
-        self.mod.up("vm1")
+        self.mod.up(self.sub, "vm1")
         armed = " ".join(" ".join(c) for c in self._adds())
         self.assertIn(NFT_SET_FILTERED, armed)
         self.assertIn("10.0.0.1", armed)
 
     def test_open_egress_applies_the_skeleton_but_arms_nothing(self):
         self._net(egress="open")
-        self.mod.up("vm1")
+        self.mod.up(self.sub, "vm1")
         self.assertEqual(self._adds(), [])
 
     def test_bridged_vm_does_not_even_apply_the_skeleton(self):
         self._net(bridge="br0")
-        self.mod.up("vm1")
+        self.mod.up(self.sub, "vm1")
         self.assertEqual(self.calls, [])
 
     def test_up_clears_stale_elements_from_a_previous_allowlist(self):
@@ -1159,7 +1176,7 @@ class TestFilterHelper(unittest.TestCase):
                              {"concat": [10001, "2.2.2.2", 443]}],
         }
         self._net(egress="filtered", allow=[allow_entry("2.2.2.2:8443")])
-        self.mod.up("vm1")
+        self.mod.up(self.sub, "vm1")
         cleared = " ".join(" ".join(c) for c in self._deletes())
         self.assertIn("1.1.1.1", cleared,
                       "the dropped entry was left permitted")
@@ -1167,7 +1184,7 @@ class TestFilterHelper(unittest.TestCase):
     def test_up_never_clears_a_sibling_workloads_elements(self):
         self.listing = {NFT_SET_ALLOW4: [{"concat": [10002, "9.9.9.9", 22]}]}
         self._net(egress="filtered", allow=[allow_entry("10.0.0.1:22")])
-        self.mod.up("vm1")
+        self.mod.up(self.sub, "vm1")
         self.assertNotIn("9.9.9.9",
                          " ".join(" ".join(c) for c in self._deletes()))
 
@@ -1177,13 +1194,13 @@ class TestFilterHelper(unittest.TestCase):
         self.rc[("/usr/sbin/nft", "-f", NFT_SKELETON)] = 1
         self._net(egress="filtered", allow=[allow_entry("10.0.0.1:22")])
         with self.assertRaises(subprocess.CalledProcessError):
-            self.mod.up("vm1")
+            self.mod.up(self.sub, "vm1")
 
     def test_up_fails_when_an_element_cannot_be_added(self):
         self.rc[("/usr/sbin/nft", "add", "element")] = 1
         self._net(egress="filtered", allow=[allow_entry("10.0.0.1:22")])
         with self.assertRaises(subprocess.CalledProcessError):
-            self.mod.up("vm1")
+            self.mod.up(self.sub, "vm1")
 
     def test_down_removes_this_workloads_elements(self):
         self.listing = {NFT_SET_FILTERED: [10001, 10002]}
@@ -1210,10 +1227,6 @@ class TestFilterHelper(unittest.TestCase):
         self._net(egress="filtered")
         self.assertEqual(self.mod.down("vm1"), 0)
 
-    def test_usage(self):
-        self.assertEqual(self.mod.main(["x"]), 2)
-        self.assertEqual(self.mod.main(["x", "sideways", "vm1"]), 2)
-
 
     def test_up_clears_the_previous_instances_resolver_status(self):
         """Same lifecycle trap as the inspector's: the run dir is preserved
@@ -1222,14 +1235,106 @@ class TestFilterHelper(unittest.TestCase):
         Cleared beside the policy write, which is the other thing this helper
         does to that directory on every arm."""
         source = (Path(__file__).resolve().parent.parent
-                  / "libexec" / "workload-vm-filter").read_text()
-        up = source[source.index("def up("):source.index("def down(")]
-        self.assertIn("clear_status(vm_resolve_status_path(name))", up)
+                  / "lib" / "filter_arm.py").read_text()
+        after = source[source.index("def vm_after_arm("):
+                       source.index("def _vm_unfiltered(")]
+        self.assertIn("clear_status(vm_resolve_status_path(name))", after)
         # Inside the resolver branch: a workload with no synthesising responder
         # has no such file, and clearing one unconditionally would claim a
         # producer that this workload does not run.
-        self.assertLess(up.index("uses_resolve"),
-                        up.index("clear_status"))
+        self.assertLess(after.index("uses_resolve"),
+                        after.index("clear_status"))
+        # And the VM substrate is what runs it, once the elements are in.
+        self.assertIs(self.mod.VM.after_arm, self.mod.vm_after_arm)
+        self.assertIsNone(self.mod.CONTAINER.after_arm)
+
+
+class TestContainerFilterSubstrate(_FilterFixture, unittest.TestCase):
+    """The same body under the container substrate: what the config says
+    differs, what is done to the table does not."""
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        cls.sub = cls.mod.CONTAINER
+
+    def _net(self, **cfg):
+        self._patch("load_workload_config", lambda name: {"network": cfg})
+
+    def test_a_container_is_filtered_by_its_trigger_not_an_egress_key(self):
+        from config_parser import container_uses_inspect
+        self.assertIsNone(self.sub.unfiltered({"network": {"hosts": ["a"]}},
+                                              {"hosts": ["a"]}))
+        self.assertIsNotNone(self.sub.unfiltered({"network": {}}, {}))
+        self.assertTrue(container_uses_inspect({"network": {"hosts": ["a"]}}))
+
+    def test_a_trigger_arms_the_uid(self):
+        self._net(hosts=["example.com"])
+        self.mod.up(self.sub, "web")
+        armed = " ".join(" ".join(c) for c in self._adds())
+        self.assertIn(NFT_SET_FILTERED, armed)
+
+    def test_no_trigger_applies_the_skeleton_but_arms_nothing(self):
+        self._net()
+        self.mod.up(self.sub, "web")
+        self.assertIn("-f", self.calls[0])
+        self.assertEqual(self._adds(), [])
+
+    def test_no_trigger_still_clears_stale_elements(self):
+        """A trigger removed and the workload restarted must not leave the
+        old allowlist armed."""
+        self.listing = {NFT_SET_FILTERED: [10001]}
+        self._net()
+        self.mod.up(self.sub, "web")
+        self.assertIn("10001",
+                      " ".join(" ".join(c) for c in self._deletes()))
+
+    def test_a_container_writes_no_responder_document(self):
+        self._net(hosts=["example.com"])
+        self.mod.up(self.sub, "web")
+        self.assertFalse(os.path.exists(self.policy_path))
+
+
+class _FilterShim:
+    """One row per verb, and one for the usage failure, run through main()."""
+
+    script = ""
+    substrate = ""
+    name = ""
+
+    @classmethod
+    def setUpClass(cls):
+        from tests import load_script
+        cls.mod = load_script(cls.script)
+
+    def test_up_binds_the_substrate(self):
+        import filter_arm
+        with mock.patch.object(self.mod, "up", return_value=0) as up:
+            self.assertEqual(self.mod.main(["x", "up", self.name]), 0)
+        up.assert_called_once_with(getattr(filter_arm, self.substrate),
+                                   self.name)
+
+    def test_down_takes_only_the_name(self):
+        with mock.patch.object(self.mod, "down", return_value=0) as down:
+            self.assertEqual(self.mod.main(["x", "down", self.name]), 0)
+        down.assert_called_once_with(self.name)
+
+    def test_usage(self):
+        with redirect_stderr(io.StringIO()):
+            self.assertEqual(self.mod.main(["x"]), 2)
+            self.assertEqual(self.mod.main(["x", "sideways", self.name]), 2)
+
+
+class TestVmFilterShim(_FilterShim, unittest.TestCase):
+    script = "libexec/workload-vm-filter"
+    substrate = "VM"
+    name = "vm1"
+
+
+class TestContainerFilterShim(_FilterShim, unittest.TestCase):
+    script = "libexec/workload-container-filter"
+    substrate = "CONTAINER"
+    name = "web"
 
 class TestEgressDiagnose(unittest.TestCase):
     """`diagnose`'s egress check.

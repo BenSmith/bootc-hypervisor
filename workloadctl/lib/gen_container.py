@@ -1198,7 +1198,7 @@ def _container_egress_exec(svc, name: str) -> None:
     workload's egress policy (P1-7 in the container egress-parity build
     spec). Mirrors the VM hook shape at generate_vm_workload's
     `workload-vm-filter up/down` pair -- same `+`/`-+` prefixes, same
-    tolerant-on-teardown reasoning (see workload-vm-filter's module
+    tolerant-on-teardown reasoning (see lib/filter_arm.py's module
     docstring).
 
     NOT gated here on the config: the caller only calls this when
