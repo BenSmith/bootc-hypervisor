@@ -56,6 +56,8 @@ from egress_upstream import tls_failure
 import inspect_listener
 from inspect_listener import MAX_CONNECTIONS, Listener, build_minter
 from inspect_http import serve_one_request
+import inspect_tls
+from inspect_tls import serve_tls
 from egress_record import (
     DROP_INTERNAL,
     DROP_NOT_H2,
@@ -84,8 +86,8 @@ def _where(plane="tls", cid="0" * 12):
     """A connection key of the shape _serve builds.
 
     A plain string will not do since T1c: `where` is a _Where, and the request
-    loops ask it for each request's ordinal. Tests that enter at _serve_tls or
-    _serve_cleartext skip _serve, so they build one here.
+    loops ask it for each request's ordinal. Tests that enter at serve_tls or
+    serve_cleartext skip _serve, so they build one here.
     """
     return Where(f"{LOG_ID_FIELD}={cid} plane={plane}",
                          cid=cid, plane=plane)
@@ -298,11 +300,11 @@ class TerminationCase(unittest.TestCase):
         ours.settimeout(3.0)
         guest.settimeout(3.0)
         served = threading.Thread(
-            target=listener._serve_tls, args=(ours, _where("tls")), daemon=True)
+            target=serve_tls, args=(listener.inspection, ours, _where("tls")), daemon=True)
         # The origin's port, on the plane object both the splice dial
-        # (inspect_listener's) and the verifying dial (egress_upstream's) read.
+        # (inspect_tls's) and the verifying dial (egress_upstream's) read.
         with unittest.mock.patch.object(
-                inspect_listener, "TLS",
+                inspect_tls, "TLS",
                 TLS._replace(guest_port=origin.port)), \
                 unittest.mock.patch.object(
                     egress_upstream, "TLS",
@@ -493,19 +495,19 @@ class TestADeniedNameIsBumpedRatherThanClosed(TerminationCase):
         self.addCleanup(origin.close)
         listener, _ = self._listener(mod, origin, hosts=("nothing.example",))
         wrapped = []
-        real = listener._wrap_guest
+        real = inspect_tls.wrap_guest
 
         def capture(conn, leaf, *args):
             # *args, not the current signature spelled out: this test is about
             # the CLOSE, and a wrapper that had to be edited every time an
-            # argument joined _wrap_guest would fail as a missing socket rather
+            # argument joined wrap_guest would fail as a missing socket rather
             # than as the mismatch it is.
             sock = real(conn, leaf, *args)
             wrapped.append(sock)
             return sock
 
-        listener._wrap_guest = capture
-        self._exchange(listener, origin)
+        with unittest.mock.patch.object(inspect_tls, "wrap_guest", capture):
+            self._exchange(listener, origin)
         self.assertEqual(len(wrapped), 1)
         self.assertEqual(wrapped[0].fileno(), -1,
                          "the handler returned with the guest's socket open")
@@ -1137,7 +1139,7 @@ class TestTheStartRefusesWhatItCannotDo(unittest.TestCase):
         ours, guest = _tcp_pair()
         self.addCleanup(ours.close)
         self.addCleanup(guest.close)
-        listener._serve_tls(ours, _where("tls"))
+        serve_tls(listener.inspection, ours, _where("tls"))
         self.assertIn("has no minter", out.getvalue())
         self.assertEqual(
             listener.status()["drop_reasons"]["could not mint a leaf"], 1)
@@ -1525,12 +1527,12 @@ class TestAnHttp2HostIsRelayedAtFrameLevel(TerminationCase):
         ours.settimeout(3.0)
         guest.settimeout(3.0)
         served = threading.Thread(
-            target=listener._serve_tls, args=(ours, _where("tls")), daemon=True)
+            target=serve_tls, args=(listener.inspection, ours, _where("tls")), daemon=True)
         negotiated = []
         # The origin's port, on the plane object both the splice dial
-        # (inspect_listener's) and the verifying dial (egress_upstream's) read.
+        # (inspect_tls's) and the verifying dial (egress_upstream's) read.
         with unittest.mock.patch.object(
-                inspect_listener, "TLS",
+                inspect_tls, "TLS",
                 TLS._replace(guest_port=origin.port)), \
                 unittest.mock.patch.object(
                     egress_upstream, "TLS",
@@ -1689,7 +1691,7 @@ class TestAnHttp2HostIsRelayedAtFrameLevel(TerminationCase):
         """Found by a ResourceWarning while every other assertion here was
         green, which is the whole reason it gets a test.
 
-        The h2 branch does not go through _serve_terminated, and that is where
+        The h2 branch does not go through serve_terminated, and that is where
         the upstream socket is closed on the HTTP/1.1 path -- so this leaked
         one verified TLS socket, owned by the workload uid, per connection, in
         a process a guest can open connections to at will. Nothing about the

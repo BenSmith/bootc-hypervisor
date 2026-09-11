@@ -937,11 +937,11 @@ class TestTheH2BlindSpotIsCounted(unittest.TestCase):
         self.assertEqual(counters.h2_unrecorded, 1)
 
     def test_the_h2_relay_increments_it(self):
-        source = (ROOT / "lib" / "inspect_listener.py").read_text()
+        source = (ROOT / "lib" / "inspect_tls.py").read_text()
         body = source[source.index("def _serve_h2("):
                       source.index("def _drop_not_h2(")]
         self.assertIn("record_h2_unrecorded()", body)
-        self.assertIn('Record(self.inspection.record, where, "h2"', body)
+        self.assertIn('Record(insp.record, where, "h2"', body)
 
 
 class TestTheRecordNeverKillsARequest(_Records):

@@ -42,6 +42,8 @@ import egress_relay
 import egress_upstream
 import inspect_http
 import inspect_listener
+import inspect_tls
+from inspect_tls import serve_tls, serve_terminated
 from inspect_http import INTERIM_MAX, serve_cleartext
 from inspect_listener import Ceiling, Listener, build_minter
 import sd_listen
@@ -69,6 +71,8 @@ from egress_record import (
 ROOT = Path(__file__).resolve().parent.parent
 LISTENER_FILE = ROOT / "libexec" / "workload-inspect-listener"
 LISTENER_LIB = ROOT / "lib" / "inspect_listener.py"
+TLS_LIB = ROOT / "lib" / "inspect_tls.py"
+HTTP_LIB = ROOT / "lib" / "inspect_http.py"
 
 
 _MOD = None
@@ -91,8 +95,8 @@ def _where(plane="tls", cid="0" * 12):
     """A connection key of the shape _serve builds.
 
     A plain string will not do since T1c: `where` is a _Where, and the request
-    loops ask it for each request's ordinal. Tests that enter at _serve_tls or
-    _serve_cleartext skip _serve, so they build one here.
+    loops ask it for each request's ordinal. Tests that enter at serve_tls or
+    serve_cleartext skip _serve, so they build one here.
     """
     return Where(f"{LOG_ID_FIELD}={cid} plane={plane}",
                          cid=cid, plane=plane)
@@ -442,7 +446,7 @@ class TestInstalledPath(unittest.TestCase):
         """The plane comes from the lib/ constants, never a hardcoded 8080 or
         8443: a literal would let the port drift from the constant the redirect
         and the socket unit both key on."""
-        for f in (LISTENER_FILE, LISTENER_LIB):
+        for f in (LISTENER_FILE, LISTENER_LIB, TLS_LIB, HTTP_LIB):
             source = f.read_text()
             self.assertNotIn("8080", source)
             self.assertNotIn("8443", source)
@@ -903,12 +907,12 @@ class TestTlsPlane(unittest.TestCase):
         which is the tunnelling signature."""
         mod, listener, out = self._listener(["example.com"])
         conn, _ = self._client(b"GET / HTTP/1.1\r\n\r\n")
-        listener._serve_tls(conn, _where("tls"))
+        serve_tls(listener.inspection, conn, _where("tls"))
         unreadable = out.getvalue()
 
         mod, listener, out = self._listener(["allowed.example"])
         conn, _ = self._client(_hello_bytes(server_name="denied.example"))
-        listener._serve_tls(conn, _where("tls"))
+        serve_tls(listener.inspection, conn, _where("tls"))
         miss = out.getvalue()
 
         self.assertIn("no readable name", unreadable)
@@ -919,7 +923,7 @@ class TestTlsPlane(unittest.TestCase):
     def test_a_hello_with_no_name_is_a_no_readable_name_drop(self):
         _, listener, out = self._listener(["example.com"])
         conn, _ = self._client(_hello_bytes(server_name=None))
-        listener._serve_tls(conn, _where("tls"))
+        serve_tls(listener.inspection, conn, _where("tls"))
         self.assertIn("no readable name", out.getvalue())
 
     def test_an_unlisted_name_never_reaches_an_upstream(self):
@@ -928,7 +932,7 @@ class TestTlsPlane(unittest.TestCase):
         _, listener, out = self._listener(["allowed.example"])
         conn, _ = self._client(_hello_bytes(server_name="denied.example"))
         with unittest.mock.patch.object(socket, "create_connection") as dial:
-            listener._serve_tls(conn, _where("tls"))
+            serve_tls(listener.inspection, conn, _where("tls"))
         dial.assert_not_called()
         self.assertIn("host=denied.example", out.getvalue())
 
@@ -951,7 +955,7 @@ class TestTlsPlane(unittest.TestCase):
             # Close the guest end after the hello so the relay ends promptly;
             # the assertion is about what reached the far side first.
             guest.shutdown(socket.SHUT_WR)
-            listener._serve_tls(conn, _where("tls"))
+            serve_tls(listener.inspection, conn, _where("tls"))
         far.settimeout(2.0)
         self.assertEqual(far.recv(len(raw)), raw)
         self.assertEqual(dial.call_args.args[0], ("example.com", 443))
@@ -969,7 +973,7 @@ class TestTlsPlane(unittest.TestCase):
         self.addCleanup(far.close)
         with unittest.mock.patch.object(
                 socket, "create_connection", return_value=upstream) as dial:
-            listener._serve_tls(conn, _where("tls"))
+            serve_tls(listener.inspection, conn, _where("tls"))
         host, port = dial.call_args.args[0]
         self.assertEqual(host, "a.example.com")
         self.assertEqual(port, 443)
@@ -980,7 +984,7 @@ class TestTlsPlane(unittest.TestCase):
         with unittest.mock.patch.object(
                 socket, "create_connection",
                 side_effect=OSError("Name or service not known")):
-            listener._serve_tls(conn, _where("tls"))
+            serve_tls(listener.inspection, conn, _where("tls"))
         self.assertIn("upstream unreachable", out.getvalue())
         self.assertNotIn("not allowlisted", out.getvalue())
 
@@ -1033,10 +1037,10 @@ class TestPerHostSplice(unittest.TestCase):
         upstream, far = socket.socketpair()
         self.addCleanup(upstream.close)
         self.addCleanup(far.close)
-        with unittest.mock.patch.object(listener, "_serve_tls_inspect") as term:
+        with unittest.mock.patch.object(inspect_tls, "_serve_tls_inspect") as term:
             with unittest.mock.patch.object(
                     socket, "create_connection", return_value=upstream):
-                listener._serve_tls(conn, _where("tls"))
+                serve_tls(listener.inspection, conn, _where("tls"))
         term.assert_not_called()
         self.assertIn("splice", out.getvalue())
         self.assertIn("host=sum.golang.org", out.getvalue())
@@ -1060,7 +1064,7 @@ class TestPerHostSplice(unittest.TestCase):
         self.addCleanup(far.close)
         with unittest.mock.patch.object(
                 socket, "create_connection", return_value=upstream):
-            listener._serve_tls(conn, _where("tls"))
+            serve_tls(listener.inspection, conn, _where("tls"))
         far.settimeout(2.0)
         upstream.close()
         received = b""
@@ -1079,10 +1083,10 @@ class TestPerHostSplice(unittest.TestCase):
             ["a.example", "b.example"], ["a.example"])
         conn, guest = self._client(_hello_bytes(server_name="b.example"))
         guest.shutdown(socket.SHUT_WR)
-        with unittest.mock.patch.object(listener, "_serve_tls_inspect") as term:
-            listener._serve_tls(conn, _where("tls"))
+        with unittest.mock.patch.object(inspect_tls, "_serve_tls_inspect") as term:
+            serve_tls(listener.inspection, conn, _where("tls"))
         term.assert_called_once()
-        self.assertEqual(term.call_args.args[2], "b.example")
+        self.assertEqual(term.call_args.args[3], "b.example")
 
     def test_a_spliced_name_on_no_allowlist_gets_the_READABLE_refusal(self):
         """The allowlist decision comes first, and the order is not cosmetic.
@@ -1097,12 +1101,12 @@ class TestPerHostSplice(unittest.TestCase):
             ["good.example.com"], ["*.example.com"])
         conn, guest = self._client(_hello_bytes(server_name="evil.example.com"))
         guest.shutdown(socket.SHUT_WR)
-        with unittest.mock.patch.object(listener, "_serve_tls_inspect") as term:
+        with unittest.mock.patch.object(inspect_tls, "_serve_tls_inspect") as term:
             with unittest.mock.patch.object(socket, "create_connection") as dial:
-                listener._serve_tls(conn, _where("tls"))
+                serve_tls(listener.inspection, conn, _where("tls"))
         dial.assert_not_called()
         term.assert_called_once()
-        self.assertEqual(term.call_args.args[3], False)   # `allowed`
+        self.assertEqual(term.call_args.args[4], False)   # `allowed`
 
     def test_the_document_carries_the_splice_list_through(self):
         """Both halves against each other, not against a literal: a listener
@@ -1307,7 +1311,7 @@ class TestLogInjection(unittest.TestCase):
         self.addCleanup(ours.close)
         guest.sendall(_hello_bytes(server_name=self._forged))
         ours.settimeout(2.0)
-        listener._serve_tls(ours, _where("tls"))
+        serve_tls(listener.inspection, ours, _where("tls"))
         lines = out.getvalue().splitlines()
         self.assertEqual(len(lines), 1, lines)
         self.assertIn("no readable name", lines[0])
@@ -1322,7 +1326,7 @@ class TestLogInjection(unittest.TestCase):
         self.addCleanup(ours.close)
         guest.sendall(_hello_bytes(server_name=self._forged))
         ours.settimeout(2.0)
-        listener._serve_tls(ours, _where("tls"))
+        serve_tls(listener.inspection, ours, _where("tls"))
         self.assertNotIn("evil.example", out.getvalue())
         self.assertIn(repr("\n"), out.getvalue())
 
@@ -1335,7 +1339,7 @@ class TestLogInjection(unittest.TestCase):
         self.addCleanup(ours.close)
         guest.sendall(_hello_bytes(server_name=self._forged))
         ours.settimeout(2.0)
-        listener._serve_tls(ours, _where("tls"))
+        serve_tls(listener.inspection, ours, _where("tls"))
         snapshot = json.dumps(
             listener.inspection.counters.snapshot(open_now=0, refused=0))
         self.assertNotIn("evil.example", snapshot)
@@ -2067,13 +2071,13 @@ class TestCleartextPerRequest(unittest.TestCase):
         handshake against a minted leaf. What the behavioural half can reach is
         the consequence, and that is the test below.
         """
-        source = LISTENER_LIB.read_text()
+        source = TLS_LIB.read_text()
         fn = source[source.index("def _serve_tls_inspect("):
                     source.index("def _bump_answer(")]
         self.assertIn("credential_for(host)", fn)
         # Decided BEFORE the dial, or the dial has already happened.
         self.assertLess(fn.index("credential_for(host)"),
-                        fn.index("self.inspection.upstream.dial_tls("))
+                        fn.index("insp.upstream.dial_tls("))
         # And the offer stays a configuration decision: h2 is forced off rather
         # than read off an origin connection that no longer exists.
         self.assertIn("h2 = False", fn)
@@ -2096,22 +2100,22 @@ class TestCleartextPerRequest(unittest.TestCase):
             seen["upstreams"] = upstreams
             return False
 
-        with unittest.mock.patch.object(Listener, "_is_http",
+        with unittest.mock.patch.object(inspect_tls, "_is_http",
                                         lambda *a, **k: True), \
              unittest.mock.patch("inspect_http.serve_one_request",
                                  one_request):
-            listener._serve_terminated(object(), where, "a.example", None)
+            serve_terminated(listener.inspection, object(), where, "a.example", None)
         self.assertEqual(seen["upstreams"], {},
                          "a None upstream was seeded into the pool")
 
         # And the ordinary path still seeds the origin it was handed, or the
         # fix has turned reuse off for every non-brokered terminated session.
         origin, far = self._pair()
-        with unittest.mock.patch.object(Listener, "_is_http",
+        with unittest.mock.patch.object(inspect_tls, "_is_http",
                                         lambda *a, **k: True), \
              unittest.mock.patch("inspect_http.serve_one_request",
                                  one_request):
-            listener._serve_terminated(object(), where, "a.example",
+            serve_terminated(listener.inspection, object(), where, "a.example",
                                        _Stream(origin))
         self.assertEqual(list(seen["upstreams"]), ["a.example"])
         del far
@@ -2717,7 +2721,7 @@ class TestEchTripwire(unittest.TestCase):
         self.addCleanup(ours.close)
         guest.sendall(payload)
         ours.settimeout(2.0)
-        listener._serve_tls(ours, _where("tls"))
+        serve_tls(listener.inspection, ours, _where("tls"))
 
     def test_an_allowlisted_ech_hello_moves_capability_and_not_the_alarm(self):
         """THE case the split exists for: an ordinary modern client reaching
@@ -2853,7 +2857,8 @@ class TestCounters(unittest.TestCase):
         thing keeping a new reason in step with the pre-seed is that every call
         site names a constant, and every constant is in DROP_REASONS."""
         import re
-        source = LISTENER_LIB.read_text()
+        source = "\n".join(
+            f.read_text() for f in (LISTENER_LIB, TLS_LIB, HTTP_LIB))
         calls = re.findall(r"record_drop\(\s*([^,)]+)", source)
         self.assertGreater(len(calls), 5)
         for arg in calls:
@@ -2882,12 +2887,12 @@ class TestCounters(unittest.TestCase):
         # or every entry in it would count as its own use and the guard would
         # assert nothing. (It was the tuple's own definition before the
         # reasons moved to egress_record; same hazard, one file over.)
-        # Three files, because the upstream leg names its own refusals where
-        # it decides them (egress_upstream), the request loop names the
-        # per-request ones (inspect_http) and the listener names the rest.
+        # Four files: each plane names the refusals it decides, the upstream
+        # leg names its own where it decides them (egress_upstream), and the
+        # listener names the two taken before a plane is entered.
         source = "\n".join(
             re.sub(r"from egress_record import \([^)]*\)", "", f.read_text())
-            for f in (LISTENER_LIB, ROOT / "lib" / "inspect_http.py",
+            for f in (LISTENER_LIB, TLS_LIB, HTTP_LIB,
                       ROOT / "lib" / "egress_upstream.py"))
         self.assertNotIn("from egress_record import (", source)
         named = {arg.strip() for arg in
