@@ -24,8 +24,9 @@ from tests import load_script
 from egress_policy import INSPECT_GUEST_AGENT_KEY
 from config_parser import normalise_hostname
 from workload_lib import container_inspect_policy
+from egress_plane import CLEARTEXT, TLS, plane_for_port
 from egress_policy import (
-    INSPECT_PORT_CLEARTEXT, INSPECT_PORT_TLS, Policy, VmPolicyEntry,
+    Policy, VmPolicyEntry,
     hostname_match, load_policy, vm_inspect_policy,
 )
 from sd_listen import NotSocketActivated
@@ -134,7 +135,7 @@ def _serve_line(test, local, peer=("192.0.2.1", 1024)):
     ours.settimeout(2.0)
     guest.sendall(b"GET / HTTP/1.1\r\nHost: nobody.example\r\n\r\n")
     guest.shutdown(socket.SHUT_WR)
-    plane = mod.plane_for_port(local[1])
+    plane = plane_for_port(local[1])
     listener._serve(ours, peer, local, plane, "0" * 12)
     return out.getvalue()
 
@@ -151,19 +152,31 @@ class TestPlaneDetection(unittest.TestCase):
     """
 
     def test_the_cleartext_port_is_the_cleartext_plane(self):
-        mod = _mod()
-        self.assertEqual(mod.plane_for_port(INSPECT_PORT_CLEARTEXT), "cleartext")
+        self.assertIs(plane_for_port(CLEARTEXT.inspect_port), CLEARTEXT)
 
     def test_the_tls_port_is_the_tls_plane(self):
-        mod = _mod()
-        self.assertEqual(mod.plane_for_port(INSPECT_PORT_TLS), "tls")
+        self.assertIs(plane_for_port(TLS.inspect_port), TLS)
 
     def test_a_third_port_is_neither(self):
         """A port that is not one of the two the socket unit binds names no
         plane: naming it one would be a guess, and a guess here is a
         misdirected policy decision in a later rung."""
+        self.assertIsNone(plane_for_port(9999))
+
+    def test_a_connection_on_a_third_port_is_refused_unserved(self):
+        """Not a listener of ours, so nothing is read from it and no record
+        names it: closed, and the line says why."""
         mod = _mod()
-        self.assertIsNone(mod.plane_for_port(9999))
+        conn = _mock_conn()
+        out = io.StringIO()
+        listener = mod.Listener([_listener_with(("198.18.0.1", 9999))], out)
+        listener._handle(conn, ("192.0.2.1", 1024),
+                         _listener_with(("198.18.0.1", 9999)))
+        self.assertIn("rejected", out.getvalue())
+        self.assertIn("reason='not an inspect port'", out.getvalue())
+        self.assertIn("local=198.18.0.1:9999", out.getvalue())
+        conn.close.assert_called_once()
+        conn.recv.assert_not_called()
 
     def test_the_plane_in_the_logged_line_comes_from_getsockname(self):
         """Driven on the cleartext plane over a real connection.
@@ -173,10 +186,10 @@ class TestPlaneDetection(unittest.TestCase):
         property under test is unchanged -- the plane in the line is the
         accepting port, not the fd name.
         """
-        local = ("198.18.0.1", INSPECT_PORT_CLEARTEXT)
+        local = ("198.18.0.1", CLEARTEXT.inspect_port)
         log = _serve_line(self, local)
         self.assertIn(_where("cleartext"), log)
-        self.assertIn(f"local=198.18.0.1:{INSPECT_PORT_CLEARTEXT}", log)
+        self.assertIn(f"local=198.18.0.1:{CLEARTEXT.inspect_port}", log)
         self.assertIn("peer=192.0.2.1:1024", log)
 
 
@@ -199,9 +212,9 @@ class TestExplicitTimeout(unittest.TestCase):
         conn = _mock_conn()
         out = io.StringIO()
         listener = mod.Listener([_listener_with(
-            ("198.18.0.1", INSPECT_PORT_CLEARTEXT))], out)
+            ("198.18.0.1", CLEARTEXT.inspect_port))], out)
         listener._handle(conn, ("192.0.2.1", 1024),
-                         _listener_with(("198.18.0.1", INSPECT_PORT_CLEARTEXT)))
+                         _listener_with(("198.18.0.1", CLEARTEXT.inspect_port)))
         self.assertEqual(conn.settimeout.call_args_list[0],
                          unittest.mock.call(mod.CONNECTION_TIMEOUT))
         self.assertIsInstance(mod.CONNECTION_TIMEOUT, float)
@@ -213,9 +226,9 @@ class TestExplicitTimeout(unittest.TestCase):
         conn = _mock_conn()
         out = io.StringIO()
         listener = mod.Listener([_listener_with(
-            ("198.18.0.1", INSPECT_PORT_TLS))], out, limit=0)
+            ("198.18.0.1", TLS.inspect_port))], out, limit=0)
         listener._handle(conn, ("192.0.2.1", 1024),
-                         _listener_with(("198.18.0.1", INSPECT_PORT_TLS)))
+                         _listener_with(("198.18.0.1", TLS.inspect_port)))
         conn.settimeout.assert_called_once_with(mod.CONNECTION_TIMEOUT)
         conn.close.assert_called()
 
@@ -234,7 +247,7 @@ class TestCeiling(unittest.TestCase):
         # reject path runs with no admitted thread to race a slot release.
         mod = _mod()
         out = io.StringIO()
-        local = ("198.18.0.1", INSPECT_PORT_CLEARTEXT)
+        local = ("198.18.0.1", CLEARTEXT.inspect_port)
         listener = mod.Listener([_listener_with(local)], out, limit=0)
         conns = [_mock_conn() for _ in range(2)]
         for c in conns:
@@ -253,7 +266,7 @@ class TestCeiling(unittest.TestCase):
         guest exactly as every other drop is, so a disposition total that
         omitted it would not account for every connection the guest saw end."""
         mod = _mod()
-        local = ("198.18.0.1", INSPECT_PORT_CLEARTEXT)
+        local = ("198.18.0.1", CLEARTEXT.inspect_port)
         listener = mod.Listener([_listener_with(local)], io.StringIO(), limit=0)
         for _ in range(2):
             listener._handle(_mock_conn(), ("192.0.2.1", 1024),
@@ -288,7 +301,7 @@ class TestThreadStartFailure(unittest.TestCase):
 
     def _listener_that_cannot_start_threads(self, out, limit=1):
         mod = _mod()
-        local = ("198.18.0.1", INSPECT_PORT_CLEARTEXT)
+        local = ("198.18.0.1", CLEARTEXT.inspect_port)
         listener = mod.Listener([_listener_with(local)], out, limit=limit)
         return mod, listener, local
 
@@ -342,7 +355,7 @@ class TestRejectionTally(unittest.TestCase):
     def test_the_shutdown_line_names_the_count(self):
         mod = _mod()
         out = io.StringIO()
-        local = ("198.18.0.1", INSPECT_PORT_CLEARTEXT)
+        local = ("198.18.0.1", CLEARTEXT.inspect_port)
         listener = mod.Listener([_listener_with(local)], out, limit=0)
         for _ in range(3):
             listener._handle(_mock_conn(), ("192.0.2.1", 1024),
@@ -356,7 +369,7 @@ class TestRejectionTally(unittest.TestCase):
         mod = _mod()
         out = io.StringIO()
         listener = mod.Listener(
-            [_listener_with(("198.18.0.1", INSPECT_PORT_CLEARTEXT))], out)
+            [_listener_with(("198.18.0.1", CLEARTEXT.inspect_port))], out)
         listener.log_summary()
         self.assertIn("stopped: 0 connection(s) rejected", out.getvalue())
 
@@ -3335,7 +3348,7 @@ class TestCallerIdentity(unittest.TestCase):
 
     def _handled(self, mod, caller_uid, own_uid=OWN_UID):
         """Drive one connection with the caller lookup answering `caller_uid`."""
-        local = ("198.18.0.1", INSPECT_PORT_CLEARTEXT)
+        local = ("198.18.0.1", CLEARTEXT.inspect_port)
         out = io.StringIO()
         listener = mod.Listener([_listener_with(local)], out)
         conn = _mock_conn()
@@ -3390,7 +3403,7 @@ class TestCallerIdentity(unittest.TestCase):
         """A hardening check that can throw is worse than one that fails soft:
         it would turn this layer into an outage for the traffic it protects."""
         mod = _mod()
-        local = ("198.18.0.1", INSPECT_PORT_CLEARTEXT)
+        local = ("198.18.0.1", CLEARTEXT.inspect_port)
         listener = mod.Listener([_listener_with(local)], io.StringIO())
         with unittest.mock.patch.object(mod, "peer_uid",
                                         side_effect=RuntimeError("boom")):
@@ -3403,7 +3416,7 @@ class TestCallerIdentity(unittest.TestCase):
         needs. With limit=0 every connection is over capacity, so whichever
         check runs first is the reason that gets recorded."""
         mod = _mod()
-        local = ("198.18.0.1", INSPECT_PORT_CLEARTEXT)
+        local = ("198.18.0.1", CLEARTEXT.inspect_port)
         out = io.StringIO()
         listener = mod.Listener([_listener_with(local)], out, limit=0)
         with unittest.mock.patch("os.getuid", return_value=self.OWN_UID), \

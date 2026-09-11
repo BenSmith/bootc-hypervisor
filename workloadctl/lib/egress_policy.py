@@ -163,28 +163,6 @@ def hostname_match(host: str, patterns) -> bool:
                for p in patterns)
 
 
-# --- The ports: the two the listener answers on, the two it is dialled at ---
-# The two listener ports, selected by the redirected connection's ORIGINAL port
-# via the DNAT map rather than recovered by the inspector: a guest dial to 80
-# lands here cleartext (the Host header carries the name) and one to 443 here
-# under TLS (the SNI in the ClientHello). The socket that accepted the
-# connection tells the inspector which it is, so SO_ORIGINAL_DST is not needed.
-INSPECT_PORT_CLEARTEXT = 8080
-INSPECT_PORT_TLS = 8443
-
-
-# The two ORIGINAL ports the redirect matches and the map keys on: a guest dial
-# to 80 or one to 443. Fixed by the redirect rules in workload-proxy.nft; they
-# never appear in an element value, which is why the constants live beside the
-# listener ports they select.
-#
-# They are defined in config_parser, because the container half of the design
-# redirects the same two ports and the parse layer is below both. Import them
-# from there: this module used to alias them so a reader found the redirect's
-# two ends next to each other, and the cost of that convenience was two names
-# answering from two modules.
-
-
 # --- The responder knob, and [[vm.network.policy]] as parsed entries ---
 def uses_resolve(config: dict) -> bool:
     """Whether this workload gets a synthesising responder.

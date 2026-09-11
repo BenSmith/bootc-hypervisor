@@ -17,7 +17,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from egress_policy import INSPECT_PORT_CLEARTEXT, INSPECT_PORT_TLS
+from egress_plane import PLANES
 from nft_elements import vm_filter_commands, filter_delete_command
 from netfilter_state import (
     CONNTRACK_PRESSURE, conntrack_occupancy, nft_drop_counter,
@@ -903,8 +903,8 @@ class TestInspectorAddresses(unittest.TestCase):
     def test_listener_ports_are_unprivileged(self):
         # The inspector binds as the workload user, not root, so both ports
         # have to stay above net.ipv4.ip_unprivileged_port_start (1024).
-        self.assertGreater(INSPECT_PORT_CLEARTEXT, 1024)
-        self.assertGreater(INSPECT_PORT_TLS, 1024)
+        for plane in PLANES:
+            self.assertGreater(plane.inspect_port, 1024)
 
 
 class TestProxySkeletonNamesAgree(unittest.TestCase):

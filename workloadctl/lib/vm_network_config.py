@@ -25,11 +25,11 @@ from typing import NamedTuple
 
 from config_parser import (BROKER_DEFAULT_AUTH_FORMAT,
                            BROKER_DEFAULT_AUTH_HEADER,
-                           INSPECT_ORIG_CLEARTEXT, INSPECT_ORIG_TLS,
                            normalise_hostname,
                            parse_volume_spec, patterns_overlap,
                            validate_credential_entries,
                            validate_host_pattern)
+from egress_plane import CLEARTEXT, TLS
 from egress_policy import (POLICY_METHODS, POLICY_METHODS_REFUSED,
                            TLS_DEFAULT, TLS_MODES, VmPolicyEntry,
                            hostname_match,
@@ -198,7 +198,7 @@ def parse_vm_allow(entry, *, filtered: bool = True) -> VmAllowEntry:
     # exactly as for the address form, since a name resolves to an address that
     # is redirected anyway. `egress = "filtered"` is the real condition, because
     # that is what puts the workload in the redirect's key at all.
-    if filtered and port in (INSPECT_ORIG_CLEARTEXT, INSPECT_ORIG_TLS):
+    if filtered and port in (CLEARTEXT.guest_port, TLS.guest_port):
         raise ValueError(
             f"{spec!r}: port {port} is redirected into this workload's egress "
             f"inspector before `allow` is consulted, so the element would be "

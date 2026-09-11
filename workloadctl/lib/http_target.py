@@ -23,9 +23,8 @@ the other.
 
 from typing import NamedTuple
 
-from config_parser import (
-    INSPECT_ORIG_CLEARTEXT, INSPECT_ORIG_TLS, normalise_hostname,
-)
+from config_parser import normalise_hostname
+from egress_plane import CLEARTEXT, TLS
 from http_framing import RequestUnreadable
 
 class Scheme(NamedTuple):
@@ -44,8 +43,8 @@ class Scheme(NamedTuple):
     port: int
 
 
-SCHEME_HTTP = Scheme("http", INSPECT_ORIG_CLEARTEXT)
-SCHEME_HTTPS = Scheme("https", INSPECT_ORIG_TLS)
+SCHEME_HTTP = Scheme("http", CLEARTEXT.guest_port)
+SCHEME_HTTPS = Scheme("https", TLS.guest_port)
 
 
 # The characters RFC 3986 says a percent-encoding of is equivalent to the

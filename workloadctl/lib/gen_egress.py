@@ -22,9 +22,8 @@ Installed to /usr/libexec/workloadctl/gen_egress.py.
 
 
 from workload_lib import GENERATED_BY, workload_state_dir, dq, uq
-from egress_policy import (
-    INSPECT_PORT_CLEARTEXT, INSPECT_PORT_TLS, inspect_logs_directory,
-)
+from egress_plane import PLANES
+from egress_policy import inspect_logs_directory
 from egress_ca import denial_dir, leaf_dir
 from nft_elements import inspect_cgroup_command, inspect_cgroup_filter_command
 from broker_config import (
@@ -112,14 +111,13 @@ def generate_inspect_socket(config, user_name: str, uid: int, *,
     # own docstring gives.
     sock.add("ExecStopPost",
              f"-+/usr/libexec/workloadctl/{arming_helper} down {dq(name)}")
-    # Four listener ports, both families, cleartext and TLS. The values come
-    # from the T4 derivation (inspect_address) and the port constants —
+    # Four listener ports, both families, one per plane. The values come
+    # from the T4 derivation (inspect_address) and the plane's inspect port —
     # never a literal. The v6 form brackets the address so it is not parsed as
     # the scope-id separator.
-    sock.add("ListenStream", f"{addr.v4}:{INSPECT_PORT_CLEARTEXT}")
-    sock.add("ListenStream", f"{addr.v4}:{INSPECT_PORT_TLS}")
-    sock.add("ListenStream", f"[{addr.v6}]:{INSPECT_PORT_CLEARTEXT}")
-    sock.add("ListenStream", f"[{addr.v6}]:{INSPECT_PORT_TLS}")
+    for family_addr in (addr.v4, f"[{addr.v6}]"):
+        for plane in PLANES:
+            sock.add("ListenStream", f"{family_addr}:{plane.inspect_port}")
     # One service instance, not one per connection: the listener is a single
     # long-lived process, and Accept=no is what makes the trigger limit below
     # the meaningful knob. Set explicitly rather than inherited.

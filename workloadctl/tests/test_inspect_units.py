@@ -18,8 +18,9 @@ from tests import load_script
 import unittest
 import unittest.mock
 
+from egress_plane import CLEARTEXT, TLS
 from egress_policy import (
-    INSPECT_PORT_CLEARTEXT, INSPECT_PORT_TLS, vm_uses_inspect,
+    vm_uses_inspect,
 )
 from nft_elements import (
     inspect_cgroup, inspect_cgroup_command,
@@ -121,14 +122,14 @@ class TestGeneratedSocket(unittest.TestCase):
     def test_all_four_listenstreams_from_the_constants(self):
         """v4 and v6, cleartext and TLS, never a literal."""
         self.assertIn(
-            f"ListenStream={self.addr.v4}:{INSPECT_PORT_CLEARTEXT}",
+            f"ListenStream={self.addr.v4}:{CLEARTEXT.inspect_port}",
             self.unit)
-        self.assertIn(f"ListenStream={self.addr.v4}:{INSPECT_PORT_TLS}",
+        self.assertIn(f"ListenStream={self.addr.v4}:{TLS.inspect_port}",
                       self.unit)
         self.assertIn(
-            f"ListenStream=[{self.addr.v6}]:{INSPECT_PORT_CLEARTEXT}",
+            f"ListenStream=[{self.addr.v6}]:{CLEARTEXT.inspect_port}",
             self.unit)
-        self.assertIn(f"ListenStream=[{self.addr.v6}]:{INSPECT_PORT_TLS}",
+        self.assertIn(f"ListenStream=[{self.addr.v6}]:{TLS.inspect_port}",
                       self.unit)
         # Exactly four — a fifth (a literal, a stray family, a duplicated
         # port) or a missing one would be a silent hole.

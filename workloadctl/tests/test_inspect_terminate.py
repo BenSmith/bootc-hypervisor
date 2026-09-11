@@ -37,6 +37,7 @@ import unittest.mock
 from pathlib import Path
 
 from tests import load_script
+from egress_plane import TLS
 from egress_policy import Policy, VmPolicyEntry
 from egress_ca import (
     ca_cert_path, ca_key_path, ca_openssl_argv, leaf_openssl_argv,
@@ -295,8 +296,8 @@ class TerminationCase(unittest.TestCase):
         mod = _mod()
         served = threading.Thread(
             target=listener._serve_tls, args=(ours, _where("tls")), daemon=True)
-        with unittest.mock.patch.object(mod, "INSPECT_ORIG_TLS",
-                                        origin.port):
+        with unittest.mock.patch.object(mod, "TLS",
+                                        TLS._replace(guest_port=origin.port)):
             served.start()
             ctx = guest_ctx or self._guest_context()
             response, error = b"", None
@@ -1520,8 +1521,8 @@ class TestAnHttp2HostIsRelayedAtFrameLevel(TerminationCase):
         served = threading.Thread(
             target=listener._serve_tls, args=(ours, _where("tls")), daemon=True)
         negotiated = []
-        with unittest.mock.patch.object(mod, "INSPECT_ORIG_TLS",
-                                        origin.port):
+        with unittest.mock.patch.object(mod, "TLS",
+                                        TLS._replace(guest_port=origin.port)):
             served.start()
             ctx = self._guest_context()
             ctx.set_alpn_protocols(["h2"])

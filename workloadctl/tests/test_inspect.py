@@ -11,10 +11,9 @@ the builder's own output.
 import unittest
 from pathlib import Path
 
-from config_parser import INSPECT_ORIG_CLEARTEXT, INSPECT_ORIG_TLS
+from egress_plane import CLEARTEXT, PLANES, TLS
 from egress_policy import (
-    INSPECT_PORT_CLEARTEXT,
-    INSPECT_PORT_TLS, vm_inspect_policy, inspect_policy_path,
+    vm_inspect_policy, inspect_policy_path,
     TLS_DEFAULT, http2_hosts, vm_policy_entries, policy_governs,
 )
 from nft_elements import (
@@ -59,17 +58,16 @@ class TestOriginalPorts(unittest.TestCase):
 
     def test_the_skeleton_matches_the_constants(self):
         text = PROXY_SKELETON_FILE.read_text()
-        self.assertIn(f"tcp dport {{ {INSPECT_ORIG_CLEARTEXT}, "
-                      f"{INSPECT_ORIG_TLS} }}", text)
-        self.assertEqual((INSPECT_ORIG_CLEARTEXT, INSPECT_ORIG_TLS),
-                         (80, 443))
+        self.assertIn(f"tcp dport {{ {CLEARTEXT.guest_port}, "
+                      f"{TLS.guest_port} }}", text)
+        self.assertEqual((CLEARTEXT.guest_port, TLS.guest_port), (80, 443))
 
     def test_the_original_ports_are_not_the_listener_ports(self):
         """The key and the value select different things: the original port
         picks the listener port, so conflating the two would redirect a dial
         to 8080 and never match a dial to 80."""
-        self.assertNotEqual(INSPECT_ORIG_CLEARTEXT, INSPECT_PORT_CLEARTEXT)
-        self.assertNotEqual(INSPECT_ORIG_TLS, INSPECT_PORT_TLS)
+        for plane in PLANES:
+            self.assertNotEqual(plane.guest_port, plane.inspect_port)
 
 
 class TestMapElements(unittest.TestCase):

@@ -20,7 +20,7 @@ import time
 
 from config_parser import (
     ContainerAllowEntry, container_allow_entries, container_allow_resolve,
-    container_uses_inspect, INSPECT_ORIG_CLEARTEXT, INSPECT_ORIG_TLS,
+    container_uses_inspect,
     workload_root_dir, WORKLOADS_BASE,
 )
 from workload_lib import (
@@ -57,14 +57,13 @@ from egress_record import (
     DROP_NOT_HTTP,
     DROP_NOT_HTTP_POLICY,
 )
+from egress_plane import CLEARTEXT, TLS
 from egress_policy import (
     INSPECT_DIGEST_KEY,
     inspect_policy_digest,
     inspect_policy_path,
     inspect_digest_short,
     INSPECT_DIGEST_SHORT,
-    INSPECT_PORT_CLEARTEXT,
-    INSPECT_PORT_TLS,
     TLS_DEFAULT,
     vm_uses_inspect,
     uses_resolve,
@@ -1935,7 +1934,7 @@ def inspect_check(config, *, elements4=PROBE, elements6=PROBE,
         return ("vm_inspect", False,
                 f"egress inspection is on for this {noun} but uid {uid} is in "
                 f"neither {NFT_MAP_INSPECT4} nor {NFT_MAP_INSPECT6}, so its "
-                f"traffic to ports {INSPECT_ORIG_CLEARTEXT}/{INSPECT_ORIG_TLS} "
+                f"traffic to ports {CLEARTEXT.guest_port}/{TLS.guest_port} "
                 f"is not redirected — this "
                 f"{inside} is reaching the internet uninspected while every other "
                 f"signal reads correct. Re-arm it: {restart}")
@@ -2189,8 +2188,9 @@ def inspect_check(config, *, elements4=PROBE, elements6=PROBE,
     posture = "terminating" if tls_mode == "inspect" else "splicing"
     return ("vm_inspect", True,
             f"egress inspected on both families: uid {uid} redirected to "
-            f"{addr.v4}/[{addr.v6}] ports {INSPECT_PORT_CLEARTEXT} "
-            f"(cleartext) and {INSPECT_PORT_TLS} (tls, {posture}), "
+            f"{addr.v4}/[{addr.v6}] ports {CLEARTEXT.inspect_port} "
+            f"({CLEARTEXT.label}) and {TLS.inspect_port} "
+            f"({TLS.label}, {posture}), "
             f"{unit} listening{tail}")
 
 

@@ -1053,7 +1053,7 @@ Read the per-request record the inspector writes for a filtered workload, VM or 
 
 ```
 sudo workloadctl egress [-n N] [-g] [--json] [--id ID] [--decision forward|drop]
-                        [--mode forward|terminate|splice|h2] [--plane tls|cleartext]
+                        [--mode forward|terminate|splice|h2] [--plane cleartext|tls]
                         [--reason REASON] [--host PATTERN] [--method METHOD]
                         [--status STATUS] [--since TIME] [--until TIME] <workload>
 ```

@@ -52,6 +52,7 @@ PLANE = frozenset({
     "workload_addr", "egress_selinux", "egress_status", "egress_mint",
     "broker_config",
     "config_parser", "nft_constants", "egress_ca", "egress_policy",
+    "egress_plane",
     "secrets_template",
 })
 

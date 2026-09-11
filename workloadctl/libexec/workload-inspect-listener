@@ -67,9 +67,9 @@ The socket unit runs with Accept=no, under which systemd names every
 activated fd after the unit — all four carry the same LISTEN_FDNAMES entry, so
 the name cannot tell the cleartext listener from the TLS one. The local port
 of the inherited fd can, and it is the honest source of it: a guest dial to 80
-is translated onto INSPECT_PORT_CLEARTEXT, one to 443 onto
-INSPECT_PORT_TLS, and the socket that accepted the connection knows which
-it is. §7.1 uses exactly this property to justify never calling
+is translated onto the cleartext plane's inspect port, one to 443 onto the
+TLS plane's (lib/egress_plane.py), and the socket that accepted the
+connection knows which it is. §7.1 uses exactly this property to justify never calling
 SO_ORIGINAL_DST; a regression that started reading the port from anywhere
 else quietly reintroduces the need for it.
 
@@ -113,13 +113,11 @@ import time
 
 sys.dont_write_bytecode = True
 
-from config_parser import (
-    INSPECT_ORIG_CLEARTEXT, INSPECT_ORIG_TLS, normalise_hostname,
-)
+from config_parser import normalise_hostname
+from egress_plane import CLEARTEXT, TLS, plane_for_port
 from egress_policy import (
-    INSPECT_DIGEST_KEY, INSPECT_PORT_CLEARTEXT, INSPECT_PORT_TLS, TLS_DEFAULT,
-    Policy, inspect_policy_path, inspect_record_path, inspect_status_path,
-    load_policy,
+    INSPECT_DIGEST_KEY, TLS_DEFAULT, Policy, inspect_policy_path,
+    inspect_record_path, inspect_status_path, load_policy,
 )
 from egress_ca import LeafRefused, ca_cert_path, ca_key_path
 from tls_hello import HelloUnreadable, TLS_EXT_ECH, read_client_hello
@@ -248,21 +246,6 @@ def inherited_listening_sockets():
     return sd_inherited_listening_sockets(
         refusal=(", because a fallback bind would move the bind out of the "
                  "inherited fd and back into the workload SELinux domain"))
-
-
-def plane_for_port(port):
-    """Map an accepting port to the plane it carries, or None.
-
-    The port comes from getsockname() on the inherited listener (see the module
-    docstring for why it is not the fd name). Only the two ports the socket
-    unit binds are recognisable; anything else is not one of our listeners, and
-    naming it a plane would be a guess.
-    """
-    if port == INSPECT_PORT_CLEARTEXT:
-        return "cleartext"
-    if port == INSPECT_PORT_TLS:
-        return "tls"
-    return None
 
 
 # The body every POLICY denial shows the guest: generic, and identical for the
@@ -773,6 +756,14 @@ class Listener:
         # the record file this keys outlives that restart -- two unrelated
         # connections would share a key in the one file a reader joins on.
         cid = secrets.token_hex(6)
+        if plane is None:
+            # Not a port the socket unit binds, so not a listener of ours:
+            # there is no plane to serve it on and none a record could name.
+            self._log(
+                f"rejected {LOG_ID_FIELD}={cid} local={format_endpoint(local)} "
+                f"peer={format_endpoint(peer)} reason='not an inspect port'")
+            conn.close()
+            return
         # WHO IS CALLING. Before the ceiling, so a foreign caller cannot spend
         # a slot the workload needs, and before any byte is read.
         #
@@ -801,7 +792,7 @@ class Listener:
             caller = None
         if caller is not None and caller != os.getuid():
             self._log(
-                f"rejected {LOG_ID_FIELD}={cid} plane={plane} "
+                f"rejected {LOG_ID_FIELD}={cid} plane={plane.label} "
                 f"local={format_endpoint(local)} peer={format_endpoint(peer)} caller_uid={caller} "
                 f"reason='{DROP_FOREIGN_CALLER}'")
             self.counters.record_drop(DROP_FOREIGN_CALLER)
@@ -823,7 +814,7 @@ class Listener:
         if not self._ceiling.admit():
             # Reject rather than queue: close now, count it, spawn no thread.
             self._log(
-                f"rejected {LOG_ID_FIELD}={cid} plane={plane} local={format_endpoint(local)} "
+                f"rejected {LOG_ID_FIELD}={cid} plane={plane.label} local={format_endpoint(local)} "
                 f"peer={format_endpoint(peer)} reason='connection ceiling reached'")
             # Counted as a drop as well as a rejection. The guest saw a closed
             # connection, which is the same thing every other drop reason gives
@@ -850,7 +841,7 @@ class Listener:
         except RuntimeError as exc:
             self._ceiling.release(refused=True)
             self._log(
-                f"rejected {LOG_ID_FIELD}={cid} plane={plane} local={format_endpoint(local)} "
+                f"rejected {LOG_ID_FIELD}={cid} plane={plane.label} local={format_endpoint(local)} "
                 f"peer={format_endpoint(peer)} reason='cannot start thread: {exc}'")
             self.counters.record_drop(DROP_CEILING)
             conn.close()
@@ -865,11 +856,11 @@ class Listener:
         # port repeats across the requests on one keep-alive connection and is
         # reused by the kernel after close, so it groups the wrong things
         # together and separates the right ones.
-        where = Where(f"{LOG_ID_FIELD}={cid} plane={plane} "
+        where = Where(f"{LOG_ID_FIELD}={cid} plane={plane.label} "
                        f"local={format_endpoint(local)} peer={format_endpoint(peer)}",
-                       cid=cid, plane=plane)
+                       cid=cid, plane=plane.label)
         try:
-            if plane == "tls":
+            if plane is TLS:
                 self._serve_tls(conn, where)
             else:
                 self._serve_cleartext(conn, where)
@@ -982,7 +973,7 @@ class Listener:
         # the policy authorised rather than one the guest chose.
         try:
             upstream = socket.create_connection(
-                (host, INSPECT_ORIG_TLS), timeout=CONNECTION_TIMEOUT)
+                (host, TLS.guest_port), timeout=CONNECTION_TIMEOUT)
         except OSError as exc:
             reason = self._dial_failure_reason(host)
             self.counters.record_drop(reason, host)
@@ -1320,7 +1311,7 @@ class Listener:
         key to turn it off.
         """
         sock = socket.create_connection(
-            (host, INSPECT_ORIG_TLS), timeout=CONNECTION_TIMEOUT)
+            (host, TLS.guest_port), timeout=CONNECTION_TIMEOUT)
         try:
             ctx = (self._upstream_ctx_h2 if alpn == ALPN_H2
                    else self._upstream_ctx)
@@ -2151,7 +2142,7 @@ class Listener:
     def _dial_upstream_cleartext(self, host):
         """A plain connection to an authorised name, as a _Stream."""
         sock = socket.create_connection(
-            (host, INSPECT_ORIG_CLEARTEXT), timeout=CONNECTION_TIMEOUT)
+            (host, CLEARTEXT.guest_port), timeout=CONNECTION_TIMEOUT)
         sock.settimeout(RELAY_IDLE_TIMEOUT)
         return _Stream(sock)
 

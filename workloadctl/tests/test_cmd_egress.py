@@ -25,6 +25,7 @@ records fell off the retention horizon, and a torn line. Each is a case where
 the honest answer differs from the convenient one.
 """
 
+import argparse
 import datetime
 import gzip
 import io
@@ -49,10 +50,8 @@ from egress_record import (
     RECORD_DECISIONS,
     RECORD_FIELDS,
     RECORD_MODES,
-    RECORD_PLANES,
 )
-
-from tests.test_inspect_listener import _mod
+from egress_plane import PLANES, plane_for_port
 
 
 def _rec(**overrides):
@@ -102,33 +101,27 @@ def _write(path: Path, records, *, gz=False):
 # --- the pins ---------------------------------------------------------------
 
 class TestPlanePin(unittest.TestCase):
-    """The reason and mode vocabularies are one definition the listener and
-    this command both import, so nothing pins them. The planes are the one
-    vocabulary the listener does not name."""
+    """The reason, mode and plane vocabularies are each one definition the
+    listener and this command both import. A `--plane` choice spelled here
+    as a literal would be a second spelling: a rename at the source leaves
+    it a legal argparse choice that matches every record never, and `No
+    records matched.` is indistinguishable from a guest that never used that
+    plane -- the silent-filter failure resolve_reason() is built to prevent.
+    """
 
-    def test_planes_are_the_two_the_listener_labels(self):
-        """Derived from plane_for_port, not restated beside it.
-
-        This asserted `{"tls", "cleartext"}` against a literal, which is a
-        third spelling of the same two strings and pins nothing: the listener
-        has no named plane vocabulary — the values are bare returns inside
-        plane_for_port() — so a rename there left `--plane cleartext` a legal
-        argparse choice that matches every record never, and `No records
-        matched.` is indistinguishable from a guest that never used that plane.
-        That is the silent-filter failure resolve_reason() is built to prevent,
-        arriving through the one vocabulary that was not derived.
-        """
-        mod = _mod()
-        self.assertEqual(
-            set(RECORD_PLANES),
-            {mod.plane_for_port(mod.INSPECT_PORT_TLS),
-             mod.plane_for_port(mod.INSPECT_PORT_CLEARTEXT)})
+    def test_the_plane_choices_are_the_plane_labels(self):
+        parser = argparse.ArgumentParser()
+        cmd_egress.add_arguments(parser)
+        choices = next(a.choices for a in parser._actions
+                       if a.dest == "plane")
+        self.assertEqual(list(choices), [p.label for p in PLANES])
 
     def test_every_plane_is_a_port_the_socket_unit_binds(self):
         """And nothing else is a plane: an unrecognised port is None, which is
         not a value any record can carry."""
-        self.assertIsNone(_mod().plane_for_port(9999))
-        self.assertNotIn(None, RECORD_PLANES)
+        self.assertIsNone(plane_for_port(9999))
+        for plane in PLANES:
+            self.assertIs(plane_for_port(plane.inspect_port), plane)
 
 
 class TestIdPatternIsBuiltFromTheConstant(unittest.TestCase):

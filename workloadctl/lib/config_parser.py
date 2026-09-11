@@ -15,6 +15,7 @@ import re
 import string
 from pathlib import Path
 from typing import NamedTuple
+from egress_plane import CLEARTEXT, TLS
 
 
 # Persistent workload data directory
@@ -428,16 +429,12 @@ def validate_credential_entries(net: dict, *, table: str, noun: str,
 
 # --- Shared hostname matching ---
 #
-# The two ports the transparent redirect targets, and the one normalisation
-# every hostname decision in this design is made under. Both substrates use
-# both: the container half used to restate the ports as literals and normalise
-# with `.rstrip(".")`, which strips a doubled trailing dot the enforcer keeps --
-# so a container's validation and the listener that enforces it disagreed about
-# what a name was. They live at the bottom of the layering because everything
-# above matches against them and nothing here needs anything above.
-
-INSPECT_ORIG_CLEARTEXT = 80
-INSPECT_ORIG_TLS = 443
+# The one normalisation every hostname decision in this design is made under.
+# Both substrates use it: a validator that normalised with `.rstrip(".")`
+# would strip a doubled trailing dot the enforcer keeps, and then disagree
+# with the listener about what a name is. It lives at the bottom of the
+# layering because everything above matches against it and nothing here
+# needs anything above.
 
 
 def normalise_hostname(host: str) -> str:
@@ -506,8 +503,8 @@ def validate_host_pattern(pattern, *, allow_key: str,
                 f"only, so a path never matches"]
     if ":" in text:
         return [f"{pattern!r} contains a port -- hostname policy applies to "
-                f"the redirected ports ({INSPECT_ORIG_CLEARTEXT} and "
-                f"{INSPECT_ORIG_TLS}) only; use {allow_key} for other ports"]
+                f"the redirected ports ({CLEARTEXT.guest_port} and "
+                f"{TLS.guest_port}) only; use {allow_key} for other ports"]
     if text == "*":
         return [f"'*' matches every host, {star_remedy}"]
     if not HOST_PATTERN_RE.match(text):

@@ -251,10 +251,6 @@ RECORD_DECISIONS = ("forward", "drop")
 # that carry requests this process never decoded.
 RECORD_MODES = ("forward", "terminate", "splice", "h2")
 
-# The two planes a record can have arrived on, which is the port the guest
-# dialled and not what the listener then did with the connection.
-RECORD_PLANES = ("tls", "cleartext")
-
 
 def record_timestamp():
     """Wall clock, ISO-8601 UTC to milliseconds.

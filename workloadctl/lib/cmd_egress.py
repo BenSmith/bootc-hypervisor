@@ -66,8 +66,8 @@ from egress_record import (
     LOG_REQ_FIELD,
     RECORD_DECISIONS,
     RECORD_MODES,
-    RECORD_PLANES,
 )
+from egress_plane import PLANES
 from egress_policy import (
     hostname_match,
     inspect_record_dir,
@@ -709,7 +709,7 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
                         choices=list(RECORD_MODES),
                         help="Repeatable")
     parser.add_argument("--plane", action="append",
-                        choices=list(RECORD_PLANES),
+                        choices=[p.label for p in PLANES],
                         help="Repeatable")
     parser.add_argument("--reason", action="append", metavar="REASON",
                         help="Drop reason, or an unambiguous part of one. "

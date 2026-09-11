@@ -23,8 +23,7 @@ Installed to /usr/libexec/workloadctl/nft_elements.py.
 import ipaddress
 import socket
 
-from config_parser import INSPECT_ORIG_CLEARTEXT, INSPECT_ORIG_TLS
-from egress_policy import INSPECT_PORT_CLEARTEXT, INSPECT_PORT_TLS
+from egress_plane import PLANES
 from netfilter_state import nft_set_elements
 from nft_constants import (both_families, split_by_family, NFT_BIN,
                            NFT_PAIR_ALLOW, NFT_PAIR_INSPECT_DST,
@@ -128,8 +127,7 @@ def inspect_map_elements(uid: int) -> dict[str, list[str]]:
     broker redirect that was its last consumer.
     """
     return both_families(NFT_PAIR_INSPECT_MAP, inspect_address(uid), lambda a: [
-        f"{uid} . {INSPECT_ORIG_CLEARTEXT} : {a} . {INSPECT_PORT_CLEARTEXT}",
-        f"{uid} . {INSPECT_ORIG_TLS} : {a} . {INSPECT_PORT_TLS}",
+        f"{uid} . {p.guest_port} : {a} . {p.inspect_port}" for p in PLANES
     ])
 
 
@@ -142,8 +140,7 @@ def inspect_dst_elements(uid: int) -> dict[str, list[str]]:
     through to the default drop.
     """
     return both_families(NFT_PAIR_INSPECT_DST, inspect_address(uid), lambda a: [
-        f"{uid} . {a} . {INSPECT_PORT_CLEARTEXT}",
-        f"{uid} . {a} . {INSPECT_PORT_TLS}",
+        f"{uid} . {a} . {p.inspect_port}" for p in PLANES
     ])
 
 
