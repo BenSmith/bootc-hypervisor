@@ -37,7 +37,7 @@ import unittest.mock
 from pathlib import Path
 
 from tests import load_script
-from egress_policy import INSPECT_PORT_TLS
+from egress_policy import VmPolicyEntry
 from egress_ca import (
     ca_cert_path, ca_key_path, ca_openssl_argv, leaf_openssl_argv,
 )
@@ -254,7 +254,7 @@ class TerminationCase(unittest.TestCase):
         # `entries` is [[vm.network.policy]] as (host, methods, paths) triples.
         policy = mod.Policy(
             tls="inspect", hosts=tuple(hosts), http2=tuple(http2),
-            policy=tuple(mod.VmPolicyEntry(host=h, methods=m, paths=pa)
+            policy=tuple(VmPolicyEntry(host=h, methods=m, paths=pa)
                          for h, m, pa in entries))
         listener = mod.Listener([unittest.mock.Mock()], out, policy=policy,
                                 minter=minter or self._minter(mod))

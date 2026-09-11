@@ -25,9 +25,10 @@ from egress_policy import INSPECT_GUEST_AGENT_KEY
 from config_parser import normalise_hostname
 from workload_lib import container_inspect_policy
 from egress_policy import (
-    INSPECT_PORT_CLEARTEXT, INSPECT_PORT_TLS, hostname_match,
+    INSPECT_PORT_CLEARTEXT, INSPECT_PORT_TLS, VmPolicyEntry, hostname_match,
     vm_inspect_policy,
 )
+from sd_listen import NotSocketActivated
 from workload_addr import INSPECT_LISTENER_BIN
 from tls_hello import HelloUnreadable, TLS_EXT_ECH, read_client_hello
 from http_target import (normalise_path, normalise_target)
@@ -377,23 +378,23 @@ class TestSocketActivation(unittest.TestCase):
 
     def test_a_pid_that_is_not_ours_is_refused(self):
         mod = _mod()
-        with self.assertRaises(mod.NotSocketActivated) as ctx:
+        with self.assertRaises(NotSocketActivated) as ctx:
             self._recover({"LISTEN_PID": "999999", "LISTEN_FDS": "4"})
         self.assertIn("999999", str(ctx.exception))
         self.assertIn(str(mod.os.getpid()), str(ctx.exception))
 
     def test_an_absent_listen_fds_is_refused(self):
-        with self.assertRaises(_mod().NotSocketActivated) as ctx:
+        with self.assertRaises(NotSocketActivated) as ctx:
             self._recover({"LISTEN_PID": str(os.getpid())})
         self.assertIn("LISTEN_FDS", str(ctx.exception))
 
     def test_an_absent_listen_pid_is_refused(self):
-        with self.assertRaises(_mod().NotSocketActivated) as ctx:
+        with self.assertRaises(NotSocketActivated) as ctx:
             self._recover({"LISTEN_FDS": "4"})
         self.assertIn("LISTEN_PID", str(ctx.exception))
 
     def test_a_non_integer_listen_fds_is_refused(self):
-        with self.assertRaises(_mod().NotSocketActivated):
+        with self.assertRaises(NotSocketActivated):
             self._recover({"LISTEN_PID": str(os.getpid()), "LISTEN_FDS": "four"})
 
     def test_listening_sockets_are_recovered_from_the_fd_range(self):
@@ -1466,7 +1467,7 @@ class TestPolicyGovernsIsAskedWhereThereIsNoRequest(unittest.TestCase):
         mod = _mod()
         return mod.Policy(
             tls="inspect", hosts=tuple(hosts),
-            policy=tuple(mod.VmPolicyEntry(host=h, methods=m, paths=pa)
+            policy=tuple(VmPolicyEntry(host=h, methods=m, paths=pa)
                          for h, m, pa in entries))
 
     def test_a_host_with_an_entry_is_governed(self):
@@ -1513,7 +1514,7 @@ class TestPolicyEnforcement(_CleartextRig):
         mod = _mod()
         return mod.Policy(
             tls="splice", hosts=tuple(hosts),
-            policy=tuple(mod.VmPolicyEntry(host=h, methods=m, paths=p)
+            policy=tuple(VmPolicyEntry(host=h, methods=m, paths=p)
                          for h, m, p in entries))
 
     def _get(self, target="/", host="a.example", method="GET"):
@@ -2802,7 +2803,7 @@ class TestCounters(unittest.TestCase):
             tls="splice", hosts=tuple(hosts),
             internal=tuple(internal), splice=tuple(splice),
             http2=tuple(http2),
-            policy=tuple(mod.VmPolicyEntry(host=h, methods=m, paths=p)
+            policy=tuple(VmPolicyEntry(host=h, methods=m, paths=p)
                          for h, m, p in policy))), out
 
     def test_every_drop_reason_is_present_before_anything_happens(self):
