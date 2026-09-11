@@ -49,3 +49,4 @@ traps worth the most to a later reader).
 | [006](006-vm-networking-passt-not-managed-bridge.md) | VM networking uses passt; the workload uid is the network identity | implemented |
 | [007](007-per-workload-credential-broker.md) | Credentials live in a per-workload broker, selected per host | implemented |
 | [008](008-transparent-egress-inspection.md) | VM egress is inspected transparently, and terminated by default | implemented |
+| [009](009-container-egress-parity-and-the-single-uid.md) | Containers get the VM egress mechanism by presence of a trigger; the inspector keeps the workload uid | implemented |
