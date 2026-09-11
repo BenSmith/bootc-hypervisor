@@ -645,6 +645,7 @@ class TestHelperContract(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.source = (ROOT / "libexec" / "workload-pcap").read_text()
+        cls.host_tap = (ROOT / "lib" / "pcap_host_tap.py").read_text()
 
     def test_teardown_runs_in_a_finally(self):
         self.assertIn("finally:", self.source)
@@ -761,8 +762,8 @@ class TestHelperContract(unittest.TestCase):
             "payload predates them and would always look non-empty")
 
     def _host_down(self) -> str:
-        return self.source[self.source.index("def host_down"):
-                           self.source.index("# --- guest vantage, VM ---")]
+        return self.host_tap[self.host_tap.index("def host_down"):
+                             self.host_tap.index("def host_reader")]
 
     def test_the_container_pid_goes_through_the_podman_wrapper(self):
         """Talking to a workload user's rootless podman needs
