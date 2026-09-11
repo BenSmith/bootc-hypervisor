@@ -37,11 +37,13 @@ from broker_server import (
 )
 from peer_identity import overflow_uid, unmappable_sandboxes, userns_maps_everything
 
-def main():
-    if len(sys.argv) != 2:
-        sys.exit(f"usage: {sys.argv[0]} <config.toml>")
+
+def main(argv=None):
+    argv = sys.argv if argv is None else argv
+    if len(argv) != 2:
+        sys.exit(f"usage: {argv[0]} <config.toml>")
     try:
-        cfg = load_config(sys.argv[1])
+        cfg = load_config(argv[1])
     except BrokerConfigError as exc:
         sys.exit(str(exc))
 

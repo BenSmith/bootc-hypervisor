@@ -2,12 +2,16 @@
 
 import contextlib
 import io
+import os
 import tempfile
 import textwrap
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import broker_config
+import broker_server
+from tests import load_script
 
 
 @contextlib.contextmanager
@@ -426,6 +430,65 @@ class TestHostKeysAreNormalised(unittest.TestCase):
                     [sandboxes.agent.hosts."API.example.com:443"]
                 """), load=lambda n: n)
         self.assertIn("already configured", str(caught.exception))
+
+
+class TestEntrypointWiring(unittest.TestCase):
+    """main() past the argv check, with a real Server on an ephemeral port.
+
+    Every other test enters below main(): the reader, the handler, the
+    server. What none of them sees is whether the program still hands the
+    reader's output to the handler and the handler to the server after a
+    move -- an attribute set on the wrong object there is a broker that
+    starts clean and refuses every request.
+    """
+
+    def setUp(self):
+        self.saved = {k: getattr(broker_server.Handler, k)
+                      for k in ("config", "profiles", "overflow", "upstream_context")}
+        self.addCleanup(lambda: [setattr(broker_server.Handler, k, v)
+                                 for k, v in self.saved.items()])
+        self.mod = load_script("libexec/agent-broker")
+        self.env = mock.patch.dict(os.environ, {"AGENT_BROKER_SECRET": "sk-test"},
+                                   clear=False)
+        self.env.start(); self.addCleanup(self.env.stop)
+        os.environ.pop("CREDENTIALS_DIRECTORY", None)
+
+    def _run(self, text, **patches):
+        seen = {}
+
+        def serve_forever(server):
+            seen["server"] = server
+
+        with config_file(text) as path, \
+                mock.patch.object(broker_server.Server, "serve_forever", serve_forever), \
+                contextlib.redirect_stderr(io.StringIO()) as err:
+            for target, value in patches.items():
+                stack = mock.patch.object(self.mod, target, value)
+                stack.start(); self.addCleanup(stack.stop)
+            self.mod.main(["agent-broker", path])
+        seen["server"].server_close()
+        return seen["server"], err.getvalue()
+
+    def test_the_profiles_reach_the_handler_and_the_server_binds(self):
+        server, err = self._run(MINIMAL.replace(
+            'listen_address = "127.129.0.3"',
+            'listen_address = "127.0.0.1"\n    listen_port = 0'))
+        self.assertEqual(list(broker_server.Handler.profiles),
+                         [("agent", "api.example.com")])
+        self.assertEqual(broker_server.Handler.profiles[("agent", "api.example.com")]
+                         .auth_value, "sk-test")
+        self.assertIsNotNone(broker_server.Handler.upstream_context)
+        self.assertIsNone(server.guest_tls_context)
+        self.assertIs(server.RequestHandlerClass, broker_server.Handler)
+        self.assertNotEqual(server.server_address[1], 0, "the port was bound")
+        self.assertIn("listening url=http://127.0.0.1:", err)
+        self.assertIn("using AGENT_BROKER_SECRET", err)
+
+    def test_an_unmappable_sandbox_refuses_to_start(self):
+        with self.assertRaises(SystemExit) as caught:
+            self._run(MINIMAL.replace("127.129.0.3", "127.0.0.1"),
+                      unmappable_sandboxes=lambda names, uid_map: ["_wl-agent (uid 10000)"])
+        self.assertIn("PrivateUsers=", str(caught.exception))
 
 
 if __name__ == "__main__":
