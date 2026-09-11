@@ -8,10 +8,12 @@ process itself, that the connection ceiling rejects rather than queues, and
 that the installed path agrees with the constant the unit's ExecStart reads.
 """
 
+import contextlib
 import io
 import json
 import os
 import shutil
+import signal
 import socket
 import tempfile
 import threading
@@ -877,6 +879,61 @@ class TestPolicyLoading(unittest.TestCase):
         it there is nothing on four identically-named fds to recover it from."""
         mod = _mod()
         self.assertEqual(mod.main(["x"]), 2)
+
+
+class TestEntrypointWiring(unittest.TestCase):
+    """main() past the argv check, with a real Listener and no sockets.
+
+    Every other row enters below main(): at the Listener, at a plane, or at
+    the policy reader. The three lines main() owns outright -- the SIGTERM
+    handler, the SIGHUP handler and the exit path -- reach the record and the
+    accept loop by attribute, and a wrong attribute there is a listener that
+    starts, serves, and then dies on logrotate's HUP or at its own shutdown.
+    Only running main() sees that."""
+
+    def test_hup_reopens_the_record_and_exit_closes_it(self):
+        mod = _mod()
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        seen = {}
+
+        class Capture(Listener):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                seen["listener"] = self
+
+        def poke():
+            while "listener" not in seen:
+                time.sleep(0.01)
+            os.kill(os.getpid(), signal.SIGHUP)
+            time.sleep(0.05)
+            os.kill(os.getpid(), signal.SIGTERM)
+
+        saved = {s: signal.getsignal(s) for s in (signal.SIGHUP, signal.SIGTERM)}
+        self.addCleanup(lambda: [signal.signal(s, h) for s, h in saved.items()])
+        patch = unittest.mock.patch.object
+        with patch(mod, "load_policy",
+                   return_value=Policy(tls="splice", hosts=())), \
+                patch(mod, "build_minter", return_value=None), \
+                patch(mod, "inherited_listening_sockets", return_value=[]), \
+                patch(mod, "inspect_status_path",
+                      return_value=os.path.join(d, "status.json")), \
+                patch(mod, "inspect_record_path",
+                      return_value=os.path.join(d, "requests.log")), \
+                patch(mod, "Listener", Capture), \
+                patch(egress_record.RequestLog, "reopen", autospec=True) as reopen, \
+                patch(egress_record.RequestLog, "close", autospec=True) as close, \
+                contextlib.redirect_stdout(io.StringIO()):
+            poker = threading.Thread(target=poke)
+            poker.start()
+            rc = mod.main(["x", "wl"])
+            poker.join()
+        self.assertEqual(rc, 0)
+        record = seen["listener"].inspection.record
+        reopen.assert_called_once_with(record)
+        close.assert_called_once_with(record)
+        self.assertTrue(os.path.exists(os.path.join(d, "status.json")),
+                        "the exit path did not write the status file")
 
 
 class TestTlsPlane(unittest.TestCase):

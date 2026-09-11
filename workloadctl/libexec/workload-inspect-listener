@@ -94,7 +94,7 @@ def main(argv=None):
     # this is the half of it that lives here: the snippet renames the file and
     # then HUPs us, rather than using copytruncate, which races an in-flight
     # write. The handler only sets a flag -- RequestLog.reopen says why.
-    signal.signal(signal.SIGHUP, lambda *_args: listener.record.reopen())
+    signal.signal(signal.SIGHUP, lambda *_args: listener.inspection.record.reopen())
     try:
         listener.accept_loop()
     finally:
@@ -103,7 +103,7 @@ def main(argv=None):
         # otherwise leave its last half-minute unreported.
         listener.write_status()
         listener.log_summary()
-        listener.record.close()
+        listener.inspection.record.close()
         listener.close()
     return 0
 
