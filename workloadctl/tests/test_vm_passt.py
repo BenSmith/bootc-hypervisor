@@ -27,6 +27,7 @@ from unittest import mock
 
 from vm_defs import parse_vm_port
 from vm_network_config import validate_vm_network
+import passt_dns_host
 import workload_lib
 from workload_addr import (NFLOG_GROUP_BASE, UID_MAX, UID_MIN,
                            MGMT_SSH_PORT, management_address,
@@ -270,10 +271,10 @@ class TestNetdevDnsDerivation(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
 
     def _resolv_conf(self, text):
-        """Point the module's RESOLV_CONF at a real file holding `text`."""
+        """Point passt_dns_host.RESOLV_CONF at a real file holding `text`."""
         path = Path(self.tmp.name) / "resolv.conf"
         path.write_text(text)
-        return mock.patch.object(self.mod, "RESOLV_CONF", path)
+        return mock.patch.object(passt_dns_host, "RESOLV_CONF", path)
 
     def test_single_family_uses_the_native_properties(self):
         fragment, _ = self.mod.build_dns_fragment(
@@ -341,7 +342,7 @@ class TestNetdevDnsDerivation(unittest.TestCase):
             "nameserver fd00::54\n"
         )
         with self._resolv_conf(text):
-            self.assertEqual(self.mod.host_resolvers(),
+            self.assertEqual(passt_dns_host.host_resolvers(),
                              {4: "127.0.0.53", 6: "fd00::53"})
 
     def test_loopback_resolvers_are_kept(self):
@@ -350,26 +351,26 @@ class TestNetdevDnsDerivation(unittest.TestCase):
         # is no reason to skip it — and skipping it would break DNS on every
         # systemd-resolved host.
         with self._resolv_conf("nameserver 127.0.0.53\n"):
-            self.assertEqual(self.mod.host_resolvers(), {4: "127.0.0.53"})
+            self.assertEqual(passt_dns_host.host_resolvers(), {4: "127.0.0.53"})
 
     def test_unreadable_resolv_conf_is_not_fatal(self):
         missing = Path(self.tmp.name) / "does-not-exist"
-        with mock.patch.object(self.mod, "RESOLV_CONF", missing):
-            self.assertEqual(self.mod.host_resolvers(), {})
+        with mock.patch.object(passt_dns_host, "RESOLV_CONF", missing):
+            self.assertEqual(passt_dns_host.host_resolvers(), {})
 
     def test_link_local_gateway_is_not_used(self):
         # An fe80::/10 gateway is scoped to an interface, so handing it to the
         # guest as a resolver address gives it something it cannot disambiguate.
         completed = mock.MagicMock(returncode=0,
                                    stdout="default via fe80::1 dev eth0\n")
-        with mock.patch.object(self.mod.subprocess, "run",
+        with mock.patch.object(passt_dns_host.subprocess, "run",
                                return_value=completed):
-            self.assertEqual(self.mod.default_gateways(), {})
+            self.assertEqual(passt_dns_host.default_gateways(), {})
 
     def test_missing_ip_binary_is_not_fatal(self):
-        with mock.patch.object(self.mod.subprocess, "run",
+        with mock.patch.object(passt_dns_host.subprocess, "run",
                                side_effect=OSError("no ip")):
-            self.assertEqual(self.mod.default_gateways(), {})
+            self.assertEqual(passt_dns_host.default_gateways(), {})
 
 
 class TestNetdevUnderSynthesis(unittest.TestCase):
@@ -474,7 +475,7 @@ class TestNetdevUnderSynthesis(unittest.TestCase):
                                return_value=str(config_path)), \
                 mock.patch.object(self.mod, "workload_env_dir",
                                   return_value=env_dir), \
-                mock.patch.object(self.mod, "RESOLV_CONF", resolv), \
+                mock.patch.object(passt_dns_host, "RESOLV_CONF", resolv), \
                 mock.patch.object(self.mod.pwd, "getpwnam",
                                   return_value=entry), \
                 mock.patch.object(self.mod, "default_gateways",
