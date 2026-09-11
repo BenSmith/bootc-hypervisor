@@ -646,6 +646,7 @@ class TestHelperContract(unittest.TestCase):
     def setUpClass(cls):
         cls.source = (ROOT / "libexec" / "workload-pcap").read_text()
         cls.host_tap = (ROOT / "lib" / "pcap_host_tap.py").read_text()
+        cls.vm_tap = (ROOT / "lib" / "pcap_vm_tap.py").read_text()
 
     def test_teardown_runs_in_a_finally(self):
         self.assertIn("finally:", self.source)
@@ -665,8 +666,8 @@ class TestHelperContract(unittest.TestCase):
     def test_the_correction_needs_nothing_from_the_guest(self):
         """Deriving it from guest uptime would leave a full timezone offset in
         place, silently, on every non-UTC host."""
-        probe = self.source[self.source.index("def emit_probe"):
-                            self.source.index("def correct_timestamps")]
+        probe = self.vm_tap[self.vm_tap.index("def emit_probe"):
+                            self.vm_tap.index("def correct_timestamps")]
         self.assertNotIn("/proc/uptime", probe)
         # No command run inside the guest, and nothing read out of it: the
         # probe is a bare TCP connect from this side.
@@ -692,7 +693,8 @@ class TestHelperContract(unittest.TestCase):
     def test_the_staged_file_is_checked_rather_than_trusted(self):
         """Because the failure mode is a capture that reports success and
         produces nothing."""
-        body = self.source[self.source.index("def guest_vm_up"):]
+        body = self.vm_tap[self.vm_tap.index("def guest_vm_up"):
+                           self.vm_tap.index("def qmp_command")]
         self.assertIn("os.path.exists(staging)", body[:1600])
 
     def test_an_unfinalized_staged_file_is_reported_not_deleted(self):
@@ -706,11 +708,12 @@ class TestHelperContract(unittest.TestCase):
         by default, and every call to them sat in the finally block — so a host
         with tcpdump and without them lost the capture it had just taken."""
         for tool in ("capinfos", "editcap"):
-            self.assertNotIn(f'"{tool}"', self.source)
-            self.assertNotIn(f"'{tool}'", self.source)
+            for text in (self.source, self.vm_tap):
+                self.assertNotIn(f'"{tool}"', text)
+                self.assertNotIn(f"'{tool}'", text)
 
     def test_a_failed_correction_is_reported_not_silent(self):
-        body = self.source[self.source.index("def _first_packet_time"):]
+        body = self.vm_tap[self.vm_tap.index("def _first_packet_time"):]
         self.assertIn("WARNING", body[:900])
 
     def test_the_finalize_path_cannot_raise_past_the_move(self):
@@ -719,8 +722,9 @@ class TestHelperContract(unittest.TestCase):
         the move, and ExecStopPost deliberately does not do it — so both are
         wrapped rather than allowed to propagate."""
         for name in ("_first_packet_time", "correct_timestamps"):
-            body = self.source[self.source.index(f"def {name}"):]
-            body = body[:body.index("\n\n\n")]
+            body = self.vm_tap[self.vm_tap.index(f"def {name}"):]
+            nxt = body.find("\ndef ")
+            body = body if nxt < 0 else body[:nxt]
             self.assertIn("except (OSError, PcapFormatError)", body,
                           f"{name} must not propagate out of the finally block")
 
