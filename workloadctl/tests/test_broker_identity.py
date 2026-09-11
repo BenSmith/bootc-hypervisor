@@ -13,6 +13,7 @@ import threading
 import unittest
 from unittest import mock
 
+import peer_identity
 from tests import load_script
 
 broker = load_script("libexec/agent-broker")
@@ -28,24 +29,24 @@ class TestProcAddress(unittest.TestCase):
     """Addresses are hex, in 32-bit words, each little-endian."""
 
     def test_ipv4(self):
-        self.assertEqual(broker._proc_addr("0100007F"),
+        self.assertEqual(peer_identity._proc_addr("0100007F"),
                          ipaddress.ip_address("127.0.0.1"))
 
     def test_ipv4_high_octets_are_not_byte_swapped_wrongly(self):
         # 127.128.0.1 -- a workload management address, where a per-byte rather
         # than per-word reversal would still produce something plausible.
-        self.assertEqual(broker._proc_addr("0100807F"),
+        self.assertEqual(peer_identity._proc_addr("0100807F"),
                          ipaddress.ip_address("127.128.0.1"))
 
     def test_ipv6(self):
-        self.assertEqual(broker._proc_addr("00000000000000000000000001000000"),
+        self.assertEqual(peer_identity._proc_addr("00000000000000000000000001000000"),
                          ipaddress.ip_address("::1"))
 
     def test_v4_mapped_collapses_to_v4(self):
         """A dual-stack listener reports peers as ::ffff:a.b.c.d, and the row
         for the same socket may sit in either table. Both sides must flatten or
         an exact match never happens."""
-        self.assertEqual(broker._proc_addr("0000000000000000FFFF00000100007F"),
+        self.assertEqual(peer_identity._proc_addr("0000000000000000FFFF00000100007F"),
                          ipaddress.ip_address("127.0.0.1"))
 
 
@@ -60,20 +61,20 @@ class TestPeerUidFrom(unittest.TestCase):
         return [proc_row("0100007F:AFC8", "0100007F:1F91", **kwargs)]
 
     def test_finds_the_mirrored_row(self):
-        found = broker.peer_uid_from(self.rows(uid=10000, inode=45338),
+        found = peer_identity.peer_uid_from(self.rows(uid=10000, inode=45338),
                                      self.locals_, self.peer)
         self.assertEqual(found, 10000)
 
     def test_ownerless_row_is_not_trusted(self):
         """A TIME_WAIT remnant has inode 0 and is reported with uid 0. Reading
         that as identity would attribute the request to root."""
-        found = broker.peer_uid_from(self.rows(uid=0, inode=0),
+        found = peer_identity.peer_uid_from(self.rows(uid=0, inode=0),
                                      self.locals_, self.peer)
         self.assertIsNone(found)
 
     def test_our_own_listening_row_is_not_mistaken_for_the_peer(self):
         rows = [proc_row("0100007F:1F91", "00000000:0000", uid=999, inode=1)]
-        self.assertIsNone(broker.peer_uid_from(rows, self.locals_, self.peer))
+        self.assertIsNone(peer_identity.peer_uid_from(rows, self.locals_, self.peer))
 
     def test_the_port_prefilter_does_not_skip_the_right_row(self):
         """The scan rejects rows without the peer's port hex anywhere in them,
@@ -84,22 +85,22 @@ class TestPeerUidFrom(unittest.TestCase):
         decoy = proc_row("0100007F:1F91", "0100007F:9000", uid=0, inode=555)
         real = proc_row("0100007F:9000", "0100007F:1F91", uid=10001, inode=777)
         self.assertEqual(
-            broker.peer_uid_from([decoy, real], [ours], peer), 10001)
+            peer_identity.peer_uid_from([decoy, real], [ours], peer), 10001)
 
     def test_a_row_without_the_peer_port_is_never_considered(self):
         other = proc_row("0100007F:8888", "0100007F:1F91", uid=10002, inode=778)
         self.assertIsNone(
-            broker.peer_uid_from([other], [("127.0.0.1", 8081)],
+            peer_identity.peer_uid_from([other], [("127.0.0.1", 8081)],
                                  ("127.0.0.1", 0x9000)))
 
     def test_a_different_connection_does_not_match(self):
         rows = [proc_row("0100007F:AFC9", "0100007F:1F91", uid=10000, inode=7)]
-        self.assertIsNone(broker.peer_uid_from(rows, self.locals_, self.peer))
+        self.assertIsNone(peer_identity.peer_uid_from(rows, self.locals_, self.peer))
 
     def test_malformed_lines_are_skipped_not_fatal(self):
         rows = ["garbage", "", "   1: zz:zz yy:yy 01"] + self.rows(uid=10001,
                                                                    inode=9)
-        self.assertEqual(broker.peer_uid_from(rows, self.locals_, self.peer),
+        self.assertEqual(peer_identity.peer_uid_from(rows, self.locals_, self.peer),
                          10001)
 
 
@@ -122,18 +123,18 @@ class TestPeerUidThroughRedirect(unittest.TestCase):
 
     def test_the_bound_address_alone_does_not_match(self):
         self.assertIsNone(
-            broker.peer_uid_from(self.rows, [self.translated], self.peer))
+            peer_identity.peer_uid_from(self.rows, [self.translated], self.peer))
 
     def test_the_advertised_endpoint_matches(self):
         self.assertEqual(
-            broker.peer_uid_from(self.rows, [self.advertised], self.peer), 10000)
+            peer_identity.peer_uid_from(self.rows, [self.advertised], self.peer), 10000)
 
     def test_offering_both_covers_translated_and_direct_alike(self):
         both = [self.translated, self.advertised]
-        self.assertEqual(broker.peer_uid_from(self.rows, both, self.peer), 10000)
+        self.assertEqual(peer_identity.peer_uid_from(self.rows, both, self.peer), 10000)
         direct = [proc_row("0100007F:AFC8", "0100007F:1F91", uid=10001, inode=2)]
         self.assertEqual(
-            broker.peer_uid_from(direct, both, ("127.0.0.1", 45000)), 10001)
+            peer_identity.peer_uid_from(direct, both, ("127.0.0.1", 45000)), 10001)
 
 
 class TestLocalEndpointsV6(unittest.TestCase):
@@ -164,7 +165,7 @@ class TestLocalEndpointsV6(unittest.TestCase):
 
         sock.getsockopt.side_effect = getsockopt
         self.assertEqual(
-            broker.local_endpoints(sock),
+            peer_identity.local_endpoints(sock),
             [("2001:2::a", 8443), ("2606:4700::1111", 443)])
 
     def test_a_v4_socket_is_unaffected(self):
@@ -181,7 +182,7 @@ class TestLocalEndpointsV6(unittest.TestCase):
 
         sock.getsockopt.side_effect = getsockopt
         self.assertEqual(
-            broker.local_endpoints(sock),
+            peer_identity.local_endpoints(sock),
             [("198.18.0.1", 8443), ("93.184.216.34", 443)])
 
     def test_neither_option_answering_is_not_an_error(self):
@@ -191,7 +192,7 @@ class TestLocalEndpointsV6(unittest.TestCase):
         sock = mock.Mock()
         sock.getsockname.return_value = ("127.0.0.1", 8081)
         sock.getsockopt.side_effect = OSError("no conntrack entry")
-        self.assertEqual(broker.local_endpoints(sock), [("127.0.0.1", 8081)])
+        self.assertEqual(peer_identity.local_endpoints(sock), [("127.0.0.1", 8081)])
 
 
 class TestPeerUidLiveV6(unittest.TestCase):
@@ -218,7 +219,7 @@ class TestPeerUidLiveV6(unittest.TestCase):
         conn, peer = srv.accept()
         self.addCleanup(conn.close)
 
-        found = broker.peer_uid(broker.local_endpoints(conn), peer[:2])
+        found = peer_identity.peer_uid(peer_identity.local_endpoints(conn), peer[:2])
         self.assertEqual(found, os.getuid())
         for sock in held:
             sock.close()
@@ -245,7 +246,7 @@ class TestPeerUidLive(unittest.TestCase):
         conn, peer = srv.accept()
         self.addCleanup(conn.close)
 
-        found = broker.peer_uid([conn.getsockname()], peer)
+        found = peer_identity.peer_uid([conn.getsockname()], peer)
         self.assertEqual(found, os.getuid())
         for sock in held:
             sock.close()
@@ -254,18 +255,18 @@ class TestPeerUidLive(unittest.TestCase):
 class TestWorkloadName(unittest.TestCase):
 
     def test_strips_the_workload_prefix(self):
-        with mock.patch.object(broker.pwd, "getpwuid",
+        with mock.patch.object(peer_identity.pwd, "getpwuid",
                                return_value=mock.Mock(pw_name="_wl-agent-scratch")):
-            self.assertEqual(broker.workload_name(10000), "agent-scratch")
+            self.assertEqual(peer_identity.workload_name(10000), "agent-scratch")
 
     def test_a_non_workload_user_is_not_a_workload(self):
-        with mock.patch.object(broker.pwd, "getpwuid",
+        with mock.patch.object(peer_identity.pwd, "getpwuid",
                                return_value=mock.Mock(pw_name="nginx")):
-            self.assertIsNone(broker.workload_name(978))
+            self.assertIsNone(peer_identity.workload_name(978))
 
     def test_an_unknown_uid_is_not_a_workload(self):
-        with mock.patch.object(broker.pwd, "getpwuid", side_effect=KeyError):
-            self.assertIsNone(broker.workload_name(4242))
+        with mock.patch.object(peer_identity.pwd, "getpwuid", side_effect=KeyError):
+            self.assertIsNone(peer_identity.workload_name(4242))
 
 
 INITIAL_NS = "         0          0 4294967295\n"
@@ -278,16 +279,16 @@ CONTAINER_NS = "         0          0          1\n         1          1      655
 class TestUsernsShape(unittest.TestCase):
 
     def test_the_initial_namespace_maps_everything(self):
-        self.assertTrue(broker.userns_maps_everything(INITIAL_NS))
+        self.assertTrue(peer_identity.userns_maps_everything(INITIAL_NS))
 
     def test_a_single_mapped_uid_does_not(self):
-        self.assertFalse(broker.userns_maps_everything(SINGLE_UID_NS))
+        self.assertFalse(peer_identity.userns_maps_everything(SINGLE_UID_NS))
 
     def test_a_container_map_does_not(self):
-        self.assertFalse(broker.userns_maps_everything(CONTAINER_NS))
+        self.assertFalse(peer_identity.userns_maps_everything(CONTAINER_NS))
 
     def test_an_empty_map_does_not(self):
-        self.assertFalse(broker.userns_maps_everything(""))
+        self.assertFalse(peer_identity.userns_maps_everything(""))
 
 
 class TestUnmappableSandboxes(unittest.TestCase):
@@ -296,9 +297,9 @@ class TestUnmappableSandboxes(unittest.TestCase):
     workload, and refusing that would be a false alarm."""
 
     def sandboxes(self, uid_map, uid=10000):
-        with mock.patch.object(broker.pwd, "getpwnam",
+        with mock.patch.object(peer_identity.pwd, "getpwnam",
                                return_value=mock.Mock(pw_uid=uid)):
-            return broker.unmappable_sandboxes(["agent-scratch"], uid_map)
+            return peer_identity.unmappable_sandboxes(["agent-scratch"], uid_map)
 
     def test_the_initial_namespace_can_see_every_workload(self):
         self.assertEqual(self.sandboxes(INITIAL_NS), [])
@@ -318,9 +319,9 @@ class TestUnmappableSandboxes(unittest.TestCase):
         self.assertEqual(len(self.sandboxes(CONTAINER_NS, uid=70000)), 1)
 
     def test_a_sandbox_whose_user_does_not_exist_yet_is_not_an_error(self):
-        with mock.patch.object(broker.pwd, "getpwnam", side_effect=KeyError):
+        with mock.patch.object(peer_identity.pwd, "getpwnam", side_effect=KeyError):
             self.assertEqual(
-                broker.unmappable_sandboxes(["not-created"], SINGLE_UID_NS), [])
+                peer_identity.unmappable_sandboxes(["not-created"], SINGLE_UID_NS), [])
 
 
 class TestIdentifyRefusals(unittest.TestCase):

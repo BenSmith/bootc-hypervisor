@@ -31,8 +31,6 @@ import difflib
 import http.client
 import http.server
 import os
-import pwd
-import socket
 import socketserver
 import ssl
 import sys
@@ -41,6 +39,11 @@ import time
 import tomllib
 import urllib.parse
 from pathlib import Path
+
+from peer_identity import (
+    local_endpoints, overflow_uid, peer_uid, unmappable_sandboxes,
+    userns_maps_everything, workload_name,
+)
 
 # Headers that are meaningful only for a single transport hop and must never be
 # copied across one (RFC 9110 §7.6.1).
@@ -118,82 +121,6 @@ def log(event, **fields):
     headers, or anything derived from the credential."""
     parts = " ".join(f"{k}={v}" for k, v in fields.items())
     print(f"[{time.strftime('%H:%M:%S')}] {event} {parts}", file=sys.stderr, flush=True)
-
-
-# --- caller identity -------------------------------------------------------
-#
-# Moved to lib/peer_identity.py, which the egress inspector's listener now uses
-# too: both programs answer the same question about a caller and had no
-# business answering it two ways. The rationale for reading /proc/net rather
-# than SO_PEERCRED, and for keying on the uid rather than the address, lives
-# there.
-
-# Re-exported, not merely imported: WORKLOAD_USER_PREFIX is the only name this
-# program's own code reads. The rest are here because tests/test_broker_identity.py
-# reaches them through this module (broker._proc_addr, broker.peer_uid_from,
-# broker.SO_ORIGINAL_DST) -- the identity logic was written and paid for here, and
-# moving the tests as well as the code would have made the extraction a rewrite.
-# ipaddress and struct are no longer imported at all: every use of them left with
-# _norm/_proc_addr/local_endpoints.
-from peer_identity import (  # noqa: E402
-    SO_ORIGINAL_DST, WORKLOAD_USER_PREFIX, _norm, _proc_addr,
-    local_endpoints, peer_uid, peer_uid_from, workload_name,
-)
-
-
-def userns_ranges(uid_map):
-    """The host uid ranges this namespace can represent, as (start, count).
-
-    /proc/net translates the uid column through the *reader's* namespace, so an
-    owner outside these ranges reads as the overflow uid instead. Enough of
-    those and every caller collapses into one identity, with the broker still
-    serving traffic and no error anywhere.
-    """
-    ranges = []
-    for line in uid_map.splitlines():
-        f = line.split()
-        if len(f) != 3:
-            continue
-        try:
-            ranges.append((int(f[1]), int(f[2])))
-        except ValueError:
-            continue
-    return ranges
-
-
-def userns_maps_everything(uid_map):
-    """Whether this is an unrestricted namespace -- the initial one, in practice."""
-    return any(start == 0 and count >= 0xFFFFFFFF
-               for start, count in userns_ranges(uid_map))
-
-
-def unmappable_sandboxes(sandbox_names, uid_map):
-    """Configured sandboxes whose uid this namespace cannot represent.
-
-    Checked against the uids that actually matter rather than against the shape
-    of the map, because a namespace can be restricted and still map the whole
-    workload range -- refusing that would be a false alarm, and an operator who
-    hits one learns to route around the check.
-    """
-    ranges = userns_ranges(uid_map)
-    unmappable = []
-    for name in sandbox_names:
-        user = WORKLOAD_USER_PREFIX + name
-        try:
-            uid = pwd.getpwnam(user).pw_uid
-        except KeyError:
-            continue  # workload not created yet; nothing to check against
-        if not any(start <= uid < start + count for start, count in ranges):
-            unmappable.append(f"{user} (uid {uid})")
-    return unmappable
-
-
-def overflow_uid():
-    """The uid the kernel substitutes for one it cannot map."""
-    try:
-        return int(Path("/proc/sys/kernel/overflowuid").read_text().strip())
-    except (OSError, ValueError):
-        return 65534
 
 
 # --- configuration ---------------------------------------------------------

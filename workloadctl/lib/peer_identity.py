@@ -2,8 +2,10 @@
 
 Shared by `libexec/agent-broker` and `libexec/workload-inspect-listener`,
 which both need to answer the same question about a caller and had no business
-answering it two ways. Extracted from the broker, where it was first written
-and where its edge cases were paid for.
+answering it two ways. The userns helpers at the end are the precondition for
+the answer being truthful: /proc/net translates the uid column through the
+reader's namespace, so a process that cannot map a workload's uid sees the
+overflow uid instead and every such caller collapses into one identity.
 
 WHY NOT SO_PEERCRED. It is AF_UNIX-only. On a TCP socket it yields nothing
 usable, so a peer-credential check on a listener bound to an address has to go
@@ -23,6 +25,7 @@ import ipaddress
 import pwd
 import socket
 import struct
+from pathlib import Path
 
 WORKLOAD_USER_PREFIX = "_wl-"
 PROC_NET_TCP = ("/proc/net/tcp", "/proc/net/tcp6")
@@ -171,3 +174,58 @@ def workload_name(uid):
     if not user.startswith(WORKLOAD_USER_PREFIX):
         return None
     return user[len(WORKLOAD_USER_PREFIX):]
+
+
+def userns_ranges(uid_map):
+    """The host uid ranges this namespace can represent, as (start, count).
+
+    /proc/net translates the uid column through the *reader's* namespace, so an
+    owner outside these ranges reads as the overflow uid instead. Enough of
+    those and every caller collapses into one identity, with the broker still
+    serving traffic and no error anywhere.
+    """
+    ranges = []
+    for line in uid_map.splitlines():
+        f = line.split()
+        if len(f) != 3:
+            continue
+        try:
+            ranges.append((int(f[1]), int(f[2])))
+        except ValueError:
+            continue
+    return ranges
+
+
+def userns_maps_everything(uid_map):
+    """Whether this is an unrestricted namespace -- the initial one, in practice."""
+    return any(start == 0 and count >= 0xFFFFFFFF
+               for start, count in userns_ranges(uid_map))
+
+
+def unmappable_sandboxes(sandbox_names, uid_map):
+    """Configured sandboxes whose uid this namespace cannot represent.
+
+    Checked against the uids that actually matter rather than against the shape
+    of the map, because a namespace can be restricted and still map the whole
+    workload range -- refusing that would be a false alarm, and an operator who
+    hits one learns to route around the check.
+    """
+    ranges = userns_ranges(uid_map)
+    unmappable = []
+    for name in sandbox_names:
+        user = WORKLOAD_USER_PREFIX + name
+        try:
+            uid = pwd.getpwnam(user).pw_uid
+        except KeyError:
+            continue  # workload not created yet; nothing to check against
+        if not any(start <= uid < start + count for start, count in ranges):
+            unmappable.append(f"{user} (uid {uid})")
+    return unmappable
+
+
+def overflow_uid():
+    """The uid the kernel substitutes for one it cannot map."""
+    try:
+        return int(Path("/proc/sys/kernel/overflowuid").read_text().strip())
+    except (OSError, ValueError):
+        return 65534
