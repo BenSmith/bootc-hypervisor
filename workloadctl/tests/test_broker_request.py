@@ -26,6 +26,7 @@ from unittest import mock
 
 from tests import load_script
 import broker_config
+import broker_request
 
 broker = load_script("libexec/agent-broker")
 
@@ -67,16 +68,16 @@ def profile_table(prof=None):
 class TestForwardedHeaders(unittest.TestCase):
 
     def test_the_credential_is_attached(self):
-        out = broker.forwarded_headers(headers(), profile())
+        out = broker_request.forwarded_headers(headers(), profile())
         self.assertEqual(out["x-api-key"], "REAL-SECRET")
 
     def test_the_upstream_host_replaces_the_callers(self):
-        out = broker.forwarded_headers(headers(Host="broker.local"), profile())
+        out = broker_request.forwarded_headers(headers(Host="broker.local"), profile())
         self.assertEqual(out["Host"], "api.example.com")
         self.assertEqual([k for k in out if k.lower() == "host"], ["Host"])
 
     def test_credential_shaped_headers_are_dropped(self):
-        out = broker.forwarded_headers(
+        out = broker_request.forwarded_headers(
             headers(Authorization="Bearer stolen", x_api_key="stolen",
                     api_key="stolen", x_goog_api_key="stolen", Cookie="s=1"),
             profile())
@@ -85,7 +86,7 @@ class TestForwardedHeaders(unittest.TestCase):
         self.assertEqual(out["x-api-key"], "REAL-SECRET")
 
     def test_case_does_not_smuggle_one_past_the_strip_list(self):
-        out = broker.forwarded_headers(headers(AUTHORIZATION="Bearer stolen"),
+        out = broker_request.forwarded_headers(headers(AUTHORIZATION="Bearer stolen"),
                                        profile())
         self.assertNotIn("stolen", "".join(out.values()))
 
@@ -94,14 +95,14 @@ class TestForwardedHeaders(unittest.TestCase):
         are on the fixed list — so with a custom one the caller's copy used to
         survive under a different capitalisation and reach the provider beside
         the real credential."""
-        out = broker.forwarded_headers(
+        out = broker_request.forwarded_headers(
             headers(x_custom_key="ATTACKER"),
             profile(auth_header="X-Custom-Key"))
         self.assertEqual(list(out.values()).count("ATTACKER"), 0)
         self.assertEqual(out["X-Custom-Key"], "REAL-SECRET")
 
     def test_hop_by_hop_headers_do_not_cross(self):
-        out = broker.forwarded_headers(
+        out = broker_request.forwarded_headers(
             headers(Connection="keep-alive", TE="trailers",
                     Transfer_Encoding="chunked"), profile())
         self.assertEqual([k for k in out if k.lower() != "host"], ["x-api-key"])
@@ -109,7 +110,7 @@ class TestForwardedHeaders(unittest.TestCase):
     def test_everything_else_passes_through(self):
         """A denylist on purpose: provider SDKs send version and beta headers
         that change faster than an allowlist would be maintained."""
-        out = broker.forwarded_headers(
+        out = broker_request.forwarded_headers(
             headers(anthropic_version="2023-06-01", anthropic_beta="a,b",
                     Content_Type="application/json"), profile())
         self.assertEqual(out["anthropic-version"], "2023-06-01")
@@ -120,22 +121,22 @@ class TestForwardedHeaders(unittest.TestCase):
 class TestRequestFraming(unittest.TestCase):
 
     def test_an_ordinary_request_is_accepted(self):
-        length, rejection = broker.request_framing(
+        length, rejection = broker_request.request_framing(
             "/v1/messages", headers(Content_Length="12"))
         self.assertEqual(length, 12)
         self.assertIsNone(rejection)
 
     def test_no_content_length_means_no_body(self):
-        length, rejection = broker.request_framing("/v1/models", headers())
+        length, rejection = broker_request.request_framing("/v1/models", headers())
         self.assertEqual((length, rejection), (0, None))
 
     def test_an_empty_content_length_is_not_an_error(self):
-        length, rejection = broker.request_framing(
+        length, rejection = broker_request.request_framing(
             "/v1/models", headers(Content_Length="  "))
         self.assertEqual((length, rejection), (0, None))
 
     def test_an_absolute_target_is_refused(self):
-        _, rejection = broker.request_framing(
+        _, rejection = broker_request.request_framing(
             "https://elsewhere.example/v1", headers())
         self.assertEqual(rejection[0], 400)
         self.assertEqual(rejection[1], "absolute-target")
@@ -144,7 +145,7 @@ class TestRequestFraming(unittest.TestCase):
         """It used to be neither: Transfer-Encoding is hop-by-hop and was
         stripped, no Content-Length meant length 0, and the body went nowhere
         while the caller got a 200 for a request the provider never saw."""
-        _, rejection = broker.request_framing(
+        _, rejection = broker_request.request_framing(
             "/v1/messages", headers(Transfer_Encoding="chunked"))
         self.assertEqual(rejection[0], 411)
         self.assertEqual(rejection[1], "chunked-request")
@@ -152,7 +153,7 @@ class TestRequestFraming(unittest.TestCase):
     def test_a_non_numeric_content_length_is_refused(self):
         """It used to raise ValueError out of the handler: no log line, no
         response, just a reset connection."""
-        _, rejection = broker.request_framing(
+        _, rejection = broker_request.request_framing(
             "/v1/messages", headers(Content_Length="twelve"))
         self.assertEqual(rejection[0], 400)
 
@@ -162,51 +163,51 @@ class TestRequestFraming(unittest.TestCase):
         msg = Message()
         msg["Content-Length"] = "4"
         msg["Content-Length"] = "40"
-        _, rejection = broker.request_framing("/v1/messages", msg)
+        _, rejection = broker_request.request_framing("/v1/messages", msg)
         self.assertEqual(rejection[0], 400)
         self.assertEqual(rejection[1], "duplicate-content-length")
 
     def test_a_negative_content_length_is_refused(self):
         """rfile.read(-1) reads to EOF, so this held a slot for as long as the
         caller cared to keep the socket open."""
-        _, rejection = broker.request_framing(
+        _, rejection = broker_request.request_framing(
             "/v1/messages", headers(Content_Length="-1"))
         self.assertEqual(rejection[0], 400)
 
     def test_an_oversized_body_is_refused(self):
-        length, rejection = broker.request_framing(
+        length, rejection = broker_request.request_framing(
             "/v1/messages",
-            headers(Content_Length=str(broker.MAX_REQUEST_BYTES + 1)))
+            headers(Content_Length=str(broker_request.MAX_REQUEST_BYTES + 1)))
         self.assertEqual(rejection[0], 413)
-        self.assertEqual(length, broker.MAX_REQUEST_BYTES + 1)
+        self.assertEqual(length, broker_request.MAX_REQUEST_BYTES + 1)
 
     def test_the_size_limit_is_inclusive(self):
-        length, rejection = broker.request_framing(
-            "/v1/messages", headers(Content_Length=str(broker.MAX_REQUEST_BYTES)))
-        self.assertEqual((length, rejection), (broker.MAX_REQUEST_BYTES, None))
+        length, rejection = broker_request.request_framing(
+            "/v1/messages", headers(Content_Length=str(broker_request.MAX_REQUEST_BYTES)))
+        self.assertEqual((length, rejection), (broker_request.MAX_REQUEST_BYTES, None))
 
 
 class TestResponseFraming(unittest.TestCase):
 
     def test_a_declared_length_is_carried_through(self):
-        passthrough, declared, bodiless = broker.response_framing(
+        passthrough, declared, bodiless = broker_request.response_framing(
             200, [("Content-Type", "application/json"), ("Content-Length", "17")])
         self.assertEqual(passthrough, [("Content-Type", "application/json")])
         self.assertEqual(declared, "17")
         self.assertFalse(bodiless)
 
     def test_content_length_is_found_whatever_its_case(self):
-        _, declared, _ = broker.response_framing(200, [("content-length", "5")])
+        _, declared, _ = broker_request.response_framing(200, [("content-length", "5")])
         self.assertEqual(declared, "5")
 
     def test_a_stream_declares_no_length(self):
-        passthrough, declared, _ = broker.response_framing(
+        passthrough, declared, _ = broker_request.response_framing(
             200, [("Content-Type", "text/event-stream")])
         self.assertIsNone(declared)
         self.assertEqual(passthrough, [("Content-Type", "text/event-stream")])
 
     def test_hop_by_hop_headers_do_not_come_back(self):
-        passthrough, _, _ = broker.response_framing(
+        passthrough, _, _ = broker_request.response_framing(
             200, [("Connection", "keep-alive"), ("Transfer-Encoding", "chunked"),
                   ("Content-Type", "application/json")])
         self.assertEqual(passthrough, [("Content-Type", "application/json")])
@@ -216,7 +217,7 @@ class TestResponseFraming(unittest.TestCase):
         so relaying the upstream's produces two of each — a duplicate that a
         client resolves by picking one, and that intermediaries resolve
         differently from each other."""
-        passthrough, _, _ = broker.response_framing(
+        passthrough, _, _ = broker_request.response_framing(
             200, [("Date", "Mon, 01 Jan 2035 00:00:00 GMT"),
                   ("Server", "upstream-edge/2"),
                   ("Content-Type", "application/json")])
@@ -224,7 +225,7 @@ class TestResponseFraming(unittest.TestCase):
 
     def test_204_and_304_carry_no_body(self):
         for status in (204, 304):
-            _, _, bodiless = broker.response_framing(status, [])
+            _, _, bodiless = broker_request.response_framing(status, [])
             self.assertTrue(bodiless, status)
 
 

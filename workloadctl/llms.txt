@@ -458,7 +458,8 @@ lib/qmp.py                         # QMP client
 lib/workloadctl_core.py            # WorkloadConfig / WorkloadManager (TOML loading, paths, lifecycle field)
 lib/config_parser.py               # The TOML grammar both substrates read (hostname patterns, policy/credential blocks, volumes)
 lib/workload_lib.py                # Shared library (UID allocation, paths, subid math)
-lib/broker_config.py               # The generated broker instance: the credential table, the rendered broker.toml, the unit's addresses
+lib/broker_config.py               # broker.toml, rendered and read: the credential table, the unit's addresses, and the (workload, Host) profile table the broker starts from
+lib/broker_request.py              # What leaves the broker carrying a credential, decided without a socket: header replacement, request and response framing
 lib/egress_selinux.py              # How QEMU enters a confined domain, which policy modules ship, and the label the QMP socket dir needs
 lib/egress_ca.py                   # The per-workload egress CA and the leaves it signs (paths, validity, openssl argv, guest anchor)
 lib/egress_plane.py                # The two planes: what the guest dialled, where the redirect lands it, what a record calls it
