@@ -36,6 +36,7 @@ from broker_config import (BROKER_BIN, BROKER_INSTANCE_PORT,
                            vm_broker_upstream_addresses, vm_credential_entries,
                            vm_credential_env, host_resolver_addresses,
                            vm_uses_credentials)
+import inspect_arm
 from nft_elements import internal_ok_elements
 from vm_network_config import validate_vm_network
 import broker_config
@@ -1396,7 +1397,7 @@ class TestTheBrokerAddressIsExemptedFromTheInternalDrop(unittest.TestCase):
 
     def _up(self):
         source = (Path(__file__).resolve().parent.parent
-                  / "libexec" / "workload-vm-inspect").read_text()
+                  / "lib" / "inspect_arm.py").read_text()
         return source[source.index("def up("):source.index("def down(")]
 
     def test_the_address_is_one_the_drop_would_match(self):
@@ -1416,7 +1417,8 @@ class TestTheBrokerAddressIsExemptedFromTheInternalDrop(unittest.TestCase):
         is a hole in the drop, and one opened for a workload with no broker
         behind it is a hole with nothing on the other side."""
         up = self._up()
-        self.assertIn("vm_uses_credentials", up)
+        self.assertIn("sub.uses_credentials(config)", up)
+        self.assertIs(inspect_arm.VM.uses_credentials, vm_uses_credentials)
         self.assertIn("broker_listen_address(uid)", up)
         # Appended to the list the exemptions are built from, and BEFORE the
         # commands are generated -- after them it would be armed by nothing.

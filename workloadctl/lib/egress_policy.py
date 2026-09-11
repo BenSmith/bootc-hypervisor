@@ -78,9 +78,8 @@ def vm_uses_inspect(config: dict) -> bool:
     and `egress` filtered (an unfiltered VM would be the one the redirect
     breaks — its dial to a port-443 service it is allowed to reach would be
     translated into a listener that would refuse it, having no policy naming
-    it). `workload-vm-inspect`'s
-    inspection_applies delegates here rather than re-stating it, so the
-    generator and the helper cannot drift apart.
+    it). inspect_arm's VM substrate names this as its `applies` rather than
+    re-stating it, so the generator and the helper cannot drift apart.
 
     A workload with no [vm] section is not a VM and is never inspected. That is
     tested here rather than left to the callers: every caller happens to be
@@ -476,7 +475,7 @@ def vm_inspect_policy(net: dict) -> dict:
 def vm_inspect_policy_text(net: dict) -> str:
     """The policy document as the exact bytes that land on disk.
 
-    THE ONE RENDERER. `write_policy()` in libexec/workload-vm-inspect writes
+    THE ONE RENDERER. inspect_arm.write_policy writes
     what this returns, and `collect_policy_drift()` compares against it, so the
     two cannot disagree about a separator, a key order or a trailing newline.
     A second `json.dumps` with its own arguments would not be a cosmetic
@@ -563,7 +562,7 @@ def internal_hosts(net: dict) -> list[str]:
     it precisely because it cannot decide it. So the check has to happen at
     start, and its failure is deliberately fatal: an exemption that silently
     did not arm leaves the guest refused by the very drop the entry existed to
-    except. See workload-vm-inspect's internal_failure for what that failure
+    except. See inspect_arm.internal_failure for what that failure
     then has to say for itself.
 
     So: tolerate what validation owns, fail loudly on what only start can know.

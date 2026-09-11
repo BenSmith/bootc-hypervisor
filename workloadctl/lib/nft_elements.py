@@ -8,9 +8,9 @@ family pairing are nft_constants'; the addresses are workload_addr's; the
 policy words are egress_policy's. This module is only the mapping between them.
 
 Both substrates arm through it: the inspector's element builders and the
-internal-exemption commands are what `workload-container-inspect` calls as
-much as `workload-vm-inspect`. Only the `vm_`-prefixed builders read the VM's
-own allow-entry shape.
+internal-exemption commands are what lib/inspect_arm.py calls for a container
+as much as for a VM. Only the `vm_`-prefixed builders read the VM's own
+allow-entry shape.
 
 This was vm.py: once the whole VM surface, re-exporting nine other modules so
 that `from vm import <anything>` kept working. It re-exports nothing: a name
