@@ -325,7 +325,7 @@ Authoring is done with **udica** against a running container; it emits the CIL b
 
 **All of the above is the container path. VM workloads confine differently** (ADR 006 step 3), and the difference is easy to get wrong:
 
-- **QEMU runs as `svirt_t`, unconditionally and without the flag.** Not a per-workload type: `svirt_t` is the distro's own domain for a hypervisor process hosting an untrusted guest, and re-deriving it would be the mistake the per-workload argument above is *not* making — there is fifteen years of encoded knowledge to inherit, where a container workload has none. The transition is a `runcon` prefix in `libexec/workload-vm-notify`, because systemd execs from `init_t` and the policy has no `init_t → svirt_t` transition; `unconfined_service_t → virt_domain` is what makes it work.
+- **QEMU runs as `svirt_t`, unconditionally and without the flag.** Not a per-workload type: `svirt_t` is the distro's own domain for a hypervisor process hosting an untrusted guest, and re-deriving it would be the mistake the per-workload argument above is *not* making — there is fifteen years of encoded knowledge to inherit, where a container workload has none. The transition is a `runcon` prefix in `lib/vm_notify.py` (`qemu_launch_argv`), because systemd execs from `init_t` and the policy has no `init_t → svirt_t` transition; `unconfined_service_t → virt_domain` is what makes it work.
 - **MCS categories are deliberately unused.** libvirt needs them because all its VMs share one uid; ours each run as their own `_wl-<name>`, so DAC already separates them.
 - **So `[security].selinux_policy` means something different on a VM.** The `wl_<name>.process` type it declares has exactly one consumer — the generator passing it to podman — and a VM makes no podman call. A VM's `policy.cil` is a *delta against `svirt_t`*.
 - **Host-global pieces ship outside that flag:** the `svirt_image_t` fcontext rule per VM workload (semanage at enable, gated on `is_vm`, because labelling is a precondition for booting rather than optional hardening), and `security/workload-vm.cil` (a virtiofsd domain plus the two grants QEMU's native passt netdev needs), `security/workload-inspect.cil` and `security/workload-resolve.cil` — all loaded once by the RPM.
@@ -474,6 +474,7 @@ lib/http_target.py                 # One canonical form for a request target, an
 lib/http_request.py                # Request: one head parsed to the form the listener authorises, and rebuilt with OUR framing and the name we authorised
 lib/nft_elements.py                # A workload's egress filter (both substrates): which nft set elements exist, and the argv that arm them
 lib/vm_provision.py                # VM disk/seed provisioning
+lib/vm_notify.py                   # workload-vm-notify's program: QEMU as a child, READY=1 on running vCPUs, the cloud-init watch, the exit status
 lib/ensure_user.py                 # workload-ensure-user's program: the per-workload lock, and every provisioning step in order (ensure_common/ensure_vm/ensure_container)
 lib/egress_status.py               # Egress inspector state derivation (both substrates)
 lib/vm_metrics.py                  # VM metric collectors (QMP balloon/vCPU, qemu cgroup) shared by the exporter and `stats`
