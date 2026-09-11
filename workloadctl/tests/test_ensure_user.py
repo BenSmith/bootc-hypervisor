@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
-"""Unit tests for workload-ensure-user helpers.
+"""Unit tests for workload-ensure-user and the ensure_* modules behind it.
 
-The script lives in libexec/ and has no __main__ guard around its imports;
-load_script() imports it so we can exercise the user-data rendering and
-cloud-init template substitution paths without running the rest of the
-(root-only) user-provisioning flow.
+The steps are tested on the module that defines them (ensure_common,
+ensure_vm, ensure_container), the order and the lock on ensure_user, and the
+entrypoint only for its argv handling.
 """
 
 import contextlib
@@ -22,6 +21,7 @@ from tests import load_script
 # `lib/` reaches sys.path via tests/__init__, so this import follows it.
 import ensure_common
 import ensure_container
+import ensure_user
 import ensure_vm
 from vm_provision import (PROVISION_FAILED, PROVISION_UNVERIFIED,
                           read_provision_marker, write_provision_marker)
@@ -2619,7 +2619,7 @@ class TestEnsureUserLock(unittest.TestCase):
     """
 
     def setUp(self):
-        self.mod = _load_script()
+        self.mod = ensure_user
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.lock_dir = Path(self.tmp.name) / "lock"
@@ -2694,15 +2694,15 @@ class TestKeygenLosesTheRaceGracefully(unittest.TestCase):
                              "rival key")
 
 
-class TestMain(unittest.TestCase):
-    """main() argument handling and control flow (both kinds)."""
+class TestProvision(unittest.TestCase):
+    """provision() control flow (both kinds)."""
 
     def setUp(self):
-        self.mod = _load_script()
+        self.mod = ensure_user
         self.pw = _fake_pw(Path("/home/_wl-test"))
 
     def _patch_common(self, kind):
-        """Patch out every side-effecting call main() makes; return the dict
+        """Patch out every side-effecting call provision() makes; return the dict
         of mocks so individual tests can assert on calls / raise from one."""
         patches = {
             "workload_username": mock.patch.object(self.mod, "workload_username", return_value="_wl-test"),
@@ -2729,30 +2729,22 @@ class TestMain(unittest.TestCase):
             self.addCleanup(p.stop)
         return mocks
 
-    def test_usage_error_wrong_argc(self):
-        with mock.patch.object(self.mod.sys, "argv", ["workload-ensure-user"]):
-            rc = self.mod.main()
-        self.assertEqual(rc, 1)
-
     def test_unknown_user_returns_1(self):
-        with mock.patch.object(self.mod.sys, "argv", ["prog", "myapp"]), \
-             mock.patch.object(self.mod, "workload_username", return_value="_wl-myapp"), \
+        with mock.patch.object(self.mod, "workload_username", return_value="_wl-myapp"), \
              mock.patch.object(self.mod.pwd, "getpwnam", side_effect=KeyError("no such user")):
-            rc = self.mod.main()
+            rc = self.mod.provision("myapp")
         self.assertEqual(rc, 1)
 
     def test_load_config_failure_returns_1(self):
         mocks = self._patch_common("container")
         mocks["load_workload_config"].side_effect = Exception("bad toml")
-        with mock.patch.object(self.mod.sys, "argv", ["prog", "myapp"]):
-            rc = self.mod.main()
+        rc = self.mod.provision("myapp")
         self.assertEqual(rc, 1)
         mocks["setup_home_directory"].assert_not_called()
 
     def test_container_kind_runs_full_sequence(self):
         mocks = self._patch_common("container")
-        with mock.patch.object(self.mod.sys, "argv", ["prog", "myapp"]):
-            rc = self.mod.main()
+        rc = self.mod.provision("myapp")
         self.assertEqual(rc, 0)
         mocks["configure_subuid_subgid"].assert_called_once()
         mocks["setup_volume_directories"].assert_called_once()
@@ -2765,8 +2757,8 @@ class TestMain(unittest.TestCase):
         mocks["build_cloud_init_iso"].assert_not_called()
 
     # The container provisioning steps split into two contracts: must-succeed
-    # steps (a failure leaves the workload running-but-wrong, so main() aborts
-    # nonzero) and best-effort steps (a failure is logged but provisioning
+    # steps (a failure leaves the workload running-but-wrong, so provision()
+    # aborts nonzero) and best-effort steps (a failure is logged but provisioning
     # continues). These two tests pin each step to its contract individually so
     # a regression flipping either direction is caught.
     CONTAINER_MUST_SUCCEED = (
@@ -2788,9 +2780,8 @@ class TestMain(unittest.TestCase):
                     m.reset_mock()
                     m.side_effect = None
                 mocks[step].side_effect = RuntimeError("boom")
-                with mock.patch.object(self.mod.sys, "argv", ["prog", "myapp"]):
-                    rc = self.mod.main()
-                # A must-succeed step's failure aborts main() nonzero
+                rc = self.mod.provision("myapp")
+                # A must-succeed step's failure aborts provision() nonzero
                 self.assertEqual(rc, 1)
 
     def test_container_best_effort_step_failures_are_nonfatal(self):
@@ -2801,17 +2792,15 @@ class TestMain(unittest.TestCase):
                     m.reset_mock()
                     m.side_effect = None
                 mocks[step].side_effect = Exception("boom")
-                with mock.patch.object(self.mod.sys, "argv", ["prog", "myapp"]):
-                    rc = self.mod.main()
-                # A best-effort failure neither aborts main() nor skips the
+                rc = self.mod.provision("myapp")
+                # A best-effort failure neither aborts provision() nor skips the
                 # later must-succeed steps (enable_linger still runs)
                 self.assertEqual(rc, 0)
                 mocks["enable_linger"].assert_called_once()
 
     def test_vm_kind_runs_full_sequence(self):
         mocks = self._patch_common("vm")
-        with mock.patch.object(self.mod.sys, "argv", ["prog", "myvm"]):
-            rc = self.mod.main()
+        rc = self.mod.provision("myvm")
         self.assertEqual(rc, 0)
         mocks["setup_nvram"].assert_called_once()
         mocks["setup_workload_runtime_dir"].assert_called_once()
@@ -2829,34 +2818,30 @@ class TestMain(unittest.TestCase):
     def test_vm_nvram_failure_is_fatal(self):
         mocks = self._patch_common("vm")
         mocks["setup_nvram"].side_effect = Exception("nvram boom")
-        with mock.patch.object(self.mod.sys, "argv", ["prog", "myvm"]):
-            rc = self.mod.main()
+        rc = self.mod.provision("myvm")
         self.assertEqual(rc, 1)
-        # main returns immediately after the fatal NVRAM failure
+        # provision returns immediately after the fatal NVRAM failure
         mocks["setup_workload_runtime_dir"].assert_not_called()
         mocks["generate_ssh_keypair"].assert_not_called()
 
     def test_vm_ssh_keypair_failure_is_fatal(self):
         mocks = self._patch_common("vm")
         mocks["generate_ssh_keypair"].side_effect = Exception("ssh boom")
-        with mock.patch.object(self.mod.sys, "argv", ["prog", "myvm"]):
-            rc = self.mod.main()
+        rc = self.mod.provision("myvm")
         self.assertEqual(rc, 1)
         mocks["build_cloud_init_iso"].assert_not_called()
 
     def test_vm_cloud_init_failure_is_fatal(self):
         mocks = self._patch_common("vm")
         mocks["build_cloud_init_iso"].side_effect = Exception("iso boom")
-        with mock.patch.object(self.mod.sys, "argv", ["prog", "myvm"]):
-            rc = self.mod.main()
+        rc = self.mod.provision("myvm")
         self.assertEqual(rc, 1)
         mocks["write_environment_file"].assert_not_called()
 
     def test_vm_non_fatal_step_failures_still_succeed(self):
         mocks = self._patch_common("vm")
         mocks["setup_workload_runtime_dir"].side_effect = Exception("socket boom")
-        with mock.patch.object(self.mod.sys, "argv", ["prog", "myvm"]):
-            rc = self.mod.main()
+        rc = self.mod.provision("myvm")
         self.assertEqual(rc, 0)
         mocks["generate_ssh_keypair"].assert_called_once()
 
@@ -2938,7 +2923,7 @@ class ContainerEgressCaGateTest(unittest.TestCase):
     AND ONLY IF ``container_uses_inspect()`` fires.
 
     This was the last §7 gate with no unit-level mutation check, deferred once
-    because ``_ensure_user()`` is a large integration surface. It is, but the
+    because ``provision()`` is a large integration surface. It is, but the
     gate itself is three calls behind one ``if``, and the surface is only in
     the way -- so every other step in the container branch is stubbed and the
     three calls under test are the only real assertion. Stubbing them all also
@@ -2952,7 +2937,7 @@ class ContainerEgressCaGateTest(unittest.TestCase):
     upstream of that reports anything.
     """
 
-    # Every module-level step _ensure_user() calls on the container path. Each
+    # Every module-level step provision() calls on the container path. Each
     # is stubbed so the test exercises the branch and not the provisioning.
     _STUBBED = (
         "warn_if_stale_home", "setup_home_directory",
@@ -2965,9 +2950,9 @@ class ContainerEgressCaGateTest(unittest.TestCase):
               "provision_egress_pki_dirs")
 
     def _drive(self, network):
-        """Run _ensure_user() for a container config and report which of the
+        """Run provision() for a container config and report which of the
         three gated steps ran."""
-        mod = _load_script()
+        mod = ensure_user
         config = {"workload": {"name": "wl"},
                   "container": {"image": "example.test/img"}}
         if network is not None:
@@ -2987,7 +2972,7 @@ class ContainerEgressCaGateTest(unittest.TestCase):
                 mod.pwd, "getpwnam", mock.MagicMock(return_value=pw)))
             stack.enter_context(mock.patch.object(
                 mod, "WORKLOADS_BASE", Path(tempfile.mkdtemp())))
-            rc = mod._ensure_user("wl")
+            rc = mod.provision("wl")
 
         self.assertEqual(rc, 0)
         return {attr: m.called for attr, m in gated.items()}
@@ -3018,6 +3003,45 @@ class ContainerEgressCaGateTest(unittest.TestCase):
         an inspector that never runs."""
         ran = self._drive({"mode": "host", "hosts": ["example.test"]})
         self.assertEqual(ran, {a: False for a in self._GATED}, ran)
+
+
+class TestEnsureUserShim(unittest.TestCase):
+    """The entrypoint: argv to ensure_user(), and its exit status back out."""
+
+    def setUp(self):
+        self.mod = _load_script()
+
+    def test_usage_error_wrong_argc(self):
+        with mock.patch.object(self.mod, "ensure_user") as run:
+            self.assertEqual(self.mod.main(["workload-ensure-user"]), 1)
+        run.assert_not_called()
+
+    def test_provisions_the_named_workload_under_the_lock(self):
+        with mock.patch.object(self.mod, "ensure_user", return_value=0) as run:
+            rc = self.mod.main(["prog", "myapp"])
+        self.assertEqual(rc, 0)
+        run.assert_called_once_with("myapp")
+
+    def test_the_run_status_is_the_exit_status(self):
+        with mock.patch.object(self.mod, "ensure_user", return_value=7):
+            self.assertEqual(self.mod.main(["prog", "myapp"]), 7)
+
+    def test_the_lock_is_taken_around_the_run(self):
+        # ensure_user() is lock + provision(); the shim must call that pair,
+        # not provision() bare, or `enable` races itself again.
+        order = []
+
+        @contextlib.contextmanager
+        def lock(name):
+            order.append(("lock", name))
+            yield
+            order.append(("unlock", name))
+
+        with mock.patch.object(ensure_user, "ensure_user_lock", lock), \
+             mock.patch.object(ensure_user, "provision",
+                               side_effect=lambda n: order.append(("run", n)) or 3):
+            self.assertEqual(self.mod.main(["prog", "web"]), 3)
+        self.assertEqual(order, [("lock", "web"), ("run", "web"), ("unlock", "web")])
 
 
 if __name__ == "__main__":
