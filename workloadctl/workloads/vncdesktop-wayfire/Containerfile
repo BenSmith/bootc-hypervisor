@@ -73,6 +73,32 @@ RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
     && dnf clean all \
     && rm -rf /var/cache/dnf
 
+# --- Development tooling ---
+# This image doubles as the workloadctl dev container. Everything below was
+# installed by hand at least once because its absence read as something else:
+# a missing `just` made a test tier exit 127 inside a pipeline that exited 0;
+# a missing `openssl` turned tests.test_vm_mint into 36 errors; `rpmbuild`
+# is what makes a spec change verifiable rather than merely text-checked;
+# `nft` and `ip` back the tier-2 checks under `unshare -rn`. yq reads
+# fedora-versions.yml for the root justfile. ruff/mypy back the advisory
+# lint-ruff and typecheck recipes; uv is how tools get installed when there
+# is no pip.
+RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
+    fd-find \
+    iproute \
+    nftables \
+    openssl \
+    python3 \
+    python3-mypy \
+    ripgrep \
+    rpm-build \
+    rpmdevtools \
+    ruff \
+    uv \
+    yq \
+    && dnf clean all \
+    && rm -rf /var/cache/dnf
+
 RUN sed -i 's/^hosts:.*/hosts: files myhostname resolve [!UNAVAIL=return] dns/' /etc/nsswitch.conf
 
 # --- Firefox stability fix ---
