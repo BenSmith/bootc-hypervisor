@@ -355,7 +355,7 @@ def _ensure_user(name: str) -> int:
             # socket's ExecStartPre (workload-container-inspect up) writes
             # inspect.json under the directory it creates -- the socket's own
             # Requires=/After= names only setup.service (never the workload's
-            # own unit, VM or container: generate_vm_inspect_socket's docstring
+            # own unit, VM or container: generate_inspect_socket's docstring
             # is explicit that the listener must exist before the workload's
             # first packet), so nothing else in the container path creates it.
             try:

@@ -1876,7 +1876,7 @@ def inspect_check(config, *, elements4=PROBE, elements6=PROBE,
     # workload-<name>-inspect.socket and the shared nft proxy maps -- exists
     # for a container as well as a VM: the
     # generator emits the container's socket from the very same
-    # generate_vm_inspect_socket(), the maps are the same two shared maps
+    # generate_inspect_socket(), the maps are the same two shared maps
     # keyed by the same uid, and the remedy is byte-for-byte the same unit
     # name. A justification that expires is worse than none, because nothing
     # re-reads it -- and the cost of leaving it stood is in the §7 table: a
@@ -3297,7 +3297,7 @@ def collect_diagnose_checks(config, manager: WorkloadManager):
     # the substrate-aware wording inside inspect_check() is inert without
     # it. The check's own `if not _uses_inspect(config)` early return is the
     # only gate it needs now that a container gets the same
-    # workload-<name>-inspect.socket from the same generate_vm_inspect_socket()
+    # workload-<name>-inspect.socket from the same generate_inspect_socket()
     # and the same two uid-keyed nft maps.
     #
     # Placed BETWEEN the two is_vm blocks rather than beside capture_check

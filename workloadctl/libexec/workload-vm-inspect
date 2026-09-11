@@ -72,7 +72,7 @@ element is armed by the inspector's own unit, not this helper: an element
 resolves to a cgroup id at add time and systemd makes a fresh cgroup on
 every start, so the add belongs to the unit that owns the cgroup, and the
 remove to its ExecStopPost — "the only point at which a path still resolves
-to the id being retired". generate_vm_inspect_service emits both lines.
+to the id being retired". generate_inspect_service emits both lines.
 
 Through rung 1 there was a SECOND cgroup to exempt, and it is worth recording
 why it is gone rather than leaving a reader to find one where the design notes

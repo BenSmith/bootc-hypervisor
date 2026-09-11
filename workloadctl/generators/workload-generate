@@ -76,9 +76,10 @@ try:
         generate_system_service, generate_pod_service, generate_net_service,
         generate_umbrella_service, container_broker_before,
     )
-    from gen_vm import (
-        generate_vm_workload, generate_vm_inspect_socket,
-        generate_vm_inspect_service, generate_vm_broker_service,
+    from gen_vm import generate_vm_workload
+    from gen_egress import (
+        generate_inspect_socket, generate_inspect_service,
+        generate_broker_service,
     )
     from gen_common import (
         set_output_dirs, services_dir, log_msg, _RunFileConfig,
@@ -420,25 +421,26 @@ def main():
             # Transparent egress inspection socket + service (P1-9), on the
             # same terms as the VM path (generate_vm_workload) -- D6: the
             # binary and unit shape do not change between substrates.
-            # generate_vm_inspect_socket/service take nothing VM-specific
-            # (config["workload"]["name"], uid, and uid-derived addressing
-            # only), so they are reused verbatim rather than duplicated.
+            # generate_inspect_socket/service take nothing substrate-specific
+            # but the arming helper (config["workload"]["name"], uid, and
+            # uid-derived addressing otherwise), so they are shared rather
+            # than duplicated.
             if container_uses_inspect(config):
                 socket_dests = paths.get(("unit", "inspect-socket"), [])
                 if socket_dests:
                     socket_dests[0].write_text(
-                        generate_vm_inspect_socket(
+                        generate_inspect_socket(
                             config, user_name, uid,
                             arming_helper="workload-container-inspect"))
                     log_msg("  Created egress inspector socket")
                 inspect_dests = paths.get(("unit", "inspect"), [])
                 if inspect_dests:
                     inspect_dests[0].write_text(
-                        generate_vm_inspect_service(config, user_name))
+                        generate_inspect_service(config, user_name))
                     log_msg("  Created egress inspector service")
 
             # The credential broker instance (P2-2), on the same reuse terms:
-            # generate_vm_broker_service takes its substrate-specific values
+            # generate_broker_service takes its substrate-specific values
             # as parameters, so this is a call site and not a second
             # generator. Gated on container_uses_credentials, which is also
             # the run-file `present=` -- one predicate, so a workload that
@@ -448,7 +450,7 @@ def main():
                 broker_dests = paths.get(("unit", "broker"), [])
                 if broker_dests:
                     broker_dests[0].write_text(
-                        generate_vm_broker_service(
+                        generate_broker_service(
                             config, uid,
                             before=container_broker_before(config, mode),
                             hosts=container_broker_hosts(config),

@@ -198,10 +198,18 @@ class TestTheGeneratedUnit(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.gen = importlib.import_module("gen_vm")
+        cls.gen = importlib.import_module("gen_egress")
 
     def unit(self, cfg=None, uid=UID_MIN + 5):
-        return self.gen.generate_vm_broker_service(cfg or cred_config(), uid)
+        # The VM call site's three values, spelled here as gen_vm spells
+        # them: the generator takes no defaults, so a test of the VM shape
+        # has to say which shape it is testing.
+        cfg = cfg or cred_config()
+        return self.gen.generate_broker_service(
+            cfg, uid,
+            before=f"workload-{cfg['workload']['name']}.service",
+            hosts=vm_broker_hosts(cfg),
+            upstream=vm_broker_upstream_addresses(cfg))
 
     def test_it_runs_as_a_dynamic_user_and_never_as_the_workload(self):
         """The whole of ADR 007's protection. The inspector runs as the uid

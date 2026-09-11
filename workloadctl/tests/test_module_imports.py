@@ -190,8 +190,9 @@ class TestASharedModuleIsNotShadowedByItsCaller(unittest.TestCase):
     # file (repo-relative) -> lib modules it imports names from
     SHARED_IMPORTS = {
         "generators/workload-generate": ("gen_common", "gen_vm",
-                                        "gen_container"),
-        "lib/gen_vm.py": ("gen_common",),
+                                        "gen_container", "gen_egress"),
+        "lib/gen_vm.py": ("gen_common", "gen_egress"),
+        "lib/gen_egress.py": ("gen_common",),
         "lib/gen_container.py": ("gen_common",),
         "libexec/workload-ensure-user": ("ensure_common", "ensure_vm",
                                         "ensure_container"),

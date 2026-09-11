@@ -87,13 +87,14 @@ class TestGeneratedSocket(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.gen = importlib.import_module("gen_vm")
+        cls.gen = importlib.import_module("gen_egress")
         cls.addr = inspect_address(UID)
         # The uid is a parameter, not a lookup. It used to be mocked here --
         # which is precisely what hid the defect the mock was standing in for:
         # on a first enable the user does not exist yet, and a real getpwnam
         # raised. See test_generation_does_not_need_the_user_to_exist_yet.
-        cls.unit = cls.gen.generate_vm_inspect_socket(_config({}), "_wl-web", UID)
+        cls.unit = cls.gen.generate_inspect_socket(
+            _config({}), "_wl-web", UID, arming_helper="workload-vm-inspect")
 
     def test_the_address_add_is_on_the_socket(self):
         """On the socket unit, privileged, not tolerant: an address that
@@ -112,7 +113,7 @@ class TestGeneratedSocket(unittest.TestCase):
     def test_the_service_carrying_the_prestart_is_rejected(self):
         """The whole point of §7.7: the prestart on the service is too late by
         one unit. It belongs on the socket, which is what binds first."""
-        service = self.gen.generate_vm_inspect_service(_config({}), "_wl-web")
+        service = self.gen.generate_inspect_service(_config({}), "_wl-web")
         self.assertNotIn("workload-vm-inspect up", service)
         self.assertNotIn("ExecStartPre=+/usr/libexec/workloadctl/"
                          "workload-vm-inspect", service)
@@ -195,14 +196,16 @@ class TestGenerationPredatesTheUser(unittest.TestCase):
         # the test cannot go quiet if the call moves to another module. It did
         # go quiet once -- the patch used to name the entrypoint's `pwd`, and
         # when the VM generators moved to gen_vm (which does not import pwd at
-        # all) it was suppressing a call nobody made.
+        # all) it was suppressing a call nobody made. The socket generator has
+        # since moved again, to gen_egress; this test did not notice.
         import pwd
         with unittest.mock.patch.object(
                 pwd, "getpwnam",
                 side_effect=KeyError(
                     "getpwnam(): name not found: '_wl-web'")):
-            gen = importlib.import_module("gen_vm")
-            unit = gen.generate_vm_inspect_socket(_config({}), "_wl-web", UID)
+            gen = importlib.import_module("gen_egress")
+            unit = gen.generate_inspect_socket(
+            _config({}), "_wl-web", UID, arming_helper="workload-vm-inspect")
         addr = inspect_address(UID)
         self.assertIn(str(addr.v4), unit)
 
@@ -218,8 +221,8 @@ class TestGeneratedService(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.gen = importlib.import_module("gen_vm")
-        cls.unit = cls.gen.generate_vm_inspect_service(_config({}), "_wl-web")
+        cls.gen = importlib.import_module("gen_egress")
+        cls.unit = cls.gen.generate_inspect_service(_config({}), "_wl-web")
 
     def test_runs_as_the_workload_user(self):
         self.assertIn("User=_wl-web", self.unit)
@@ -333,9 +336,10 @@ class TestSidecarHardening(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.gen = importlib.import_module("gen_vm")
-        cls.inspect = cls.gen.generate_vm_inspect_service(_config({}), "_wl-web")
-        cls.resolve = cls.gen.generate_vm_resolve_service(_config({}), "_wl-web")
+        cls.inspect = importlib.import_module("gen_egress") \
+            .generate_inspect_service(_config({}), "_wl-web")
+        cls.resolve = importlib.import_module("gen_vm") \
+            .generate_vm_resolve_service(_config({}), "_wl-web")
 
     def units(self):
         return (("inspect", self.inspect), ("resolve", self.resolve))

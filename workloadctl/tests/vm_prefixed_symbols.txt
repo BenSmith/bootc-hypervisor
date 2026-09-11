@@ -20,10 +20,10 @@
 #     the ratchet now FAILS on a RENAME verdict for any symbol with a twin
 #     rather than leaving the rule to a reader.
 #   * A vm-named FILE is not evidence either. generators/workload-generate
-#     calls gen_vm's generate_vm_inspect_service, generate_vm_inspect_socket
-#     and generate_vm_broker_service for CONTAINERS -- the arming helper is
-#     the only substrate-specific value -- so what those three functions touch
-#     is shared no matter which file it is reached from.
+#     called gen_vm's inspector and broker unit generators for CONTAINERS --
+#     the arming helper was the only substrate-specific value -- so what
+#     those three functions touch is shared no matter which file it is
+#     reached from. (They are gen_egress's now, and named accordingly.)
 #   * Tests are not evidence. A symbol used only by tests/test_vm_*.py is
 #     classified by where it is DEFINED, because a test name follows the code
 #     it was written against and would just restate the prefix.

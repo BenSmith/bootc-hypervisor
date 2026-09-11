@@ -330,14 +330,14 @@ class TestTheUnitCarriesTheDirectory(unittest.TestCase):
     statement in the unit, so losing this line loses the write silently."""
 
     def _unit(self):
-        gen = importlib.import_module("gen_vm")
+        gen = importlib.import_module("gen_egress")
         config = {
             "workload": {"name": "recdemo", "mode": "vm"},
             "vm": {"image": "/tmp/x.qcow2", "memory": "1G", "cpus": 1,
                    "network": {"egress": "filtered",
                                "hosts": ["example.com"]}},
         }
-        return gen.generate_vm_inspect_service(config, "_wl-recdemo")
+        return gen.generate_inspect_service(config, "_wl-recdemo")
 
     def test_it_names_the_workloads_own_directory(self):
         self.assertIn(f"LogsDirectory={inspect_logs_directory('recdemo')}",
