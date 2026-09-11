@@ -29,11 +29,15 @@ import unittest.mock
 from pathlib import Path
 
 from egress_record import (
+    DROP_NOT_ALLOWLISTED,
+    DROP_NO_NAME,
+    DROP_UNREADABLE_REQUEST,
     LOG_ID_FIELD,
     LOG_REQ_FIELD,
     RECORD_DECISIONS,
     RECORD_FIELDS,
     RECORD_MODES,
+    RequestLog,
 )
 from egress_policy import (
     INSPECT_RECORD_FILE,
@@ -110,7 +114,6 @@ class TestEveryLineCarriesTheId(_Harness):
         self.assertRegex(log, ID)
 
     def test_a_forwarded_request_carries_one(self):
-        mod = _mod()
         origin = []
 
         def dial(addr, timeout=None):
@@ -443,7 +446,7 @@ class TestTheRecordFile(unittest.TestCase):
         self.path = os.path.join(self.dir, INSPECT_RECORD_FILE)
 
     def _log(self, path=None, out=None, on_failure=None):
-        log = _mod().RequestLog(self.path if path is None else path,
+        log = RequestLog(self.path if path is None else path,
                                 out=out, on_failure=on_failure)
         self.addCleanup(log.close)
         return log
@@ -567,7 +570,7 @@ class TestTheRecordFile(unittest.TestCase):
         """The convention _status_path already uses: the shape tests construct
         a Listener with no workload name and no directory to write into, and a
         diagnostic that made those impossible would decide which tests exist."""
-        _mod().RequestLog(None).write({"id": "a"})
+        RequestLog(None).write({"id": "a"})
 
     def test_concurrent_writers_produce_whole_lines(self):
         """O_APPEND fixes the offset but does not make a partial write atomic;
@@ -823,7 +826,7 @@ class TestARefusalIsRecorded(_Records):
         rec = records[0]
         self.assertEqual(rec["decision"], "drop")
         self.assertEqual(rec["status"], 403)
-        self.assertEqual(rec["reason"], _mod().DROP_NOT_ALLOWLISTED)
+        self.assertEqual(rec["reason"], DROP_NOT_ALLOWLISTED)
 
     def test_a_denied_path_is_recorded_too(self):
         """The split is by CONTENT, not by outcome. A denied path is evidence
@@ -850,7 +853,7 @@ class TestAHeadThatCouldNotBeRead(_Records):
         self.assertEqual(len(records), 1, records)
         rec = records[0]
         self.assertEqual(rec["decision"], "drop")
-        self.assertEqual(rec["reason"], _mod().DROP_UNREADABLE_REQUEST)
+        self.assertEqual(rec["reason"], DROP_UNREADABLE_REQUEST)
         self.assertEqual(rec["status"], 400)
         self.assertIsNone(rec["host"])
         self.assertIsNone(rec["path"])
@@ -916,7 +919,7 @@ class TestTheConnectionLevelRecords(_Records):
         records = self._records()
         self.assertEqual(len(records), 1, records)
         self.assertEqual(records[0]["decision"], "drop")
-        self.assertEqual(records[0]["reason"], mod.DROP_NO_NAME)
+        self.assertEqual(records[0]["reason"], DROP_NO_NAME)
         self.assertIsNone(records[0]["host"])
 
 

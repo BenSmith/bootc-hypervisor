@@ -28,6 +28,23 @@ from egress_policy import (
     vm_inspect_policy,
 )
 from workload_addr import INSPECT_LISTENER_BIN
+import egress_record
+from egress_record import (
+    DROP_CEILING,
+    DROP_CLIENT_CERT,
+    DROP_FOREIGN_CALLER,
+    DROP_MISDIRECTED,
+    DROP_MISDIRECTED_LISTED,
+    DROP_NOT_ALLOWLISTED,
+    DROP_NOT_HTTP,
+    DROP_NOT_PERMITTED,
+    DROP_REASONS,
+    DROP_UNCLASSIFIED,
+    DROP_UNVERIFIED,
+    LOG_ID_FIELD,
+    PER_HOST_REASONS,
+    Where,
+)
 
 ROOT = Path(__file__).resolve().parent.parent
 LISTENER_FILE = ROOT / "libexec" / "workload-inspect-listener"
@@ -56,7 +73,7 @@ def _where(plane="tls", cid="0" * 12):
     loops ask it for each request's ordinal. Tests that enter at _serve_tls or
     _serve_cleartext skip _serve, so they build one here.
     """
-    return _mod().Where(f"{_mod().LOG_ID_FIELD}={cid} plane={plane}",
+    return Where(f"{LOG_ID_FIELD}={cid} plane={plane}",
                          cid=cid, plane=plane)
 
 
@@ -1652,10 +1669,10 @@ class TestPolicyEnforcement(_CleartextRig):
         listener = mod.Listener(
             [], out, policy=self._policy(
                 [], ("a.example", ("GET",), ("/v2/*",))))
-        listener.counters.record_drop(mod.DROP_NOT_PERMITTED, "a.example")
+        listener.counters.record_drop(DROP_NOT_PERMITTED, "a.example")
         snap = listener.counters.snapshot(open_now=0, refused=0)
-        self.assertEqual(snap["drop_reasons"][mod.DROP_NOT_PERMITTED], 1)
-        self.assertNotIn(mod.DROP_UNCLASSIFIED, snap.get("drop_reasons", {}))
+        self.assertEqual(snap["drop_reasons"][DROP_NOT_PERMITTED], 1)
+        self.assertNotIn(DROP_UNCLASSIFIED, snap.get("drop_reasons", {}))
 
 
 class TestCleartextAuthorisation(unittest.TestCase):
@@ -2089,7 +2106,7 @@ class TestCleartextPerRequest(unittest.TestCase):
         listener = mod.Listener([], io.StringIO(),
                                 policy=mod.Policy(tls="inspect",
                                                   hosts=("a.example",)))
-        where = mod.Where("t", cid="c0", plane="tls")
+        where = Where("t", cid="c0", plane="tls")
         seen = {}
 
         def one_request(_self, _client, _conn, _where, upstreams, _first,
@@ -2870,7 +2887,6 @@ class TestCounters(unittest.TestCase):
         thing keeping a new reason in step with the pre-seed is that every call
         site names a constant, and every constant is in DROP_REASONS."""
         import re
-        mod = _mod()
         source = LISTENER_FILE.read_text()
         calls = re.findall(r"record_drop\(\s*([^,)]+)", source)
         self.assertGreater(len(calls), 5)
@@ -2880,13 +2896,15 @@ class TestCounters(unittest.TestCase):
                 continue          # the definition and the docstring's own text
             self.assertFalse(arg.startswith(('"', "'")),
                              f"record_drop called with the literal {arg}")
-            self.assertIn(getattr(mod, arg), mod.DROP_REASONS)
+            # Resolved against egress_record, where the reasons are defined,
+            # not against the listener -- a name the listener spelled itself
+            # would resolve there and be in no closed set.
+            self.assertIn(getattr(egress_record, arg), DROP_REASONS)
 
     def test_the_pre_seed_is_exactly_the_named_reasons(self):
         _, listener, _ = self._listener()
-        mod = _mod()
         self.assertEqual(set(listener.status()["drop_reasons"]),
-                         set(mod.DROP_REASONS))
+                         set(DROP_REASONS))
 
     def test_the_reasons_and_the_call_sites_are_the_same_set(self):
         """Drift is possible in both directions and neither is visible at
@@ -2894,11 +2912,13 @@ class TestCounters(unittest.TestCase):
         (unclassified); a tuple entry no call site uses reads zero forever and
         is indistinguishable from a refusal that never happened to fire."""
         import re
-        mod = _mod()
-        # The tuple's own definition is removed before scanning, or every entry
-        # in it would count as its own use and the guard would assert nothing.
-        source = re.sub(r"DROP_REASONS = \([^)]*\)", "",
+        # The import that brings every reason in is removed before scanning,
+        # or every entry in it would count as its own use and the guard would
+        # assert nothing. (It was the tuple's own definition before the
+        # reasons moved to egress_record; same hazard, one file over.)
+        source = re.sub(r"from egress_record import \([^)]*\)", "",
                         LISTENER_FILE.read_text())
+        self.assertNotIn("from egress_record import (", source)
         named = {arg.strip() for arg in
                  re.findall(r"record_drop\(\s*([^,)]+)", source)
                  if arg.strip().startswith("DROP_")}
@@ -2913,8 +2933,8 @@ class TestCounters(unittest.TestCase):
         # shape as the `return` pattern above -- the name appears where the
         # DECISION is taken, not where the counter is bumped.
         named |= set(re.findall(r"reason = (DROP_\w+)", source))
-        self.assertEqual({getattr(mod, n) for n in named},
-                         set(mod.DROP_REASONS))
+        self.assertEqual({getattr(egress_record, n) for n in named},
+                         set(DROP_REASONS))
 
     def test_the_lists_loaded_at_start_are_reported(self):
         """`drift` cannot see them, so this is the only place the question
@@ -2999,11 +3019,11 @@ class TestCounters(unittest.TestCase):
         an entry to add, a root to install, a workload to splice -- so the
         figure has to say which host, not only how many."""
         mod, listener, _ = self._listener()
-        for reason in mod.PER_HOST_REASONS:
+        for reason in PER_HOST_REASONS:
             listener.counters.record_drop(reason, "named.example")
         per_host = listener.status()["per_host"]
-        self.assertEqual(sorted(per_host), sorted(mod.PER_HOST_REASONS))
-        for reason in mod.PER_HOST_REASONS:
+        self.assertEqual(sorted(per_host), sorted(PER_HOST_REASONS))
+        for reason in PER_HOST_REASONS:
             self.assertEqual(per_host[reason], {"named.example": 1}, reason)
 
     def test_the_reasons_an_operator_acts_on_by_name_are_the_ones_split(self):
@@ -3011,10 +3031,10 @@ class TestCounters(unittest.TestCase):
         those names, there is no bound on how many it invents, and the answer is
         the allowlist itself rather than a list to read."""
         mod, listener, _ = self._listener()
-        self.assertNotIn(mod.DROP_NOT_ALLOWLISTED, mod.PER_HOST_REASONS)
-        self.assertNotIn(mod.DROP_MISDIRECTED, mod.PER_HOST_REASONS)
-        listener.counters.record_drop(mod.DROP_NOT_ALLOWLISTED, "a.example")
-        self.assertNotIn(mod.DROP_NOT_ALLOWLISTED,
+        self.assertNotIn(DROP_NOT_ALLOWLISTED, PER_HOST_REASONS)
+        self.assertNotIn(DROP_MISDIRECTED, PER_HOST_REASONS)
+        listener.counters.record_drop(DROP_NOT_ALLOWLISTED, "a.example")
+        self.assertNotIn(DROP_NOT_ALLOWLISTED,
                          listener.status()["per_host"])
 
     def test_the_allowlisted_half_of_the_binding_rejection_is_named(self):
@@ -3022,11 +3042,11 @@ class TestCounters(unittest.TestCase):
         un-allowlisted half there is no unbounded set of guest-chosen names --
         and WHICH pair of names a client is coalescing is the whole question."""
         mod, listener, _ = self._listener()
-        self.assertIn(mod.DROP_MISDIRECTED_LISTED, mod.PER_HOST_REASONS)
-        listener.counters.record_drop(mod.DROP_MISDIRECTED_LISTED,
+        self.assertIn(DROP_MISDIRECTED_LISTED, PER_HOST_REASONS)
+        listener.counters.record_drop(DROP_MISDIRECTED_LISTED,
                                       "other.example")
         self.assertEqual(
-            listener.status()["per_host"][mod.DROP_MISDIRECTED_LISTED],
+            listener.status()["per_host"][DROP_MISDIRECTED_LISTED],
             {"other.example": 1})
 
     def test_the_two_binding_rejections_are_two_figures(self):
@@ -3034,14 +3054,14 @@ class TestCounters(unittest.TestCase):
         assumption in §4, and one bucket cannot say which. Both are counted,
         both under their own reason, and neither lands on a policy figure."""
         mod, listener, _ = self._listener()
-        listener.counters.record_drop(mod.DROP_MISDIRECTED, "evil.example")
-        listener.counters.record_drop(mod.DROP_MISDIRECTED_LISTED,
+        listener.counters.record_drop(DROP_MISDIRECTED, "evil.example")
+        listener.counters.record_drop(DROP_MISDIRECTED_LISTED,
                                       "other.example")
         reasons = listener.status()["drop_reasons"]
-        self.assertEqual(reasons[mod.DROP_MISDIRECTED], 1)
-        self.assertEqual(reasons[mod.DROP_MISDIRECTED_LISTED], 1)
-        self.assertEqual(reasons[mod.DROP_NOT_ALLOWLISTED], 0)
-        self.assertEqual(reasons[mod.DROP_NOT_PERMITTED], 0)
+        self.assertEqual(reasons[DROP_MISDIRECTED], 1)
+        self.assertEqual(reasons[DROP_MISDIRECTED_LISTED], 1)
+        self.assertEqual(reasons[DROP_NOT_ALLOWLISTED], 0)
+        self.assertEqual(reasons[DROP_NOT_PERMITTED], 0)
 
     def test_both_binding_reasons_are_found_by_one_grep(self):
         """The `not HTTP` convention one tier earlier: an operator who greps
@@ -3049,36 +3069,36 @@ class TestCounters(unittest.TestCase):
         to look for."""
         mod, _, _ = self._listener()
         self.assertTrue(
-            mod.DROP_MISDIRECTED_LISTED.startswith(mod.DROP_MISDIRECTED),
+            DROP_MISDIRECTED_LISTED.startswith(DROP_MISDIRECTED),
             "the split reason must carry the original as its prefix")
 
     def test_the_splice_candidates_are_countable_per_host(self):
         """The two reasons whose remedy is `tls = "splice"` on the workload."""
         mod, listener, _ = self._listener()
-        listener.counters.record_drop(mod.DROP_CLIENT_CERT, "mtls.example")
-        listener.counters.record_drop(mod.DROP_NOT_HTTP, "pg.example")
-        listener.counters.record_drop(mod.DROP_NOT_HTTP, "pg.example")
+        listener.counters.record_drop(DROP_CLIENT_CERT, "mtls.example")
+        listener.counters.record_drop(DROP_NOT_HTTP, "pg.example")
+        listener.counters.record_drop(DROP_NOT_HTTP, "pg.example")
         per_host = listener.status()["per_host"]
-        self.assertEqual(per_host[mod.DROP_CLIENT_CERT], {"mtls.example": 1})
-        self.assertEqual(per_host[mod.DROP_NOT_HTTP], {"pg.example": 2})
+        self.assertEqual(per_host[DROP_CLIENT_CERT], {"mtls.example": 1})
+        self.assertEqual(per_host[DROP_NOT_HTTP], {"pg.example": 2})
 
     def test_the_totals_survive_the_bound_the_names_do_not(self):
         """A top-N can lose WHICH names; it must never lose HOW MANY."""
         mod, listener, _ = self._listener()
         for i in range(200):
-            listener.counters.record_drop(mod.DROP_UNVERIFIED, f"h{i}.example")
+            listener.counters.record_drop(DROP_UNVERIFIED, f"h{i}.example")
         snap = listener.status()
-        self.assertLessEqual(len(snap["per_host"][mod.DROP_UNVERIFIED]), 21)
-        self.assertEqual(snap["per_host_totals"][mod.DROP_UNVERIFIED], 200)
+        self.assertLessEqual(len(snap["per_host"][DROP_UNVERIFIED]), 21)
+        self.assertEqual(snap["per_host_totals"][DROP_UNVERIFIED], 200)
 
     def test_a_drop_with_no_host_moves_only_the_reason(self):
         """Not every refusal knows a name -- a ceiling rejection has none --
         and inventing a key for it would be a host that never existed."""
         mod, listener, _ = self._listener()
-        listener.counters.record_drop(mod.DROP_NOT_HTTP)
+        listener.counters.record_drop(DROP_NOT_HTTP)
         snap = listener.status()
-        self.assertEqual(snap["per_host"][mod.DROP_NOT_HTTP], {})
-        self.assertEqual(snap["drop_reasons"][mod.DROP_NOT_HTTP], 1)
+        self.assertEqual(snap["per_host"][DROP_NOT_HTTP], {})
+        self.assertEqual(snap["drop_reasons"][DROP_NOT_HTTP], 1)
 
 
 class TestInternalAttribution(unittest.TestCase):
@@ -3377,20 +3397,20 @@ class TestCallerIdentity(unittest.TestCase):
     def test_a_foreign_uid_is_refused_and_counted(self):
         mod = _mod()
         listener, conn, log = self._handled(mod, self.OWN_UID + 1)
-        self.assertIn(mod.DROP_FOREIGN_CALLER, log)
+        self.assertIn(DROP_FOREIGN_CALLER, log)
         self.assertIn("rejected", log)
         conn.close.assert_called()
         snap = listener.status()
-        self.assertEqual(snap["drop_reasons"][mod.DROP_FOREIGN_CALLER], 1)
+        self.assertEqual(snap["drop_reasons"][DROP_FOREIGN_CALLER], 1)
         self.assertEqual(snap["dispositions"]["dropped"], 1)
 
     def test_the_workloads_own_uid_is_admitted(self):
         """The listener runs as _wl-<name>, so its own uid IS the workload's."""
         mod = _mod()
         listener, _conn, log = self._handled(mod, self.OWN_UID)
-        self.assertNotIn(mod.DROP_FOREIGN_CALLER, log)
+        self.assertNotIn(DROP_FOREIGN_CALLER, log)
         self.assertEqual(
-            listener.status()["drop_reasons"][mod.DROP_FOREIGN_CALLER], 0)
+            listener.status()["drop_reasons"][DROP_FOREIGN_CALLER], 0)
 
     def test_root_is_refused_even_though_nftables_exempts_it(self):
         """The nft guard exempts `meta skuid != 0` so a host-wide drop does not
@@ -3400,7 +3420,7 @@ class TestCallerIdentity(unittest.TestCase):
         was the second half of the defect this closes."""
         mod = _mod()
         listener, conn, log = self._handled(mod, 0)
-        self.assertIn(mod.DROP_FOREIGN_CALLER, log)
+        self.assertIn(DROP_FOREIGN_CALLER, log)
         conn.close.assert_called()
 
     def test_an_unresolvable_caller_is_admitted_and_counted(self):
@@ -3410,7 +3430,7 @@ class TestCallerIdentity(unittest.TestCase):
         control that must hold; this layer must not become an outage."""
         mod = _mod()
         listener, conn, log = self._handled(mod, None)
-        self.assertNotIn(mod.DROP_FOREIGN_CALLER, log)
+        self.assertNotIn(DROP_FOREIGN_CALLER, log)
         self.assertEqual(listener.status()["caller_unresolved"], 1)
         # Admitted means no connection id was logged for a refusal...
         self.assertNotIn("rejected", log)
@@ -3441,5 +3461,5 @@ class TestCallerIdentity(unittest.TestCase):
             listener._handle(_mock_conn(), ("192.0.2.1", 1024),
                              _listener_with(local))
         snap = listener.status()
-        self.assertEqual(snap["drop_reasons"][mod.DROP_FOREIGN_CALLER], 1)
-        self.assertEqual(snap["drop_reasons"][mod.DROP_CEILING], 0)
+        self.assertEqual(snap["drop_reasons"][DROP_FOREIGN_CALLER], 1)
+        self.assertEqual(snap["drop_reasons"][DROP_CEILING], 0)

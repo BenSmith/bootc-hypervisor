@@ -628,7 +628,9 @@ from egress_record import (
     DROP_BROKER_UNREACHABLE,
     DROP_REASONS,
     DROP_UNREACHABLE,
+    LOG_ID_FIELD,
     RECORD_FIELDS,
+    Where,
 )
 from egress_policy import (
     VmPolicyEntry,
@@ -780,9 +782,8 @@ class _BrokerRig(unittest.TestCase):
 
 
 def _where():
-    mod = listener_mod()
-    return mod.Where(f"{mod.LOG_ID_FIELD}=abc plane=cleartext",
-                      cid="abc", plane="cleartext")
+    return Where(f"{LOG_ID_FIELD}=abc plane=cleartext",
+                 cid="abc", plane="cleartext")
 
 
 BROKERED = VmPolicyEntry(host="api.provider", methods=None, paths=None,

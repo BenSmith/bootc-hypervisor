@@ -41,6 +41,19 @@ from egress_policy import INSPECT_PORT_TLS
 from egress_ca import (
     ca_cert_path, ca_key_path, ca_openssl_argv, leaf_openssl_argv,
 )
+from egress_record import (
+    DROP_INTERNAL,
+    DROP_NOT_H2,
+    DROP_NOT_HTTP,
+    DROP_NOT_HTTP_POLICY,
+    DROP_NOT_PERMITTED,
+    DROP_TIMED_OUT,
+    DROP_UNREACHABLE,
+    DROP_UNREADABLE_REQUEST,
+    DROP_UNVERIFIED,
+    LOG_ID_FIELD,
+    Where,
+)
 
 _MOD = None
 
@@ -59,7 +72,7 @@ def _where(plane="tls", cid="0" * 12):
     loops ask it for each request's ordinal. Tests that enter at _serve_tls or
     _serve_cleartext skip _serve, so they build one here.
     """
-    return _mod().Where(f"{_mod().LOG_ID_FIELD}={cid} plane={plane}",
+    return Where(f"{LOG_ID_FIELD}={cid} plane={plane}",
                          cid=cid, plane=plane)
 
 
@@ -588,7 +601,7 @@ class TestTheClientCertificateCase(TerminationCase):
         exc = ssl.SSLError("handshake failure")
         exc.reason = "SSLV3_ALERT_HANDSHAKE_FAILURE"
         reason, text = listener._upstream_tls_failure("api.example", exc)
-        self.assertEqual(reason, mod.DROP_UNVERIFIED)
+        self.assertEqual(reason, DROP_UNVERIFIED)
         self.assertIn("not distinguishable", text)
         self.assertIn("api.example", text)
 
@@ -1269,9 +1282,9 @@ class TestNonHttpInsideATerminatedSessionIsClosed(TerminationCase):
         listener, _ = self._listener(mod, origin)
         self._exchange(listener, origin, request=self.NOT_HTTP)
         reasons = listener.status()["drop_reasons"]
-        self.assertEqual(reasons[mod.DROP_NOT_HTTP], 1)
-        self.assertEqual(reasons[mod.DROP_UNREADABLE_REQUEST], 0)
-        self.assertEqual(reasons[mod.DROP_TIMED_OUT], 0)
+        self.assertEqual(reasons[DROP_NOT_HTTP], 1)
+        self.assertEqual(reasons[DROP_UNREADABLE_REQUEST], 0)
+        self.assertEqual(reasons[DROP_TIMED_OUT], 0)
 
     def test_the_remedy_it_names_is_the_PER_HOST_key(self):
         """Rung 4 tier 6. Rung 3 could only say `tls = "splice"`, which gives
@@ -1301,7 +1314,7 @@ class TestNonHttpInsideATerminatedSessionIsClosed(TerminationCase):
             request=b"GET /\x01\x02 HTTP/1.1\r\nHost: localhost\r\n\r\n")
         self.assertTrue(response.startswith(b"HTTP/1.1 400 "), response[:40])
         self.assertEqual(
-            listener.status()["drop_reasons"][mod.DROP_NOT_HTTP], 0)
+            listener.status()["drop_reasons"][DROP_NOT_HTTP], 0)
 
     def test_a_decidable_prefix_does_not_wait_for_a_whole_method(self):
         """A peer that sends four bytes and then waits is answered on those
@@ -1365,8 +1378,8 @@ class TestTheNonHttpRefusalIsSplitByPolicy(TerminationCase):
         listener, _ = self._governed(mod, origin)
         self._exchange(listener, origin, request=self.NOT_HTTP)
         reasons = listener.status()["drop_reasons"]
-        self.assertEqual(reasons[mod.DROP_NOT_HTTP_POLICY], 1)
-        self.assertEqual(reasons[mod.DROP_NOT_HTTP], 0)
+        self.assertEqual(reasons[DROP_NOT_HTTP_POLICY], 1)
+        self.assertEqual(reasons[DROP_NOT_HTTP], 0)
 
     def test_an_ungoverned_host_stays_in_the_plain_bucket(self):
         """The other half of the same guard. A split that put everything in one
@@ -1377,8 +1390,8 @@ class TestTheNonHttpRefusalIsSplitByPolicy(TerminationCase):
         listener, _ = self._listener(mod, origin)
         self._exchange(listener, origin, request=self.NOT_HTTP)
         reasons = listener.status()["drop_reasons"]
-        self.assertEqual(reasons[mod.DROP_NOT_HTTP], 1)
-        self.assertEqual(reasons[mod.DROP_NOT_HTTP_POLICY], 0)
+        self.assertEqual(reasons[DROP_NOT_HTTP], 1)
+        self.assertEqual(reasons[DROP_NOT_HTTP_POLICY], 0)
 
     def test_a_WILDCARD_policy_entry_governs_the_name_it_covers(self):
         """The split is asked of the policy's matcher, not of a literal host
@@ -1392,7 +1405,7 @@ class TestTheNonHttpRefusalIsSplitByPolicy(TerminationCase):
             mod, origin, entries=(("*host", ("GET",), ("/",)),))
         self._exchange(listener, origin, request=self.NOT_HTTP)
         self.assertEqual(
-            listener.status()["drop_reasons"][mod.DROP_NOT_HTTP_POLICY], 1)
+            listener.status()["drop_reasons"][DROP_NOT_HTTP_POLICY], 1)
 
     def test_both_are_per_host_so_the_operator_gets_names_not_totals(self):
         origin = _Origin(self.origin_pem)
@@ -1401,9 +1414,9 @@ class TestTheNonHttpRefusalIsSplitByPolicy(TerminationCase):
         listener, _ = self._governed(mod, origin)
         self._exchange(listener, origin, request=self.NOT_HTTP)
         per_host = listener.status()["per_host"]
-        self.assertEqual(per_host[mod.DROP_NOT_HTTP_POLICY],
+        self.assertEqual(per_host[DROP_NOT_HTTP_POLICY],
                          {"localhost": 1})
-        self.assertEqual(per_host[mod.DROP_NOT_HTTP], {})
+        self.assertEqual(per_host[DROP_NOT_HTTP], {})
 
     def test_the_governed_line_names_the_deletion_as_well_as_the_key(self):
         """Half the remedy is the trap. An operator told only to splice adds
@@ -1454,9 +1467,9 @@ class TestTheNonHttpRefusalIsSplitByPolicy(TerminationCase):
             listener, origin,
             request=b"DELETE /v1/x HTTP/1.1\r\nHost: localhost\r\n\r\n")
         reasons = listener.status()["drop_reasons"]
-        self.assertEqual(reasons[mod.DROP_NOT_HTTP_POLICY], 0)
-        self.assertEqual(reasons[mod.DROP_NOT_HTTP], 0)
-        self.assertEqual(reasons[mod.DROP_NOT_PERMITTED], 1)
+        self.assertEqual(reasons[DROP_NOT_HTTP_POLICY], 0)
+        self.assertEqual(reasons[DROP_NOT_HTTP], 0)
+        self.assertEqual(reasons[DROP_NOT_PERMITTED], 1)
 
 
 @unittest.skipUnless(_have_openssl(), "openssl is not installed")
@@ -1582,7 +1595,7 @@ class TestAnHttp2HostIsRelayedAtFrameLevel(TerminationCase):
         self.assertEqual(origin.requests, [],
                          "a refused stream must never reach the origin")
         self.assertEqual(
-            listener.status()["drop_reasons"][mod.DROP_NOT_H2], 1)
+            listener.status()["drop_reasons"][DROP_NOT_H2], 1)
         self.assertIn("not HTTP/2", out.getvalue())
         self.assertIn("splic", out.getvalue(),
                       "the refusal must name a remedy `validate` accepts")
@@ -1597,7 +1610,7 @@ class TestAnHttp2HostIsRelayedAtFrameLevel(TerminationCase):
         headers = b"\x00\x00\x05\x01\x04\x00\x00\x00\x01hpack"
         self._h2_exchange(listener, origin, mod.H2_PREFACE + headers)
         self.assertEqual(
-            listener.status()["drop_reasons"][mod.DROP_NOT_H2], 1)
+            listener.status()["drop_reasons"][DROP_NOT_H2], 1)
         self.assertEqual(origin.requests, [],
                          "the scanner must run BEFORE the forward, or a "
                          "stream it refuses has already reached the origin "
@@ -1622,7 +1635,7 @@ class TestAnHttp2HostIsRelayedAtFrameLevel(TerminationCase):
         self.assertEqual(back, b"")
         self.assertEqual(origin.requests, [])
         self.assertEqual(
-            listener.status()["drop_reasons"][mod.DROP_NOT_H2], 1)
+            listener.status()["drop_reasons"][DROP_NOT_H2], 1)
 
     def test_a_stream_that_stops_framing_MID_SESSION_is_refused_AT_THE_END(self):
         """The relay's copy of the scanner, and the limit of what it can do.
@@ -1654,7 +1667,7 @@ class TestAnHttp2HostIsRelayedAtFrameLevel(TerminationCase):
                           mod.H2_PREFACE + self.SETTINGS,
                           then=b"GET /secret HTTP/1.1\r\n\r\n")
         self.assertEqual(
-            listener.status()["drop_reasons"][mod.DROP_NOT_H2], 1)
+            listener.status()["drop_reasons"][DROP_NOT_H2], 1)
         # Pinned as it is, not as it ought to be: this is the residual, and a
         # test that asserted the stronger property would have to be deleted by
         # whoever eventually closes it rather than tightened.
@@ -1701,7 +1714,7 @@ class TestAnHttp2HostIsRelayedAtFrameLevel(TerminationCase):
         origin = self._h2_origin()
         listener, _ = self._listener(mod, origin, http2=("localhost",))
         self._h2_exchange(listener, origin, b"not h2 at all, not even close")
-        per_host = listener.status()["per_host"][mod.DROP_NOT_H2]
+        per_host = listener.status()["per_host"][DROP_NOT_H2]
         self.assertEqual(dict(per_host).get("localhost"), 1, per_host)
 
     # --- and the ORIGIN half of the same question ---
@@ -1732,7 +1745,7 @@ class TestAnHttp2HostIsRelayedAtFrameLevel(TerminationCase):
         listener, out = self._listener(mod, origin, http2=("localhost",))
         back, _, _ = self._h2_exchange(
             listener, origin, mod.H2_PREFACE + self.SETTINGS)
-        self.assertEqual(listener.status()["drop_reasons"][mod.DROP_NOT_H2], 1)
+        self.assertEqual(listener.status()["drop_reasons"][DROP_NOT_H2], 1)
         self.assertEqual(origin.requests, [],
                          "the guest's preface must never reach a server that "
                          "did not select h2")
@@ -1798,7 +1811,7 @@ class TestAnHttp2HostIsRelayedAtFrameLevel(TerminationCase):
         listener, _ = self._listener(mod, origin)
         self._exchange(listener, origin)
         self.assertEqual(
-            listener.status()["drop_reasons"][mod.DROP_NOT_H2], 0)
+            listener.status()["drop_reasons"][DROP_NOT_H2], 0)
 
 
 class TestWhatTheStatusFileCarriesFromARealExchange(TerminationCase):
@@ -1813,7 +1826,7 @@ class TestWhatTheStatusFileCarriesFromARealExchange(TerminationCase):
         listener, _ = self._listener(mod, origin, trust=False)
         self._exchange(listener, origin)
         snap = listener.status()
-        self.assertEqual(snap["per_host"][mod.DROP_UNVERIFIED],
+        self.assertEqual(snap["per_host"][DROP_UNVERIFIED],
                          {self.HOST: 1})
 
     def test_the_ca_an_operator_must_install_is_in_the_status(self):
@@ -1950,8 +1963,8 @@ class TestARedialThatCannotBeVerifiedSaysSo(TerminationCase):
                       "the guest's 502 is the only place the reason lands")
         self.assertIn(b"THIS HOST", response,
                       "an operator has to be told whose trust store to fix")
-        self.assertIn(mod.DROP_UNVERIFIED, log)
-        self.assertNotIn(mod.DROP_UNREACHABLE, log)
+        self.assertIn(DROP_UNVERIFIED, log)
+        self.assertNotIn(DROP_UNREACHABLE, log)
 
     def test_an_ordinary_dial_failure_still_goes_the_other_way(self):
         """The other arm still works -- this is a split, not a replacement.
@@ -1969,5 +1982,5 @@ class TestARedialThatCannotBeVerifiedSaysSo(TerminationCase):
             mod, ConnectionRefusedError("connection refused"))
         self.assertIn(b"502", response)
         self.assertIn(b"could not be reached", response)
-        self.assertIn(mod.DROP_INTERNAL, log)
-        self.assertNotIn(mod.DROP_UNVERIFIED, log)
+        self.assertIn(DROP_INTERNAL, log)
+        self.assertNotIn(DROP_UNVERIFIED, log)
