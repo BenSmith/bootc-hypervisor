@@ -29,6 +29,8 @@ from unittest import mock
 import cmd_doctor
 import inspect_figures as fig
 
+import exporter_collect
+
 from tests import load_script
 
 REPO = Path(__file__).resolve().parent.parent
@@ -347,19 +349,19 @@ class ExporterTest(unittest.TestCase):
     def test_an_unfiltered_workload_is_not_collected(self):
         """Nothing, not zeros: a series for an unfiltered workload asserts a
         filter exists and is idle."""
-        with mock.patch.object(self.mod, "get_enabled_workloads",
+        with mock.patch.object(exporter_collect, "get_enabled_workloads",
                                return_value=[("app", [], False, False),
                                              ("vm1", [], True, False)]):
-            self.assertEqual(self.mod.collect_inspect(), [])
+            self.assertEqual(exporter_collect.collect_inspect(), [])
 
     def test_a_filtered_workload_is(self):
-        with mock.patch.object(self.mod, "get_enabled_workloads",
+        with mock.patch.object(exporter_collect, "get_enabled_workloads",
                                return_value=[("vm1", [], True, True)]), \
-             mock.patch.object(self.mod, "read_inspect_status",
+             mock.patch.object(exporter_collect, "read_inspect_status",
                                return_value=FULL_STATUS), \
-             mock.patch.object(self.mod, "read_resolve_status",
+             mock.patch.object(exporter_collect, "read_resolve_status",
                                return_value=None):
-            collected = self.mod.collect_inspect()
+            collected = exporter_collect.collect_inspect()
         self.assertEqual([name for name, _ in collected], ["vm1"])
         self.assertEqual(collected[0][1]["status_present"], 1)
 
@@ -368,7 +370,7 @@ class ExporterTest(unittest.TestCase):
         directory instead cannot tell a filtered VM that has not started this
         boot from an unfiltered one, and those owe opposite output."""
         self.assertIn("uses_inspect",
-                      (REPO / "libexec" / "workload-exporter").read_text())
+                      (REPO / "lib" / "exporter_collect.py").read_text())
 
 
 class DoctorSectionTest(unittest.TestCase):

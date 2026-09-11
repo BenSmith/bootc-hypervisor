@@ -25,6 +25,7 @@ import unittest
 from pathlib import Path
 
 import vm_metrics
+import exporter_collect
 import workload_metrics
 
 from tests import REPO_ROOT, load_script, script_env
@@ -93,16 +94,12 @@ def parse_metric_value(prom_text, metric_name, labels=None):
 
 
 def _exporter_get_enabled_workloads(config_dir):
-    """Load workload-exporter and call get_enabled_workloads against config_dir."""
+    """Call get_enabled_workloads against config_dir."""
     orig_env = os.environ.get("WORKLOAD_CONFIG_DIR")
-    orig_argv = sys.argv[:]
     os.environ["WORKLOAD_CONFIG_DIR"] = str(config_dir)
-    sys.argv = [EXPORTER_SCRIPT]  # prevent PORT = int(sys.argv[1]) from failing
     try:
-        mod = load_script("libexec/workload-exporter")
-        return mod.get_enabled_workloads()
+        return exporter_collect.get_enabled_workloads()
     finally:
-        sys.argv = orig_argv
         if orig_env is None:
             os.environ.pop("WORKLOAD_CONFIG_DIR", None)
         else:
@@ -805,17 +802,16 @@ class TestGetEnabledWorkloadsDirect(unittest.TestCase):
     def setUp(self):
         from unittest import mock
         self.mock = mock
-        self.mod = _load_exporter()
+        self.mod = exporter_collect
 
     def test_config_dir_not_a_dir_returns_empty(self):
-        with self.mock.patch.object(self.mod, "WORKLOAD_CONFIG_DIR",
-                                    Path("/nonexistent-config-dir-xyz")):
+        with self.mock.patch.object(self.mod, "workload_config_dir", return_value=Path("/nonexistent-config-dir-xyz")):
             self.assertEqual(self.mod.get_enabled_workloads(), [])
 
     def test_resolve_oserror_is_skipped(self):
         bad_toml = self.mock.Mock()
         bad_toml.resolve.side_effect = OSError
-        with self.mock.patch.object(self.mod, "WORKLOAD_CONFIG_DIR", Path(".")), \
+        with self.mock.patch.object(self.mod, "workload_config_dir", return_value=Path(".")), \
              self.mock.patch.object(self.mod, "iter_workloads",
                                     return_value=[("bad", bad_toml)]):
             self.assertEqual(self.mod.get_enabled_workloads(), [])
@@ -830,7 +826,7 @@ class TestGetEnabledWorkloadsDirect(unittest.TestCase):
             [container]
             image = "alpine:latest"
         """, enabled=False)
-        with self.mock.patch.object(self.mod, "WORKLOAD_CONFIG_DIR", Path(tmp)), \
+        with self.mock.patch.object(self.mod, "workload_config_dir", return_value=Path(tmp)), \
              self.mock.patch.object(self.mod, "iter_workloads",
                                     return_value=[("off", toml_path)]):
             self.assertEqual(self.mod.get_enabled_workloads(), [])
@@ -842,7 +838,7 @@ class TestGetEnabledWorkloadsDirect(unittest.TestCase):
         bad_path.parent.mkdir()
         bad_path.write_text("not valid [[[ toml")
         (bad_path.parent / ".enabled").touch()
-        with self.mock.patch.object(self.mod, "WORKLOAD_CONFIG_DIR", Path(tmp)), \
+        with self.mock.patch.object(self.mod, "workload_config_dir", return_value=Path(tmp)), \
              self.mock.patch.object(self.mod, "iter_workloads",
                                     return_value=[("bad", bad_path)]):
             self.assertEqual(self.mod.get_enabled_workloads(), [])
@@ -1027,7 +1023,7 @@ class TestCollectAll(unittest.TestCase):
     def setUp(self):
         from unittest import mock
         self.mock = mock
-        self.mod = _load_exporter()
+        self.mod = exporter_collect
 
     def test_full_workload_collection_path(self):
         with self.mock.patch.object(
@@ -1042,7 +1038,7 @@ class TestCollectAll(unittest.TestCase):
         name, svc, _cgroup, _vm = all_metrics[0]
         self.assertEqual(name, "app")
         self.assertEqual(svc["health"], {"app": 1})
-        body = self.mod.format_metrics(all_metrics)
+        body = _load_exporter().format_metrics(all_metrics)
         self.assertIn('workload_health{workload="app"} 1', body)
 
     def test_pod_workload_queries_per_container_names(self):
@@ -1073,7 +1069,7 @@ class TestCollectAll(unittest.TestCase):
         self.assertNotIn("workload-multi", queried_names)
         _name, svc, *_ = all_metrics[0]
         self.assertEqual(svc["health"], {"web": 1, "db": 0})
-        body = self.mod.format_metrics(all_metrics)
+        body = _load_exporter().format_metrics(all_metrics)
         self.assertIn('workload_health{workload="multi",container="web"} 1', body)
         self.assertIn('workload_health{workload="multi",container="db"} 0', body)
 
@@ -1141,13 +1137,13 @@ class TestDiskProducer(unittest.TestCase):
 
     def test_collect_disk_walks_each_enabled_workload(self):
         with self.mock.patch.object(
-                self.mod, "get_enabled_workloads",
+                exporter_collect, "get_enabled_workloads",
                 return_value=[("app", [], False, False), ("big", [], True, False)]), \
-             self.mock.patch.object(self.mod, "workload_root_dir",
+             self.mock.patch.object(exporter_collect, "workload_root_dir",
                                     side_effect=lambda n: Path(f"/var/lib/workloads/{n}")), \
-             self.mock.patch.object(self.mod, "get_workload_disk_bytes",
+             self.mock.patch.object(exporter_collect, "get_workload_disk_bytes",
                                     side_effect=[4096, None]):
-            disk_metrics = self.mod.collect_disk()
+            disk_metrics = exporter_collect.collect_disk()
         self.assertEqual(disk_metrics, [("app", 4096), ("big", None)])
 
     def test_format_disk_metrics_skips_none(self):
