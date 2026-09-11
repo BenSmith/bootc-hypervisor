@@ -14,7 +14,6 @@ stale "T5a" reads as a live forward reference to it.
 """
 
 import importlib
-from tests import load_script
 import unittest
 import unittest.mock
 
@@ -27,6 +26,7 @@ from nft_elements import (
     inspect_cgroup_filter_command,
 )
 from nft_constants import NFT_SET_INSPECT_CG, NFT_SET_EGRESS_CG
+from inspect_listener import MAX_CONNECTIONS
 from nft_constants import SIDECAR_SLICE
 from vm_defs import EGRESS_DEFAULT
 from workload_addr import INSPECT_LISTENER_BIN, inspect_address
@@ -424,12 +424,10 @@ class TestSidecarHardening(unittest.TestCase):
     def test_the_inspectors_task_ceiling_covers_its_connection_ceiling(self):
         """One thread per connection, so a TasksMax below MAX_CONNECTIONS is a
         listener that refuses connections it counted as admitted."""
-        listener = load_script("libexec/workload-inspect-listener")
         tasks = [l for l in self.inspect.splitlines()
                  if l.startswith("TasksMax=")]
         self.assertEqual(len(tasks), 1)
-        self.assertGreater(int(tasks[0].split("=", 1)[1]),
-                           listener.MAX_CONNECTIONS)
+        self.assertGreater(int(tasks[0].split("=", 1)[1]), MAX_CONNECTIONS)
 
     def test_both_units_bound_their_memory(self):
         for which, unit in self.units():

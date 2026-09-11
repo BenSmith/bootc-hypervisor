@@ -53,6 +53,8 @@ from http_framing import (
 )
 import egress_upstream
 from egress_upstream import tls_failure
+import inspect_listener
+from inspect_listener import MAX_CONNECTIONS, Listener
 from egress_record import (
     DROP_INTERNAL,
     DROP_NOT_H2,
@@ -259,7 +261,7 @@ class TerminationCase(unittest.TestCase):
             tls="inspect", hosts=tuple(hosts), http2=tuple(http2),
             policy=tuple(VmPolicyEntry(host=h, methods=m, paths=pa)
                          for h, m, pa in entries))
-        listener = mod.Listener([unittest.mock.Mock()], out, policy=policy,
+        listener = Listener([unittest.mock.Mock()], out, policy=policy,
                                 minter=minter or self._minter(mod))
         if trust:
             # BOTH contexts, each keeping its own offer. Pointing them at one
@@ -294,13 +296,13 @@ class TerminationCase(unittest.TestCase):
         # than in the listener's own patience.
         ours.settimeout(3.0)
         guest.settimeout(3.0)
-        mod = _mod()
         served = threading.Thread(
             target=listener._serve_tls, args=(ours, _where("tls")), daemon=True)
-        # The origin's port, on the plane object both the splice dial (the
-        # listener's) and the verifying dial (egress_upstream's) read.
+        # The origin's port, on the plane object both the splice dial
+        # (inspect_listener's) and the verifying dial (egress_upstream's) read.
         with unittest.mock.patch.object(
-                mod, "TLS", TLS._replace(guest_port=origin.port)), \
+                inspect_listener, "TLS",
+                TLS._replace(guest_port=origin.port)), \
                 unittest.mock.patch.object(
                     egress_upstream, "TLS",
                     TLS._replace(guest_port=origin.port)):
@@ -1128,9 +1130,8 @@ class TestTheStartRefusesWhatItCannotDo(unittest.TestCase):
         The alternative is a listener that fails every guest handshake with an
         opaque certificate error while reporting itself up.
         """
-        mod = _mod()
         out = io.StringIO()
-        listener = mod.Listener([unittest.mock.Mock()], out,
+        listener = Listener([unittest.mock.Mock()], out,
                                 policy=Policy(tls="inspect",
                                                   hosts=("a.example",)))
         ours, guest = _tcp_pair()
@@ -1523,14 +1524,14 @@ class TestAnHttp2HostIsRelayedAtFrameLevel(TerminationCase):
         self.addCleanup(guest.close)
         ours.settimeout(3.0)
         guest.settimeout(3.0)
-        mod = _mod()
         served = threading.Thread(
             target=listener._serve_tls, args=(ours, _where("tls")), daemon=True)
         negotiated = []
-        # The origin's port, on the plane object both the splice dial (the
-        # listener's) and the verifying dial (egress_upstream's) read.
+        # The origin's port, on the plane object both the splice dial
+        # (inspect_listener's) and the verifying dial (egress_upstream's) read.
         with unittest.mock.patch.object(
-                mod, "TLS", TLS._replace(guest_port=origin.port)), \
+                inspect_listener, "TLS",
+                TLS._replace(guest_port=origin.port)), \
                 unittest.mock.patch.object(
                     egress_upstream, "TLS",
                     TLS._replace(guest_port=origin.port)):
@@ -1922,14 +1923,13 @@ class TestTheCachesCannotEvictALeafInFlight(unittest.TestCase):
 
     def test_every_cache_is_larger_than_the_connection_ceiling(self):
         from egress_mint import DENIAL_CACHE_MAX, LEAF_CACHE_MAX
-        mod = _mod()
         for name, size in (("working set", LEAF_CACHE_MAX),
                            ("denial set", DENIAL_CACHE_MAX)):
             with self.subTest(cache=name):
                 self.assertGreater(
-                    size, mod.MAX_CONNECTIONS,
+                    size, MAX_CONNECTIONS,
                     f"the {name} holds {size} entries against "
-                    f"{mod.MAX_CONNECTIONS} connection slots, so its "
+                    f"{MAX_CONNECTIONS} connection slots, so its "
                     f"least-recently-used entry can be one in flight")
 
 

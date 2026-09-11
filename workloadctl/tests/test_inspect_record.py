@@ -19,6 +19,7 @@ import io
 import json
 import os
 import re
+import secrets
 import socket
 import stat
 import tempfile
@@ -28,6 +29,7 @@ import unittest
 import unittest.mock
 from pathlib import Path
 
+import egress_record
 from egress_record import (
     DROP_NOT_ALLOWLISTED,
     DROP_NO_NAME,
@@ -50,6 +52,7 @@ from egress_policy import (
 )
 from nft_elements import INSPECT_RECORD_SELINUX_TYPE
 from inspect_counters import Counters
+from inspect_listener import Listener
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -93,16 +96,15 @@ class _Harness(unittest.TestCase):
         """One connection, driven through _serve — the function _handle's
         thread calls, so the lines are the real ones and the assertion is not
         a race against a daemon thread."""
-        mod = _mod()
         out = io.StringIO()
-        listener = mod.Listener(
+        listener = Listener(
             [_listener_with(local)], out,
             policy=Policy(tls="splice", hosts=tuple(hosts)))
         ours, guest = self._pair()
         guest.sendall(feed)
         guest.shutdown(socket.SHUT_WR)
         listener._serve(ours, peer, local, plane_for_port(local[1]),
-                        mod.secrets.token_hex(6))
+                        secrets.token_hex(6))
         return out.getvalue()
 
     def _lines(self, log):
@@ -152,9 +154,8 @@ class TestEveryLineCarriesTheId(_Harness):
         """The rejection path never reaches _serve, which is exactly why the
         id is minted in _handle: a guest reporting a stall it got no answer to
         is correlated through these two lines or through nothing."""
-        mod = _mod()
         out = io.StringIO()
-        listener = mod.Listener([_listener_with(CLEARTEXT_LOCAL)], out,
+        listener = Listener([_listener_with(CLEARTEXT_LOCAL)], out,
                                 limit=0)
         conn = unittest.mock.MagicMock()
         conn.recv.return_value = b""
@@ -164,9 +165,8 @@ class TestEveryLineCarriesTheId(_Harness):
         self.assertRegex(out.getvalue(), ID)
 
     def test_a_connection_no_thread_could_be_started_for_carries_one(self):
-        mod = _mod()
         out = io.StringIO()
-        listener = mod.Listener([_listener_with(CLEARTEXT_LOCAL)], out)
+        listener = Listener([_listener_with(CLEARTEXT_LOCAL)], out)
         conn = unittest.mock.MagicMock()
         conn.recv.return_value = b""
         with unittest.mock.patch.object(
@@ -205,9 +205,8 @@ class TestTheIdGroupsOneConnection(_Harness):
         counter begins again at zero every time the socket re-triggers it,
         while the record file it keys outlives that restart — two unrelated
         connections would collide on the one key a reader joins on."""
-        mod = _mod()
         out = io.StringIO()
-        listener = mod.Listener([_listener_with(CLEARTEXT_LOCAL)], out,
+        listener = Listener([_listener_with(CLEARTEXT_LOCAL)], out,
                                 limit=0)
         for _ in range(4):
             conn = unittest.mock.MagicMock()
@@ -589,7 +588,6 @@ class TestTheRecordFile(unittest.TestCase):
         expose. Without the instrumentation a single os.write of a small line
         never interleaves in practice and the test passes with no lock at
         all."""
-        mod = _mod()
         log = self._log()
         real = os.write
 
@@ -600,7 +598,7 @@ class TestTheRecordFile(unittest.TestCase):
                 return real(fd, data[8:])
             return real(fd, data)
 
-        with unittest.mock.patch.object(mod.os, "write", torn):
+        with unittest.mock.patch.object(egress_record.os, "write", torn):
             record = {"id": "x", "pad": "y" * 400}
             threads = [threading.Thread(target=log.write, args=(record,))
                        for _ in range(16)]
@@ -614,8 +612,7 @@ class TestTheRecordFile(unittest.TestCase):
 class TestTheListenerHoldsOne(unittest.TestCase):
 
     def test_a_failure_shows_up_in_the_status_document(self):
-        mod = _mod()
-        listener = mod.Listener([], io.StringIO(),
+        listener = Listener([], io.StringIO(),
                                 record_path="/nonexistent/dir/requests.log")
         self.addCleanup(listener.record.close)
         self.assertEqual(
@@ -630,8 +627,7 @@ class TestTheListenerHoldsOne(unittest.TestCase):
         """A figure that only accumulates when someone is watching is a figure
         nobody can trust — the reason the listener's other counters are
         unconditional."""
-        mod = _mod()
-        listener = mod.Listener([], io.StringIO())
+        listener = Listener([], io.StringIO())
         self.assertIn("record_failures",
                       listener.counters.snapshot(open_now=0, refused=0))
 
@@ -651,9 +647,8 @@ class _Records(_Harness):
     def _drive(self, feed, *, local=CLEARTEXT_LOCAL, policy=None,
                peer=("192.0.2.1", 1024), origin=None):
         """One connection. Returns (journal text, [record dicts])."""
-        mod = _mod()
         out = io.StringIO()
-        listener = mod.Listener(
+        listener = Listener(
             [_listener_with(local)], out,
             policy=policy or Policy(tls="splice", hosts=()),
             record_path=self.path)
@@ -665,7 +660,7 @@ class _Records(_Harness):
                if origin else contextlib.nullcontext())
         with ctx:
             listener._serve(ours, peer, local, plane_for_port(local[1]),
-                            mod.secrets.token_hex(6))
+                            secrets.token_hex(6))
         listener.record.close()
         return out.getvalue(), self._records()
 
@@ -881,13 +876,11 @@ class TestTheConnectionLevelRecords(_Records):
     like silence."""
 
     def _tls_listener(self, policy):
-        mod = _mod()
         out = io.StringIO()
-        return mod.Listener([_listener_with(TLS_LOCAL)], out, policy=policy,
+        return Listener([_listener_with(TLS_LOCAL)], out, policy=policy,
                             record_path=self.path), out
 
     def test_a_spliced_connection_is_recorded_as_an_exemption(self):
-        mod = _mod()
         listener, _out = self._tls_listener(
             Policy(tls="splice", hosts=("ok.example",)))
         ours, guest = self._pair()
@@ -897,7 +890,7 @@ class TestTheConnectionLevelRecords(_Records):
         with unittest.mock.patch.object(
                 socket, "create_connection", side_effect=self._origin(b"")):
             listener._serve(ours, ("192.0.2.1", 1024), TLS_LOCAL, TLS,
-                            mod.secrets.token_hex(6))
+                            secrets.token_hex(6))
         listener.record.close()
         records = self._records()
         self.assertEqual(len(records), 1, records)
@@ -910,13 +903,12 @@ class TestTheConnectionLevelRecords(_Records):
         self.assertIsNone(rec[LOG_REQ_FIELD])
 
     def test_a_hello_with_no_name_is_recorded(self):
-        mod = _mod()
         listener, _out = self._tls_listener(Policy(tls="splice", hosts=()))
         ours, guest = self._pair()
         guest.sendall(b"\x16\x03\x01\x00\x05rubbish")
         guest.shutdown(socket.SHUT_WR)
         listener._serve(ours, ("192.0.2.1", 1024), TLS_LOCAL, TLS,
-                        mod.secrets.token_hex(6))
+                        secrets.token_hex(6))
         listener.record.close()
         records = self._records()
         self.assertEqual(len(records), 1, records)
@@ -945,7 +937,7 @@ class TestTheH2BlindSpotIsCounted(unittest.TestCase):
         self.assertEqual(counters.h2_unrecorded, 1)
 
     def test_the_h2_relay_increments_it(self):
-        source = (ROOT / "libexec" / "workload-inspect-listener").read_text()
+        source = (ROOT / "lib" / "inspect_listener.py").read_text()
         body = source[source.index("def _serve_h2("):
                       source.index("def _drop_not_h2(")]
         self.assertIn("record_h2_unrecorded()", body)
@@ -958,9 +950,8 @@ class TestTheRecordNeverKillsARequest(_Records):
     request per failure rather than the accept loop once."""
 
     def test_a_sink_that_cannot_be_written_still_serves_the_request(self):
-        mod = _mod()
         out = io.StringIO()
-        listener = mod.Listener(
+        listener = Listener(
             [_listener_with(CLEARTEXT_LOCAL)], out,
             policy=Policy(tls="splice", hosts=("ok.example",)),
             record_path=Path(self._tmp.name) / "no-such-dir" / "requests.log")
@@ -971,6 +962,6 @@ class TestTheRecordNeverKillsARequest(_Records):
         with unittest.mock.patch.object(
                 socket, "create_connection", side_effect=self._origin()):
             listener._serve(ours, ("192.0.2.1", 1024), CLEARTEXT_LOCAL, CLEARTEXT,
-                            mod.secrets.token_hex(6))
+                            secrets.token_hex(6))
         self.assertIn("forward ", out.getvalue())
         self.assertEqual(listener.counters.record_failures, 1)

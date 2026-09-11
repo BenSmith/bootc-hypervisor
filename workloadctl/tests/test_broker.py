@@ -642,6 +642,8 @@ from egress_policy import (
 from workload_addr import broker_listen_address
 import egress_relay
 from egress_upstream import Upstream
+import inspect_listener
+from inspect_listener import Listener
 import inspect_figures
 
 LISTENER = Path(__file__).resolve().parent.parent / "libexec" / "workload-inspect-listener"
@@ -736,14 +738,13 @@ class _BrokerRig(unittest.TestCase):
         `dialled` is [(address, bytes-that-arrived)] in dial order, which is
         the assertion this whole class exists to make.
         """
-        mod = listener_mod()
         out = io.StringIO()
         record_path = None
         if record:
             tmp = tempfile.TemporaryDirectory(prefix="broker-rec-")
             self.addCleanup(tmp.cleanup)
             record_path = str(Path(tmp.name) / "requests.log")
-        listener = mod.Listener([], out, policy=policy,
+        listener = Listener([], out, policy=policy,
                                 record_path=record_path,
                                 broker_address=BROKER_ADDR)
         ours, guest = self._pair()
@@ -886,18 +887,16 @@ class TestTheRefusalWhenTheBrokerIsDown(_BrokerRig):
         was never dialled -- a loopback address on this box was -- so running
         it would attribute a dead broker to whatever api.provider resolves to,
         and would pay a synchronous getaddrinfo for the wrong answer."""
-        mod = listener_mod()
         with unittest.mock.patch.object(
-                mod, "dial_failure_reason") as failure:
+                inspect_listener, "dial_failure_reason") as failure:
             self._serve(self._policy([BROKERED]), _GET_BROKERED, refuse=True)
         failure.assert_not_called()
 
     def test_an_unbrokered_host_still_gets_the_resolving_reason(self):
         """The guard for the test above: the generic path must keep the
         behaviour the broker path opts out of."""
-        mod = listener_mod()
         with unittest.mock.patch.object(
-                mod, "dial_failure_reason",
+                inspect_listener, "dial_failure_reason",
                 return_value=DROP_UNREACHABLE) as failure:
             self._serve(self._policy([PLAIN]), _GET_PLAIN, refuse=True)
         failure.assert_called_once()

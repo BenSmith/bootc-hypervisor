@@ -40,6 +40,9 @@ from http_framing import (
 import egress_record
 import egress_relay
 import egress_upstream
+import inspect_listener
+from inspect_listener import Ceiling, INTERIM_MAX, Listener
+import sd_listen
 from egress_upstream import (
     ALPN_H2, BROKER_UPSTREAM_KEY, UPSTREAM_ALPN, UPSTREAMS_MAX,
     dial_failure_reason,
@@ -63,6 +66,7 @@ from egress_record import (
 
 ROOT = Path(__file__).resolve().parent.parent
 LISTENER_FILE = ROOT / "libexec" / "workload-inspect-listener"
+LISTENER_LIB = ROOT / "lib" / "inspect_listener.py"
 
 
 _MOD = None
@@ -132,9 +136,8 @@ def _serve_line(test, local, peer=("192.0.2.1", 1024)):
     one request the empty policy refuses -- the refusal is what produces the
     line whose plane, local and peer are under test.
     """
-    mod = _mod()
     out = io.StringIO()
-    listener = mod.Listener([_listener_with(local)], out)
+    listener = Listener([_listener_with(local)], out)
     ours, guest = socket.socketpair()
     test.addCleanup(ours.close)
     test.addCleanup(guest.close)
@@ -172,10 +175,9 @@ class TestPlaneDetection(unittest.TestCase):
     def test_a_connection_on_a_third_port_is_refused_unserved(self):
         """Not a listener of ours, so nothing is read from it and no record
         names it: closed, and the line says why."""
-        mod = _mod()
         conn = _mock_conn()
         out = io.StringIO()
-        listener = mod.Listener([_listener_with(("198.18.0.1", 9999))], out)
+        listener = Listener([_listener_with(("198.18.0.1", 9999))], out)
         listener._handle(conn, ("192.0.2.1", 1024),
                          _listener_with(("198.18.0.1", 9999)))
         self.assertIn("rejected", out.getvalue())
@@ -214,10 +216,9 @@ class TestExplicitTimeout(unittest.TestCase):
         of every request it serves, so a `called_once` assertion here would be
         an assertion about how many requests the connection carried.
         """
-        mod = _mod()
         conn = _mock_conn()
         out = io.StringIO()
-        listener = mod.Listener([_listener_with(
+        listener = Listener([_listener_with(
             ("198.18.0.1", CLEARTEXT.inspect_port))], out)
         listener._handle(conn, ("192.0.2.1", 1024),
                          _listener_with(("198.18.0.1", CLEARTEXT.inspect_port)))
@@ -228,10 +229,9 @@ class TestExplicitTimeout(unittest.TestCase):
     def test_the_timeout_is_set_even_when_the_connection_is_rejected(self):
         """The timeout is a ceiling the peek inherits, so it lands on the socket
         before the ceiling is consulted — a rejected socket carries it too."""
-        mod = _mod()
         conn = _mock_conn()
         out = io.StringIO()
-        listener = mod.Listener([_listener_with(
+        listener = Listener([_listener_with(
             ("198.18.0.1", TLS.inspect_port))], out, limit=0)
         listener._handle(conn, ("192.0.2.1", 1024),
                          _listener_with(("198.18.0.1", TLS.inspect_port)))
@@ -252,10 +252,9 @@ class TestCeiling(unittest.TestCase):
     def test_at_the_ceiling_the_next_connection_is_rejected_not_queued(self):
         # limit=0 makes every connection over capacity immediately, so the
         # reject path runs with no admitted thread to race a slot release.
-        mod = _mod()
         out = io.StringIO()
         local = ("198.18.0.1", CLEARTEXT.inspect_port)
-        listener = mod.Listener([_listener_with(local)], out, limit=0)
+        listener = Listener([_listener_with(local)], out, limit=0)
         conns = [_mock_conn() for _ in range(2)]
         for c in conns:
             listener._handle(c, ("192.0.2.1", 1024), _listener_with(local))
@@ -272,9 +271,8 @@ class TestCeiling(unittest.TestCase):
         one of them was being checked. A refused connection is closed on the
         guest exactly as every other drop is, so a disposition total that
         omitted it would not account for every connection the guest saw end."""
-        mod = _mod()
         local = ("198.18.0.1", CLEARTEXT.inspect_port)
-        listener = mod.Listener([_listener_with(local)], io.StringIO(), limit=0)
+        listener = Listener([_listener_with(local)], io.StringIO(), limit=0)
         for _ in range(2):
             listener._handle(_mock_conn(), ("192.0.2.1", 1024),
                              _listener_with(local))
@@ -284,8 +282,7 @@ class TestCeiling(unittest.TestCase):
         self.assertEqual(snap["concurrency"]["refused"], 2)
 
     def test_releasing_an_admission_opens_a_slot(self):
-        mod = _mod()
-        ceiling = mod.Ceiling(1)
+        ceiling = Ceiling(1)
         self.assertTrue(ceiling.admit())
         self.assertFalse(ceiling.admit())
         self.assertEqual(ceiling.rejected, 1)
@@ -309,14 +306,14 @@ class TestThreadStartFailure(unittest.TestCase):
     def _listener_that_cannot_start_threads(self, out, limit=1):
         mod = _mod()
         local = ("198.18.0.1", CLEARTEXT.inspect_port)
-        listener = mod.Listener([_listener_with(local)], out, limit=limit)
+        listener = Listener([_listener_with(local)], out, limit=limit)
         return mod, listener, local
 
     def test_a_thread_that_cannot_start_gives_its_slot_back(self):
         out = io.StringIO()
         mod, listener, local = self._listener_that_cannot_start_threads(out)
         boom = unittest.mock.Mock(side_effect=RuntimeError("can't start new thread"))
-        with unittest.mock.patch.object(mod.threading, "Thread") as thread:
+        with unittest.mock.patch.object(inspect_listener.threading, "Thread") as thread:
             thread.return_value.start = boom
             for _ in range(5):
                 listener._handle(_mock_conn(), ("192.0.2.1", 1024),
@@ -331,7 +328,7 @@ class TestThreadStartFailure(unittest.TestCase):
         out = io.StringIO()
         mod, listener, local = self._listener_that_cannot_start_threads(out)
         conn = _mock_conn()
-        with unittest.mock.patch.object(mod.threading, "Thread") as thread:
+        with unittest.mock.patch.object(inspect_listener.threading, "Thread") as thread:
             thread.return_value.start = unittest.mock.Mock(
                 side_effect=RuntimeError("can't start new thread"))
             listener._handle(conn, ("192.0.2.1", 1024), _listener_with(local))
@@ -345,7 +342,7 @@ class TestThreadStartFailure(unittest.TestCase):
     def test_a_failed_start_counts_as_a_rejection(self):
         out = io.StringIO()
         mod, listener, local = self._listener_that_cannot_start_threads(out)
-        with unittest.mock.patch.object(mod.threading, "Thread") as thread:
+        with unittest.mock.patch.object(inspect_listener.threading, "Thread") as thread:
             thread.return_value.start = unittest.mock.Mock(
                 side_effect=RuntimeError("can't start new thread"))
             listener._handle(_mock_conn(), ("192.0.2.1", 1024),
@@ -360,10 +357,9 @@ class TestRejectionTally(unittest.TestCase):
     indistinguishable from one that never fires."""
 
     def test_the_shutdown_line_names_the_count(self):
-        mod = _mod()
         out = io.StringIO()
         local = ("198.18.0.1", CLEARTEXT.inspect_port)
-        listener = mod.Listener([_listener_with(local)], out, limit=0)
+        listener = Listener([_listener_with(local)], out, limit=0)
         for _ in range(3):
             listener._handle(_mock_conn(), ("192.0.2.1", 1024),
                              _listener_with(local))
@@ -373,9 +369,8 @@ class TestRejectionTally(unittest.TestCase):
     def test_a_quiet_run_still_reports_its_zero(self):
         # The zero is the useful reading: it separates "the ceiling never
         # fired" from "nothing was logged about it".
-        mod = _mod()
         out = io.StringIO()
-        listener = mod.Listener(
+        listener = Listener(
             [_listener_with(("198.18.0.1", CLEARTEXT.inspect_port))], out)
         listener.log_summary()
         self.assertIn("stopped: 0 connection(s) rejected", out.getvalue())
@@ -422,7 +417,7 @@ class TestSocketActivation(unittest.TestCase):
         with unittest.mock.patch.dict(
                 os.environ,
                 {"LISTEN_PID": str(os.getpid()), "LISTEN_FDS": "4"}, clear=True), \
-                unittest.mock.patch.object(mod.socket, "socket",
+                unittest.mock.patch.object(sd_listen.socket, "socket",
                                            return_value=unittest.mock.Mock()) as m:
             result = mod.inherited_listening_sockets()
             self.assertEqual(len(result), 4)
@@ -446,9 +441,10 @@ class TestInstalledPath(unittest.TestCase):
         """The plane comes from the lib/ constants, never a hardcoded 8080 or
         8443: a literal would let the port drift from the constant the redirect
         and the socket unit both key on."""
-        source = LISTENER_FILE.read_text()
-        self.assertNotIn("8080", source)
-        self.assertNotIn("8443", source)
+        for f in (LISTENER_FILE, LISTENER_LIB):
+            source = f.read_text()
+            self.assertNotIn("8080", source)
+            self.assertNotIn("8443", source)
 
 
 # --- rung 2: the TLS plane ---
@@ -882,7 +878,7 @@ class TestTlsPlane(unittest.TestCase):
     def _listener(self, hosts):
         mod = _mod()
         out = io.StringIO()
-        listener = mod.Listener(
+        listener = Listener(
             [], out, policy=Policy(tls="splice", hosts=tuple(hosts)))
         return mod, listener, out
 
@@ -996,7 +992,7 @@ class TestPerHostSplice(unittest.TestCase):
     def _listener(self, hosts, splice, tls="inspect"):
         mod = _mod()
         out = io.StringIO()
-        listener = mod.Listener(
+        listener = Listener(
             [], out,
             policy=Policy(tls=tls, hosts=tuple(hosts),
                               splice=tuple(splice)),
@@ -1262,7 +1258,7 @@ class TestHttp2AlpnSelection(unittest.TestCase):
         handshake races every other connection using it -- silently, and in the
         direction that gives a host the offer another host asked for."""
         mod = _mod()
-        listener = mod.Listener([], io.StringIO(),
+        listener = Listener([], io.StringIO(),
                                 policy=self._policy(mod, http2=("grpc.example",)))
         self.assertIsNot(listener._upstream._ctx, listener._upstream._ctx_h2)
         self.assertEqual(UPSTREAM_ALPN, ("http/1.1",))
@@ -1286,7 +1282,7 @@ class TestLogInjection(unittest.TestCase):
     def _listener(self, hosts):
         mod = _mod()
         out = io.StringIO()
-        listener = mod.Listener(
+        listener = Listener(
             [], out, policy=Policy(tls="splice", hosts=tuple(hosts)))
         return mod, listener, out
 
@@ -1385,9 +1381,8 @@ class _CleartextRig(unittest.TestCase):
         end is pre-loaded with the matching entry of `responses`, so the
         response is already waiting when the relay comes to read it.
         """
-        mod = _mod()
         out = io.StringIO()
-        listener = mod.Listener(
+        listener = Listener(
             [], out,
             policy=policy or Policy(tls="splice", hosts=tuple(hosts)))
         ours, guest = self._pair()
@@ -1650,9 +1645,8 @@ class TestPolicyEnforcement(_CleartextRig):
         self.assertEqual(dialled, [])
 
     def test_the_refusal_is_counted_under_its_own_reason(self):
-        mod = _mod()
         out = io.StringIO()
-        listener = mod.Listener(
+        listener = Listener(
             [], out, policy=self._policy(
                 [], ("a.example", ("GET",), ("/v2/*",))))
         listener.counters.record_drop(DROP_NOT_PERMITTED, "a.example")
@@ -2040,8 +2034,7 @@ class TestCleartextPerRequest(unittest.TestCase):
         uid would live as long as the client connection. The closure sits in
         _serve_one_request's own finally; this pins the premise it rests on.
         """
-        mod = _mod()
-        listener = mod.Listener([], io.StringIO(),
+        listener = Listener([], io.StringIO(),
                                 policy=Policy(tls="splice",
                                                   hosts=("a.example",)))
         near, far = self._pair()
@@ -2070,7 +2063,7 @@ class TestCleartextPerRequest(unittest.TestCase):
         handshake against a minted leaf. What the behavioural half can reach is
         the consequence, and that is the test below.
         """
-        source = (ROOT / "libexec" / "workload-inspect-listener").read_text()
+        source = LISTENER_LIB.read_text()
         fn = source[source.index("def _serve_tls_inspect("):
                     source.index("def _bump_answer(")]
         self.assertIn("credential_for(host)", fn)
@@ -2086,8 +2079,7 @@ class TestCleartextPerRequest(unittest.TestCase):
         host, and seeding the pool with None would hand the first request a
         non-socket -- while seeding it with the origin is the defect this
         replaced."""
-        mod = _mod()
-        listener = mod.Listener([], io.StringIO(),
+        listener = Listener([], io.StringIO(),
                                 policy=Policy(tls="inspect",
                                                   hosts=("a.example",)))
         where = Where("t", cid="c0", plane="tls")
@@ -2100,9 +2092,9 @@ class TestCleartextPerRequest(unittest.TestCase):
             seen["upstreams"] = upstreams
             return False
 
-        with unittest.mock.patch.object(mod.Listener, "_is_http",
+        with unittest.mock.patch.object(Listener, "_is_http",
                                         lambda *a, **k: True), \
-             unittest.mock.patch.object(mod.Listener, "_serve_one_request",
+             unittest.mock.patch.object(Listener, "_serve_one_request",
                                         one_request):
             listener._serve_terminated(object(), where, "a.example", None)
         self.assertEqual(seen["upstreams"], {},
@@ -2111,9 +2103,9 @@ class TestCleartextPerRequest(unittest.TestCase):
         # And the ordinary path still seeds the origin it was handed, or the
         # fix has turned reuse off for every non-brokered terminated session.
         origin, far = self._pair()
-        with unittest.mock.patch.object(mod.Listener, "_is_http",
+        with unittest.mock.patch.object(Listener, "_is_http",
                                         lambda *a, **k: True), \
-             unittest.mock.patch.object(mod.Listener, "_serve_one_request",
+             unittest.mock.patch.object(Listener, "_serve_one_request",
                                         one_request):
             listener._serve_terminated(object(), where, "a.example",
                                        _Stream(origin))
@@ -2136,8 +2128,7 @@ class TestCleartextPerRequest(unittest.TestCase):
         disagree, and a session test that dialled its own origin would pass
         with the two collapsed back together.
         """
-        mod = _mod()
-        listener = mod.Listener([], io.StringIO(),
+        listener = Listener([], io.StringIO(),
                                 policy=Policy(tls="inspect",
                                                   hosts=("a.example",)))
         origin, far = self._pair()
@@ -2165,8 +2156,7 @@ class TestCleartextPerRequest(unittest.TestCase):
     def test_two_brokered_requests_share_one_broker_connection(self):
         """The other direction: separating the slots must not turn reuse off
         for the broker leg, or every request on a session redials it."""
-        mod = _mod()
-        listener = mod.Listener([], io.StringIO(),
+        listener = Listener([], io.StringIO(),
                                 policy=Policy(tls="inspect",
                                                   hosts=("a.example",)))
         upstreams = {}
@@ -2351,9 +2341,8 @@ class TestCleartextTimeouts(unittest.TestCase):
         ever written, so every case here ends on a timeout rather than on EOF.
         Returns (log, counters snapshot, elapsed seconds).
         """
-        mod = _mod()
         out = io.StringIO()
-        listener = mod.Listener(
+        listener = Listener(
             [], out, policy=Policy(tls="splice", hosts=tuple(hosts)))
         ours, guest = self._pair()
         guest.sendall(feed)
@@ -2377,7 +2366,8 @@ class TestCleartextTimeouts(unittest.TestCase):
         started = time.monotonic()
         with unittest.mock.patch.object(
                 socket, "create_connection", side_effect=dial), \
-                unittest.mock.patch.object(mod, "copy_body", watched_copy_body), \
+                unittest.mock.patch.object(
+                    inspect_listener, "copy_body", watched_copy_body), \
                 unittest.mock.patch.object(
                     egress_relay, "CONNECTION_TIMEOUT", self.CONNECTION), \
                 unittest.mock.patch.object(
@@ -2608,8 +2598,7 @@ class TestInterimResponses(unittest.TestCase):
         self.assertIn(b"200 OK", got)
 
     def test_an_endless_run_of_interim_heads_ends_the_exchange(self):
-        mod = _mod()
-        flood = b"HTTP/1.1 100 Continue\r\n\r\n" * (mod.INTERIM_MAX + 5)
+        flood = b"HTTP/1.1 100 Continue\r\n\r\n" * (INTERIM_MAX + 5)
         log, got, _ = self._run(
             ["a.example"], b"GET / HTTP/1.1\r\nHost: a.example\r\n\r\n",
             [flood])
@@ -2619,8 +2608,7 @@ class TestInterimResponses(unittest.TestCase):
 
     def test_a_run_within_the_ceiling_still_reaches_the_final_response(self):
         """The bound must not be what breaks an origin sending early hints."""
-        mod = _mod()
-        head = b"HTTP/1.1 103 Early Hints\r\n\r\n" * mod.INTERIM_MAX
+        head = b"HTTP/1.1 103 Early Hints\r\n\r\n" * INTERIM_MAX
         _, got, _ = self._run(
             ["a.example"], b"GET / HTTP/1.1\r\nHost: a.example\r\n\r\n",
             [head + _OK])
@@ -2639,9 +2627,8 @@ class TestCleartextUpstreamFailure(unittest.TestCase):
     _pair = _CleartextRig._pair
 
     def test_an_unreachable_upstream_is_not_reported_as_a_policy_decision(self):
-        mod = _mod()
         out = io.StringIO()
-        listener = mod.Listener(
+        listener = Listener(
             [], out, policy=Policy(tls="splice", hosts=("a.example",)))
         ours, guest = self._pair()
         guest.sendall(b"GET / HTTP/1.1\r\nHost: a.example\r\n\r\n")
@@ -2717,7 +2704,7 @@ class TestEchTripwire(unittest.TestCase):
     def _listener(self, hosts):
         mod = _mod()
         out = io.StringIO()
-        return mod, mod.Listener(
+        return mod, Listener(
             [], out, policy=Policy(tls="splice", hosts=tuple(hosts))), out
 
     def _serve(self, listener, payload):
@@ -2796,7 +2783,7 @@ class TestCounters(unittest.TestCase):
                   http2=(), policy=()):
         mod = _mod()
         out = io.StringIO()
-        return mod, mod.Listener([], out, policy=Policy(
+        return mod, Listener([], out, policy=Policy(
             tls="splice", hosts=tuple(hosts),
             internal=tuple(internal), splice=tuple(splice),
             http2=tuple(http2),
@@ -2862,7 +2849,7 @@ class TestCounters(unittest.TestCase):
         thing keeping a new reason in step with the pre-seed is that every call
         site names a constant, and every constant is in DROP_REASONS."""
         import re
-        source = LISTENER_FILE.read_text()
+        source = LISTENER_LIB.read_text()
         calls = re.findall(r"record_drop\(\s*([^,)]+)", source)
         self.assertGreater(len(calls), 5)
         for arg in calls:
@@ -2895,7 +2882,7 @@ class TestCounters(unittest.TestCase):
         # it decides them (egress_upstream) and the listener names the rest.
         source = "\n".join(
             re.sub(r"from egress_record import \([^)]*\)", "", f.read_text())
-            for f in (LISTENER_FILE, ROOT / "lib" / "egress_upstream.py"))
+            for f in (LISTENER_LIB, ROOT / "lib" / "egress_upstream.py"))
         self.assertNotIn("from egress_record import (", source)
         named = {arg.strip() for arg in
                  re.findall(r"record_drop\(\s*([^,)]+)", source)
@@ -3149,7 +3136,7 @@ class TestStatusFile(unittest.TestCase):
 
     def _listener(self, path):
         mod = _mod()
-        return mod, mod.Listener(
+        return mod, Listener(
             [], io.StringIO(), policy=Policy(tls="splice", hosts=()),
             status_path=path)
 
@@ -3178,9 +3165,8 @@ class TestStatusFile(unittest.TestCase):
         listener.write_status()   # must not raise
 
     def test_the_failure_is_logged_rather_than_swallowed_silently(self):
-        mod = _mod()
         out = io.StringIO()
-        listener = mod.Listener(
+        listener = Listener(
             [], out, policy=Policy(tls="splice", hosts=()),
             status_path=os.path.join(self.dir, "no", "such", "status.json"))
         listener.write_status()
@@ -3193,9 +3179,8 @@ class TestStatusFile(unittest.TestCase):
         not a plain int or str would, under a narrower clause, kill the accept
         loop and with it the guest's whole egress. It must cost the status file
         instead."""
-        mod = _mod()
         out = io.StringIO()
-        listener = mod.Listener(
+        listener = Listener(
             [], out, policy=Policy(tls="splice", hosts=()),
             status_path=self.path)
         listener.status = lambda: {"a_later_rungs_counter": object()}
@@ -3358,10 +3343,10 @@ class TestCallerIdentity(unittest.TestCase):
         """Drive one connection with the caller lookup answering `caller_uid`."""
         local = ("198.18.0.1", CLEARTEXT.inspect_port)
         out = io.StringIO()
-        listener = mod.Listener([_listener_with(local)], out)
+        listener = Listener([_listener_with(local)], out)
         conn = _mock_conn()
         with unittest.mock.patch("os.getuid", return_value=own_uid), \
-                unittest.mock.patch.object(mod, "peer_uid",
+                unittest.mock.patch.object(inspect_listener, "peer_uid",
                                            return_value=caller_uid):
             listener._handle(conn, ("192.0.2.1", 1024), _listener_with(local))
         return listener, conn, out.getvalue()
@@ -3410,10 +3395,9 @@ class TestCallerIdentity(unittest.TestCase):
     def test_a_raising_lookup_does_not_take_the_connection_path_down(self):
         """A hardening check that can throw is worse than one that fails soft:
         it would turn this layer into an outage for the traffic it protects."""
-        mod = _mod()
         local = ("198.18.0.1", CLEARTEXT.inspect_port)
-        listener = mod.Listener([_listener_with(local)], io.StringIO())
-        with unittest.mock.patch.object(mod, "peer_uid",
+        listener = Listener([_listener_with(local)], io.StringIO())
+        with unittest.mock.patch.object(inspect_listener, "peer_uid",
                                         side_effect=RuntimeError("boom")):
             listener._handle(_mock_conn(), ("192.0.2.1", 1024),
                              _listener_with(local))
@@ -3423,12 +3407,11 @@ class TestCallerIdentity(unittest.TestCase):
         """A foreign caller must not be able to spend a slot the workload
         needs. With limit=0 every connection is over capacity, so whichever
         check runs first is the reason that gets recorded."""
-        mod = _mod()
         local = ("198.18.0.1", CLEARTEXT.inspect_port)
         out = io.StringIO()
-        listener = mod.Listener([_listener_with(local)], out, limit=0)
+        listener = Listener([_listener_with(local)], out, limit=0)
         with unittest.mock.patch("os.getuid", return_value=self.OWN_UID), \
-                unittest.mock.patch.object(mod, "peer_uid",
+                unittest.mock.patch.object(inspect_listener, "peer_uid",
                                            return_value=self.OWN_UID + 1):
             listener._handle(_mock_conn(), ("192.0.2.1", 1024),
                              _listener_with(local))
