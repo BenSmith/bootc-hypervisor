@@ -42,6 +42,10 @@ from egress_ca import (
     ca_cert_path, ca_key_path, ca_openssl_argv, leaf_openssl_argv,
 )
 from tls_hello import HelloUnreadable, read_client_hello
+from http_target import (
+    SCHEME_HTTP, SCHEME_HTTPS, host_from_authority, redirect_host,
+    redirect_target,
+)
 from http_framing import (
     Framing, H2_PREFACE, HTTP_METHOD_MAX, RequestUnreadable, _Stream,
     _is_count, is_http_request_start, request_framing, response_framing,
@@ -794,14 +798,13 @@ class TestTheHostHeaderIsPinnedToTheServerName(TerminationCase):
         it; a copy that still did would refuse this as naming a destination
         neither end is on.
         """
-        mod = _mod()
         self.assertEqual(
-            mod.host_from_authority("localhost:443", mod.SCHEME_HTTPS).host,
+            host_from_authority("localhost:443", SCHEME_HTTPS).host,
             "localhost")
         with self.assertRaises(RequestUnreadable):
-            mod.host_from_authority("localhost:443", mod.SCHEME_HTTP)
+            host_from_authority("localhost:443", SCHEME_HTTP)
         with self.assertRaises(RequestUnreadable):
-            mod.host_from_authority("localhost:80", mod.SCHEME_HTTPS)
+            host_from_authority("localhost:80", SCHEME_HTTPS)
 
 
 class TestUpgradesAreRelayedAfterThePolicyCheck(TerminationCase):
@@ -980,15 +983,13 @@ class TestARedirectOffTheAllowlistIsNamedWhereBothNamesAreKnown(
         self.assertNotIn("redirected to", out.getvalue())
 
     def test_a_relative_location_names_no_host(self):
-        mod = _mod()
-        self.assertIsNone(mod.redirect_host("/next"))
-        self.assertIsNone(mod.redirect_host("//host-relative/x"))
+        self.assertIsNone(redirect_host("/next"))
+        self.assertIsNone(redirect_host("//host-relative/x"))
 
     def test_a_port_in_the_location_does_not_lose_the_name(self):
         """host_from_authority refuses a port the plane does not reach, which
         is right for authorising and wrong for reporting."""
-        mod = _mod()
-        self.assertEqual(mod.redirect_host("https://cdn.elsewhere:8443/x"),
+        self.assertEqual(redirect_host("https://cdn.elsewhere:8443/x"),
                          "cdn.elsewhere")
 
     # --- rung 4 T8: the target its own policy entry will refuse ---
@@ -1074,20 +1075,18 @@ class TestARedirectOffTheAllowlistIsNamedWhereBothNamesAreKnown(
         so it has to be judged on the same string that connection is. A path
         normalised differently here produces a note that contradicts the 403
         it exists to explain."""
-        mod = _mod()
-        self.assertEqual(mod.redirect_target("https://h/a/../b"), ("h", "/b"))
-        self.assertEqual(mod.redirect_target("https://h/p?q=1/2"), ("h", "/p"))
-        self.assertEqual(mod.redirect_target("https://h/p#f/g"), ("h", "/p"))
-        self.assertEqual(mod.redirect_target("https://h"), ("h", "/"))
-        self.assertEqual(mod.redirect_target("https://h?q=1"), ("h", "/"))
-        self.assertEqual(mod.redirect_target("https://h:8443/x"), ("h", "/x"))
-        self.assertEqual(mod.redirect_target("/next"), (None, None))
+        self.assertEqual(redirect_target("https://h/a/../b"), ("h", "/b"))
+        self.assertEqual(redirect_target("https://h/p?q=1/2"), ("h", "/p"))
+        self.assertEqual(redirect_target("https://h/p#f/g"), ("h", "/p"))
+        self.assertEqual(redirect_target("https://h"), ("h", "/"))
+        self.assertEqual(redirect_target("https://h?q=1"), ("h", "/"))
+        self.assertEqual(redirect_target("https://h:8443/x"), ("h", "/x"))
+        self.assertEqual(redirect_target("/next"), (None, None))
 
     def test_a_path_that_cannot_be_normalised_predicts_nothing(self):
         """None is not "no refusal": an encoded slash has two readings and the
         request side declines to pick one, so there is no string to judge."""
-        mod = _mod()
-        host, path = mod.redirect_target("https://h/a%2fb")
+        host, path = redirect_target("https://h/a%2fb")
         self.assertEqual(host, "h")
         self.assertIsNone(path)
 

@@ -22,6 +22,7 @@ from pathlib import Path
 
 from tests import load_script
 from egress_policy import INSPECT_GUEST_AGENT_KEY
+from config_parser import normalise_hostname
 from workload_lib import container_inspect_policy
 from egress_policy import (
     INSPECT_PORT_CLEARTEXT, INSPECT_PORT_TLS, hostname_match,
@@ -29,6 +30,7 @@ from egress_policy import (
 )
 from workload_addr import INSPECT_LISTENER_BIN
 from tls_hello import HelloUnreadable, TLS_EXT_ECH, read_client_hello
+from http_target import (normalise_path, normalise_target)
 from http_framing import (
     DRAIN_MAX, H2Framing, H2_PREFACE, MAX_TRAILER_LINES, NotH2, RELAY_CHUNK,
     RequestUnreadable, _Stream, copy_body,
@@ -3134,7 +3136,7 @@ class TestInternalAttribution(unittest.TestCase):
                 return_value=[(2, 1, 6, "", ("10.0.0.9", 443))]):
             self.assertEqual(
                 listener._dial_failure_reason(
-                    mod.normalise_hostname("Host.Example.")),
+                    normalise_hostname("Host.Example.")),
                 "upstream unreachable")
 
 
@@ -3211,7 +3213,7 @@ class TestTargetNormalisation(unittest.TestCase):
     """
 
     def norm(self, target):
-        return _mod().normalise_path(target)
+        return normalise_path(target)
 
     def test_dot_segments_resolve(self):
         for target, expected in (
@@ -3285,16 +3287,14 @@ class TestTargetNormalisation(unittest.TestCase):
     def test_an_absolute_form_target_is_normalised_too(self):
         """Otherwise the one form that moves the name out of the Host header is
         also the one that skips the path work."""
-        mod = _mod()
-        target, authority = mod.normalise_target(
+        target, authority = normalise_target(
             "GET", "http://h.example/a/../b")
         self.assertEqual((target, authority), ("/b", "h.example"))
 
     def test_an_absolute_form_authority_ends_before_a_query(self):
         """A query can carry a slash of its own, and splitting the authority on
         that one puts half the query into the name being authorised."""
-        mod = _mod()
-        target, authority = mod.normalise_target(
+        target, authority = normalise_target(
             "GET", "http://h.example?next=/a/b")
         self.assertEqual(authority, "h.example")
         self.assertEqual(target, "/?next=/a/b")
