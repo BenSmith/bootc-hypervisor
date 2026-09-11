@@ -458,7 +458,7 @@ lib/qmp.py                         # QMP client
 lib/workloadctl_core.py            # WorkloadConfig / WorkloadManager (TOML loading, paths, lifecycle field)
 lib/config_parser.py               # The TOML grammar both substrates read (hostname patterns, policy/credential blocks, volumes)
 lib/workload_lib.py                # Shared library (UID allocation, paths, subid math)
-lib/broker_config.py               # broker.toml, rendered and read: the credential table, the unit's addresses, and the (workload, Host) profile table the broker starts from
+lib/broker_config.py               # broker.toml, rendered, written (write_instance_config) and read: the credential table, the unit's addresses, and the (workload, Host) profile table the broker starts from
 lib/broker_request.py              # What leaves the broker carrying a credential, decided without a socket: header replacement, request and response framing
 lib/broker_server.py               # The broker's Handler and Server: identity once per connection, the three ceilings that refuse rather than queue, the two TLS contexts
 lib/egress_selinux.py              # How QEMU enters a confined domain, which policy modules ship, and the label the QMP socket dir needs
@@ -512,7 +512,7 @@ libexec/workload-write-env         # main() over lib/secrets_env.py
 libexec/workload-vm-*              # VM helpers: build-disk, qmp, shutdown, notify, netdev, filter,
                                    #   inspect, resolve
 libexec/workload-inspect-listener  # The inspector's entrypoint: reads the policy, recovers the activated sockets, runs lib/inspect_listener.py; both substrates
-libexec/workload-broker-config     # Writes one broker instance's broker.toml (ExecStartPre, either substrate)
+libexec/workload-broker-config     # main() over broker_config.write_instance_config (ExecStartPre, either substrate)
 libexec/agent-broker               # The credential broker: a whole standalone program, not a helper
 libexec/workload-pcap              # Capture runner main() (SIGTERM → SystemExit)
 libexec/workload-exporter          # Prometheus metrics exporter: main() over lib/exporter_*.py

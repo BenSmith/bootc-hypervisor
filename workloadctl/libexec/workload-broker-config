@@ -10,112 +10,38 @@ RuntimeDirectory= systemd has already created as the unit's dynamic user -- so
 the file is written unprivileged, at 0600 inside a 0700 directory, and there is
 no window in which it is wider than it ends up.
 
-Regenerated at every start rather than installed once, which is what
-/run buys over /etc (ADR 007 decision 2 as amended): the config cannot drift
-from the bundle it is a pure function of, and it cannot serve the previous
-boot's credential set.
+Regenerated at every start rather than installed once, which is what /run buys
+over /etc (ADR 007 decision 2 as amended): the config cannot drift from the
+bundle it is a pure function of, and it cannot serve the previous boot's
+credential set.
 
-WHAT USED TO BE HERE
-
-`up` and `down`, an ExecStartPre/ExecStopPost pair on the VM unit that owned a
-shared advertised endpoint (a dummy interface plus an nftables nat chain) and
-this workload's element in a uid -> broker map. ADR 007 deleted what they
-reached: with one broker instance per workload, bound to an address derived from
-that workload's uid and dialled by the inspector, there is no advertised
-endpoint for a guest to name and no map to translate it. They went with the
-mechanism rather than being left inert, so this helper is one verb now.
-
-The uid-reuse sweep those verbs performed went too, and nothing replaces it
-because nothing needs to: the entitlement it was scrubbing lived in a
-host-global map keyed by a uid the allocator reuses, and the entitlement now
-lives in the workload's own generated unit, which is deleted with the workload.
+The program is broker_config.write_instance_config; this file is main(), which
+turns the name into the bundle and the uid it is a function of.
 
 EXIT CODES
 
-`config` fails loudly. A broker started against a stale config serves the wrong
-credentials, and one started against no config serves none -- both are worse
-than a start that does not happen, and the unit's ExecStartPre is deliberately
-not `-` prefixed for the same reason.
+`config` fails loudly, and always with 1. There is no tolerant verb: a config
+that did not get written leaves the broker reading a stale file or none, and
+the unit's ExecStartPre is deliberately not `-` prefixed for the same reason.
 """
-import os
 import pwd
 import sys
 
 sys.dont_write_bytecode = True
 
-from broker_config import (
-    container_uses_credentials, render_container_broker_config,
-    render_vm_broker_config, broker_config_path, vm_uses_credentials,
-)
+from broker_config import write_instance_config
 from workload_lib import load_workload_config
-
-
-def log(msg):
-    print(msg, flush=True)
-
-
-
-def write_config(name: str) -> int:
-    """Render this workload's broker.toml into the instance's runtime directory.
-
-    A pure function of the workload TOML and the workload uid, rewritten at
-    every start (design D2). Nothing here reconciles anything: there is no
-    previous file to compare against, because systemd removed the runtime
-    directory when the instance last stopped, and that is precisely what stops
-    an instance serving the previous boot's credential set.
-
-    UNPRIVILEGED, and the whole verb depends on it. It runs as the instance's
-    own DynamicUser, inside the unit's sandbox, so the file it writes is owned
-    by the uid the broker runs as and by nothing else -- no chown, and no window
-    in which the material's config is readable by the workload uid. Everything
-    it reads (the bundle, the passwd db) is world-readable.
-
-    Failing is the right outcome for every error below. A broker started against
-    a missing or stale config either refuses every request or attaches the wrong
-    credential to one, and the second is silent.
-    """
-    config = load_workload_config(name)
-    uid = pwd.getpwnam(f"_wl-{name}").pw_uid
-    # One helper, both substrates. The unit directive is identical on either
-    # side and the config it writes is the same file at the same path, so the
-    # only thing that differs is which table the credentials are read from --
-    # a branch here rather than a second ExecStartPre binary to keep in step.
-    is_vm = isinstance(config.get("vm"), dict)
-    uses = vm_uses_credentials(config) if is_vm else container_uses_credentials(config)
-    render = render_vm_broker_config if is_vm else render_container_broker_config
-    block = "[[vm.network.credential]]" if is_vm else "[[network.credential]]"
-    if not uses:
-        # The generator does not emit an instance for such a workload, so
-        # reaching here means a unit outlived the config that produced it --
-        # a hand-edited unit, or a TOML edited without a regeneration. Refused
-        # rather than written empty: the broker exits on a config with no
-        # sandboxes anyway, and this message names the cause.
-        print(f"  ERROR: {name} declares no {block} blocks "
-              f"(or is not inspected), so it has no broker instance. This unit "
-              f"is stale: `workloadctl reload {name}`", file=sys.stderr)
-        return 1
-    path = broker_config_path(name)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    text = render(config, uid)
-    # Written through a temporary and renamed, so a broker that is somehow
-    # already reading cannot see a half-written table -- and 0600 before the
-    # rename rather than after, so the file is never briefly wider than it ends
-    # up. The directory is already 0700 (RuntimeDirectoryMode=); this is the
-    # second half of the same rule and costs nothing.
-    tmp = path.with_name(path.name + ".new")
-    with open(tmp, "w") as fh:
-        fh.write(text)
-    os.chmod(tmp, 0o600)
-    os.replace(tmp, path)
-    log(f"  Wrote {path} for uid {uid}")
-    return 0
 
 
 def main(argv):
     if len(argv) != 3 or argv[1] != "config":
         print(f"usage: {argv[0]} config <name>", file=sys.stderr)
         return 2
-    return write_config(argv[2])
+    name = argv[2]
+    path = write_instance_config(load_workload_config(name),
+                                 pwd.getpwnam(f"_wl-{name}").pw_uid)
+    print(f"  Wrote {path}", flush=True)
+    return 0
 
 
 if __name__ == "__main__":
@@ -123,9 +49,4 @@ if __name__ == "__main__":
         sys.exit(main(sys.argv))
     except Exception as e:  # noqa: BLE001
         print(f"  ERROR: {e}", file=sys.stderr)
-        # Always 1. There is no tolerant verb left: `down` was the one, and it
-        # was tolerant because its element was legitimately absent whenever a
-        # start had failed before installing it. A config that did not get
-        # written has no such benign case -- it leaves the broker reading a
-        # stale file or none.
         sys.exit(1)

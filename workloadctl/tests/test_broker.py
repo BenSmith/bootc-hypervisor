@@ -536,27 +536,20 @@ class TestTheHelperWritesTheConfig(unittest.TestCase):
 
     def setUp(self):
         from unittest import mock
-        self.mod = load_script("libexec/workload-broker-config")
+        import broker_config
+        self.mod = broker_config
         self.tmp = Path(tempfile.mkdtemp(prefix="broker-config-"))
         self.addCleanup(__import__("shutil").rmtree, self.tmp,
                         ignore_errors=True)
         self.path = self.tmp / "broker.toml"
         self.enterContext(mock.patch.object(
             self.mod, "broker_config_path", lambda name: self.path))
-        self.enterContext(mock.patch.object(
-            self.mod.pwd, "getpwnam",
-            lambda user: type("pw", (), {"pw_uid": UID_MIN + 5})))
 
     def write(self, cfg):
-        from unittest import mock
-        with mock.patch.object(self.mod, "load_workload_config", lambda name: cfg):
-            buf = io.StringIO()
-            with contextlib.redirect_stdout(buf), \
-                    contextlib.redirect_stderr(io.StringIO()):
-                return self.mod.write_config(cfg["workload"]["name"])
+        return self.mod.write_instance_config(cfg, UID_MIN + 5)
 
     def test_it_writes_the_rendered_config(self):
-        self.assertEqual(self.write(cred_config()), 0)
+        self.assertEqual(self.write(cred_config()), self.path)
         self.assertEqual(tomllib.loads(self.path.read_text())["listen_address"],
                          broker_listen_address(UID_MIN + 5))
 
@@ -585,8 +578,37 @@ class TestTheHelperWritesTheConfig(unittest.TestCase):
         cfg = cred_config()
         cfg["vm"]["network"]["credential"] = []
         cfg["vm"]["network"]["policy"] = [{"host": "api.example.test"}]
-        self.assertEqual(self.write(cfg), 1)
+        with self.assertRaisesRegex(self.mod.BrokerConfigError,
+                                    r"declares no \[\[vm.network.credential\]\]"):
+            self.write(cfg)
         self.assertFalse(self.path.exists())
+
+    def test_a_container_is_refused_naming_its_own_block(self):
+        cfg = {"workload": {"name": "web"}, "network": {"hosts": ["a"]}}
+        with self.assertRaisesRegex(self.mod.BrokerConfigError,
+                                    r"declares no \[\[network.credential\]\]"):
+            self.write(cfg)
+
+
+class TestTheConfigVerbShim(unittest.TestCase):
+    """main() turns the name into the bundle and the uid the document is a
+    function of, and nothing else."""
+
+    def setUp(self):
+        self.mod = load_script("libexec/workload-broker-config")
+
+    def test_config_writes_for_the_named_workload(self):
+        from unittest import mock
+        cfg = cred_config()
+        with mock.patch.object(self.mod, "load_workload_config",
+                               lambda name: cfg), \
+                mock.patch.object(self.mod.pwd, "getpwnam",
+                                  lambda user: type("pw", (), {"pw_uid": 10005})), \
+                mock.patch.object(self.mod, "write_instance_config",
+                                  return_value=Path("/run/x")) as w, \
+                contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(self.mod.main(["prog", "config", "agent"]), 0)
+        w.assert_called_once_with(cfg, 10005)
 
     def test_the_verb_is_rejected_with_the_wrong_argument_count(self):
         buf = io.StringIO()
@@ -1277,7 +1299,7 @@ class TestTheMapSweepIsGone(unittest.TestCase):
         """
         source = (Path(__file__).resolve().parent.parent
                   / "libexec" / "workload-broker-config").read_text()
-        self.assertIn("def write_config(", source)
+        self.assertIn("write_instance_config(", source)
         self.assertNotIn("def up(", source)
         self.assertNotIn("def down(", source)
 

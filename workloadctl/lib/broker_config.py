@@ -491,6 +491,61 @@ def inspect_link_delete_commands(uid: int) -> tuple[list[str], list[str]]:
 # --- the reader: what the shipped program makes of the document ------------
 
 
+def write_instance_config(config: dict, uid: int) -> Path:
+    """Render one workload's broker.toml into the instance's runtime directory
+    and return its path.
+
+    A pure function of the workload TOML and the workload uid, rewritten at
+    every start (design D2). Nothing here reconciles anything: there is no
+    previous file to compare against, because systemd removed the runtime
+    directory when the instance last stopped, and that is precisely what stops
+    an instance serving the previous boot's credential set.
+
+    UNPRIVILEGED, and the whole verb depends on it. It runs as the instance's
+    own DynamicUser, inside the unit's sandbox, so the file it writes is owned
+    by the uid the broker runs as and by nothing else -- no chown, and no window
+    in which the material's config is readable by the workload uid. Everything
+    it reads (the bundle, the passwd db) is world-readable.
+
+    Refusing is the right outcome for every error below. A broker started
+    against a missing or stale config either refuses every request or attaches
+    the wrong credential to one, and the second is silent.
+    """
+    name = config["workload"]["name"]
+    # One helper, both substrates. The unit directive is identical on either
+    # side and the config it writes is the same file at the same path, so the
+    # only thing that differs is which table the credentials are read from --
+    # a branch here rather than a second ExecStartPre binary to keep in step.
+    is_vm = isinstance(config.get("vm"), dict)
+    uses = vm_uses_credentials(config) if is_vm else container_uses_credentials(config)
+    render = render_vm_broker_config if is_vm else render_container_broker_config
+    block = "[[vm.network.credential]]" if is_vm else "[[network.credential]]"
+    if not uses:
+        # The generator does not emit an instance for such a workload, so
+        # reaching here means a unit outlived the config that produced it --
+        # a hand-edited unit, or a TOML edited without a regeneration. Refused
+        # rather than written empty: the broker exits on a config with no
+        # sandboxes anyway, and this message names the cause.
+        raise BrokerConfigError(
+            f"{name} declares no {block} blocks (or is not inspected), so it "
+            f"has no broker instance. This unit is stale: "
+            f"`workloadctl reload {name}`")
+    path = broker_config_path(name)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    text = render(config, uid)
+    # Written through a temporary and renamed, so a broker that is somehow
+    # already reading cannot see a half-written table -- and 0600 before the
+    # rename rather than after, so the file is never briefly wider than it ends
+    # up. The directory is already 0700 (RuntimeDirectoryMode=); this is the
+    # second half of the same rule and costs nothing.
+    tmp = path.with_name(path.name + ".new")
+    with open(tmp, "w") as fh:
+        fh.write(text)
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, path)
+    return path
+
+
 class BrokerConfigError(ValueError):
     """The document, or the credential it names, cannot be used. Raised by the
     reader and turned into an exit by the program: the library raises, the
