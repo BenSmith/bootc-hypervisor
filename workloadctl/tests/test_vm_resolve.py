@@ -16,6 +16,7 @@ as one.
 import importlib
 from tests import load_script
 import dns_wire
+import resolve_policy
 import ipaddress
 import json
 import os
@@ -152,10 +153,10 @@ def _module():
     return mod
 
 
-def _policy(mod, **overrides):
+def _policy(**overrides):
     doc = vm_resolve_policy({}, UID)
     doc.update(overrides)
-    return mod.Policy(doc)
+    return resolve_policy.Policy(doc)
 
 
 class TestAddress(unittest.TestCase):
@@ -287,7 +288,7 @@ class TestPolicyDocument(unittest.TestCase):
         it and the tunnelling counter loud on a correct config."""
         mod = _module()
         self.assertEqual(set(vm_resolve_policy({}, UID)),
-                         set(mod.Policy.DOCUMENT_KEYS))
+                         set(resolve_policy.Policy.DOCUMENT_KEYS))
 
     def test_the_two_keys_stay_apart(self):
         """A `hosts` name must not appear under `policy`. Merging them would
@@ -369,7 +370,7 @@ class TestSynthesis(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.mod = _module()
-        cls.policy = _policy(cls.mod)
+        cls.policy = _policy()
         cls.inspect = inspect_address(UID)
 
     def answer(self, *args, **kwargs):
@@ -431,7 +432,7 @@ class TestNodata(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.mod = _module()
-        cls.policy = _policy(cls.mod)
+        cls.policy = _policy()
 
     def answer(self, *args, **kwargs):
         return Reply(dns_wire.build_answer(query(*args, **kwargs), self.policy))
@@ -483,7 +484,7 @@ class TestStaticMap(unittest.TestCase):
     def setUpClass(cls):
         cls.mod = _module()
         cls.inspect = inspect_address(UID)
-        cls.policy = _policy(cls.mod, static={
+        cls.policy = _policy(static={
             "git.local": ["192.0.2.9"],
             "dual.local": ["192.0.2.10", "2001:db8::10"],
         })
@@ -527,7 +528,7 @@ class TestStaticMap(unittest.TestCase):
                              ["192.0.2.9"], spelling)
 
     def test_a_hand_edited_map_key_is_normalised_on_load(self):
-        policy = _policy(self.mod, static={"GIT.Local.": ["192.0.2.9"]})
+        policy = _policy(static={"GIT.Local.": ["192.0.2.9"]})
         reply = Reply(dns_wire.build_answer(query("git.local", TYPE_A), policy))
         self.assertEqual(reply.addresses(), ["192.0.2.9"])
 
@@ -538,7 +539,7 @@ class TestEdns(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.mod = _module()
-        cls.policy = _policy(cls.mod)
+        cls.policy = _policy()
         cls.inspect = inspect_address(UID)
 
     def test_an_opt_query_is_answered(self):
@@ -573,7 +574,7 @@ class TestMalformed(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.mod = _module()
-        cls.policy = _policy(cls.mod)
+        cls.policy = _policy()
 
     def test_a_non_query_opcode_gets_notimp(self):
         """An UPDATE or a NOTIFY is not a question about a name, so there is no
@@ -644,7 +645,7 @@ class TestLogInjectionViaLabel(unittest.TestCase):
 
     def setUp(self):
         self.mod = _module()
-        self.policy = _policy(self.mod, hosts=["allowed.example"])
+        self.policy = _policy(hosts=["allowed.example"])
 
     _forged = "evil\n  allowed.example A -> static: 1 record(s)"
 
@@ -734,14 +735,14 @@ class TestUdpSurvivesABugInItself(unittest.TestCase):
         return sock, counters
 
     def test_a_corrupt_static_literal_does_not_end_the_process(self):
-        policy = _policy(self.mod, static={"broken.example": ("not-an-ip",)})
+        policy = _policy(static={"broken.example": ("not-an-ip",)})
         sock, _ = self._serve(policy)
         self.assertEqual(Reply(sock.sent).rcode, 2)      # SERVFAIL
 
     def test_it_is_servfail_and_not_formerr(self):
         """The query was fine; we were not. FORMERR would send an operator
         looking at the guest for a query the guest got right."""
-        policy = _policy(self.mod, static={"broken.example": ("not-an-ip",)})
+        policy = _policy(static={"broken.example": ("not-an-ip",)})
         sock, _ = self._serve(policy)
         self.assertNotEqual(Reply(sock.sent).rcode, 1)
 
@@ -749,12 +750,12 @@ class TestUdpSurvivesABugInItself(unittest.TestCase):
         """That figure means `the guest sent rubbish`, and a rising count
         would point at the guest instead of at the journal line, which is the
         evidence."""
-        policy = _policy(self.mod, static={"broken.example": ("not-an-ip",)})
+        policy = _policy(static={"broken.example": ("not-an-ip",)})
         _, counters = self._serve(policy)
         self.assertEqual(counters.snapshot()["queries"]["malformed"], 0)
 
     def test_the_journal_carries_the_exception_type(self):
-        policy = _policy(self.mod, static={"broken.example": ("not-an-ip",)})
+        policy = _policy(static={"broken.example": ("not-an-ip",)})
         self._serve(policy)
         self.assertTrue(any("could not answer" in line
                             for line in self.mod.logged))
@@ -762,7 +763,7 @@ class TestUdpSurvivesABugInItself(unittest.TestCase):
     def test_the_arm_is_wide_enough_for_a_bug_that_is_not_an_oserror(self):
         """The point of the arm is that it does not enumerate what a bug in
         this program can raise."""
-        policy = _policy(self.mod)
+        policy = _policy()
         with mock.patch.object(self.mod, "build_answer",
                                side_effect=ZeroDivisionError("boom")):
             sock, _ = self._serve(policy)
@@ -771,7 +772,7 @@ class TestUdpSurvivesABugInItself(unittest.TestCase):
     def test_a_query_too_short_to_reply_to_is_dropped_not_answered(self):
         """Same disposition the Malformed arm has: under two bytes there is no
         id to echo, so there is nothing to reply to."""
-        policy = _policy(self.mod)
+        policy = _policy()
         with mock.patch.object(self.mod, "build_answer",
                                side_effect=ZeroDivisionError("boom")):
             sock, _ = self._serve(policy, msg=b"\x01")
@@ -785,11 +786,11 @@ class TestUdpBudget(unittest.TestCase):
     def setUpClass(cls):
         cls.mod = _module()
         # More v4 addresses than fit in 512 bytes at 16 bytes a record.
-        cls.policy = _policy(cls.mod, static={
+        cls.policy = _policy(static={
             "many.local": [f"192.0.2.{n}" for n in range(1, 60)]})
 
     def test_a_normal_answer_never_truncates(self):
-        policy = _policy(self.mod)
+        policy = _policy()
         reply = Reply(dns_wire.build_answer(
             query("example.com", TYPE_A), policy, budget=512))
         self.assertFalse(reply.tc)
@@ -822,6 +823,7 @@ class TestNoUpstream(unittest.TestCase):
     RESPONDER_FILES = (
         "libexec/workload-vm-resolve",
         "lib/dns_wire.py",
+        "lib/resolve_policy.py",
     )
 
     def test_the_responder_never_calls_out(self):
@@ -931,7 +933,7 @@ class TestOnTheWire(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.mod = _module()
-        cls.policy = _policy(cls.mod, static={"git.local": ["192.0.2.9"]})
+        cls.policy = _policy(static={"git.local": ["192.0.2.9"]})
         cls.inspect = inspect_address(UID)
 
     def test_a_udp_query_is_answered_to_the_sender(self):
@@ -1010,7 +1012,7 @@ class TestTcpDoesNotHoldTheLoop(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.mod = _module()
-        cls.policy = _policy(cls.mod, static={"git.local": ["192.0.2.9"]})
+        cls.policy = _policy(static={"git.local": ["192.0.2.9"]})
 
     def _listener(self):
         listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -1183,7 +1185,7 @@ class TestFuzz(unittest.TestCase):
         # A deliberately awkward map: more addresses than fit in a UDP answer,
         # and both families, so the record-packing and budget paths are on the
         # hot path of the fuzz rather than skipped by a one-record answer.
-        cls.policy = _policy(cls.mod, static={
+        cls.policy = _policy(static={
             "git.local": [f"192.0.2.{n}" for n in range(1, 60)]
                          + [f"2001:db8::{n}" for n in range(1, 40)]})
 
@@ -1258,7 +1260,7 @@ class TestLogging(unittest.TestCase):
 
     def test_the_name_type_and_source_are_logged(self):
         mod = _module()
-        policy = _policy(mod, static={"git.local": ["192.0.2.9"]})
+        policy = _policy(static={"git.local": ["192.0.2.9"]})
         dns_wire.build_answer(query("git.local", TYPE_A), policy)
         dns_wire.build_answer(query("elsewhere.example", TYPE_AAAA), policy)
         self.assertEqual(len(mod.logged), 2, mod.logged)
@@ -1530,7 +1532,7 @@ class TestDnsCounters(unittest.TestCase):
 
     def setUp(self):
         self.mod = _module()
-        self.policy = _policy(self.mod, hosts=["allowed.example", "*.ok.example"])
+        self.policy = _policy(hosts=["allowed.example", "*.ok.example"])
         self.counters = self.mod.Counters()
 
     def answer(self, *args, **kwargs):
@@ -1567,7 +1569,7 @@ class TestDnsCounters(unittest.TestCase):
     def test_an_allow_entry_counts_as_a_list(self):
         """`static` is an authorisation. A query for one is not the tunnelling
         signature even though `hosts` does not match it."""
-        policy = _policy(self.mod, hosts=[],
+        policy = _policy(hosts=[],
                          static={"forge.internal": ["10.0.0.5"]})
         dns_wire.build_answer(query("forge.internal", TYPE_A), policy,
                               counters=self.counters)
@@ -1581,7 +1583,7 @@ class TestDnsCounters(unittest.TestCase):
         not match it. The listener's Policy.admits already knows this; a
         responder that did not would count every legitimate lookup on such a
         workload as unlisted."""
-        policy = _policy(self.mod, hosts=[], policy=["api.example.com"])
+        policy = _policy(hosts=[], policy=["api.example.com"])
         dns_wire.build_answer(query("api.example.com", TYPE_A), policy,
                               counters=self.counters)
         self.assertEqual(self.counters.snapshot()["unlisted"], 0)
@@ -1592,7 +1594,7 @@ class TestDnsCounters(unittest.TestCase):
         entries, and the workload works either way. Only the detector breaks
         -- pinned at every query the guest makes, which is how a signal stops
         being read."""
-        policy = _policy(self.mod, hosts=[],
+        policy = _policy(hosts=[],
                          policy=["api.example.com", "*.cdn.example.com"])
         for name in ("api.example.com", "assets.cdn.example.com"):
             dns_wire.build_answer(query(name, TYPE_A), policy,
@@ -1605,7 +1607,7 @@ class TestDnsCounters(unittest.TestCase):
         """A rule that put everything on a list would pass the two above on its
         own. The apex trap is the case that proves it did not: `*.` requires a
         label before the dot, so the apex is NOT covered and stays counted."""
-        policy = _policy(self.mod, hosts=[], policy=["*.cdn.example.com"])
+        policy = _policy(hosts=[], policy=["*.cdn.example.com"])
         dns_wire.build_answer(query("cdn.example.com", TYPE_A), policy,
                               counters=self.counters)
         self.assertEqual(self.counters.snapshot()["unlisted"], 1)
@@ -1615,7 +1617,7 @@ class TestDnsCounters(unittest.TestCase):
         written before this key existed must not fail the responder."""
         doc = vm_resolve_policy({}, UID)
         del doc["policy"]
-        self.assertEqual(self.mod.Policy(doc).policy, ())
+        self.assertEqual(resolve_policy.Policy(doc).policy, ())
 
     def test_a_nodata_type_is_counted_as_nodata_and_not_as_unlisted(self):
         """An HTTPS query names a host the guest is about to look up properly
@@ -1648,7 +1650,7 @@ class TestDnsCounters(unittest.TestCase):
         no host patterns, not a broken one."""
         doc = vm_resolve_policy({}, UID)
         doc.pop("hosts", None)
-        policy = self.mod.Policy(doc)
+        policy = resolve_policy.Policy(doc)
         self.assertEqual(policy.hosts, ())
 
 
@@ -1703,7 +1705,7 @@ class TestResponderStatusFile(unittest.TestCase):
             seen.append(Path(self.path).exists())
             return True
 
-        self.mod.serve([], self.mod.Policy(vm_resolve_policy({}, UID)),
+        self.mod.serve([], resolve_policy.Policy(vm_resolve_policy({}, UID)),
                        counters, self.path, stop=stop)
         self.assertEqual(seen, [True],
                          "the status file did not exist before the first turn "
