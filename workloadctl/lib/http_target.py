@@ -3,15 +3,13 @@ http_target: what a request target and an authority NAME, in one canonical form.
 
 The request target the inspect listener acts on IS normalised here --
 percent-decoding, dot-segment resolution, duplicate-slash collapsing -- and
-the normalised form is what goes upstream. Rung 2 deferred this to rung 4 on
-the reasoning that there was no `paths` rule for it to matter to yet, and that
-was the wrong half of the problem to look at. Normalisation is not a service
-to a matcher; it is the claim that the string the listener acts on and the
-string the origin acts on are the same string. That claim has to be TRUE
-BEFORE a matcher exists, or the matcher arrives already reading a different
-path from the one being fetched -- and the day it arrives is the worst
-possible day to find out. See normalise_path for what is normalised, what is
-deliberately not (the query, `;params`, a trailing `/`), and why each.
+the normalised form is what goes upstream. Normalisation is not a service
+to the `paths` matcher; it is the claim that the string the listener acts on
+and the string the origin acts on are the same string. A matcher reading a
+different path from the one being fetched is a traversal, so the claim has to
+hold whether or not any policy names a path. See normalise_path for what is
+normalised, what is deliberately not (the query, `;params`, a trailing `/`),
+and why each.
 
 The same applies to the two other places a guest names a destination: the
 authority (`Host`, or an absolute-form target) and a redirect's `Location`.
@@ -142,8 +140,8 @@ def normalise_path(path):
     ONE PLACE, on purpose. A path that is decoded here, resolved there and
     matched somewhere else is a path with three forms, and the gap between any
     two of them is where a traversal lives. Everything that has an opinion about
-    what this request addresses -- the `paths` matcher arriving at rung 4, the
-    log line, and the bytes sent upstream -- reads the string this returns.
+    what this request addresses -- the `paths` matcher, the log line, and the
+    bytes sent upstream -- reads the string this returns.
 
     THE QUERY IS NOT PART OF IT and is carried through untouched. Both readings
     are defensible and silence picks the worse one: matching the full target
@@ -172,7 +170,7 @@ def normalise_target(method, target, scheme=SCHEME_HTTP):
     Absolute-form is legal HTTP/1.1 and moves the authorising name OUT of the
     Host header, which RFC 9110 §7.2 then says to ignore. Left alone, that one
     line of guest input defeats both the Host read that authorises here and the
-    `paths` match arriving at rung 4. So it is normalised to origin-form and
+    `paths` match. So it is normalised to origin-form and
     its authority becomes the name we authorise -- or the request is refused.
     """
     if method == "CONNECT":

@@ -9,13 +9,10 @@ closed sets three of its fields draw from), and the writer (`Record`,
 the file: the listener writes it, `workloadctl egress` renders and filters
 it, `diagnose` reads the counters keyed by the same strings.
 
-They used to be spelled twice -- once in the listener, once in
-egress_policy for the readers -- because the listener is an extension-less
-entrypoint nothing in lib/ can import, and each pair was held together by a
-pin test. A drift turned a real refusal into a figure that read zero, which
-is indistinguishable from a refusal that never fired; the pins were the
-guard, and moving the definitions to where both sides can import them is
-what makes the pins unnecessary.
+Defined once because a writer and a reader that each spell the vocabulary
+can drift, and a drift turns a real refusal into a figure that reads zero --
+indistinguishable from a refusal that never fired. One definition both sides
+import needs no pin test to hold it together.
 
 Where the record file lives (`INSPECT_RECORD_ROOT`, `inspect_record_path`)
 stays in egress_policy beside the rest of the inspector's paths.

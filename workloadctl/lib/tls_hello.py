@@ -68,7 +68,7 @@ class HelloUnreadable(Exception):
     """The first bytes are not a ClientHello this can read a name out of.
 
     A DISTINCT condition from "the name is not allowlisted", and the two must
-    stay distinguishable in the log and (from T6) in the counters. They fail the
+    stay distinguishable in the log and in the counters. They fail the
     connection identically, so an operator with one bucket for both cannot tell
     a guest reaching for a host it may not have from a guest speaking something
     that is not TLS on the TLS port — which is the tunnelling signature.

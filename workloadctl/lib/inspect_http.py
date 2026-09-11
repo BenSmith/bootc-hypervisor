@@ -488,12 +488,11 @@ def _relay_response(insp, up, client, conn, req, where="", rec=None):
                                 f"longer applies to this connection'")
             # Anything EITHER side read past the message boundary belongs
             # to the tunnel and goes across before the relay starts, or the
-            # stream is delivered out of order. Both directions, which for
-            # one rung this did not do: the guest's own surplus stayed in
-            # its _Stream buffer and was never sent, so a client that
-            # pipelined its first frame behind the upgrade request -- which
-            # is legal, and which some clients do -- lost exactly those
-            # bytes into a tunnel that then looked merely stalled.
+            # stream is delivered out of order. Both directions: a guest
+            # that pipelines its first frame behind the upgrade request --
+            # which is legal, and which some clients do -- has that frame
+            # sitting in its _Stream buffer, and a tunnel that starts
+            # without it looks merely stalled.
             pending_up = up.take_buffered()
             if pending_up:
                 conn.sendall(pending_up)
