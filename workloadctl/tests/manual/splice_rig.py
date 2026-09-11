@@ -352,7 +352,7 @@ def read_until_quiet(conn, timeout=1.5):
 def probe_cleartext(plain, origin, log):
     """The T4b claim, through the installed listener and a real origin.
 
-    The unit tests drive `_serve_cleartext` over a socketpair they own. What
+    The unit tests drive `inspect_http.serve_cleartext` over a socketpair they own. What
     they cannot do is have an ORIGIN report what arrived: that the head it was
     sent is the one this process composed rather than the guest's, and that the
     refused request reached nobody at all.

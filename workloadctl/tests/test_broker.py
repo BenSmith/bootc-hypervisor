@@ -643,7 +643,6 @@ from workload_addr import broker_listen_address
 import egress_relay
 from egress_upstream import Upstream
 import inspect_http
-import inspect_listener
 from inspect_listener import Listener
 from inspect_http import serve_cleartext
 import inspect_figures

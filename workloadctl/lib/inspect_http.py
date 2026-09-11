@@ -264,26 +264,26 @@ def serve_request(insp, client, conn, where, upstreams, first, rec, *,
         up = insp.upstream.connection_for(
             req.host, upstreams, reusable=not transient,
             # A KEY OF ITS OWN FOR THE BROKER LEG, and this is not tidiness.
-            # `_serve_terminated` seeds the pool with the ORIGIN connection
-            # it opened before the request was read -- keyed by the host --
-            # so a brokered request found that entry, was handed the origin,
-            # and `dial` was never called. The credential was recorded as
-            # attached and was not: the request reached the provider
-            # carrying whatever the guest held, which for a real client is
-            # the placeholder. No unit test sees it, because none seeds
-            # the pool the way a terminated session does.
+            # `inspect_tls.serve_terminated` seeds the pool with the ORIGIN
+            # connection it opened before the request was read, keyed by the
+            # host. Under that key a brokered request is handed the origin
+            # and `dial` is never called: the credential is recorded as
+            # attached and is not, and the request reaches the provider
+            # carrying whatever the guest held -- for a real client, the
+            # placeholder. No unit test seeds the pool the way a terminated
+            # session does, so only a real guest sees it.
             key=BROKER_UPSTREAM_KEY + req.host if credential else req.host,
             dial=insp.upstream.dial_broker if credential
             else (insp.upstream.dial_tls if pinned_host is not None
                   else insp.upstream.dial_cleartext))
     except ssl.SSLError as exc:
         # BEFORE the OSError arm: ssl.SSLError IS an OSError, so a single
-        # generic arm reported a certificate that would not verify as a
-        # host that could not be reached -- and then paid for a second
+        # generic arm would report a certificate that will not verify as a
+        # host that cannot be reached -- and then pay for a second
         # getaddrinfo to decide which flavour of unreachable to call it.
-        # The front of a terminated connection has always split these two
-        # (see _serve_tls_inspect); this is the REDIAL, which reaches the
-        # same verifying dial by way of an origin that answered
+        # The front of a terminated connection splits these two
+        # (inspect_tls._serve_tls_inspect); this is the REDIAL, which
+        # reaches the same verifying dial by way of an origin that answered
         # `Connection: close` or an HTTP/1.0 exchange, and it deserves the
         # same sentence -- the one naming the host's own trust anchor,
         # which is the only thing an operator can act on.
@@ -341,12 +341,12 @@ def serve_request(insp, client, conn, where, upstreams, first, rec, *,
             # failures above rather than a relay that broke in the middle:
             # the guest's body is still unread and no byte of a response has
             # been written, so `_refuse` can drain and answer exactly as it
-            # does there. Falling through to the relay's handler instead --
-            # which is what this did -- ends the connection with `return
-            # False` and gives the guest a SILENT CLOSE, the one outcome
-            # _serve_tls_inspect argues against at length: a guest told "no"
-            # by a dead socket cannot tell a refusal from the host being
-            # down, and the CA is held precisely so it can be told.
+            # does there. Falling through to the relay's handler instead
+            # ends the connection with `return False` and gives the guest a
+            # SILENT CLOSE, the one outcome inspect_tls._serve_tls_inspect
+            # argues against at length: a guest told "no" by a dead socket
+            # cannot tell a refusal from the host being down, and the CA is
+            # held precisely so it can be told.
             #
             # IT IS ALSO WHERE A CLIENT-CERTIFICATE ORIGIN LANDS, SOMETIMES,
             # and that is why the body names the possibility. Under TLS 1.3

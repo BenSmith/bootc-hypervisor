@@ -272,10 +272,11 @@ class Where(str):
     working untouched while the record builder gets the id, the plane and the
     request ordinal without re-parsing the line it just composed.
 
-    The alternative was a second parameter threaded through _serve_tls,
-    _serve_tls_inspect, _serve_h2, _serve_terminated and _serve_one_request --
-    five signatures, and a sixth path added later that forgets it produces a
-    record with no id while its journal line still looks perfectly right.
+    The alternative is a second parameter threaded through
+    inspect_tls.serve_tls, _serve_tls_inspect, _serve_h2, serve_terminated and
+    inspect_http.serve_one_request -- five signatures, and a sixth path added
+    later that forgets it produces a record with no id while its journal line
+    still looks perfectly right.
 
     `t0` is when this context began: the connection for a connection-level
     record, the request for a per-request one. That is what `duration_ms` is

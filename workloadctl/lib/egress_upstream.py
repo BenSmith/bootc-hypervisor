@@ -69,8 +69,8 @@ UPSTREAM_ALPN = ("http/1.1",)
 # no_application_protocol alert, no failure of any kind. So the offer above
 # selects what a COOPERATING client speaks, and the guest this design exists
 # for writes its own bytes. What actually binds a terminated host to HTTP/1.1
-# is the non-HTTP refusal in Listener._is_http, and what binds an `http2` host
-# to h2 is the preface check in Listener._serve_h2 -- not either of these
+# is the non-HTTP refusal in inspect_tls._is_http, and what binds an `http2`
+# host to h2 is the preface check in inspect_tls._serve_h2 -- not either of these
 # tuples. Deleting a refusal because "the ALPN already says so" reopens the whole plane.
 ALPN_H2 = ("h2",)
 
