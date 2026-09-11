@@ -26,6 +26,7 @@ from pathlib import Path
 
 import vm_metrics
 import exporter_collect
+import exporter_render
 import workload_metrics
 
 from tests import REPO_ROOT, load_script, script_env
@@ -977,7 +978,7 @@ class TestFindWorkloadCgroupSuccess(unittest.TestCase):
 
 class TestFormatMetrics(unittest.TestCase):
     def setUp(self):
-        self.mod = _load_exporter()
+        self.mod = exporter_render
 
     def test_full_metrics_rendered(self):
         all_metrics = [
@@ -1038,7 +1039,7 @@ class TestCollectAll(unittest.TestCase):
         name, svc, _cgroup, _vm = all_metrics[0]
         self.assertEqual(name, "app")
         self.assertEqual(svc["health"], {"app": 1})
-        body = _load_exporter().format_metrics(all_metrics)
+        body = exporter_render.format_metrics(all_metrics)
         self.assertIn('workload_health{workload="app"} 1', body)
 
     def test_pod_workload_queries_per_container_names(self):
@@ -1069,7 +1070,7 @@ class TestCollectAll(unittest.TestCase):
         self.assertNotIn("workload-multi", queried_names)
         _name, svc, *_ = all_metrics[0]
         self.assertEqual(svc["health"], {"web": 1, "db": 0})
-        body = _load_exporter().format_metrics(all_metrics)
+        body = exporter_render.format_metrics(all_metrics)
         self.assertIn('workload_health{workload="multi",container="web"} 1', body)
         self.assertIn('workload_health{workload="multi",container="db"} 0', body)
 
@@ -1098,7 +1099,7 @@ class TestWriteMetrics(unittest.TestCase):
             out = Path(d) / "workloads.prom"
             with self.mock.patch.object(self.mod, "collect_all", return_value=sample):
                 self.mod.write_metrics(out)
-            self.assertEqual(out.read_text(), self.mod.format_metrics(sample))
+            self.assertEqual(out.read_text(), exporter_render.format_metrics(sample))
 
     def test_write_is_atomic_no_tmp_left(self):
         with tempfile.TemporaryDirectory() as d:
@@ -1147,7 +1148,7 @@ class TestDiskProducer(unittest.TestCase):
         self.assertEqual(disk_metrics, [("app", 4096), ("big", None)])
 
     def test_format_disk_metrics_skips_none(self):
-        text = self.mod.format_disk_metrics([("app", 4096), ("big", None)])
+        text = exporter_render.format_disk_metrics([("app", 4096), ("big", None)])
         self.assertIn('workload_disk_bytes{workload="app"} 4096', text)
         self.assertNotIn('workload_disk_bytes{workload="big"}', text)
         self.assertIn("workload_disk_last_collect_timestamp_seconds", text)

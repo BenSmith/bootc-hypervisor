@@ -27,17 +27,12 @@ from types import SimpleNamespace
 from unittest import mock
 
 import cmd_doctor
+import exporter_collect
+import exporter_render
 import inspect_figures as fig
 
-import exporter_collect
-
-from tests import load_script
 
 REPO = Path(__file__).resolve().parent.parent
-
-
-def _exporter():
-    return load_script("libexec/workload-exporter", "exporter_figures")
 
 
 FULL_STATUS = {
@@ -242,7 +237,7 @@ class OneProducerTest(unittest.TestCase):
         payload = {"status_present": 1,
                    "figures": fig.figures(FULL_STATUS, FULL_RESOLVE),
                    "drop_reasons": fig.drop_reasons(FULL_STATUS)}
-        return _exporter()._inspect_metric_lines([("vm1", payload)])
+        return exporter_render._inspect_metric_lines([("vm1", payload)])
 
     def test_every_published_value_is_the_producers_value(self):
         figs = fig.figures(FULL_STATUS, FULL_RESOLVE)
@@ -278,11 +273,8 @@ class OneProducerTest(unittest.TestCase):
 
 class ExporterTest(unittest.TestCase):
 
-    def setUp(self):
-        self.mod = _exporter()
-
     def _lines(self, payloads):
-        return self.mod._inspect_metric_lines(payloads)
+        return exporter_render._inspect_metric_lines(payloads)
 
     def test_no_inspected_workloads_emits_nothing(self):
         self.assertEqual(self._lines([]), [])
