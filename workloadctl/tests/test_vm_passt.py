@@ -17,31 +17,23 @@ disclosure the configuration exists to prevent. A test that only asked "does
 DNS work" would pass on a leaking configuration.
 """
 
-import importlib.machinery
-import importlib.util
 import socket
 import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
 
-from vm_defs import parse_vm_port
-from vm_network_config import validate_vm_network
 import passt_dns_fragment
 import passt_dns_host
+import vm_netdev
 import workload_lib
+from tests import load_script
+from vm_defs import parse_vm_port
+from vm_network_config import validate_vm_network
 from workload_addr import (NFLOG_GROUP_BASE, UID_MAX, UID_MIN,
                            MGMT_SSH_PORT, management_address,
                            nflog_group)
 
-
-def _load(path, name):
-    """Load one of the extension-less entrypoints as a module."""
-    spec = importlib.util.spec_from_loader(
-        name, importlib.machinery.SourceFileLoader(name, path))
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
 
 
 class TestUidDerivedValues(unittest.TestCase):
@@ -250,7 +242,7 @@ class TestNetworkValidation(unittest.TestCase):
 
 
 class TestNetdevDnsDerivation(unittest.TestCase):
-    """libexec/workload-vm-netdev, for a workload with NO responder.
+    """passt_dns_host and passt_dns_fragment, for a workload with NO responder.
 
     An unfiltered or bridged VM: its guest really is handed the host's own
     nameservers, so the symmetric all-three-or-none loop still governs it, and
@@ -262,10 +254,6 @@ class TestNetdevDnsDerivation(unittest.TestCase):
     branch of the resolv.conf scan, leaving the other to advertise the host's
     real nameservers over NDP RDNSS / DHCPv6.
     """
-
-    @classmethod
-    def setUpClass(cls):
-        cls.mod = _load("libexec/workload-vm-netdev", "workload_vm_netdev")
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -375,7 +363,8 @@ class TestNetdevDnsDerivation(unittest.TestCase):
 
 
 class TestNetdevUnderSynthesis(unittest.TestCase):
-    """libexec/workload-vm-netdev, for a workload WITH a responder.
+    """passt_dns_fragment for a workload WITH a responder, and the dispatch in
+    vm_netdev.passt_dns, run end to end through libexec/workload-vm-netdev.
 
     Three fragments and no fourth, because only one of the three carries the v6
     flag and getting that wrong is invisible in a functional test: a guest with
@@ -391,7 +380,7 @@ class TestNetdevUnderSynthesis(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.mod = _load("libexec/workload-vm-netdev", "workload_vm_netdev")
+        cls.helper = load_script("libexec/workload-vm-netdev")
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -474,16 +463,16 @@ class TestNetdevUnderSynthesis(unittest.TestCase):
         entry.pw_uid = uid
         with mock.patch.object(workload_lib, "workload_config_path",
                                return_value=str(config_path)), \
-                mock.patch.object(self.mod, "workload_env_dir",
+                mock.patch.object(vm_netdev, "workload_env_dir",
                                   return_value=env_dir), \
                 mock.patch.object(passt_dns_host, "RESOLV_CONF", resolv), \
-                mock.patch.object(self.mod.pwd, "getpwnam",
+                mock.patch.object(vm_netdev.pwd, "getpwnam",
                                   return_value=entry), \
-                mock.patch.object(self.mod, "default_gateways",
+                mock.patch.object(vm_netdev, "default_gateways",
                                   return_value=gateways
                                   if gateways is not None
                                   else {4: "192.168.0.1"}):
-            self.assertEqual(self.mod.main(["netdev", "vm1"]), 0)
+            self.assertEqual(self.helper.main(["netdev", "vm1"]), 0)
 
         written = (env_dir / "workload-vm1.passt").read_text()
         self.assertTrue(written.startswith("WL_PASST_DNS="), written)

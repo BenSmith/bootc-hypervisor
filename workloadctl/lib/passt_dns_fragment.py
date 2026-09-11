@@ -101,6 +101,11 @@ it — there is no address to advertise that passt would then intercept. A limit
 of the mechanism, unchanged from before synthesis.
 """
 
+# What a guest is told when it gets no resolver: passt advertises nothing on
+# either family. Also the helper's fallback, so ExecStart always has a defined
+# expansion.
+NO_RESOLVER = "dhcp-dns=off"
+
 
 def build_synthesis_fragment(gateways: dict[int, str],
                              responder: str) -> tuple[str, list[str]]:
@@ -119,7 +124,7 @@ def build_synthesis_fragment(gateways: dict[int, str],
         # residual, and the reason this row carries no `--dns ::1`: dhcp-dns=off
         # suppresses the advertisement on BOTH families, so a dead ::1 here
         # would be a guest-visible artifact of a switched-off mechanism.
-        return ("dhcp-dns=off",
+        return (NO_RESOLVER,
                 ["host has no IPv4 default route, so there is no address to "
                  "advertise and intercept; the guest gets no resolver"])
 
@@ -187,6 +192,6 @@ def build_dns_fragment(gateways: dict[int, str],
         # the fragment empty: an empty expansion would leave a dangling comma
         # in the netdev argument and QEMU would refuse to start.
         notes.append("no usable resolver on any family; the guest gets none")
-        return ("dhcp-dns=off", notes)
+        return (NO_RESOLVER, notes)
 
     return (",".join(props + params), notes)
