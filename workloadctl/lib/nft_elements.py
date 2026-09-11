@@ -365,7 +365,7 @@ def inspect_cgroup(name: str) -> str:
     and an inspector whose own egress is dropped. The premise it rests on is
     wired by generate_inspect_service: the service unit is named
     workload-<name>-inspect.service and pins Slice=workloads.slice, which is
-    what makes this path exact. tests/test_vm_inspect_units.py asserts the pin
+    what makes this path exact. tests/test_inspect_units.py asserts the pin
     as a whole line, since a nested slice satisfies a substring match and
     silently deepens this path past `level 2`.
     """

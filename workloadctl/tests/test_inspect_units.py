@@ -8,7 +8,7 @@ failure.
 
 These were written before the listener program existed, when no functional test
 could have caught any of it. It exists now (libexec/workload-inspect-listener,
-tests/test_vm_inspect_listener.py), which is why the unit numbers the original
+tests/test_inspect_listener.py), which is why the unit numbers the original
 docstring cited are gone: rung 2 reuses those labels for different work, and a
 stale "T5a" reads as a live forward reference to it.
 """
@@ -31,7 +31,7 @@ from vm_defs import EGRESS_DEFAULT
 from workload_addr import INSPECT_LISTENER_BIN, inspect_address
 from workload_lib import dq
 
-UID = 10004  # worked example, matching test_vm_inspect.py
+UID = 10004  # worked example, matching test_inspect.py
 
 
 def net_config(**net):

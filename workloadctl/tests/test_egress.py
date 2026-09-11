@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """The uid-keyed egress layer: skeleton, element model, and unit wiring.
 
-Named test_vm_egress rather than test_..._workload_filter to stay clear of
+Named test_egress rather than test_..._workload_filter to stay clear of
 tests/test_generator_workload_filter.py, which is about the generator's
 `--workload` narrowing flag and has nothing to do with nftables.
 """

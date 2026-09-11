@@ -581,7 +581,7 @@ an ALPN offer binds nobody, and a server that speaks only HTTP/1.1 completes
 the handshake selecting nothing, with no alert of any kind.
 
 **The four split counters, read off a file a real process wrote.**
-`tests/test_vm_inspect_diagnose.py` pins each key string against the listener's
+`tests/test_inspect_diagnose.py` pins each key string against the listener's
 own constant, so a rename cannot rot them. What no unit test can say is whether
 anything ever *increments* them: a counter that is declared, exported, pinned
 and never written reads 0, and 0 is a legal value every test passes. These are

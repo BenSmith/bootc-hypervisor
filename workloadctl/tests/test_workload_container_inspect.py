@@ -2,7 +2,7 @@
 workload-vm-inspect (P1-8/P1-9/P1-15, G18 in the container egress-parity
 build spec).
 
-Mirrors tests/test_vm_inspect.py's TestHelperArmsBothTables /
+Mirrors tests/test_inspect.py's TestHelperArmsBothTables /
 TestTheInternalFailureSaysWhatItCosts in style -- most properties are asserted
 against the source the way that file does (the point being that the two
 helpers agree, and a substring check on both fails the same way a real drift

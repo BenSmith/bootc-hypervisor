@@ -326,9 +326,9 @@ class TestCodeCitations(unittest.TestCase):
     WHAT IT DOES NOT CATCH, said plainly because the check was written after
     two of these and would have caught neither: a citation that resolves to the
     WRONG tracked file. `lib/vm.py` pointed its internal-prefix pin at
-    `tests/test_cmd_egress.py` (the assertion is in `tests/test_vm_egress.py`)
-    and its log-field pin at `tests/test_vm_inspect_diagnose.py` (it is in
-    `tests/test_vm_inspect_record.py`); both exist, so both pass here. A
+    `tests/test_cmd_egress.py` (the assertion is in `tests/test_egress.py`)
+    and its log-field pin at `tests/test_inspect_diagnose.py` (it is in
+    `tests/test_inspect_record.py`); both exist, so both pass here. A
     reciprocity rule — require the cited module to name the definition the
     comment is attached to — was prototyped against the same 45 and rejected:
     only 14 yielded a subject at all, and two of the three it flagged were
@@ -372,7 +372,7 @@ class TestCodeCitations(unittest.TestCase):
         workloadctl/ is a self-contained project nested in the image repo, and
         files at the ROOT that discuss it write its paths project-relative,
         because that is how they read to somebody working in it: the root
-        CLAUDE.md says `tests/test_vm_broker.py` and hypervisor.Containerfile
+        CLAUDE.md says `tests/test_broker.py` and hypervisor.Containerfile
         names the modules that need the openssl CLI. Those are followable —
         the reader is told which project — so resolving them only against the
         citing file's own ancestors would fail three sound citations and the
@@ -399,7 +399,7 @@ class TestCodeCitations(unittest.TestCase):
         searching rather than named.
 
         Both guards below were pinned to `lib/vm.py` citing
-        `tests/test_vm_egress.py`, and both broke when that comment moved into
+        `tests/test_egress.py`, and both broke when that comment moved into
         a module split out of vm.py. The pin was measuring which file happened
         to hold a citation, which is not what either guard is for -- and the
         failure it produces is indistinguishable from the regex genuinely
@@ -447,9 +447,9 @@ class TestCodeCitations(unittest.TestCase):
         root_file = GIT_ROOT / "CLAUDE.md"
         self.assertFalse(
             _resolves_against(self.tracked, root_file,
-                              "tests/test_vm_broker.py"))
+                              "tests/test_broker.py"))
         self.assertTrue(
-            self._code_resolves(root_file, "tests/test_vm_broker.py"))
+            self._code_resolves(root_file, "tests/test_broker.py"))
         self.assertFalse(
             self._code_resolves(root_file, "tests/test_nonesuch.py"))
 

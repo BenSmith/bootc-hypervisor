@@ -32,7 +32,7 @@ from egress_policy import (
 import inspect_figures as figures_mod
 from egress_status import OTHER_KEY
 
-from tests.test_vm_inspect_listener import _mod
+from tests.test_inspect_listener import _mod
 
 
 class TestTheKeysAgreeWithTheListener(unittest.TestCase):

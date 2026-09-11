@@ -1,7 +1,7 @@
 """`workloadctl egress` — the reader over the per-request record. Rung 5 T2.
 
 Named test_cmd_egress rather than test_egress to stay clear of
-tests/test_vm_egress.py, which is the uid-keyed nftables layer and has nothing
+tests/test_egress.py, which is the uid-keyed nftables layer and has nothing
 to do with the record.
 
 Three kinds of thing are held here.
@@ -49,7 +49,7 @@ from egress_policy import (
     INSPECT_RECORD_REASONS,
 )
 
-from tests.test_vm_inspect_listener import _mod
+from tests.test_inspect_listener import _mod
 
 
 def _rec(**overrides):

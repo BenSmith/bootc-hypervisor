@@ -41,7 +41,7 @@ from egress_policy import (
 )
 from egress_ca import CA_EXPIRY_WARN_DAYS
 
-from tests.test_vm_inspect_listener import _mod
+from tests.test_inspect_listener import _mod
 
 UID = 10001
 NET = {"hosts": ["example.com"], "egress": "filtered"}

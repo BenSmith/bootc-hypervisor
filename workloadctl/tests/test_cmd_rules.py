@@ -11,7 +11,7 @@ three places a renderer can quietly get it wrong -- the union reading, the
 absent/empty distinction, and a splice pattern on a host no list admits.
 
 The report calls the shipped matcher, so what is NOT tested here is matching
-itself; `tests/test_vm_egress.py` owns that. What is tested is that the report
+itself; `tests/test_egress.py` owns that. What is tested is that the report
 asks the matcher the same question the listener asks it.
 """
 

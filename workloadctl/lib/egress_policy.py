@@ -353,7 +353,7 @@ INSPECT_STATUS_FILE = "inspect-status.json"
 # BECAUSE the two halves need different operator responses, so a reader that
 # merges them by prefix reports the opposite of what the split was for.
 #
-# tests/test_vm_inspect_diagnose.py pins each of these against the listener's
+# tests/test_inspect_diagnose.py pins each of these against the listener's
 # own constant. That pin is what makes restating them safe: a rename over there
 # fails a test here, rather than turning a figure into a permanent zero that
 # reads exactly like a refusal that never fired.
@@ -366,7 +366,7 @@ VM_DROP_NOT_HTTP_POLICY = "not HTTP (policy entry)"
 # The two field names that tie one of the inspector's journal lines to the
 # per-request record written beside it. Second definitions for the same reason
 # the four keys above are, and pinned the same way by
-# tests/test_vm_inspect_record.py, which asserts each against the listener's
+# tests/test_inspect_record.py, which asserts each against the listener's
 # own LOG_ID_FIELD/LOG_REQ_FIELD.
 #
 # `id` is per CONNECTION and `req` is the ordinal within it, so a reader
@@ -383,7 +383,7 @@ INSPECT_LOG_REQ_FIELD = "req"
 # MORE SECOND DEFINITIONS OF LISTENER STRINGS, for the reason the VM_DROP_*
 # keys above are: the record is written by an extension-less entrypoint nothing
 # in lib/ can import, and the reader that renders it lives here. Restating them
-# is safe only because tests/test_vm_inspect_record.py pins each against the
+# is safe only because tests/test_inspect_record.py pins each against the
 # listener's own constant -- without that pin a renamed field turns a column
 # into a permanent blank, which reads exactly like a guest that did nothing.
 #

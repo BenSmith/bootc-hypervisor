@@ -836,7 +836,7 @@ class TestTheCountersAreWrittenUnderTheLockTheyAreReadWith(unittest.TestCase):
         Each unlocked `self.stats[...] += 1` read as ordinary correct code on
         its own line; what was wrong was the absence of a lock several hundred
         lines away. Grepping is the only check that sees that, and it is the
-        same shape as the constant-drift assertion in tests/test_vm_broker.py.
+        same shape as the constant-drift assertion in tests/test_broker.py.
         """
         source = Path(egress_mint.__file__).read_text()
         writes = [line.strip() for line in source.splitlines()

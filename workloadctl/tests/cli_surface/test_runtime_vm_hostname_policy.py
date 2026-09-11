@@ -96,7 +96,7 @@ RETIRED_PROXY_ADDR = "192.0.2.1"
 RETIRED_PROXY_PORT = 3128
 
 # Matches rt-vm-hostname.toml's `hosts`. The fixture itself is guarded in the
-# normal suite by tests/test_vm_inspect.py TestRuntimeFixture — that it
+# normal suite by tests/test_inspect.py TestRuntimeFixture — that it
 # validates, that it is `filtered` with no `allow`, and that the wildcard's apex
 # is not separately listed. Those checks are text and run on every PR; this
 # module only runs on a host with /dev/kvm, so a drifted fixture has to be

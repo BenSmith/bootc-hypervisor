@@ -175,7 +175,7 @@ NFT_SET_INSPECT_CG = "wl_inspect_cg"
 # the arming path can refuse an element the drop would never have caught.
 #
 # Duplicating them is the lesser evil and the test is what makes it safe:
-# tests/test_vm_egress.py asserts these against the elements the .nft actually
+# tests/test_egress.py asserts these against the elements the .nft actually
 # arms, so a range added on one side and not the other fails rather than
 # silently making the refusal wrong. Parsing the .nft at runtime was the
 # alternative and it puts a parser on the start path of every VM to answer a

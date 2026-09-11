@@ -11,7 +11,7 @@ advertised endpoint (192.0.2.1:8081) to one host-wide broker on 127.0.0.1:8081,
 plus the WORKLOAD_BROKER_URL the guest was told. Rung 6 deleted that whole
 mechanism. The gates that survive it are elsewhere and are deliberately not
 re-created here: `[vm.network].broker` is now a hard error, asserted in
-tests/test_vm_egress.py with the other retired-key refusals; the reservation
+tests/test_egress.py with the other retired-key refusals; the reservation
 that entry needed is inherited from 127.128.0.0/9 and asserted by
 TestReservedRanges; and the sweep the generator ran on every VM's stop is gone
 with the map, asserted below by its absence.
@@ -495,7 +495,7 @@ class TestDriftSeesAHandEditedInstance(unittest.TestCase):
         # predates this branch does not know `[[vm.network.credential]]` at
         # all, refuses the fixture, and emits nothing -- so every live unit
         # reads as an orphan and the drift list is the whole workload rather
-        # than the one hand-edited file. Only test_vm_broker ran the real
+        # than the one hand-edited file. Only test_broker ran the real
         # collect_drift unpinned; test_cmd_drift patches this same hook and
         # test_substrate patches subprocess.run.
         self.enterContext(mock.patch.object(

@@ -316,7 +316,7 @@ against what the generator renders and what the inspector dials
 (`broker_listen_address` in `lib/workload_addr.py`, `BROKER_INSTANCE_PORT`
 in `lib/broker_config.py`). A
 mismatch presents exactly as the broker being down — connection refused, no log
-line on either side, nothing pointing at the cause. `tests/test_vm_broker.py`
+line on either side, nothing pointing at the cause. `tests/test_broker.py`
 asserts they agree, which is most of the reason the broker moved into this
 package.
 

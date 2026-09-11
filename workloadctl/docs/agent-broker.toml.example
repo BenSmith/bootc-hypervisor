@@ -124,7 +124,7 @@ placeholder = "sk-ant-api00-000000000000000000PLACEHOLDER0000000000"
 # connection that should not have opened.
 #
 # The address and port above must match what the inspector dials. That is
-# asserted by tests/test_vm_broker.py against lib/broker_config.py, but only
+# asserted by tests/test_broker.py against lib/broker_config.py, but only
 # for the generated form -- override them by hand and you are on your own, and
 # a mismatch looks exactly like the broker being down.
 #

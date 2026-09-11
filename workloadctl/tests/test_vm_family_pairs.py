@@ -22,7 +22,7 @@ address.
 WHAT IT DOES NOT DO
 
 It does not check the .nft skeleton's rules -- those genuinely are written
-twice, and test_vm_egress.py is what holds them to each other. This file is
+twice, and test_egress.py is what holds them to each other. This file is
 about the Python that arms them.
 """
 

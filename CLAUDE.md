@@ -114,7 +114,7 @@ cannot be pointed at another workload's.
 
 `libexec/workload-broker-config` is not the broker: it is the one-verb helper that
 writes an instance's `broker.toml` (`workload-broker-config config <name>`), run as
-that unit's `ExecStartPre`. `tests/test_vm_broker.py` covers both halves.
+that unit's `ExecStartPre`. `tests/test_broker.py` covers both halves.
 
 There was a host-wide `agent-broker.service` reached by every guest at an
 advertised `192.0.2.1:8081` through a uid-keyed nft map. All of it is deleted —

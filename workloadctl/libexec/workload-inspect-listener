@@ -268,7 +268,7 @@ PEEK_ATTEMPTS_MAX = 16
 # and nothing in lib/ can import this extension-less entrypoint -- the same
 # situation VM_DROP_* is in, and answered the same way:
 # INSPECT_LOG_ID_FIELD / INSPECT_LOG_REQ_FIELD in lib/egress_policy.py are pinned
-# against these by tests/test_vm_inspect_diagnose.py. A rename here fails that
+# against these by tests/test_inspect_diagnose.py. A rename here fails that
 # test rather than turning the join into a silent no-match, which is what a
 # reader looking for a field nobody emits any more would look like.
 LOG_ID_FIELD = "id"
@@ -2092,7 +2092,7 @@ DROP_UNCLASSIFIED = "(unclassified)"
 # The record's field names, and the vocabularies of two of them. Stated once
 # here and restated in lib/egress_policy.py for the reason the VM_DROP_* keys are: nothing
 # in lib/ can import this entrypoint, so T2's reader either restates them or
-# matches on a substring, and tests/test_vm_inspect_record.py pins each pair.
+# matches on a substring, and tests/test_inspect_record.py pins each pair.
 RECORD_FIELDS = (
     LOG_ID_FIELD, LOG_REQ_FIELD, "ts", "plane", "mode", "host", "method",
     "path", "query", "http", "decision", "reason", "status", "upstream",

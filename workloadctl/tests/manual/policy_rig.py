@@ -28,7 +28,7 @@ WHAT THE UNIT TESTS CANNOT REACH, AND WHY THIS EXISTS
                                                               to have run)
 
 5 is the reason to write this even though every figure below has a unit test.
-`tests/test_vm_inspect_diagnose.py` pins the four key strings against the
+`tests/test_inspect_diagnose.py` pins the four key strings against the
 listener's own constants, so a rename cannot rot them. What no unit test can
 say is that anything ever INCREMENTS them: a counter that is declared,
 exported, pinned and never written reads 0, and 0 is a legal value that every
@@ -641,7 +641,7 @@ def probe_status(status_doc):
     """T9: the four split figures, in a file a real process wrote.
 
     Every key here is pinned against the listener's own constant by
-    tests/test_vm_inspect_diagnose.py, so a rename cannot rot them. What that
+    tests/test_inspect_diagnose.py, so a rename cannot rot them. What that
     pin cannot say is whether anything ever INCREMENTS them -- a counter with
     no writer reads 0, and 0 is a legal value every test passes. These are the
     same figures after the refusals above actually happened.

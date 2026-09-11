@@ -24,7 +24,7 @@
 #     the arming helper was the only substrate-specific value -- so what
 #     those three functions touch is shared no matter which file it is
 #     reached from. (They are gen_egress's now, and named accordingly.)
-#   * Tests are not evidence. A symbol used only by tests/test_vm_*.py is
+#   * Tests are not evidence. A symbol used only by a vm-named test module is
 #     classified by where it is DEFINED, because a test name follows the code
 #     it was written against and would just restate the prefix.
 #   * A symbol with NO consumer outside its own module has no consumer

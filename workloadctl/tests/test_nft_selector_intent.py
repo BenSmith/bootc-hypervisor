@@ -43,7 +43,7 @@ collide with an existing entry, find its selector acceptable, and pass.
 WHAT IT DOES NOT DO
 
 It does not run nft, so it cannot say the ruleset LOADS or that the rules are
-in the right order — tests/test_vm_egress.py holds the ordering properties and
+in the right order — tests/test_egress.py holds the ordering properties and
 the manual rigs prove the behaviour on a host. This is the intent layer only:
 whether each rule selects who it means to.
 """

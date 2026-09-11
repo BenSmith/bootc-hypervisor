@@ -32,7 +32,7 @@ here without anyone remembering to add one.
 WHAT IT DOES NOT DO
 
 It does not check that anything BINDS these addresses, or that the nft elements
-name them -- tests/test_vm_egress.py and the manual rigs hold that. This is the
+name them -- tests/test_egress.py and the manual rigs hold that. This is the
 arithmetic and the reservation only.
 """
 

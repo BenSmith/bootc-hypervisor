@@ -41,7 +41,7 @@ _MOD = None
 
 
 def _mod():
-    """The listener module, loaded once — see test_vm_inspect_listener._mod."""
+    """The listener module, loaded once — see test_inspect_listener._mod."""
     global _MOD
     if _MOD is None:
         _MOD = load_script("libexec/workload-inspect-listener")
@@ -899,7 +899,7 @@ class TestTheConnectionLevelRecords(_Records):
         listener, _out = self._tls_listener(
             mod.Policy(tls="splice", hosts=("ok.example",)))
         ours, guest = self._pair()
-        from tests.test_vm_inspect_listener import _hello_bytes
+        from tests.test_inspect_listener import _hello_bytes
         guest.sendall(_hello_bytes(server_name="ok.example"))
         guest.shutdown(socket.SHUT_WR)
         with unittest.mock.patch.object(

@@ -105,7 +105,7 @@ LEAF_CACHE_MAX = 1024
 # was a handshake that died on a missing file and was reported as the guest not
 # trusting the CA -- a wrong diagnosis pointing at a re-provision. Doubled, so
 # the margin is a factor rather than an off-by-one, and asserted against the
-# listener's ceiling by tests/test_vm_mint.py, since the two numbers live in
+# listener's ceiling by tests/test_mint.py, since the two numbers live in
 # different files and nothing else makes them meet. The working set was always
 # clear of this (1024 against 128) and is unchanged.
 DENIAL_CACHE_MAX = 256
