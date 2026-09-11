@@ -8,6 +8,7 @@ the snaplen default, what `filter-dump` cannot do, and that `log group` takes a
 literal.
 """
 
+import json
 import os
 import struct
 import tempfile
@@ -15,6 +16,8 @@ from unittest import mock
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+
+from tests import load_script
 
 from pcap import (
     CT_MARK_MASK, CT_MARK_TAG, CT_MARK_UID_MASK, DIRECTION_DEFAULT,
@@ -645,9 +648,15 @@ class TestHelperContract(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.source = (ROOT / "libexec" / "workload-pcap").read_text()
+        cls.host_tap = (ROOT / "lib" / "pcap_host_tap.py").read_text()
+        cls.vm_tap = (ROOT / "lib" / "pcap_vm_tap.py").read_text()
+        cls.container_tap = (
+            ROOT / "lib" / "pcap_container_tap.py").read_text()
+        cls.session = (ROOT / "lib" / "pcap_session.py").read_text()
 
     def test_teardown_runs_in_a_finally(self):
-        self.assertIn("finally:", self.source)
+        body = self.session[self.session.index("def run("):]
+        self.assertIn("finally:", body)
 
     def test_the_plan_is_read_not_recomputed(self):
         """If the helper re-derived it from the config the two could disagree,
@@ -658,14 +667,14 @@ class TestHelperContract(unittest.TestCase):
         """A probe emitted before the object exists is not in the file, and
         the correction would then be measured against whatever unrelated
         packet happened to be first."""
-        body = self.source[self.source.index("def main("):]
+        body = self.session[self.session.index("def run("):]
         self.assertLess(body.index("guest_vm_up"), body.index("emit_probe"))
 
     def test_the_correction_needs_nothing_from_the_guest(self):
         """Deriving it from guest uptime would leave a full timezone offset in
         place, silently, on every non-UTC host."""
-        probe = self.source[self.source.index("def emit_probe"):
-                            self.source.index("def correct_timestamps")]
+        probe = self.vm_tap[self.vm_tap.index("def emit_probe"):
+                            self.vm_tap.index("def correct_timestamps")]
         self.assertNotIn("/proc/uptime", probe)
         # No command run inside the guest, and nothing read out of it: the
         # probe is a bare TCP connect from this side.
@@ -691,13 +700,15 @@ class TestHelperContract(unittest.TestCase):
     def test_the_staged_file_is_checked_rather_than_trusted(self):
         """Because the failure mode is a capture that reports success and
         produces nothing."""
-        body = self.source[self.source.index("def guest_vm_up"):]
+        body = self.vm_tap[self.vm_tap.index("def guest_vm_up"):
+                           self.vm_tap.index("def qmp_command")]
         self.assertIn("os.path.exists(staging)", body[:1600])
 
     def test_an_unfinalized_staged_file_is_reported_not_deleted(self):
         """The packets are real and the operator asked for them; only the
         timestamps are uncorrected."""
-        body = self.source[self.source.index("def cleanup"):]
+        body = self.session[self.session.index("def cleanup"):
+                            self.session.index("def run(")]
         self.assertNotIn("os.unlink(staging)", body[:1400])
 
     def test_no_wireshark_cli_tool_is_shelled_out_to(self):
@@ -705,11 +716,12 @@ class TestHelperContract(unittest.TestCase):
         by default, and every call to them sat in the finally block — so a host
         with tcpdump and without them lost the capture it had just taken."""
         for tool in ("capinfos", "editcap"):
-            self.assertNotIn(f'"{tool}"', self.source)
-            self.assertNotIn(f"'{tool}'", self.source)
+            for text in (self.source, self.vm_tap):
+                self.assertNotIn(f'"{tool}"', text)
+                self.assertNotIn(f"'{tool}'", text)
 
     def test_a_failed_correction_is_reported_not_silent(self):
-        body = self.source[self.source.index("def _first_packet_time"):]
+        body = self.vm_tap[self.vm_tap.index("def _first_packet_time"):]
         self.assertIn("WARNING", body[:900])
 
     def test_the_finalize_path_cannot_raise_past_the_move(self):
@@ -718,15 +730,17 @@ class TestHelperContract(unittest.TestCase):
         the move, and ExecStopPost deliberately does not do it — so both are
         wrapped rather than allowed to propagate."""
         for name in ("_first_packet_time", "correct_timestamps"):
-            body = self.source[self.source.index(f"def {name}"):]
-            body = body[:body.index("\n\n\n")]
+            body = self.vm_tap[self.vm_tap.index(f"def {name}"):]
+            nxt = body.find("\ndef ")
+            body = body if nxt < 0 else body[:nxt]
             self.assertIn("except (OSError, PcapFormatError)", body,
                           f"{name} must not propagate out of the finally block")
 
     def test_cleanup_is_idempotent_and_needs_no_plan(self):
         """It runs as ExecStopPost, including after a start that never got far
         enough to have a plan."""
-        self.assertIn("def cleanup(name: str)", self.source)
+        self.assertIn("def cleanup(name: str)", self.session)
+        self.assertIn('argv[1] == "cleanup"', self.source)
 
     def test_the_capture_chains_are_removed_with_the_rules(self):
         """An empty chain in the security-critical table is one more thing for
@@ -761,15 +775,16 @@ class TestHelperContract(unittest.TestCase):
             "payload predates them and would always look non-empty")
 
     def _host_down(self) -> str:
-        return self.source[self.source.index("def host_down"):
-                           self.source.index("# --- guest vantage, VM ---")]
+        return self.host_tap[self.host_tap.index("def host_down"):
+                             self.host_tap.index("def host_reader")]
 
     def test_the_container_pid_goes_through_the_podman_wrapper(self):
         """Talking to a workload user's rootless podman needs
         XDG_RUNTIME_DIR, HOME and that user's session bus. A hand-rolled
         `runuser` supplies none of them and does not even leave a cwd the
         workload user can enter."""
-        body = self.source[self.source.index("def container_netns_pid"):]
+        body = self.container_tap[
+            self.container_tap.index("def container_netns_pid"):]
         # Assert on the code, not the docstring, which names runuser to say
         # why it is not used.
         code = body.split('"""')[2]
@@ -779,7 +794,9 @@ class TestHelperContract(unittest.TestCase):
     def test_the_container_interface_is_discovered_not_assumed(self):
         """pasta names its tun after the host interface it templated from and
         podman may pass its own; measured, neither is tap0."""
-        body = self.source[self.source.index("def container_interface"):]
+        body = self.container_tap[
+            self.container_tap.index("def container_interface"):
+            self.container_tap.index("def container_reader")]
         self.assertIn("route", body[:800])
         self.assertNotIn('"tap0"', body[:800])
 
@@ -1096,3 +1113,39 @@ class TestPcapShift(unittest.TestCase):
             f.write(whole[:-4])
         self.assertEqual(pcap_shift_timestamps(self.src, self.dst, 1.0), 1)
         self.assertEqual(pcap_packet_count(self.dst), 1)
+
+
+class TestEntrypointWiring(unittest.TestCase):
+    """main() reaches the session with what argv carried. The module is
+    imported with the SIGTERM install stubbed, so the test process keeps its
+    own handler."""
+
+    @classmethod
+    def setUpClass(cls):
+        with mock.patch("signal.signal"):
+            cls.helper = load_script("libexec/workload-pcap")
+
+    def test_run_hands_the_decoded_plan_to_the_session(self):
+        plan = {"vantages": [], "uid": 10007, "write": None,
+                "substrate": "container", "bpf": []}
+        with mock.patch("pcap_session._wait") as wait:
+            rc = self.helper.main(["workload-pcap", "run", "fj",
+                                   json.dumps(plan)])
+        self.assertEqual(rc, 0)
+        wait.assert_called_once_with([], plan)
+
+    def test_cleanup_takes_the_host_rules_down_for_the_named_workload(self):
+        with mock.patch("pcap_session.pwd.getpwnam",
+                        return_value=SimpleNamespace(pw_uid=10007)), \
+             mock.patch("pcap_session.host_down") as down, \
+             mock.patch("pcap_session.qmp_command", side_effect=OSError), \
+             mock.patch("pcap_session.os.path.exists", return_value=False):
+            rc = self.helper.main(["workload-pcap", "cleanup", "fj"])
+        self.assertEqual(rc, 0)
+        down.assert_called_once_with(10007)
+
+    def test_anything_else_is_usage(self):
+        with mock.patch("sys.stderr"):
+            self.assertEqual(self.helper.main(["workload-pcap"]), 2)
+            self.assertEqual(
+                self.helper.main(["workload-pcap", "run", "fj"]), 2)
