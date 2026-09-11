@@ -474,6 +474,7 @@ lib/http_target.py                 # One canonical form for a request target, an
 lib/http_request.py                # Request: one head parsed to the form the listener authorises, and rebuilt with OUR framing and the name we authorised
 lib/nft_elements.py                # A workload's egress filter (both substrates): which nft set elements exist, and the argv that arm them
 lib/vm_provision.py                # VM disk/seed provisioning
+lib/ensure_user.py                 # workload-ensure-user's program: the per-workload lock, and every provisioning step in order (ensure_common/ensure_vm/ensure_container)
 lib/egress_status.py               # Egress inspector state derivation (both substrates)
 lib/vm_metrics.py                  # VM metric collectors (QMP balloon/vCPU, qemu cgroup) shared by the exporter and `stats`
 lib/workload_metrics.py            # Per-workload metric sources for the exporter: unit state, container health, cgroup usage, du
@@ -507,7 +508,7 @@ lib/pcap_vm_tap.py                 # VM guest vantage: QMP filter-dump, probe, t
 lib/pcap_container_tap.py          # Container guest vantage: tcpdump in the netns
 generators/workload-generator      # Tiny shell systemd generator (emits workload-generate.service)
 generators/workload-generate       # Python script run by workload-generate.service at early boot
-libexec/workload-ensure-user       # Per-workload user setup (ExecStartPre)
+libexec/workload-ensure-user       # Per-workload user setup (ExecStartPre); main() over lib/ensure_user.py
 libexec/workload-write-env         # main() over lib/secrets_env.py
 libexec/workload-vm-*              # VM helpers: build-disk, qmp, shutdown, notify, netdev, filter,
                                    #   inspect, resolve
