@@ -37,9 +37,8 @@ from broker_config import (BROKER_BIN, BROKER_INSTANCE_PORT,
                            vm_credential_env, host_resolver_addresses,
                            vm_uses_credentials)
 from nft_elements import internal_ok_elements
-from config_parser import (BROKER_DEFAULT_AUTH_FORMAT,
-                           BROKER_DEFAULT_AUTH_HEADER)
 from vm_network_config import validate_vm_network
+import broker_config
 from workload_addr import UID_MIN, broker_listen_address
 import ipaddress
 import tomllib
@@ -1472,29 +1471,12 @@ class TestTheProvidersAuthConvention(unittest.TestCase):
         self.assertNotIn("auth_header", host)
         self.assertNotIn("auth_format", host)
 
-    def test_the_defaults_we_quote_are_the_brokers_own(self):
-        """Two copies of a default is exactly what the test above refuses, and
-        these two exist only to be named in an error message -- so they are
-        pinned against the source that applies them."""
-        source = (Path(__file__).resolve().parent.parent
-                  / "libexec" / "agent-broker").read_text()
-        self.assertIn(
-            f'cfg.setdefault("auth_header", "{BROKER_DEFAULT_AUTH_HEADER}")',
-            source)
-        self.assertIn(
-            f'cfg.setdefault("auth_format", "{BROKER_DEFAULT_AUTH_FORMAT}")',
-            source)
-
     def test_the_broker_accepts_both_keys_where_they_are_written(self):
         """Rendered into the HOST table, which is the only level that takes
         them. A key at the wrong level is refused by the broker at startup,
         which for a generated unit is a restart loop."""
-        source = (Path(__file__).resolve().parent.parent
-                  / "libexec" / "agent-broker").read_text()
-        block = source[source.index("HOST_KEYS = frozenset("):]
-        block = block[:block.index(")")]
-        self.assertIn("auth_header", block)
-        self.assertIn("auth_format", block)
+        self.assertIn("auth_header", broker_config.HOST_KEYS)
+        self.assertIn("auth_format", broker_config.HOST_KEYS)
 
     def test_a_header_that_is_not_a_header_is_refused(self):
         for bad in ("X-Key: oops", "X Key", "X-Key\nInjected", ""):

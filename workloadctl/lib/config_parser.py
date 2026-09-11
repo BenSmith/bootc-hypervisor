@@ -236,10 +236,9 @@ _AUTH_HEADER_REFUSED = {
 }
 
 
-# The broker's own defaults, restated so an error message can name them. They
-# are NOT applied here: the render emits nothing for an absent key, so the
-# default lives in one place and these two are only ever quoted at an operator.
-# tests/test_broker.py pins them against the broker's own source.
+# The broker's defaults. Applied by broker_config.load_config, which the
+# shipped program runs; here they are only quoted at an operator, because the
+# render emits nothing for an absent key.
 BROKER_DEFAULT_AUTH_HEADER = "x-api-key"
 BROKER_DEFAULT_AUTH_FORMAT = "{secret}"
 
