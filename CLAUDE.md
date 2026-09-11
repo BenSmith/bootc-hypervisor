@@ -95,9 +95,11 @@ Virtiofs volumes have their own design doc, `workloadctl/docs/vm-virtiofs.md` â€
 `libexec/agent-broker` holds a provider API key that a sandboxed workload -- a
 coding-agent VM or a filtered container -- is never given, and attaches it to
 outbound requests that workload makes through it.
-It is a whole program shipped by the workloadctl RPM: stdlib, plus
-`lib/peer_identity.py` for caller identification, which it shares with the
-egress inspector's listener.
+It is a whole program shipped by the workloadctl RPM, stdlib only: the
+entrypoint is a `main()` shim over `lib/broker_config.py` (the document, read
+and rendered), `lib/broker_request.py` (what goes upstream), `lib/broker_server.py`
+(Handler, Server, the ceilings) and `lib/peer_identity.py` (caller
+identification, shared with the egress inspector's listener).
 Callers are identified by the uid owning the far end of the connection.
 
 **One instance per workload, and the workload is never told where it is.**

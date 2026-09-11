@@ -13,10 +13,8 @@ import threading
 import unittest
 from unittest import mock
 
+import broker_server
 import peer_identity
-from tests import load_script
-
-broker = load_script("libexec/agent-broker")
 
 
 def proc_row(local, remote, uid, inode, state="01"):
@@ -348,7 +346,7 @@ class TestIdentifyRefusals(unittest.TestCase):
         connection a slot; the handler no longer looks it up itself, so the
         fixture is the uid rather than a patched lookup.
         """
-        handler = broker.Handler.__new__(broker.Handler)
+        handler = broker_server.Handler.__new__(broker_server.Handler)
         handler.profiles = {(name, "api.example.com"): f"profile-of-{name}"
                             for name in sandboxes}
         handler.overflow = 65534
@@ -366,7 +364,7 @@ class TestIdentifyRefusals(unittest.TestCase):
         self.assertEqual(label, "uid-unmapped")
 
     def test_an_unlisted_caller_gets_nothing(self):
-        with mock.patch.object(broker, "workload_name",
+        with mock.patch.object(broker_server, "workload_name",
                                return_value="not-in-config"):
             sandbox, label = self._handler(10001, ["agent"])._identify()
         self.assertIsNone(sandbox)
@@ -379,7 +377,7 @@ class TestIdentifyRefusals(unittest.TestCase):
         mean resolving it once per CONNECTION, and one keep-alive connection
         from an inspector may carry requests for two credential-backed hosts --
         the second would get the first's credential."""
-        with mock.patch.object(broker, "workload_name", return_value="agent"):
+        with mock.patch.object(broker_server, "workload_name", return_value="agent"):
             sandbox, label = self._handler(10001, ["agent"])._identify()
         self.assertEqual(sandbox, "agent")
         self.assertEqual(label, "agent")

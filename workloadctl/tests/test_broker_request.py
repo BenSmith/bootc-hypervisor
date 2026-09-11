@@ -24,11 +24,9 @@ import unittest
 from email.message import Message
 from unittest import mock
 
-from tests import load_script
 import broker_config
 import broker_request
-
-broker = load_script("libexec/agent-broker")
+import broker_server
 
 
 def headers(**pairs):
@@ -241,7 +239,7 @@ class BrokerServerCase(unittest.TestCase):
     def setUp(self):
         case = self
 
-        class H(broker.Handler):
+        class H(broker_server.Handler):
             config = {"connect_timeout": 1.0, "read_timeout": 1.0}
             profiles = profile_table()
             overflow = 65534
@@ -250,11 +248,11 @@ class BrokerServerCase(unittest.TestCase):
 
         # The caller here is the test process, whose uid owns no workload user,
         # so _identify would refuse it before any of these assertions ran.
-        patcher = mock.patch.object(broker, "workload_name", lambda uid: "agent")
+        patcher = mock.patch.object(broker_server, "workload_name", lambda uid: "agent")
         patcher.start()
         self.addCleanup(patcher.stop)
 
-        self.server = broker.Server(("127.0.0.1", 0), H)
+        self.server = broker_server.Server(("127.0.0.1", 0), H)
         self.port = self.server.server_address[1]
         self.thread = threading.Thread(target=self.server.serve_forever,
                                        daemon=True)
@@ -290,7 +288,7 @@ class TestOneCallerCannotTakeThePool(BrokerServerCase):
     """
 
     def test_a_caller_is_refused_past_its_own_ceiling(self):
-        with mock.patch.object(broker, "MAX_PER_CALLER", 2):
+        with mock.patch.object(broker_server, "MAX_PER_CALLER", 2):
             held = [self.connect() for _ in range(2)]
             self.assertTrue(all(s.fileno() >= 0 for s in held))
             refused = self.connect()
@@ -298,7 +296,7 @@ class TestOneCallerCannotTakeThePool(BrokerServerCase):
                              "past the ceiling the connection must be closed")
 
     def test_the_ceiling_is_released_when_a_connection_ends(self):
-        with mock.patch.object(broker, "MAX_PER_CALLER", 1):
+        with mock.patch.object(broker_server, "MAX_PER_CALLER", 1):
             first = self.connect()
             first.close()
             # A slot freed by the previous caller is usable, not leaked: the
@@ -327,13 +325,13 @@ class TestAFailedSpawnDoesNotLeakASlot(unittest.TestCase):
         # back -- and would make the 411 assertion pass for the wrong reason if
         # it were ever loosened.
         self.enterContext(
-            mock.patch.object(broker, "workload_name", lambda uid: "agent"))
-        with mock.patch.object(broker, "MAX_CONCURRENT", 1):
-            class H(broker.Handler):
+            mock.patch.object(broker_server, "workload_name", lambda uid: "agent"))
+        with mock.patch.object(broker_server, "MAX_CONCURRENT", 1):
+            class H(broker_server.Handler):
                 config = {"connect_timeout": 1.0, "read_timeout": 1.0}
                 profiles, overflow = profile_table(), 65534
 
-            server = broker.Server(("127.0.0.1", 0), H)
+            server = broker_server.Server(("127.0.0.1", 0), H)
             self.addCleanup(server.server_close)
             port = server.server_address[1]
 
@@ -410,7 +408,7 @@ class StubResponse:
         if self._chunks:
             return self._chunks.pop(0)
         if self._die:
-            raise broker.http.client.IncompleteRead(b"", 1)
+            raise broker_server.http.client.IncompleteRead(b"", 1)
         return b""
 
 
@@ -425,7 +423,7 @@ class TestTheBodyBudgetIsShared(BrokerServerCase):
     """
 
     def test_a_request_past_the_shared_budget_is_refused(self):
-        with mock.patch.object(broker, "MAX_INFLIGHT_BYTES", 64):
+        with mock.patch.object(broker_server, "MAX_INFLIGHT_BYTES", 64):
             sock = self.connect()
             sock.sendall(b"POST /v1/messages HTTP/1.1\r\nHost: x\r\n"
                          b"Content-Length: 128\r\n\r\n" + b"x" * 128)
@@ -434,13 +432,13 @@ class TestTheBodyBudgetIsShared(BrokerServerCase):
 
     def test_a_bodiless_request_never_costs_budget(self):
         """Otherwise a full budget stops GETs, which hold nothing."""
-        with mock.patch.object(broker, "MAX_INFLIGHT_BYTES", 0):
+        with mock.patch.object(broker_server, "MAX_INFLIGHT_BYTES", 0):
             self.assertTrue(self.server.reserve_body(0))
 
     def test_one_request_can_exhaust_the_budget_for_another(self):
         """The property under test: the budget is shared, not per connection.
         A per-connection cap is what MAX_REQUEST_BYTES already was."""
-        with mock.patch.object(broker, "MAX_INFLIGHT_BYTES", 100):
+        with mock.patch.object(broker_server, "MAX_INFLIGHT_BYTES", 100):
             self.assertTrue(self.server.reserve_body(60))
             self.assertFalse(self.server.reserve_body(60),
                              "two 60-byte bodies fit in a 100-byte budget")
@@ -453,7 +451,7 @@ class TestTheBodyBudgetIsShared(BrokerServerCase):
     def test_the_budget_comes_back_after_a_refusal(self):
         """The leak that would turn a transient overload into a wedged broker:
         every later request refused because a reservation was never returned."""
-        with mock.patch.object(broker, "MAX_INFLIGHT_BYTES", 64):
+        with mock.patch.object(broker_server, "MAX_INFLIGHT_BYTES", 64):
             for _ in range(3):
                 sock = self.connect()
                 sock.sendall(b"POST /v1/messages HTTP/1.1\r\nHost: x\r\n"
@@ -498,7 +496,7 @@ class TestAnUpstreamDyingMidResponse(BrokerServerCase):
     def _drive(self, status, hdrs, chunks, die=True):
         upstream = DyingUpstream
         upstream.response = StubResponse(status, hdrs, chunks, die=die)
-        with mock.patch.object(broker.http.client, "HTTPSConnection", upstream):
+        with mock.patch.object(broker_server.http.client, "HTTPSConnection", upstream):
             sock = self.connect()
             sock.sendall(b"GET /v1/messages HTTP/1.1\r\nHost: x\r\n\r\n")
             return self.drain(sock)
@@ -534,9 +532,9 @@ class TestAnUpstreamDyingMidResponse(BrokerServerCase):
         real error response is both possible and correct."""
         class DeadOnArrival(DyingUpstream):
             def getresponse(self):
-                raise broker.http.client.IncompleteRead(b"", 1)
+                raise broker_server.http.client.IncompleteRead(b"", 1)
 
-        with mock.patch.object(broker.http.client, "HTTPSConnection",
+        with mock.patch.object(broker_server.http.client, "HTTPSConnection",
                                DeadOnArrival):
             sock = self.connect()
             sock.sendall(b"GET /v1/messages HTTP/1.1\r\nHost: x\r\n\r\n")
@@ -621,7 +619,7 @@ class TestTheHostSelectsTheCredential(BrokerServerCase):
                                     die=False)
 
         self.enterContext(mock.patch.object(
-            broker.http.client, "HTTPSConnection", Recording))
+            broker_server.http.client, "HTTPSConnection", Recording))
 
     def _get(self, host, extra=b""):
         # Connection: close so drain() returns on EOF rather than on its own
