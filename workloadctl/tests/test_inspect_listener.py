@@ -28,6 +28,7 @@ from egress_policy import (
     vm_inspect_policy,
 )
 from workload_addr import INSPECT_LISTENER_BIN
+from tls_hello import HelloUnreadable, TLS_EXT_ECH, read_client_hello
 import egress_record
 from egress_record import (
     DROP_CEILING,
@@ -462,9 +463,8 @@ class TestClientHelloParser(unittest.TestCase):
     """Enough of RFC 8446 §4.1.2 to read a name, and nothing more."""
 
     def test_a_plain_hello_yields_its_server_name(self):
-        mod = _mod()
         raw = _hello_bytes()
-        _, hello = mod.read_client_hello(_FakeSocket([raw]))
+        _, hello = read_client_hello(_FakeSocket([raw]))
         self.assertEqual(hello.server_name, "example.com")
 
     def test_a_grease_hello_parses(self):
@@ -472,9 +472,8 @@ class TestClientHelloParser(unittest.TestCase):
         extension type is a well-formed extension, skipped by its length like
         any other. Code that enumerated the reserved values could get the list
         wrong; code that ignores them cannot."""
-        mod = _mod()
         raw = _hello_bytes(_grease_extension() + _grease_extension(0x1a1a))
-        _, hello = mod.read_client_hello(_FakeSocket([raw]))
+        _, hello = read_client_hello(_FakeSocket([raw]))
         self.assertEqual(hello.server_name, "example.com")
         self.assertIn(0x0a0a, hello.extensions)
 
@@ -482,54 +481,48 @@ class TestClientHelloParser(unittest.TestCase):
         """A hello with a large extension block -- a post-quantum key share is
         the case that made this ordinary -- must parse, and must parse when it
         spans more than one TLS record."""
-        mod = _mod()
         big = b"\x00\x2a" + (300).to_bytes(2, "big") + b"\x00" * 300
         raw = _hello_bytes(big)
-        _, hello = mod.read_client_hello(_FakeSocket([raw]))
+        _, hello = read_client_hello(_FakeSocket([raw]))
         self.assertEqual(hello.server_name, "example.com")
 
     def test_a_hello_split_across_reads_is_reassembled(self):
         """The peek must not assume one recv is one record: TCP is a stream,
         and a hello that arrives in two segments is the common case for the
         large ones above."""
-        mod = _mod()
         raw = _hello_bytes(b"\x00\x2a" + (300).to_bytes(2, "big") + b"\x00" * 300)
         sock = _FakeSocket([raw[:20], raw[20:100], raw[100:]])
-        got, hello = mod.read_client_hello(sock)
+        got, hello = read_client_hello(sock)
         self.assertEqual(hello.server_name, "example.com")
         self.assertEqual(got, raw)
 
     def test_a_hello_with_no_sni_reads_but_names_nothing(self):
         """Legal TLS, and simply unallowlistable: there is no name to match."""
-        mod = _mod()
         raw = _hello_bytes(server_name=None)
-        _, hello = mod.read_client_hello(_FakeSocket([raw]))
+        _, hello = read_client_hello(_FakeSocket([raw]))
         self.assertIsNone(hello.server_name)
 
     def test_a_truncated_length_is_refused_not_silently_short(self):
         """Every length in a ClientHello is written by the peer. Python's
         slicing returns a short result rather than raising, so a parser that
         sliced would accept a field the peer said was longer than it sent."""
-        mod = _mod()
         raw = _hello_bytes()
         # Keep the record header honest, cut the body.
         cut = raw[:5] + raw[5:20]
         cut = cut[:3] + (15).to_bytes(2, "big") + cut[5:]
-        with self.assertRaises(mod.HelloUnreadable):
-            mod.read_client_hello(_FakeSocket([cut]))
+        with self.assertRaises(HelloUnreadable):
+            read_client_hello(_FakeSocket([cut]))
 
     def test_a_non_handshake_first_byte_is_refused(self):
-        mod = _mod()
-        with self.assertRaises(mod.HelloUnreadable):
-            mod.read_client_hello(_FakeSocket([b"GET / HTTP/1.1\r\n\r\n"]))
+        with self.assertRaises(HelloUnreadable):
+            read_client_hello(_FakeSocket([b"GET / HTTP/1.1\r\n\r\n"]))
 
     def test_an_oversized_hello_is_refused_rather_than_buffered(self):
         """The read loop is driven by lengths the guest writes, so it needs a
         bound that is not one of them."""
-        mod = _mod()
         raw = b"\x16\x03\x01" + (60000).to_bytes(2, "big")
-        with self.assertRaises(mod.HelloUnreadable):
-            mod.read_client_hello(_FakeSocket([raw]), max_bytes=1024)
+        with self.assertRaises(HelloUnreadable):
+            read_client_hello(_FakeSocket([raw]), max_bytes=1024)
 
 
 class _FakeSocket:
@@ -1305,9 +1298,8 @@ class TestLogInjection(unittest.TestCase):
               "peer=127.0.0.1:2 host=allowed.example"
 
     def test_an_sni_with_a_newline_is_not_a_readable_name(self):
-        mod = _mod()
-        with self.assertRaises(mod.HelloUnreadable):
-            mod.read_client_hello(
+        with self.assertRaises(HelloUnreadable):
+            read_client_hello(
                 _FakeSocket([_hello_bytes(server_name=self._forged)]))
 
     def test_a_forged_sni_writes_exactly_one_line_and_not_the_forged_one(self):
@@ -1355,18 +1347,16 @@ class TestLogInjection(unittest.TestCase):
     def test_every_control_character_is_refused_not_only_the_newline(self):
         """LF is the one that forges a record; CR, NUL and DEL are refused with
         it because a field with any of them has no reading both ends share."""
-        mod = _mod()
         for ch in ("\n", "\r", "\x00", "\x7f", "\t", "\x1b"):
             with self.subTest(ch=ch):
-                with self.assertRaises(mod.HelloUnreadable):
-                    mod.read_client_hello(
+                with self.assertRaises(HelloUnreadable):
+                    read_client_hello(
                         _FakeSocket([_hello_bytes(
                             server_name=f"a{ch}b.example")]))
 
     def test_an_ordinary_name_still_reads(self):
         """The guard must not cost the names that are not attacks."""
-        mod = _mod()
-        _, hello = mod.read_client_hello(
+        _, hello = read_client_hello(
             _FakeSocket([_hello_bytes(server_name="Fine-Name.EXAMPLE.com")]))
         self.assertEqual(hello.server_name, "Fine-Name.EXAMPLE.com")
 
@@ -2708,26 +2698,23 @@ class TestEchFixture(unittest.TestCase):
         self.assertTrue(self.FIXTURE.exists())
 
     def test_it_parses_to_the_cover_name(self):
-        mod = _mod()
         raw = self.FIXTURE.read_bytes()
-        _, hello = mod.read_client_hello(_FakeSocket([raw]))
+        _, hello = read_client_hello(_FakeSocket([raw]))
         self.assertEqual(hello.server_name, "cloudflare-ech.com")
 
     def test_it_carries_the_ech_extension(self):
-        mod = _mod()
-        _, hello = mod.read_client_hello(_FakeSocket([self.FIXTURE.read_bytes()]))
-        self.assertIn(mod.TLS_EXT_ECH, hello.extensions)
+        _, hello = read_client_hello(_FakeSocket([self.FIXTURE.read_bytes()]))
+        self.assertIn(TLS_EXT_ECH, hello.extensions)
 
     def test_the_parser_does_not_decrypt_or_special_case_it(self):
         """The ECH extension must be skipped by its length like every other.
         A parser that reached inside it would be a TLS implementation, which
         the peek must not become."""
-        mod = _mod()
-        _, hello = mod.read_client_hello(_FakeSocket([self.FIXTURE.read_bytes()]))
+        _, hello = read_client_hello(_FakeSocket([self.FIXTURE.read_bytes()]))
         # Every extension after the ECH one is still recovered, which is only
         # true if it was skipped correctly rather than terminating the walk.
         self.assertGreater(len(hello.extensions),
-                           hello.extensions.index(mod.TLS_EXT_ECH) + 1)
+                           hello.extensions.index(TLS_EXT_ECH) + 1)
 
 
 class TestEchTripwire(unittest.TestCase):

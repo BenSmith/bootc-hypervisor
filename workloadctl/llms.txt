@@ -463,6 +463,7 @@ lib/egress_selinux.py              # How QEMU enters a confined domain, which po
 lib/egress_ca.py                   # The per-workload egress CA and the leaves it signs (paths, validity, openssl argv, guest anchor)
 lib/egress_policy.py               # What a filtered workload may reach: TLS mode, hostname rules, the inspector's document and paths
 lib/egress_record.py               # What the inspector refuses with, and the per-request record it writes (one definition for writer and readers)
+lib/tls_hello.py                   # Reads the server name and extension list out of a ClientHello, peeked or consumed; not a TLS implementation
 lib/nft_elements.py                # A workload's egress filter (both substrates): which nft set elements exist, and the argv that arm them
 lib/vm_provision.py                # VM disk/seed provisioning
 lib/egress_status.py               # Egress inspector state derivation (both substrates)

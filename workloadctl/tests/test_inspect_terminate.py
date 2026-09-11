@@ -41,6 +41,7 @@ from egress_policy import INSPECT_PORT_TLS
 from egress_ca import (
     ca_cert_path, ca_key_path, ca_openssl_argv, leaf_openssl_argv,
 )
+from tls_hello import HelloUnreadable, read_client_hello
 from egress_record import (
     DROP_INTERNAL,
     DROP_NOT_H2,
@@ -1166,38 +1167,35 @@ class TestThePeekLeavesTheHelloWhereItWas(unittest.TestCase):
         return conn
 
     def test_peeking_reads_the_name_and_consumes_nothing(self):
-        mod = _mod()
         conn = self._hello()
         self.addCleanup(conn.close)
-        raw, hello = mod.read_client_hello(conn, peek=True)
+        raw, hello = read_client_hello(conn, peek=True)
         self.assertEqual(hello.server_name, "peek.example")
-        again, _ = mod.read_client_hello(conn, peek=True)
+        again, _ = read_client_hello(conn, peek=True)
         self.assertEqual(again[:len(raw)], raw,
                          "a peek that consumed would not find it twice")
 
     def test_the_splice_reader_consumes_what_it_reads(self):
-        mod = _mod()
         conn = self._hello()
         self.addCleanup(conn.close)
-        raw, hello = mod.read_client_hello(conn)
+        raw, hello = read_client_hello(conn)
         self.assertEqual(hello.server_name, "peek.example")
         conn.settimeout(0.3)
-        with self.assertRaises(mod.HelloUnreadable):
-            mod.read_client_hello(conn)
+        with self.assertRaises(HelloUnreadable):
+            read_client_hello(conn)
 
     def test_a_hello_that_never_arrives_whole_is_refused_not_spun_on(self):
         """MSG_WAITALL is advisory under a socket timeout, so a dribbling peer
         gets short reads forever. Without the no-progress guard that is a
         ceiling slot held until the peer feels like closing."""
-        mod = _mod()
         ours, guest = _tcp_pair()
         self.addCleanup(ours.close)
         self.addCleanup(guest.close)
         ours.settimeout(0.3)
         guest.sendall(bytes([0x16, 0x03, 0x01, 0x40, 0x00]))   # 16 KiB claimed
         started = time.monotonic()
-        with self.assertRaises(mod.HelloUnreadable):
-            mod.read_client_hello(ours, peek=True)
+        with self.assertRaises(HelloUnreadable):
+            read_client_hello(ours, peek=True)
         self.assertLess(time.monotonic() - started, 10.0)
 
 
