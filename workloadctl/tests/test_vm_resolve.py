@@ -15,6 +15,7 @@ as one.
 
 import importlib
 from tests import load_script
+import dns_wire
 import ipaddress
 import json
 import os
@@ -144,7 +145,10 @@ def _module():
     """
     mod = load_script("libexec/workload-vm-resolve")
     mod.logged = []
-    mod.log = mod.logged.append
+    # Both bindings: build_answer logs through dns_wire's own name, the serve
+    # loop through the copy it imported, and a fixture that silenced one of
+    # them would let the other print through every fuzz case.
+    mod.log = dns_wire.log = mod.logged.append
     return mod
 
 
@@ -369,7 +373,7 @@ class TestSynthesis(unittest.TestCase):
         cls.inspect = inspect_address(UID)
 
     def answer(self, *args, **kwargs):
-        return Reply(self.mod.build_answer(query(*args, **kwargs), self.policy))
+        return Reply(dns_wire.build_answer(query(*args, **kwargs), self.policy))
 
     def test_an_a_query_gets_the_inspectors_v4(self):
         reply = self.answer("example.com", TYPE_A)
@@ -394,7 +398,7 @@ class TestSynthesis(unittest.TestCase):
         self.assertEqual(ttl, RESOLVE_TTL)
 
     def test_the_id_and_question_are_echoed(self):
-        raw = self.mod.build_answer(query("example.com", TYPE_A, ident=0xBEEF),
+        raw = dns_wire.build_answer(query("example.com", TYPE_A, ident=0xBEEF),
                                     self.policy)
         reply = Reply(raw)
         self.assertEqual(reply.id, 0xBEEF)
@@ -430,7 +434,7 @@ class TestNodata(unittest.TestCase):
         cls.policy = _policy(cls.mod)
 
     def answer(self, *args, **kwargs):
-        return Reply(self.mod.build_answer(query(*args, **kwargs), self.policy))
+        return Reply(dns_wire.build_answer(query(*args, **kwargs), self.policy))
 
     def test_https_gets_nodata_not_refused(self):
         """The type Firefox and curl now ask for before every connection. A
@@ -485,7 +489,7 @@ class TestStaticMap(unittest.TestCase):
         })
 
     def answer(self, *args, **kwargs):
-        return Reply(self.mod.build_answer(query(*args, **kwargs), self.policy))
+        return Reply(dns_wire.build_answer(query(*args, **kwargs), self.policy))
 
     def test_a_static_name_wins_over_synthesis(self):
         """Without this every named non-80/443 destination -- an SSH forge, a
@@ -524,7 +528,7 @@ class TestStaticMap(unittest.TestCase):
 
     def test_a_hand_edited_map_key_is_normalised_on_load(self):
         policy = _policy(self.mod, static={"GIT.Local.": ["192.0.2.9"]})
-        reply = Reply(self.mod.build_answer(query("git.local", TYPE_A), policy))
+        reply = Reply(dns_wire.build_answer(query("git.local", TYPE_A), policy))
         self.assertEqual(reply.addresses(), ["192.0.2.9"])
 
 
@@ -538,7 +542,7 @@ class TestEdns(unittest.TestCase):
         cls.inspect = inspect_address(UID)
 
     def test_an_opt_query_is_answered(self):
-        reply = Reply(self.mod.build_answer(
+        reply = Reply(dns_wire.build_answer(
             query("example.com", TYPE_A, opt=True), self.policy))
         self.assertEqual(reply.rcode, 0)
         self.assertEqual(reply.addresses(), [self.inspect.v4])
@@ -548,7 +552,7 @@ class TestEdns(unittest.TestCase):
         as no EDNS0 support and downgrades once; a malformed or truncated OPT
         echoed back is what makes a stub mark a server bad -- with nowhere to
         fall back to."""
-        reply = Reply(self.mod.build_answer(
+        reply = Reply(dns_wire.build_answer(
             query("example.com", TYPE_A, opt=True), self.policy))
         self.assertEqual(reply.arcount, 0)
         self.assertNotIn(b"\x00\x29", reply.raw[12:])  # type 41, OPT
@@ -556,9 +560,9 @@ class TestEdns(unittest.TestCase):
     def test_the_answer_is_identical_with_and_without_opt(self):
         """Everything past the question is ignored, which is the shape that
         cannot echo a malformed OPT."""
-        with_opt = self.mod.build_answer(
+        with_opt = dns_wire.build_answer(
             query("example.com", TYPE_A, opt=True), self.policy)
-        without = self.mod.build_answer(
+        without = dns_wire.build_answer(
             query("example.com", TYPE_A, opt=False), self.policy)
         self.assertEqual(with_opt[2:], without[2:])
 
@@ -574,14 +578,14 @@ class TestMalformed(unittest.TestCase):
     def test_a_non_query_opcode_gets_notimp(self):
         """An UPDATE or a NOTIFY is not a question about a name, so there is no
         empty answer that would mean anything."""
-        reply = Reply(self.mod.build_answer(
+        reply = Reply(dns_wire.build_answer(
             query("example.com", TYPE_A, opcode=5), self.policy))
         self.assertEqual(reply.rcode, 4)
         self.assertEqual(reply.opcode, 5)
 
     def test_a_query_with_no_question_gets_formerr(self):
         raw = struct.pack("!HHHHHH", 0x1234, 0x0100, 0, 0, 0, 0)
-        self.assertEqual(Reply(self.mod.build_answer(raw, self.policy)).rcode, 1)
+        self.assertEqual(Reply(dns_wire.build_answer(raw, self.policy)).rcode, 1)
 
     def test_a_compression_pointer_in_the_question_is_refused(self):
         """A pointer in a QUESTION section is malformed -- there is nothing
@@ -589,8 +593,8 @@ class TestMalformed(unittest.TestCase):
         parser is walked into a loop by a peer that controls every byte."""
         raw = struct.pack("!HHHHHH", 0x1234, 0x0100, 1, 0, 0, 0)
         raw += b"\xc0\x0c" + struct.pack("!HH", TYPE_A, CLASS_IN)
-        with self.assertRaises(self.mod.Malformed):
-            self.mod.build_answer(raw, self.policy)
+        with self.assertRaises(dns_wire.Malformed):
+            dns_wire.build_answer(raw, self.policy)
 
     def test_a_name_ending_exactly_at_the_message_boundary_is_refused(self):
         """Found by TestFuzz, pinned here.
@@ -605,20 +609,20 @@ class TestMalformed(unittest.TestCase):
         packet.
         """
         raw = bytes.fromhex("00010100000100000000b9000100")
-        with self.assertRaises(self.mod.Malformed):
-            self.mod.build_answer(raw, self.policy)
+        with self.assertRaises(dns_wire.Malformed):
+            dns_wire.build_answer(raw, self.policy)
 
     def test_a_truncated_header_is_refused(self):
-        with self.assertRaises(self.mod.Malformed):
-            self.mod.build_answer(b"\x12\x34", self.policy)
+        with self.assertRaises(dns_wire.Malformed):
+            dns_wire.build_answer(b"\x12\x34", self.policy)
 
     def test_a_name_running_past_the_message_is_refused(self):
         raw = struct.pack("!HHHHHH", 0x1234, 0x0100, 1, 0, 0, 0) + b"\x09abc"
-        with self.assertRaises(self.mod.Malformed):
-            self.mod.build_answer(raw, self.policy)
+        with self.assertRaises(dns_wire.Malformed):
+            dns_wire.build_answer(raw, self.policy)
 
     def test_an_error_response_carries_the_queried_id(self):
-        raw = self.mod.error_response(
+        raw = dns_wire.error_response(
             query("example.com", TYPE_A, ident=0x4242), 1)
         self.assertEqual(Reply(raw).id, 0x4242)
         self.assertTrue(Reply(raw).qr)
@@ -645,13 +649,13 @@ class TestLogInjectionViaLabel(unittest.TestCase):
     _forged = "evil\n  allowed.example A -> static: 1 record(s)"
 
     def test_a_label_with_a_newline_is_malformed(self):
-        with self.assertRaises(self.mod.Malformed):
-            self.mod.build_answer(query(self._forged, TYPE_A), self.policy)
+        with self.assertRaises(dns_wire.Malformed):
+            dns_wire.build_answer(query(self._forged, TYPE_A), self.policy)
 
     def test_it_is_refused_before_it_is_logged_or_counted(self):
         counters = self.mod.Counters()
-        with self.assertRaises(self.mod.Malformed):
-            self.mod.build_answer(query(self._forged, TYPE_A), self.policy,
+        with self.assertRaises(dns_wire.Malformed):
+            dns_wire.build_answer(query(self._forged, TYPE_A), self.policy,
                                   counters=counters)
         self.assertEqual(self.mod.logged, [])
         snap = counters.snapshot()
@@ -673,14 +677,14 @@ class TestLogInjectionViaLabel(unittest.TestCase):
     def test_every_control_character_goes_with_the_newline(self):
         for ch in ("\n", "\r", "\x00", "\x7f", "\t", "\x1b"):
             with self.subTest(ch=ch):
-                with self.assertRaises(self.mod.Malformed):
-                    self.mod.build_answer(
+                with self.assertRaises(dns_wire.Malformed):
+                    dns_wire.build_answer(
                         query(f"a{ch}b.example", TYPE_A), self.policy)
 
     def test_an_ordinary_name_still_answers(self):
         """The guard must not cost the names that are not attacks -- including
         the hyphens and digits a real hostname carries."""
-        reply = Reply(self.mod.build_answer(
+        reply = Reply(dns_wire.build_answer(
             query("api-1.allowed.example", TYPE_A), self.policy))
         self.assertEqual(reply.rcode, 0)
         self.assertEqual(reply.ancount, 1)
@@ -786,7 +790,7 @@ class TestUdpBudget(unittest.TestCase):
 
     def test_a_normal_answer_never_truncates(self):
         policy = _policy(self.mod)
-        reply = Reply(self.mod.build_answer(
+        reply = Reply(dns_wire.build_answer(
             query("example.com", TYPE_A), policy, budget=512))
         self.assertFalse(reply.tc)
 
@@ -795,14 +799,14 @@ class TestUdpBudget(unittest.TestCase):
         sends the client to the TCP listener the socket unit also binds.
         Dropping them quietly would hand the guest a partial answer it has no
         way to know is partial."""
-        reply = Reply(self.mod.build_answer(
+        reply = Reply(dns_wire.build_answer(
             query("many.local", TYPE_A), self.policy, budget=512))
         self.assertTrue(reply.tc)
         self.assertLess(reply.ancount, 59)
         self.assertLessEqual(len(reply.raw), 512)
 
     def test_tcp_is_not_bounded_and_carries_the_whole_answer(self):
-        reply = Reply(self.mod.build_answer(query("many.local", TYPE_A),
+        reply = Reply(dns_wire.build_answer(query("many.local", TYPE_A),
                                             self.policy))
         self.assertFalse(reply.tc)
         self.assertEqual(reply.ancount, 59)
@@ -810,6 +814,15 @@ class TestUdpBudget(unittest.TestCase):
 
 class TestNoUpstream(unittest.TestCase):
     """The property that makes DNS exfiltration absent rather than filtered."""
+
+    # Every file the responder is made of. The property is about the program,
+    # and the program is the entrypoint plus the modules it is a shim over: a
+    # scan of the script alone would pass on a fifty-line main() while the
+    # answering path, in a module beside it, grew a fallback.
+    RESPONDER_FILES = (
+        "libexec/workload-vm-resolve",
+        "lib/dns_wire.py",
+    )
 
     def test_the_responder_never_calls_out(self):
         """Parsed, not grepped. The property is about CALLS, and the words
@@ -822,32 +835,35 @@ class TestNoUpstream(unittest.TestCase):
         what fails: the fallback IS the exfiltration channel.
         """
         import ast
-        import pathlib
-        source = pathlib.Path(__file__).resolve().parent.parent \
-            / "libexec" / "workload-vm-resolve"
-        tree = ast.parse(source.read_text())
         forbidden = {
             "connect", "connect_ex", "create_connection", "getaddrinfo",
             "gethostbyname", "gethostbyname_ex", "getnameinfo", "urlopen",
             "sendto_upstream",
         }
-        called = set()
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.Call):
-                continue
-            func = node.func
-            name = func.attr if isinstance(func, ast.Attribute) else \
-                getattr(func, "id", None)
-            if name:
-                called.add(name)
-        self.assertEqual(called & forbidden, set(), sorted(called & forbidden))
+        for relative in self.RESPONDER_FILES:
+            with self.subTest(file=relative):
+                tree = ast.parse(self._source(relative).read_text())
+                called = set()
+                for node in ast.walk(tree):
+                    if not isinstance(node, ast.Call):
+                        continue
+                    func = node.func
+                    name = func.attr if isinstance(func, ast.Attribute) \
+                        else getattr(func, "id", None)
+                    if name:
+                        called.add(name)
+                self.assertEqual(called & forbidden, set(),
+                                 sorted(called & forbidden))
 
     @staticmethod
-    def _socket_constructions(relative: str):
-        import ast
+    def _source(relative: str):
         import pathlib
-        source = pathlib.Path(__file__).resolve().parent.parent / relative
-        tree = ast.parse(source.read_text())
+        return pathlib.Path(__file__).resolve().parent.parent / relative
+
+    @classmethod
+    def _socket_constructions(cls, relative: str):
+        import ast
+        tree = ast.parse(cls._source(relative).read_text())
         return [
             node for node in ast.walk(tree)
             if isinstance(node, ast.Call)
@@ -856,7 +872,7 @@ class TestNoUpstream(unittest.TestCase):
         ]
 
     def test_the_program_itself_constructs_no_socket_at_all(self):
-        """This file contains no socket.socket() call of any kind.
+        """No file of the responder's contains a socket.socket() call.
 
         The one constructor it relies on moved to lib/sd_listen.py when the
         activation mechanics were shared with workload-inspect-listener.
@@ -866,8 +882,10 @@ class TestNoUpstream(unittest.TestCase):
         more strongly than one with a construction that happens to be safe.
         """
         import ast
-        found = self._socket_constructions("libexec/workload-vm-resolve")
-        self.assertEqual(found, [], [ast.unparse(c) for c in found])
+        for relative in self.RESPONDER_FILES:
+            with self.subTest(file=relative):
+                found = self._socket_constructions(relative)
+                self.assertEqual(found, [], [ast.unparse(c) for c in found])
 
     def test_the_shared_constructor_only_adopts_an_inherited_fd(self):
         """sd_listen's socket.socket() appears exactly once, and only with
@@ -896,8 +914,8 @@ class TestNoUpstream(unittest.TestCase):
         them here is what keeps the assertion above from being read as
         "the socket module is banned"."""
         mod = _module()
-        self.assertEqual(mod.pack_address("192.0.2.1"), b"\xc0\x00\x02\x01")
-        self.assertEqual(len(mod.pack_address("2001:db8::1")), 16)
+        self.assertEqual(dns_wire.pack_address("192.0.2.1"), b"\xc0\x00\x02\x01")
+        self.assertEqual(len(dns_wire.pack_address("2001:db8::1")), 16)
 
 
 class TestOnTheWire(unittest.TestCase):
@@ -1213,8 +1231,8 @@ class TestFuzz(unittest.TestCase):
             data = self._mutate(rng, corpus)
             budget = 512 if i % 2 else None
             try:
-                reply = self.mod.build_answer(data, self.policy, budget=budget)
-            except self.mod.Malformed:
+                reply = dns_wire.build_answer(data, self.policy, budget=budget)
+            except dns_wire.Malformed:
                 continue
             except Exception as exc:  # noqa: BLE001
                 self.fail(f"{type(exc).__name__}: {exc} on {data.hex()}")
@@ -1241,8 +1259,8 @@ class TestLogging(unittest.TestCase):
     def test_the_name_type_and_source_are_logged(self):
         mod = _module()
         policy = _policy(mod, static={"git.local": ["192.0.2.9"]})
-        mod.build_answer(query("git.local", TYPE_A), policy)
-        mod.build_answer(query("elsewhere.example", TYPE_AAAA), policy)
+        dns_wire.build_answer(query("git.local", TYPE_A), policy)
+        dns_wire.build_answer(query("elsewhere.example", TYPE_AAAA), policy)
         self.assertEqual(len(mod.logged), 2, mod.logged)
         self.assertIn("git.local", mod.logged[0])
         self.assertIn("A", mod.logged[0])
@@ -1516,7 +1534,7 @@ class TestDnsCounters(unittest.TestCase):
         self.counters = self.mod.Counters()
 
     def answer(self, *args, **kwargs):
-        return self.mod.build_answer(query(*args, **kwargs), self.policy,
+        return dns_wire.build_answer(query(*args, **kwargs), self.policy,
                                      counters=self.counters)
 
     def test_a_synthesised_answer_is_counted_as_one(self):
@@ -1551,7 +1569,7 @@ class TestDnsCounters(unittest.TestCase):
         signature even though `hosts` does not match it."""
         policy = _policy(self.mod, hosts=[],
                          static={"forge.internal": ["10.0.0.5"]})
-        self.mod.build_answer(query("forge.internal", TYPE_A), policy,
+        dns_wire.build_answer(query("forge.internal", TYPE_A), policy,
                               counters=self.counters)
         snap = self.counters.snapshot()
         self.assertEqual(snap["unlisted"], 0)
@@ -1564,7 +1582,7 @@ class TestDnsCounters(unittest.TestCase):
         responder that did not would count every legitimate lookup on such a
         workload as unlisted."""
         policy = _policy(self.mod, hosts=[], policy=["api.example.com"])
-        self.mod.build_answer(query("api.example.com", TYPE_A), policy,
+        dns_wire.build_answer(query("api.example.com", TYPE_A), policy,
                               counters=self.counters)
         self.assertEqual(self.counters.snapshot()["unlisted"], 0)
 
@@ -1577,7 +1595,7 @@ class TestDnsCounters(unittest.TestCase):
         policy = _policy(self.mod, hosts=[],
                          policy=["api.example.com", "*.cdn.example.com"])
         for name in ("api.example.com", "assets.cdn.example.com"):
-            self.mod.build_answer(query(name, TYPE_A), policy,
+            dns_wire.build_answer(query(name, TYPE_A), policy,
                                   counters=self.counters)
         snap = self.counters.snapshot()
         self.assertEqual(snap["unlisted"], 0)
@@ -1588,7 +1606,7 @@ class TestDnsCounters(unittest.TestCase):
         own. The apex trap is the case that proves it did not: `*.` requires a
         label before the dot, so the apex is NOT covered and stays counted."""
         policy = _policy(self.mod, hosts=[], policy=["*.cdn.example.com"])
-        self.mod.build_answer(query("cdn.example.com", TYPE_A), policy,
+        dns_wire.build_answer(query("cdn.example.com", TYPE_A), policy,
                               counters=self.counters)
         self.assertEqual(self.counters.snapshot()["unlisted"], 1)
 
@@ -1621,7 +1639,7 @@ class TestDnsCounters(unittest.TestCase):
         """Every existing caller passes none. A response must never be shaped
         by whether anyone is counting."""
         with_counters = self.answer("allowed.example", TYPE_A)
-        without = self.mod.build_answer(query("allowed.example", TYPE_A),
+        without = dns_wire.build_answer(query("allowed.example", TYPE_A),
                                         self.policy)
         self.assertEqual(with_counters, without)
 
