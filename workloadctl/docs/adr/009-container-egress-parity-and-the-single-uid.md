@@ -157,7 +157,6 @@ arbitrary destinations and is never asked to cooperate.
 | Image trust-store probing as a gate | A probe reports on the image, not on the binary that will make the request, so it can be confidently wrong. At most a `doctor` hint, never a gate |
 | Re-resolution on a timer | A second resolution with a second answer, which the filter-element builder already documents as its own problem |
 | Consolidating `workload-container-inspect` into `workload-vm-inspect` | Looks like duplication, isn't: the container helper is already the smaller one *because* it reuses the listener, `peer_identity` and every uid-keyed element builder. What remains in each is per-substrate by construction — the two halves state different rules, not the same rule twice |
-| Splitting the inspect listener into `lib/` modules | Pure logic inside it (policy matching, SNI/Host parsing, upstream pool) could move, but this is the file rungs 1–6 were fought in and it is covered by six hardware rigs. Last, if ever |
 | A per-mode strategy record for the `single`/`pod`/`bridge` axis | Would consolidate ~22 `mode ==` branch sites — and "single-container TOMLs produce byte-identical units" is a deliberate constraint, and this is exactly the code that would break it quietly |
 
 ## Consequences
