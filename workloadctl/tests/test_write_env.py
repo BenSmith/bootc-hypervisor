@@ -11,9 +11,14 @@ import sys
 import tempfile
 import textwrap
 import unittest
+import io
+from contextlib import redirect_stderr
 from pathlib import Path
+from unittest import mock
 
-from tests import script_env
+from tests import load_script, script_env
+
+import secrets_env
 
 
 WRITE_ENV = os.path.join(os.path.dirname(__file__), '..', 'libexec', 'workload-write-env')
@@ -671,6 +676,92 @@ class TestRetiredSecretsAreRemoved(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stderr.strip(), "")
         self.assertFalse((Path(self.env_dir) / "workload-never.secrets").exists())
+
+
+class TestSecretsEnvRefusals(unittest.TestCase):
+    """lib/secrets_env.py refuses with an EnvFileError whose message is the
+    whole report; the rows above see the same text over a subprocess."""
+
+    def _entry(self, **env):
+        return {"name": "web", "container": {"environment": env}}
+
+    def test_a_multi_container_workload_needs_a_container_name(self):
+        config = {"containers": [{"name": "a", "image": "x"},
+                                 {"name": "b", "image": "x"}]}
+        with self.assertRaisesRegex(secrets_env.EnvFileError,
+                                    "multiple containers"):
+            secrets_env.select_container(config, "stack", None)
+        self.assertEqual(
+            secrets_env.select_container(config, "stack", "b")["name"], "b")
+
+    def test_an_unknown_container_is_named_in_the_refusal(self):
+        config = {"containers": [{"name": "a", "image": "x"}]}
+        with self.assertRaisesRegex(secrets_env.EnvFileError,
+                                    "'nope' not in workload 'stack'"):
+            secrets_env.select_container(config, "stack", "nope")
+
+    def test_a_real_reference_needs_the_credentials_directory(self):
+        with self.assertRaisesRegex(secrets_env.EnvFileError,
+                                    "CREDENTIALS_DIRECTORY"):
+            secrets_env.secret_lines(self._entry(K="${SECRET:tok}"), None)
+
+    def test_an_escaped_reference_does_not(self):
+        self.assertEqual(
+            secrets_env.secret_lines(self._entry(K="$${SECRET:tok}"), None),
+            ["K=${SECRET:tok}"])
+
+    def test_a_newline_in_a_value_is_refused(self):
+        creds = tempfile.mkdtemp()
+        self.addCleanup(__import__("shutil").rmtree, creds, True)
+        Path(creds, "tok").write_text("a\nb")
+        with self.assertRaisesRegex(secrets_env.EnvFileError, "newlines"):
+            secrets_env.secret_lines(self._entry(K="${SECRET:tok}"), creds)
+
+    def test_the_file_is_0600_before_it_holds_a_byte(self):
+        out = tempfile.mkdtemp()
+        self.addCleanup(__import__("shutil").rmtree, out, True)
+        path = Path(out, "workload-web.secrets")
+        secrets_env.write_env_file(path, ["K=v"], "web")
+        self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(path.read_text(), "K=v\n")
+
+    def test_env_file_name(self):
+        self.assertEqual(secrets_env.env_file_name("web", None),
+                         "workload-web.secrets")
+        self.assertEqual(secrets_env.env_file_name("stack", "db"),
+                         "workload-stack-db.secrets")
+
+
+class TestWriteEnvShim(unittest.TestCase):
+    """main() hands the program its two arguments and turns its refusal into
+    exit 1."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.mod = load_script("libexec/workload-write-env")
+
+    def test_single_container_passes_no_container_name(self):
+        with mock.patch.object(self.mod, "write_secrets_env") as w:
+            self.assertEqual(self.mod.main(["x", "web"]), 0)
+        w.assert_called_once_with("web", None)
+
+    def test_multi_container_passes_the_container_name(self):
+        with mock.patch.object(self.mod, "write_secrets_env") as w:
+            self.assertEqual(self.mod.main(["x", "stack", "db"]), 0)
+        w.assert_called_once_with("stack", "db")
+
+    def test_a_refusal_is_exit_1_with_the_message(self):
+        err = io.StringIO()
+        with mock.patch.object(self.mod, "write_secrets_env",
+                               side_effect=secrets_env.EnvFileError("why")), \
+             redirect_stderr(err):
+            self.assertEqual(self.mod.main(["x", "web"]), 1)
+        self.assertEqual(err.getvalue(), "ERROR: why\n")
+
+    def test_usage(self):
+        with redirect_stderr(io.StringIO()):
+            self.assertEqual(self.mod.main(["x"]), 1)
+            self.assertEqual(self.mod.main(["x", "a", "b", "c"]), 1)
 
 
 if __name__ == "__main__":
