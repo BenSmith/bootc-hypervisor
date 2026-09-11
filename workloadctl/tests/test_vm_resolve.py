@@ -18,10 +18,12 @@ from sd_listen import NotSocketActivated
 import dns_wire
 import resolve_policy
 import resolve_server
+from tests import load_script
 import ipaddress
 import json
 import os
 import shutil
+import signal
 import socket
 import struct
 import tempfile
@@ -1710,6 +1712,64 @@ class TestResponderStatusFile(unittest.TestCase):
         self.assertEqual(seen, [True],
                          "the status file did not exist before the first turn "
                          "of the accept loop")
+
+
+class TestEntrypointWiring(unittest.TestCase):
+    """main() end to end, on a real socket, stopped by its own SIGTERM handler.
+
+    Every other row enters below main(): at build_answer, at the serve loop,
+    at the policy reader. What main() owns outright is the wiring between
+    them -- which path the policy is read from, which path the status file
+    goes to, that the Counters it makes are the ones serve() counts into, and
+    that the SIGTERM flag is the stop the loop reads. A wrong argument there
+    is a responder that answers every query and reports nothing, or one that
+    never stops. Only running main() sees that.
+    """
+
+    def test_a_query_is_answered_and_counted_into_the_status_file(self):
+        mod = load_script("libexec/workload-vm-resolve")
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        policy_path = os.path.join(d, "policy.json")
+        status_path = os.path.join(d, "status.json")
+        Path(policy_path).write_text(json.dumps(vm_resolve_policy({}, UID)))
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.addCleanup(sock.close)
+        sock.bind(("127.0.0.1", 0))
+        client = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.addCleanup(client.close)
+        client.settimeout(5)
+        seen = {}
+
+        def poke():
+            client.sendto(query("git.local", 1), sock.getsockname())
+            seen["reply"] = Reply(client.recv(512))
+            os.kill(os.getpid(), signal.SIGTERM)
+
+        saved = signal.getsignal(signal.SIGTERM)
+        self.addCleanup(signal.signal, signal.SIGTERM, saved)
+        patch = mock.patch.object
+        with patch(mod, "inherited_listening_sockets", return_value=[sock]), \
+                patch(mod, "vm_resolve_policy_path", return_value=policy_path), \
+                patch(mod, "vm_resolve_status_path", return_value=status_path):
+            threading.Thread(target=poke, daemon=True).start()
+            rc = mod.main(["workload-vm-resolve", "demo"])
+        self.assertEqual(rc, 0)
+        self.assertEqual(seen["reply"].ancount, 1)
+        status = json.loads(Path(status_path).read_text())
+        self.assertEqual(status["queries"]["synthesised"], 1)
+
+    def test_it_refuses_without_a_workload_name(self):
+        mod = load_script("libexec/workload-vm-resolve")
+        with mock.patch("sys.stderr"):
+            self.assertEqual(mod.main(["workload-vm-resolve"]), 2)
+
+    def test_no_sockets_is_a_refusal_not_a_bind(self):
+        mod = load_script("libexec/workload-vm-resolve")
+        with mock.patch.object(mod, "inherited_listening_sockets",
+                               return_value=[]):
+            with self.assertRaises(NotSocketActivated):
+                mod.main(["workload-vm-resolve", "demo"])
 
 
 if __name__ == "__main__":
