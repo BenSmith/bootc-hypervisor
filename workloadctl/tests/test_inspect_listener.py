@@ -29,6 +29,10 @@ from egress_policy import (
 )
 from workload_addr import INSPECT_LISTENER_BIN
 from tls_hello import HelloUnreadable, TLS_EXT_ECH, read_client_hello
+from http_framing import (
+    DRAIN_MAX, H2Framing, H2_PREFACE, MAX_TRAILER_LINES, NotH2, RELAY_CHUNK,
+    RequestUnreadable, _Stream, copy_body,
+)
 import egress_record
 from egress_record import (
     DROP_CEILING,
@@ -1139,22 +1143,19 @@ class TestHttp2Framing(unittest.TestCase):
         bytes chosen so an HTTP/1.1 server cannot mistake them for a request,
         and a version this file computed could be wrong in a way that only
         showed up against a real client."""
-        mod = _mod()
-        self.assertEqual(mod.H2_PREFACE,
+        self.assertEqual(H2_PREFACE,
                          b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n")
-        self.assertEqual(len(mod.H2_PREFACE), 24)
+        self.assertEqual(len(H2_PREFACE), 24)
 
     def test_a_settings_frame_on_stream_zero_opens_a_connection(self):
-        mod = _mod()
-        framing = mod.H2Framing()
+        framing = H2Framing()
         framing.feed(self._frame(0x4, payload=b"\x00\x03\x00\x00\x00\x64"))
         self.assertTrue(framing.aligned)
 
     def test_an_empty_settings_frame_opens_a_connection(self):
         """RFC 9113 §3.4: the client's opening SETTINGS MAY be empty, and a
         check requiring a payload would refuse conforming clients."""
-        mod = _mod()
-        framing = mod.H2Framing()
+        framing = H2Framing()
         framing.feed(self._frame(0x4))
         self.assertTrue(framing.aligned)
 
@@ -1163,23 +1164,20 @@ class TestHttp2Framing(unittest.TestCase):
         preface and then whatever it liked would otherwise be relayed, because
         the length field is 24 arbitrary bits and nearly any byte string parses
         as frames."""
-        mod = _mod()
-        framing = mod.H2Framing()
-        with self.assertRaises(mod.NotH2):
+        framing = H2Framing()
+        with self.assertRaises(NotH2):
             framing.feed(self._frame(0x1, stream=1, payload=b"headers"))
 
     def test_a_first_settings_frame_off_stream_zero_is_refused(self):
-        mod = _mod()
-        framing = mod.H2Framing()
-        with self.assertRaises(mod.NotH2):
+        framing = H2Framing()
+        with self.assertRaises(NotH2):
             framing.feed(self._frame(0x4, stream=1))
 
     def test_an_opening_settings_frame_of_a_ragged_length_is_refused(self):
         """Settings are 6 bytes each (RFC 9113 §6.5), so a length that is not a
         multiple of six is not a SETTINGS frame whatever the type byte says."""
-        mod = _mod()
-        framing = mod.H2Framing()
-        with self.assertRaises(mod.NotH2):
+        framing = H2Framing()
+        with self.assertRaises(NotH2):
             framing.feed(self._frame(0x4, payload=b"\x00\x03\x00"))
 
     def test_a_frame_header_split_across_reads_is_reassembled(self):
@@ -1187,11 +1185,10 @@ class TestHttp2Framing(unittest.TestCase):
         version that parsed each chunk independently would refuse every real
         connection whose opening SETTINGS straddled a segment boundary --
         intermittently, and under load first."""
-        mod = _mod()
-        framing = mod.H2Framing()
+        framing = H2Framing()
         frame = self._frame(0x4, payload=b"\x00\x03\x00\x00\x00\x64")
         for i in range(1, len(frame)):
-            scanner = mod.H2Framing()
+            scanner = H2Framing()
             scanner.feed(frame[:i])
             scanner.feed(frame[i:])
             self.assertTrue(scanner.aligned, i)
@@ -1199,8 +1196,7 @@ class TestHttp2Framing(unittest.TestCase):
         self.assertTrue(framing.aligned)
 
     def test_several_frames_in_one_read_stay_aligned(self):
-        mod = _mod()
-        framing = mod.H2Framing()
+        framing = H2Framing()
         framing.feed(self._frame(0x4)
                      + self._frame(0x1, stream=1, payload=b"hpack")
                      + self._frame(0x0, stream=1, payload=b"body"))
@@ -1209,16 +1205,14 @@ class TestHttp2Framing(unittest.TestCase):
     def test_a_stream_that_stops_part_way_through_a_frame_is_not_aligned(self):
         """The one thing continuous framing actually catches. A relay checking
         only the first frame would carry anything at all after it."""
-        mod = _mod()
-        framing = mod.H2Framing()
+        framing = H2Framing()
         framing.feed(self._frame(0x4) + b"\x00\x00\x40\x00\x00\x00\x00")
         self.assertFalse(framing.aligned)
 
     def test_the_reserved_bit_of_a_stream_id_is_ignored_not_refused(self):
         """RFC 9113 §4.1: receivers must ignore it. Refusing a sender that sets
         it would fail a conforming connection over a bit nothing reads."""
-        mod = _mod()
-        framing = mod.H2Framing()
+        framing = H2Framing()
         framing.feed(b"\x00\x00\x00\x04\x00\x80\x00\x00\x00")
         self.assertTrue(framing.aligned)
 
@@ -1226,9 +1220,8 @@ class TestHttp2Framing(unittest.TestCase):
         """The preface does nearly all the work, and this says why the framing
         scanner is not asked to be a conformance checker: everything that is
         not h2 fails on byte one, before any of it runs."""
-        mod = _mod()
-        self.assertNotEqual(b"GET / HTTP/1.1\r\n"[:len(mod.H2_PREFACE)],
-                            mod.H2_PREFACE)
+        self.assertNotEqual(b"GET / HTTP/1.1\r\n"[:len(H2_PREFACE)],
+                            H2_PREFACE)
 
 
 class TestHttp2AlpnSelection(unittest.TestCase):
@@ -1884,26 +1877,25 @@ class TestCleartextFraming(unittest.TestCase):
         chunk before forwarding any of it lets one line of guest input decide
         how much memory this process holds -- beside the workloads, on their
         host. The bytes are relayed in bounded pieces instead."""
-        mod = _mod()
         # Bigger than one RELAY_CHUNK, so the relay loop must iterate, and
         # small enough to fit the rig's socketpair -- the rig writes the whole
         # request before serving it, which is itself why a real large-body case
         # belongs to splice_rig and not here.
-        body = b"A" * (mod.RELAY_CHUNK + 1000)
+        body = b"A" * (RELAY_CHUNK + 1000)
         # The assertion is about MEMORY, so it is made where memory is spent:
         # the largest single read. Asserting on the bytes that arrive cannot
         # tell a streamed chunk from a buffered one -- the same bytes arrive
         # either way, which is exactly why this property survives a test that
         # only reads the socket.
         reads = []
-        original = mod._Stream.read_exactly
+        original = _Stream.read_exactly
 
         def recording(self, n):
             reads.append(n)
             return original(self, n)
 
         with unittest.mock.patch.object(
-                mod._Stream, "read_exactly", recording):
+                _Stream, "read_exactly", recording):
             _, _, ups = self._run(
                 ["a.example"],
                 b"POST / HTTP/1.1\r\nHost: a.example\r\n"
@@ -1913,13 +1905,12 @@ class TestCleartextFraming(unittest.TestCase):
         sent = ups[0][1]
         self.assertIn(b"%x\r\n" % len(body), sent)
         self.assertIn(body, sent)
-        self.assertLessEqual(max(reads), mod.RELAY_CHUNK,
+        self.assertLessEqual(max(reads), RELAY_CHUNK,
                              "a chunk was read whole before any of it moved")
 
     def test_more_trailers_than_the_ceiling_is_refused(self):
-        mod = _mod()
         trailers = b"".join(b"X-T%d: v\r\n" % i
-                            for i in range(mod.MAX_TRAILER_LINES + 2))
+                            for i in range(MAX_TRAILER_LINES + 2))
         log, _, ups = self._run(
             ["a.example"],
             b"POST / HTTP/1.1\r\nHost: a.example\r\n"
@@ -2122,7 +2113,7 @@ class TestCleartextPerRequest(unittest.TestCase):
              unittest.mock.patch.object(mod.Listener, "_serve_one_request",
                                         one_request):
             listener._serve_terminated(object(), where, "a.example",
-                                       mod._Stream(origin))
+                                       _Stream(origin))
         self.assertEqual(list(seen["upstreams"]), ["a.example"])
         del far
 
@@ -2147,13 +2138,13 @@ class TestCleartextPerRequest(unittest.TestCase):
                                 policy=mod.Policy(tls="inspect",
                                                   hosts=("a.example",)))
         origin, far = self._pair()
-        upstreams = {"a.example": mod._Stream(origin)}
+        upstreams = {"a.example": _Stream(origin)}
         dialled = []
 
         def dial(host):
             near, _keep = self._pair()
             dialled.append((host, near))
-            return mod._Stream(near)
+            return _Stream(near)
 
         up = listener._upstream_for(
             "a.example", upstreams,
@@ -2181,7 +2172,7 @@ class TestCleartextPerRequest(unittest.TestCase):
         def dial(host):
             near, _keep = self._pair()
             dialled.append(host)
-            return mod._Stream(near)
+            return _Stream(near)
 
         key = mod.BROKER_UPSTREAM_KEY + "a.example"
         first = listener._upstream_for("a.example", upstreams, key=key,
@@ -2321,11 +2312,10 @@ class TestCleartextPerRequest(unittest.TestCase):
         """Draining is a service to the connection, not an obligation: a guest
         that answers a refusal with more than the ceiling gets the connection
         closed rather than the courtesy of having it all read."""
-        mod = _mod()
         _, got, ups = self._run(
             ["a.example"],
             b"POST / HTTP/1.1\r\nHost: denied.example\r\nContent-Length: %d\r\n"
-            b"\r\n" % (mod.DRAIN_MAX + 1))
+            b"\r\n" % (DRAIN_MAX + 1))
         self.assertEqual(ups, [])
         self.assertIn(b"403 Forbidden", got)
         self.assertIn(b"Connection: close", got)
@@ -2379,17 +2369,15 @@ class TestCleartextTimeouts(unittest.TestCase):
             pumps.append(pump)
             return near
 
-        real_copy_body = mod.copy_body
-
-        def copy_body(src, dst, framing):
+        def watched_copy_body(src, dst, framing):
             if watch is not None:
                 watch.append(ours.gettimeout())
-            return real_copy_body(src, dst, framing)
+            return copy_body(src, dst, framing)
 
         started = time.monotonic()
         with unittest.mock.patch.object(
                 socket, "create_connection", side_effect=dial), \
-                unittest.mock.patch.object(mod, "copy_body", copy_body), \
+                unittest.mock.patch.object(mod, "copy_body", watched_copy_body), \
                 unittest.mock.patch.object(
                     mod, "CONNECTION_TIMEOUT", self.CONNECTION), \
                 unittest.mock.patch.object(
@@ -3267,17 +3255,15 @@ class TestTargetNormalisation(unittest.TestCase):
         """The case the whole unit turns on. Origins are split on whether
         `%2f` separates two segments, so neither reading is one this listener
         may pick on the guest's behalf."""
-        mod = _mod()
         for target in ("/repos/myorg%2f..%2f..%2fsecret", "/a%2Fb",
                        "/a/%2e%2e%2fb"):
-            with self.assertRaises(mod.RequestUnreadable, msg=target) as caught:
+            with self.assertRaises(RequestUnreadable, msg=target) as caught:
                 self.norm(target)
             self.assertIn("encoded slash", str(caught.exception))
 
     def test_a_stray_percent_is_refused(self):
-        mod = _mod()
         for target in ("/a%", "/a%zz", "/a%2"):
-            with self.assertRaises(mod.RequestUnreadable, msg=target):
+            with self.assertRaises(RequestUnreadable, msg=target):
                 self.norm(target)
 
     def test_the_query_is_carried_through_untouched(self):
@@ -3293,8 +3279,7 @@ class TestTargetNormalisation(unittest.TestCase):
         self.assertEqual(self.norm("/a;v=1/b"), "/a;v=1/b")
 
     def test_a_fragment_is_refused(self):
-        mod = _mod()
-        with self.assertRaises(mod.RequestUnreadable):
+        with self.assertRaises(RequestUnreadable):
             self.norm("/a#b")
 
     def test_an_absolute_form_target_is_normalised_too(self):

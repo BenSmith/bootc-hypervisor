@@ -42,6 +42,10 @@ from egress_ca import (
     ca_cert_path, ca_key_path, ca_openssl_argv, leaf_openssl_argv,
 )
 from tls_hello import HelloUnreadable, read_client_hello
+from http_framing import (
+    Framing, H2_PREFACE, HTTP_METHOD_MAX, RequestUnreadable, _Stream,
+    _is_count, is_http_request_start, request_framing, response_framing,
+)
 from egress_record import (
     DROP_INTERNAL,
     DROP_NOT_H2,
@@ -794,9 +798,9 @@ class TestTheHostHeaderIsPinnedToTheServerName(TerminationCase):
         self.assertEqual(
             mod.host_from_authority("localhost:443", mod.SCHEME_HTTPS).host,
             "localhost")
-        with self.assertRaises(mod.RequestUnreadable):
+        with self.assertRaises(RequestUnreadable):
             mod.host_from_authority("localhost:443", mod.SCHEME_HTTP)
-        with self.assertRaises(mod.RequestUnreadable):
+        with self.assertRaises(RequestUnreadable):
             mod.host_from_authority("localhost:80", mod.SCHEME_HTTPS)
 
 
@@ -1208,7 +1212,7 @@ class TestWhatCountsAsTheStartOfARequest(unittest.TestCase):
     """
 
     def check(self, start, expected):
-        self.assertIs(_mod().is_http_request_start(start), expected,
+        self.assertIs(is_http_request_start(start), expected,
                       f"for {start!r}")
 
     def test_a_request_line_is_one(self):
@@ -1233,7 +1237,7 @@ class TestWhatCountsAsTheStartOfARequest(unittest.TestCase):
             self.check(start, None)
 
     def test_a_run_longer_than_any_method_is_not_a_method(self):
-        self.check(b"A" * _mod().HTTP_METHOD_MAX, False)
+        self.check(b"A" * HTTP_METHOD_MAX, False)
 
     def test_the_h2_preface_is_left_to_the_parser(self):
         """`PRI * HTTP/2.0` IS a request line; what it is not is one this
@@ -1318,30 +1322,28 @@ class TestNonHttpInsideATerminatedSessionIsClosed(TerminationCase):
         """A peer that sends four bytes and then waits is answered on those
         four. Without the `until` this costs a decision timeout to decide
         something already decided."""
-        mod = _mod()
         ours, guest = _tcp_pair()
         self.addCleanup(ours.close)
         self.addCleanup(guest.close)
         ours.settimeout(5.0)
         guest.sendall(b"\x00\x01\x02\x03")
-        stream = mod._Stream(ours)
+        stream = _Stream(ours)
         started = time.monotonic()
         start = stream.peek_start(
-            until=lambda buf: mod.is_http_request_start(buf) is not None)
+            until=lambda buf: is_http_request_start(buf) is not None)
         self.assertLess(time.monotonic() - started, 2.0)
-        self.assertIs(mod.is_http_request_start(start), False)
+        self.assertIs(is_http_request_start(start), False)
 
     def test_the_peeked_bytes_are_still_there_for_the_parser(self):
         """The peek does not consume: an HTTP connection reaches the request
         loop with its head intact, which is why there is no MSG_PEEK here."""
-        mod = _mod()
         ours, guest = _tcp_pair()
         self.addCleanup(ours.close)
         self.addCleanup(guest.close)
         ours.settimeout(5.0)
         head = b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n"
         guest.sendall(head)
-        stream = mod._Stream(ours)
+        stream = _Stream(ours)
         stream.peek_start()
         self.assertEqual(stream.read_head(), head)
 
@@ -1553,12 +1555,12 @@ class TestAnHttp2HostIsRelayedAtFrameLevel(TerminationCase):
         origin = self._h2_origin()
         listener, out = self._listener(mod, origin, http2=("localhost",))
         back, error, alpn = self._h2_exchange(
-            listener, origin, mod.H2_PREFACE + self.SETTINGS)
+            listener, origin, H2_PREFACE + self.SETTINGS)
         self.assertIsNone(error)
         self.assertEqual(alpn, "h2", "the guest leg did not negotiate h2")
         self.assertEqual(origin.alpn_seen, ["h2"],
                          "the upstream leg did not negotiate h2")
-        self.assertEqual(origin.requests[0], mod.H2_PREFACE + self.SETTINGS,
+        self.assertEqual(origin.requests[0], H2_PREFACE + self.SETTINGS,
                          "the preface and the opening SETTINGS must both "
                          "reach the origin, unaltered")
         self.assertEqual(back, self.SETTINGS_ACK)
@@ -1606,7 +1608,7 @@ class TestAnHttp2HostIsRelayedAtFrameLevel(TerminationCase):
         origin = self._h2_origin()
         listener, _ = self._listener(mod, origin, http2=("localhost",))
         headers = b"\x00\x00\x05\x01\x04\x00\x00\x00\x01hpack"
-        self._h2_exchange(listener, origin, mod.H2_PREFACE + headers)
+        self._h2_exchange(listener, origin, H2_PREFACE + headers)
         self.assertEqual(
             listener.status()["drop_reasons"][DROP_NOT_H2], 1)
         self.assertEqual(origin.requests, [],
@@ -1627,7 +1629,7 @@ class TestAnHttp2HostIsRelayedAtFrameLevel(TerminationCase):
         mod = _mod()
         origin = self._h2_origin()
         listener, _ = self._listener(mod, origin, http2=("localhost",))
-        self.assertEqual(len(mod.H2_PREFACE), 24)
+        self.assertEqual(len(H2_PREFACE), 24)
         back, _, _ = self._h2_exchange(
             listener, origin, b"X" * 24 + self.SETTINGS)
         self.assertEqual(back, b"")
@@ -1662,7 +1664,7 @@ class TestAnHttp2HostIsRelayedAtFrameLevel(TerminationCase):
         origin = self._h2_origin(follow=True)
         listener, _ = self._listener(mod, origin, http2=("localhost",))
         self._h2_exchange(listener, origin,
-                          mod.H2_PREFACE + self.SETTINGS,
+                          H2_PREFACE + self.SETTINGS,
                           then=b"GET /secret HTTP/1.1\r\n\r\n")
         self.assertEqual(
             listener.status()["drop_reasons"][DROP_NOT_H2], 1)
@@ -1694,7 +1696,7 @@ class TestAnHttp2HostIsRelayedAtFrameLevel(TerminationCase):
             return leg
 
         listener._dial_upstream_tls = capture
-        self._h2_exchange(listener, origin, mod.H2_PREFACE + self.SETTINGS)
+        self._h2_exchange(listener, origin, H2_PREFACE + self.SETTINGS)
         self.assertEqual(len(legs), 1)
         # ON THE FD, not on a count of open descriptors. This file already
         # records why (see the guest-socket close test): CPython collects the
@@ -1742,7 +1744,7 @@ class TestAnHttp2HostIsRelayedAtFrameLevel(TerminationCase):
         origin = self._http11_origin()
         listener, out = self._listener(mod, origin, http2=("localhost",))
         back, _, _ = self._h2_exchange(
-            listener, origin, mod.H2_PREFACE + self.SETTINGS)
+            listener, origin, H2_PREFACE + self.SETTINGS)
         self.assertEqual(listener.status()["drop_reasons"][DROP_NOT_H2], 1)
         self.assertEqual(origin.requests, [],
                          "the guest's preface must never reach a server that "
@@ -1756,7 +1758,7 @@ class TestAnHttp2HostIsRelayedAtFrameLevel(TerminationCase):
         origin = self._http11_origin()
         listener, _ = self._listener(mod, origin, http2=("localhost",))
         back, _, _ = self._h2_exchange(
-            listener, origin, mod.H2_PREFACE + self.SETTINGS)
+            listener, origin, H2_PREFACE + self.SETTINGS)
         text = back.decode("latin-1")
         self.assertIn("502", text)
         self.assertIn("did not select h2", text)
@@ -1771,7 +1773,7 @@ class TestAnHttp2HostIsRelayedAtFrameLevel(TerminationCase):
         origin = self._http11_origin()
         listener, _ = self._listener(mod, origin, http2=("localhost",))
         back, error, alpn = self._h2_exchange(
-            listener, origin, mod.H2_PREFACE + self.SETTINGS)
+            listener, origin, H2_PREFACE + self.SETTINGS)
         self.assertIsNone(error)
         self.assertIsNone(alpn, "the guest offered h2 alone and must have been "
                                 "answered with no selection, not with h2")
@@ -1794,7 +1796,7 @@ class TestAnHttp2HostIsRelayedAtFrameLevel(TerminationCase):
             return leg
 
         listener._dial_upstream_tls = capture
-        self._h2_exchange(listener, origin, mod.H2_PREFACE + self.SETTINGS)
+        self._h2_exchange(listener, origin, H2_PREFACE + self.SETTINGS)
         self.assertEqual(len(legs), 1)
         self.assertEqual(legs[0].sock.fileno(), -1,
                          "the origin leg was left open by the refusal")
@@ -1870,22 +1872,19 @@ class TestACountIsASCIIOrItIsNotACount(unittest.TestCase):
     """
 
     def test_a_superscript_content_length_is_refused_not_crashed(self):
-        mod = _mod()
-        with self.assertRaises(mod.RequestUnreadable):
-            mod.response_framing(200, "GET", (("content-length", "²"),))
+        with self.assertRaises(RequestUnreadable):
+            response_framing(200, "GET", (("content-length", "²"),))
 
     def test_a_superscript_status_code_is_refused_not_crashed(self):
-        mod = _mod()
-        self.assertFalse(mod._is_count("²"))
-        self.assertFalse(mod._is_count("2²"))
+        self.assertFalse(_is_count("²"))
+        self.assertFalse(_is_count("2²"))
 
     def test_ordinary_counts_still_pass(self):
-        mod = _mod()
-        self.assertTrue(mod._is_count("0"))
-        self.assertTrue(mod._is_count("4096"))
+        self.assertTrue(_is_count("0"))
+        self.assertTrue(_is_count("4096"))
         self.assertEqual(
-            mod.response_framing(200, "GET", (("content-length", "5"),)),
-            mod.Framing("length", 5))
+            response_framing(200, "GET", (("content-length", "5"),)),
+            Framing("length", 5))
 
     def test_the_request_side_agrees(self):
         """Safe there already -- that head is ASCII -- and checked anyway.
@@ -1894,9 +1893,8 @@ class TestACountIsASCIIOrItIsNotACount(unittest.TestCase):
         in `_split_head`. A guard written to depend on it is one refactor from
         being wrong, so both sides use the same predicate and both are asserted.
         """
-        mod = _mod()
-        with self.assertRaises(mod.RequestUnreadable):
-            mod.request_framing((("content-length", "²"),))
+        with self.assertRaises(RequestUnreadable):
+            request_framing((("content-length", "²"),))
 
 
 class TestTheCachesCannotEvictALeafInFlight(unittest.TestCase):
@@ -1948,7 +1946,7 @@ class TestARedialThatCannotBeVerifiedSaysSo(TerminationCase):
         with unittest.mock.patch.object(
                 listener, "_upstream_for", side_effect=exc):
             listener._serve_one_request(
-                mod._Stream(ours), ours, _where("tls").request(1),
+                _Stream(ours), ours, _where("tls").request(1),
                 {}, True)
         return listener, guest.recv(65536), out.getvalue()
 
