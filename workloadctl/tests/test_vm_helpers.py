@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Unit tests for the VM libexec helpers: workload-vm-notify,
+"""Unit tests for the VM helpers: vm_notify (behind workload-vm-notify),
 workload-vm-qmp, workload-vm-shutdown.
 
-These three gate VM readiness (sd_notify), the QMP escape hatch, and graceful
-power-off — and had no tests at all. They're argv scripts (no .py), so load_script()
-imports each and we drive its pure functions with a fake QMPClient; the real
-socket/QEMU/systemd I/O is out of scope for a unit test.
+These gate VM readiness (sd_notify), the QMP escape hatch, and graceful
+power-off. The pure functions are driven with a fake QMPClient; the real
+socket/QEMU/systemd I/O is out of scope for a unit test. workload-vm-notify
+itself is tested only for its argv handling.
 """
 
 import io
@@ -18,10 +18,11 @@ from pathlib import Path
 from typing import Any
 from unittest import mock
 
+import vm_notify as notify
 from tests import load_script
 
 
-notify = load_script("libexec/workload-vm-notify", "wl_vm_notify")
+notify_script = load_script("libexec/workload-vm-notify", "wl_vm_notify")
 qmp = load_script("libexec/workload-vm-qmp", "wl_vm_qmp")
 shutdown = load_script("libexec/workload-vm-shutdown", "wl_vm_shutdown")
 
@@ -60,7 +61,7 @@ class FakeQMP:
 
 
 # ---------------------------------------------------------------------------
-# workload-vm-notify
+# vm_notify / workload-vm-notify
 # ---------------------------------------------------------------------------
 
 class NotifyTest(unittest.TestCase):
@@ -115,13 +116,6 @@ class NotifyTest(unittest.TestCase):
              mock.patch.object(notify.socket, "socket", return_value=fake_sock):
             notify.sd_notify("READY=1")  # must not raise
 
-    def test_main_usage_error_exits_1(self):
-        with mock.patch.object(notify.sys, "argv", ["notify", "onlyname"]), \
-             redirect_stderr(io.StringIO()):
-            with self.assertRaises(SystemExit) as cm:
-                notify.main()
-        self.assertEqual(cm.exception.code, 1)
-
     # --- on-reboot shutdown-reason monitoring (O6) -----------------------
 
     def test_monitor_returns_shutdown_reason(self):
@@ -156,8 +150,6 @@ class NotifyTest(unittest.TestCase):
         proc = mock.Mock()
         proc.wait.return_value = wait_rc
         with mock.patch.dict(os.environ, {"WORKLOADCTL_VM_REBOOT_EXIT": "133"}), \
-             mock.patch.object(notify.sys, "argv",
-                               ["notify", "vm1", "qemu", "-nographic"]), \
              mock.patch.object(notify.subprocess, "Popen", return_value=proc), \
              mock.patch.object(notify, "QMPClient", return_value=fake), \
              mock.patch.object(notify.signal, "signal"), \
@@ -165,9 +157,7 @@ class NotifyTest(unittest.TestCase):
                                return_value=reason), \
              mock.patch.object(notify, "sd_notify"), \
              redirect_stderr(io.StringIO()):
-            with self.assertRaises(SystemExit) as cm:
-                notify.main()
-        return cm.exception.code
+            return notify.supervise("vm1", ["qemu", "-nographic"])
 
     def test_main_on_reboot_reboot_exits_reboot_code(self):
         self.assertEqual(self._run_main_reboot_mode("guest-reset"), 133)
@@ -183,16 +173,13 @@ class NotifyTest(unittest.TestCase):
     def _run_main(self, fake_qmp, wait_rc=0):
         proc = mock.Mock()
         proc.wait.return_value = wait_rc
-        with mock.patch.object(notify.sys, "argv",
-                               ["notify", "vm1", "qemu", "-nographic"]), \
-             mock.patch.object(notify.subprocess, "Popen", return_value=proc), \
+        with mock.patch.object(notify.subprocess, "Popen", return_value=proc), \
              mock.patch.object(notify, "QMPClient", return_value=fake_qmp), \
              mock.patch.object(notify.signal, "signal"), \
              mock.patch.object(notify, "sd_notify") as sd, \
              redirect_stderr(io.StringIO()):
-            with self.assertRaises(SystemExit) as cm:
-                notify.main()
-        return cm.exception.code, sd, fake_qmp
+            code = notify.supervise("vm1", ["qemu", "-nographic"])
+        return code, sd, fake_qmp
 
     def test_main_happy_path_sends_ready_and_propagates_rc(self):
         fake = FakeQMP(handler=lambda c, a=None: {"return": {"running": True}})
@@ -215,41 +202,35 @@ class NotifyTest(unittest.TestCase):
         fake = FakeQMP(handler=lambda c, a=None: {"return": {"running": False}})
         proc = mock.Mock()
         proc.wait.return_value = 4
-        with mock.patch.object(notify.sys, "argv",
-                               ["notify", "vm1", "qemu", "-nographic"]), \
-             mock.patch.object(notify.subprocess, "Popen", return_value=proc), \
+        with mock.patch.object(notify.subprocess, "Popen", return_value=proc), \
              mock.patch.object(notify, "QMPClient", return_value=fake), \
              mock.patch.object(notify.signal, "signal"), \
              mock.patch.object(notify, "wait_running",
                                side_effect=TimeoutError("no run")), \
              mock.patch.object(notify, "sd_notify") as sd, \
              redirect_stderr(io.StringIO()):
-            with self.assertRaises(SystemExit) as cm:
-                notify.main()
-        self.assertEqual(cm.exception.code, 4)
+            code = notify.supervise("vm1", ["qemu", "-nographic"])
+        self.assertEqual(code, 4)
         self.assertNotIn(mock.call("READY=1"), sd.call_args_list)
         self.assertTrue(any("STATUS=Timeout" in c.args[0]
                             for c in sd.call_args_list))
         self.assertTrue(fake.closed)
 
     def test_main_installs_signal_forwarder(self):
-        # main() registers a SIGTERM/SIGINT forwarder closure. Capture it and
+        # supervise() registers a SIGTERM/SIGINT forwarder closure. Capture it and
         # drive both branches: a live QEMU (send_signal) and an already-dead one
         # (ProcessLookupError must be swallowed).
         proc = mock.Mock()
         proc.wait.return_value = 0
         handlers: dict = {}
         fake = FakeQMP(handler=lambda c, a=None: {"return": {"running": True}})
-        with mock.patch.object(notify.sys, "argv",
-                               ["notify", "vm1", "qemu", "-nographic"]), \
-             mock.patch.object(notify.subprocess, "Popen", return_value=proc), \
+        with mock.patch.object(notify.subprocess, "Popen", return_value=proc), \
              mock.patch.object(notify, "QMPClient", return_value=fake), \
              mock.patch.object(notify.signal, "signal",
                                lambda sig, h: handlers.__setitem__(sig, h)), \
              mock.patch.object(notify, "sd_notify"), \
              redirect_stderr(io.StringIO()):
-            with self.assertRaises(SystemExit):
-                notify.main()
+            notify.supervise("vm1", ["qemu", "-nographic"])
         fwd = handlers[notify.signal.SIGTERM]
         self.assertIs(fwd, handlers[notify.signal.SIGINT])
         fwd(notify.signal.SIGTERM, None)
@@ -257,6 +238,27 @@ class NotifyTest(unittest.TestCase):
         # QEMU already reaped: forwarder must not propagate ProcessLookupError.
         proc.send_signal.side_effect = ProcessLookupError()
         fwd(notify.signal.SIGTERM, None)  # must not raise
+
+
+class NotifyShimTest(unittest.TestCase):
+    """workload-vm-notify: argv in, supervise() out, its status back."""
+
+    def test_usage_error_returns_1(self):
+        with mock.patch.object(notify_script, "supervise") as sup, \
+             redirect_stderr(io.StringIO()):
+            rc = notify_script.main(["notify", "onlyname"])
+        self.assertEqual(rc, 1)
+        sup.assert_not_called()
+
+    def test_hands_the_name_and_qemu_command_to_supervise(self):
+        with mock.patch.object(notify_script, "supervise", return_value=0) as sup:
+            rc = notify_script.main(["notify", "vm1", "qemu", "-nographic", "-m", "2G"])
+        self.assertEqual(rc, 0)
+        sup.assert_called_once_with("vm1", ["qemu", "-nographic", "-m", "2G"])
+
+    def test_the_run_status_is_the_exit_status(self):
+        with mock.patch.object(notify_script, "supervise", return_value=133):
+            self.assertEqual(notify_script.main(["notify", "vm1", "qemu"]), 133)
 
 
 # ---------------------------------------------------------------------------

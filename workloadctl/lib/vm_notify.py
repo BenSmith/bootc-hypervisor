@@ -1,0 +1,232 @@
+"""The VM service's main process: QEMU, readiness, and the guest's exit.
+
+Starts QEMU as a child and stays alive as the unit's MainPID, connects to its
+QMP socket, sends READY=1 once the guest's vCPUs run, watches the guest's
+cloud-init from a daemon thread, and exits with QEMU's status -- or, in
+[vm].restart = "on-reboot" mode, with a status that tells a reboot from a
+poweroff.
+"""
+import os
+import signal
+import socket
+import subprocess
+import sys
+import threading
+import time
+
+from egress_selinux import qemu_launch_argv
+from config_parser import SOCKET_DIR
+from qmp import QMPClient
+from vm_provision import (marker_reports_failure, marker_vouches_for,
+                          read_provision_marker, record_guest_provision_result)
+from workload_lib import workload_state_dir
+
+# How long to keep asking the guest whether cloud-init finished, and how often.
+# READY=1 goes out when the vCPUs start (~1 s); provisioning runs for tens of
+# seconds on a plain seed and for many minutes on one whose runcmd installs
+# packages, so the budget is generous — it costs one local socket round trip
+# per poll, and the watch exits the moment the guest answers.
+PROVISION_WATCH_TIMEOUT = 1800.0
+PROVISION_POLL_INTERVAL = 15.0
+
+
+def sd_notify(msg: str):
+    notify_socket = os.environ.get("NOTIFY_SOCKET", "")
+    if not notify_socket:
+        return
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as s:
+            if notify_socket.startswith("@"):
+                notify_socket = "\0" + notify_socket[1:]
+            s.connect(notify_socket)
+            s.sendall(msg.encode())
+    except OSError:
+        pass
+
+
+def wait_running(qmp: QMPClient, timeout: float = 120.0):
+    """Block until the guest vCPUs are running or `timeout` expires."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        reply = qmp.execute("query-status")
+        if bool(reply.get("return", {}).get("running", False)):
+            return
+        time.sleep(0.5)
+    raise TimeoutError(f"Guest did not enter running state within {timeout:.0f}s")
+
+
+def watch_provisioning(name: str,
+                       deadline: float = PROVISION_WATCH_TIMEOUT,
+                       interval: float = PROVISION_POLL_INTERVAL) -> None:
+    """Record whether this instance's cloud-init actually finished.
+
+    READY=1 means "the vCPUs are running", which is true a good half-minute
+    before the guest is provisioned — so nothing on the host has ever known
+    whether the per-instance modules (users, sudo drop-ins, runcmd) completed.
+    A first boot cut short leaves them half-done *and* marked done by the
+    guest's own semaphores, and the host then pins that instance-id forever
+    because the seed content never changed. See lib/vm_provision.py.
+
+    We are the VM service's main process, we run as the workload user that owns
+    the state dir, and we already live for the guest's whole lifetime, so this
+    is the one place that can watch without a new unit. Best-effort throughout:
+    every failure path just leaves no record, which callers read as "not
+    observed" rather than as a broken guest.
+
+    The question goes to the guest over SSH rather than qemu-guest-agent: the
+    agent is confined to virt_qemu_ga_t, which stock guest policy does not let
+    read cloud-init's state at all (see lib/vm_provision.py). So the first polls
+    of a cold boot normally fail simply because sshd is not up yet, which is an
+    ordinary "ask again", not a fault.
+    """
+    try:
+        state_dir = workload_state_dir(name)
+        instance_id = (state_dir / ".cloud-init-instance-id").read_text().strip()
+    except OSError:
+        return
+    if not instance_id:
+        return
+
+    marker = read_provision_marker(state_dir)
+    if (marker_vouches_for(marker, instance_id)
+            or marker_reports_failure(marker, instance_id)):
+        return  # outcome already recorded for this instance; nothing to watch
+
+    end = time.monotonic() + deadline
+    while time.monotonic() < end:
+        try:
+            status = record_guest_provision_result(state_dir, instance_id, name)
+        except Exception as e:
+            print(f"workload-vm-notify: provisioning watch error: {e}",
+                  file=sys.stderr)
+            return
+        if status is not None:
+            print(f"workload-vm-notify: cloud-init reported {status} for "
+                  f"instance {instance_id}", flush=True)
+            return
+        time.sleep(interval)
+
+    print(f"workload-vm-notify: cloud-init outcome unknown for instance "
+          f"{instance_id} after {deadline:.0f}s (the guest never answered). "
+          f"Provisioning is unverified, not failed.", file=sys.stderr)
+
+
+def monitor_shutdown_reason(name: str, proc) -> str | None:
+    """Watch the guest's QMP SHUTDOWN event and return its `reason`.
+
+    Used only in [vm].restart = "on-reboot" mode to tell a guest reboot from a
+    poweroff. QEMU runs with -no-reboot, so both exit QEMU with status 0; only
+    the SHUTDOWN event distinguishes them:
+      "guest-reset"    → the guest rebooted (should relaunch)
+      "guest-shutdown" → the guest powered off (should stay down)
+    Watches a DEDICATED monitor (qmp-notify.sock) so it never contends with the
+    control socket (ExecStop's system_powerdown) or the metrics socket. Reads
+    until the event arrives or the monitor closes (QEMU gone). Best-effort:
+    returns None on any error, so a monitoring hiccup falls back to QEMU's own
+    exit code rather than breaking the VM lifecycle.
+    """
+    sock_path = str(SOCKET_DIR / name / "qmp-notify.sock")
+    qmp = QMPClient()
+    try:
+        qmp.connect(sock_path, timeout=60.0, recv_timeout=2.0)
+        qmp.negotiate()
+        while True:
+            try:
+                msg = qmp.next_message()
+            except ConnectionError:
+                return None  # monitor closed before a SHUTDOWN was seen
+            if msg is None:
+                # Read timeout: keep waiting only while QEMU is alive. (Buffered
+                # messages are still drained first — recv returns queued bytes
+                # before it ever signals close — so a SHUTDOWN emitted right
+                # before exit isn't lost to this liveness check.)
+                if proc.poll() is not None:
+                    return None
+                continue
+            if msg.get("event") == "SHUTDOWN":
+                return msg.get("data", {}).get("reason")
+    except Exception as e:
+        print(f"workload-vm-notify: shutdown-reason monitor error: {e}",
+              file=sys.stderr)
+        return None
+    finally:
+        qmp.close()
+
+
+def supervise(name: str, qemu_cmd: list[str]) -> int:
+    """Run QEMU for one VM and hold the unit's main PID; the exit status.
+
+    READY=1 goes out when the guest's vCPUs run, the cloud-init watch runs
+    beside QEMU for its whole lifetime, and the status is QEMU's own unless
+    on-reboot mode translates the guest's shutdown reason into one.
+    """
+    qmp_sock = str(SOCKET_DIR / name / "qmp.sock")
+
+    # Start QEMU as a child process. We stay alive to hold the service's
+    # main PID; systemd tracks *us* for cgroup membership.
+    #
+    # qemu_launch_argv prefixes runcon so QEMU enters svirt_t (ADR 006 step 3).
+    # runcon execs QEMU in its own process rather than forking, so `proc` is
+    # still QEMU itself — the pid we signal below and the pid systemd sees are
+    # unchanged by confinement.
+    proc = subprocess.Popen(qemu_launch_argv(qemu_cmd), stdin=subprocess.DEVNULL)
+
+    # Forward SIGTERM/SIGINT to QEMU. In a normal stop the graceful ExecStop
+    # (workload-vm-shutdown) has already powered the guest off and QEMU has
+    # exited before systemd's kill phase, so this never fires. It's the
+    # last-resort hard kill if the guest ignored ACPI and ExecStop timed out;
+    # if QEMU is already dead these are no-ops.
+    def _forward(sig, _frame):
+        try:
+            proc.send_signal(sig)
+        except ProcessLookupError:
+            pass
+
+    signal.signal(signal.SIGTERM, _forward)
+    signal.signal(signal.SIGINT, _forward)
+
+    qmp = QMPClient()
+    try:
+        # Wait up to 60 s for QEMU to create the QMP socket
+        qmp.connect(qmp_sock, timeout=60.0)
+        qmp.negotiate()
+        # Wait up to 120 s for guest vCPUs to start running
+        wait_running(qmp, timeout=120.0)
+        sd_notify("READY=1")
+    except TimeoutError as e:
+        print(f"workload-vm-notify: {e}", file=sys.stderr)
+        sd_notify(f"STATUS=Timeout waiting for QMP: {e}")
+        # Don't kill QEMU — let systemd's TimeoutStartSec handle it.
+        # We fall through to proc.wait() so we exit when QEMU does.
+    except Exception as e:
+        # Best-effort: still send READY so the unit doesn't hang on this
+        # wrapper, but flag the degraded state via STATUS so `systemctl
+        # status` and the journal make the broken QMP path visible.
+        print(f"workload-vm-notify: QMP error: {e}", file=sys.stderr)
+        sd_notify(f"STATUS=Degraded: QMP unavailable ({e}); guest may still be running")
+        sd_notify("READY=1")
+    finally:
+        qmp.close()
+
+    # Watch the guest's cloud-init from here on. A daemon thread so it can never
+    # hold up the exit paths below: whatever it has learned by the time QEMU
+    # goes away is already persisted, and what it hasn't is simply unrecorded.
+    threading.Thread(target=watch_provisioning, args=(name,),
+                     name="provision-watch", daemon=True).start()
+
+    # on-reboot mode: the generator arms this env var and adds qmp-notify.sock.
+    # Translate the guest's shutdown reason into an exit code the unit's
+    # Restart=on-failure acts on — nonzero for a reboot (relaunch), 0 for a
+    # poweroff (stay down). Anything else falls through to QEMU's own code.
+    reboot_exit = os.environ.get("WORKLOADCTL_VM_REBOOT_EXIT")
+    if reboot_exit:
+        reason = monitor_shutdown_reason(name, proc)
+        rc = proc.wait()
+        if reason == "guest-reset":
+            return int(reboot_exit)
+        if reason == "guest-shutdown":
+            return 0
+        return rc
+
+    # Wait for QEMU to exit and propagate its exit code
+    return proc.wait()

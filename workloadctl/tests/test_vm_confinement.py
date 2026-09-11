@@ -476,7 +476,7 @@ class TestNotifyWrapperUsesTheTransition(unittest.TestCase):
     def test_notify_launches_qemu_through_qemu_launch_argv(self):
         """A regression guard: reverting to a bare Popen(qemu_cmd) would leave
         every VM unconfined with no test failing anywhere else."""
-        text = (ROOT / "libexec" / "workload-vm-notify").read_text()
+        text = (ROOT / "lib" / "vm_notify.py").read_text()
         self.assertIn("qemu_launch_argv", text)
         self.assertRegex(text, r"Popen\(\s*qemu_launch_argv\(qemu_cmd\)")
         self.assertNotRegex(text, r"Popen\(qemu_cmd,")
