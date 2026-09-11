@@ -550,12 +550,12 @@ def normalise_host(value):
 def _split_upstream(url, where):
     """(host, port) for one configured upstream.
 
-    A base path is REFUSED rather than carried. It used to be returned as a
-    `prefix` and prepended to every forwarded path -- which, once the inspector
-    is in front, rewrites the very path `[[vm.network.policy]].paths`
-    authorised: a guest's `/repos/myorg/x`, admitted against that pattern,
-    would leave here as `/v1/repos/myorg/x`. The two layers would disagree
-    about what request was made, and the one holding the credential would win.
+    A base path is REFUSED rather than carried. Prepending one to every
+    forwarded path would rewrite the very path `[[vm.network.policy]].paths`
+    authorised at the inspector in front: a guest's `/repos/myorg/x`, admitted
+    against that pattern, would leave here as `/v1/repos/myorg/x`. The two
+    layers would disagree about what request was made, and the one holding
+    the credential would win.
     """
     up = urllib.parse.urlsplit(url)
     if up.scheme != "https" or not up.hostname:
@@ -564,9 +564,9 @@ def _split_upstream(url, where):
         raise BrokerConfigError(f"{where}: 'upstream' must not carry a query or fragment")
     if up.path.rstrip("/"):
         raise BrokerConfigError(f"{where}: 'upstream' must not carry a path ({up.path!r}). A "
-                 f"base path would be prepended to every forwarded request, "
-                 f"rewriting the path the inspector's policy admitted -- put "
-                 f"the full path in the request instead")
+                                f"base path would be prepended to every forwarded request, "
+                                f"rewriting the path the inspector's policy admitted -- put "
+                                f"the full path in the request instead")
     return up.hostname, up.port or 443
 
 
@@ -582,8 +582,8 @@ CONFIG_KEYS = frozenset({
     "read_timeout", "relax_x509_strict", "tls_cert", "tls_key",
 })
 
-# What a [sandboxes.<name>] table holds. It is now a container and nothing else:
-# every credential-bearing key moved down one level, into [sandboxes.<name>
+# What a [sandboxes.<name>] table holds: a container and nothing else. Every
+# credential-bearing key lives one level down, in [sandboxes.<name>
 # .hosts."<Host>"], because ADR 007 decision 3 keys the profile table by
 # (workload, Host) rather than by workload alone.
 SANDBOX_KEYS = frozenset({"hosts"})
@@ -625,10 +625,10 @@ def load_config(path):
     # and 403 everything. Refuse it rather than let a stale file look applied.
     if "allow_unknown_sources" in cfg:
         raise BrokerConfigError("broker.toml: 'allow_unknown_sources' identified callers by "
-                 "address, which stopped working when every guest began "
-                 "arriving from the same one. Its successor "
-                 "'allow_unknown_callers' is gone too -- see below "
-                 "(docs/agent-broker.md §5)")
+                                "address, which stopped working when every guest began "
+                                "arriving from the same one. Its successor "
+                                "'allow_unknown_callers' is gone too -- see below "
+                                "(docs/agent-broker.md §5)")
     if "allow_unknown_callers" in cfg:
         # Deleted rather than defaulted, because there is nothing left for it to
         # mean. It named a default profile for a caller the config did not
@@ -639,14 +639,14 @@ def load_config(path):
         # here. Keeping the key would ship the one switch that turns the uid
         # check off, on the component whose whole job is the uid check.
         raise BrokerConfigError("broker.toml: 'allow_unknown_callers' is gone -- a broker "
-                 "instance serves one workload and its config is generated "
-                 "from that workload's [[vm.network.credential]] blocks, so "
-                 "there is no caller it could apply to (docs/agent-broker.md)")
+                                "instance serves one workload and its config is generated "
+                                "from that workload's [[vm.network.credential]] blocks, so "
+                                "there is no caller it could apply to (docs/agent-broker.md)")
     for key, value in cfg.get("sandboxes", {}).items():
         if not isinstance(value, dict):
             raise BrokerConfigError(f"broker.toml: [sandboxes] maps a workload NAME to a "
-                     f"table now, not {key!r} to a string -- callers are "
-                     f"identified by uid, not by address (docs/agent-broker.md §5)")
+                                    f"table now, not {key!r} to a string -- callers are "
+                                    f"identified by uid, not by address (docs/agent-broker.md §5)")
         if set(value) & (HOST_KEYS - SANDBOX_KEYS):
             # The pre-rung-6 shape: one profile per sandbox, with `upstream` and
             # `credential` on the sandbox table itself. Named rather than
@@ -655,16 +655,16 @@ def load_config(path):
             # upstream per caller, and the operator needs to know the dimension
             # that was added rather than which four keys moved.
             raise BrokerConfigError(f"broker.toml: [sandboxes.{key}] holds one profile for "
-                     f"the whole sandbox, which is the shape before credentials "
-                     f"were selected per host. The table is keyed by (workload, "
-                     f"Host) now: move `upstream`, `credential` and the auth "
-                     f"keys into [sandboxes.{key}.hosts.\"<the Host>\"] "
-                     f"(docs/agent-broker.md §3)")
+                                    f"the whole sandbox, which is the shape before credentials "
+                                    f"were selected per host. The table is keyed by (workload, "
+                                    f"Host) now: move `upstream`, `credential` and the auth "
+                                    f"keys into [sandboxes.{key}.hosts.\"<the Host>\"] "
+                                    f"(docs/agent-broker.md §3)")
         reject_unknown_keys(value, SANDBOX_KEYS, f"broker.toml: [sandboxes.{key}]")
         hosts = value.get("hosts", {})
         if not isinstance(hosts, dict):
             raise BrokerConfigError(f"broker.toml: [sandboxes.{key}].hosts maps a Host to a "
-                     f"table, got {type(hosts).__name__}")
+                                    f"table, got {type(hosts).__name__}")
         for host, entry in hosts.items():
             where = f"broker.toml: [sandboxes.{key}.hosts.\"{host}\"]"
             if not isinstance(entry, dict):
@@ -684,8 +684,8 @@ def load_config(path):
     # where nothing reads it.
     if not cfg.get("sandboxes"):
         raise BrokerConfigError("broker.toml: no [sandboxes.<workload>.hosts.\"<Host>\"] "
-                 "tables, so this broker holds credentials for nothing and "
-                 "would refuse every request it received")
+                                "tables, so this broker holds credentials for nothing and "
+                                "would refuse every request it received")
 
     # NOT defaulted, unlike everything below it. An instance must bind the
     # address derived for ITS workload (ADR 007's second detail that will bite):
@@ -697,13 +697,13 @@ def load_config(path):
     listen = cfg.get("listen_address")
     if not listen:
         raise BrokerConfigError("broker.toml: 'listen_address' is required -- an instance "
-                 "binds the loopback address derived from its own workload's "
-                 "uid, and there is no safe default (ADR 007 decision 6)")
+                                "binds the loopback address derived from its own workload's "
+                                "uid, and there is no safe default (ADR 007 decision 6)")
     if listen in ("0.0.0.0", "::", "*"):
         raise BrokerConfigError(f"broker.toml: 'listen_address' = {listen!r} binds every "
-                 f"address on the host, including the ones other workloads' "
-                 f"brokers listen on. Bind this workload's derived address "
-                 f"alone.")
+                                f"address on the host, including the ones other workloads' "
+                                f"brokers listen on. Bind this workload's derived address "
+                                f"alone.")
 
     cfg.setdefault("listen_port", 8081)
     cfg.setdefault("auth_header", BROKER_DEFAULT_AUTH_HEADER)
@@ -718,15 +718,14 @@ def build_profiles(cfg, load=None):
 
     Keyed by both, and there is NO default entry in either dimension: a caller
     whose workload is not a sandbox gets nothing, and a `Host` with no entry
-    under its sandbox gets nothing. That is the difference this rung makes to
-    the threat model, not a schema detail. The old table was keyed by workload
-    alone, so a caller that reached the broker at all reached its ONE upstream
-    with its ONE credential; a workload holding several keys had no way to say
-    which request should get which, and the answer would have had to come from
-    something the request carried.
+    under its sandbox gets nothing. That is a threat-model property, not a
+    schema detail: a table keyed by workload alone gives every caller that
+    reaches the broker ONE upstream with ONE credential, so a workload holding
+    several keys can only say which request gets which through something the
+    request carries.
 
-    It still does not. The `Host` is a lookup key into this table and never a
-    source of anything: an unrecognised value selects no profile and the request
+    Nothing it carries decides that. The `Host` is a lookup key into this
+    table and never a source of anything: an unrecognised value selects no profile and the request
     is refused, and a recognised one selects an upstream, a port and a
     credential that were all written here at start. Nothing the caller sends
     reaches the wire unexamined -- forwarded_headers rewrites `Host` from the
@@ -743,14 +742,14 @@ def build_profiles(cfg, load=None):
         credential = spec.get("credential", cfg.get("credential"))
         if not credential:
             raise BrokerConfigError(f"{where}: no 'credential', and none at the top level to "
-                     f"inherit. A host entry with no credential is a host the "
-                     f"broker would forward for while attaching nothing")
+                                    f"inherit. A host entry with no credential is a host the "
+                                    f"broker would forward for while attaching nothing")
         if credential not in secrets:
             secrets[credential] = load(credential)
         upstream = spec.get("upstream", cfg.get("upstream"))
         if not upstream:
             raise BrokerConfigError(f"{where}: no 'upstream', and none at the top level to "
-                     f"inherit")
+                                    f"inherit")
         host, port = _split_upstream(upstream, where)
         placeholder = spec.get("placeholder")
         if placeholder and placeholder == secrets[credential]:
@@ -764,11 +763,11 @@ def build_profiles(cfg, load=None):
             # itself rather than a coincidental match with a sealed blob. The
             # message names neither value.
             raise BrokerConfigError(f"{where}: 'placeholder' is byte-identical to the "
-                     f"decrypted credential {credential!r}. The placeholder is "
-                     f"the fiction the guest holds and lives in a plain-text "
-                     f"workload.toml; if it equals the real key then the real "
-                     f"key is in that file. Rotate the credential, then put a "
-                     f"plausible fake of the same shape here")
+                                    f"decrypted credential {credential!r}. The placeholder is "
+                                    f"the fiction the guest holds and lives in a plain-text "
+                                    f"workload.toml; if it equals the real key then the real "
+                                    f"key is in that file. Rotate the credential, then put a "
+                                    f"plausible fake of the same shape here")
         auth_format = spec.get("auth_format", cfg["auth_format"])
         try:
             auth_value = auth_format.format(secret=secrets[credential])
@@ -777,7 +776,7 @@ def build_profiles(cfg, load=None):
             # point of the string is that a secret is substituted into it, and a
             # sufficiently wrong one could already hold part of it.
             raise BrokerConfigError(f"{where}: 'auth_format' is not a usable format string "
-                     f"({type(exc).__name__}); it takes exactly {{secret}}")
+                                    f"({type(exc).__name__}); it takes exactly {{secret}}")
         return Profile(
             name=f"{sandbox}/{host_key}",
             host=host,
@@ -799,8 +798,8 @@ def build_profiles(cfg, load=None):
                 # last-wins, because which credential a request gets would then
                 # depend on table order.
                 raise BrokerConfigError(f"{where}: {key!r} is already configured for sandbox "
-                         f"{sandbox!r} under a different spelling; hosts are "
-                         f"compared lowercased and without a port")
+                                        f"{sandbox!r} under a different spelling; hosts are "
+                                        f"compared lowercased and without a port")
             profiles[(sandbox, key)] = resolve(sandbox, key, entry, where)
     return profiles
 
@@ -823,4 +822,4 @@ def load_credential(name):
     if env:
         return env.strip()
     raise BrokerConfigError("no credential: run under systemd with LoadCredentialEncrypted=, "
-             "or set AGENT_BROKER_SECRET for local testing")
+                            "or set AGENT_BROKER_SECRET for local testing")

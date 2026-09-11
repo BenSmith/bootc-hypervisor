@@ -83,9 +83,9 @@ def main(argv=None):
     server.guest_tls_context = guest_tls_context(cfg.get("tls_cert"), cfg.get("tls_key"))
     scheme = "https" if server.guest_tls_context else "http"
 
-    # The profile table's SHAPE, not a single upstream: there is no longer one
-    # to name, and a line reporting the top-level default would describe an
-    # inheritance source rather than anything this instance serves.
+    # The profile table's SHAPE, not an upstream: a line naming the top-level
+    # default would describe an inheritance source, not anything this
+    # instance serves.
     log("listening", url=f"{scheme}://{addr[0]}:{addr[1]}",
         sandboxes=len({s for s, _ in Handler.profiles}),
         hosts=len(Handler.profiles), unknown="refused")

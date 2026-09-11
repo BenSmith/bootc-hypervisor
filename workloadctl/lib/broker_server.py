@@ -180,14 +180,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._fail(403, "caller not registered with the broker\n")
             return
 
-        # The second half of the key, and the whole of what this rung added.
-        # Resolved from THIS BROKER'S OWN TABLE -- the header selects a row and
-        # supplies nothing. A Host with no row is refused: there is no default
-        # profile and no per-host analogue of the caller escape hatch that used
-        # to exist (ADR 007 decision 3), so the failure mode where a workload's
-        # second, unlisted
-        # destination silently receives its first destination's key cannot
-        # occur.
+        # The second half of the key. Resolved from THIS BROKER'S OWN TABLE --
+        # the header selects a row and supplies nothing. A Host with no row is
+        # refused: there is no default profile in either dimension (ADR 007
+        # decision 3), so a workload's second, unlisted destination cannot
+        # silently receive its first destination's key.
         host = normalise_host(self.headers.get("Host"))
         profile = self.profiles.get((sandbox, host)) if host else None
         if profile is None:
