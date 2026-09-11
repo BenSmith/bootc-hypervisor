@@ -26,7 +26,8 @@ from vm import (
     inspect_cgroup_filter_command,
 )
 from nft_constants import NFT_SET_INSPECT_CG, NFT_SET_EGRESS_CG
-from vm_defs import EGRESS_DEFAULT, SIDECAR_SLICE
+from nft_constants import SIDECAR_SLICE
+from vm_defs import EGRESS_DEFAULT
 from workload_addr import INSPECT_LISTENER_BIN, inspect_address
 from workload_lib import dq
 

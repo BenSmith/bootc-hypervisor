@@ -77,7 +77,8 @@ from nft_constants import (
     NFT_SET_INSPECT_SELF6, NFT_SET_INSPECT_DST, NFT_SET_INSPECT_DST6,
     NFT_SET_INSPECT_LIVE, NFT_SET_INSPECT_LIVE6,
 )
-from vm_defs import EGRESS_DEFAULT, SOCKET_DIR
+from config_parser import SOCKET_DIR
+from vm_defs import EGRESS_DEFAULT
 from vm_network_config import (
     vm_resolve_policy_path, parse_vm_allow, vm_allow_resolve,
 )

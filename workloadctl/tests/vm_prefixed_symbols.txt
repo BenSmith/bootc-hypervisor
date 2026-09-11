@@ -44,7 +44,7 @@
 # diff is what makes it visible.
 #
 # The two constants whose VALUE is pinned by hosts already running --
-# workload_addr.INSPECT_LISTENER_BIN and vm_defs.SOCKET_DIR -- were renamed
+# workload_addr.INSPECT_LISTENER_BIN and config_parser.SOCKET_DIR -- were renamed
 # last and deliberately, with the values asserted before and after. The rule
 # outlives the rename: change either constant's spelling freely, never what it
 # holds. TestTheValuePinnedConstants pins both strings.

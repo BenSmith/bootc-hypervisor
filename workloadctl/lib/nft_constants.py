@@ -169,3 +169,53 @@ NFT_MAP_INSPECT4 = "wl_inspect4"
 NFT_MAP_INSPECT6 = "wl_inspect6"
 NFT_PAIR_INSPECT_MAP = FamilyPair(NFT_MAP_INSPECT4, NFT_MAP_INSPECT6)
 NFT_SET_INSPECT_CG = "wl_inspect_cg"
+
+
+# The private ranges the skeleton's internal drop matches on, restated here so
+# the arming path can refuse an element the drop would never have caught.
+#
+# Duplicating them is the lesser evil and the test is what makes it safe:
+# tests/test_vm_egress.py asserts these against the elements the .nft actually
+# arms, so a range added on one side and not the other fails rather than
+# silently making the refusal wrong. Parsing the .nft at runtime was the
+# alternative and it puts a parser on the start path of every VM to answer a
+# question about a constant.
+INTERNAL_PREFIXES4 = (
+    "0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8",
+    "169.254.0.0/16", "172.16.0.0/12", "192.0.2.0/24", "192.168.0.0/16",
+    "255.255.255.255",
+)
+INTERNAL_PREFIXES6 = (
+    "::/128", "::1/128", "::ffff:0.0.0.0/96", "64:ff9b::/96",
+    "64:ff9b:1::/48", "2002::/16", "fc00::/7", "fe80::/10",
+)
+
+# Kernel rules match addresses; policy is written about names, and the
+# resolution is transparent interception rather than a proxy.
+#
+# A PROXY IS ADVISORY. A guest process that ignores HTTPS_PROXY simply does not
+# use it, and a default-deny chain can only turn that into a failure — never
+# into a filtered request; every language runtime, every static binary and
+# every vendored HTTP client is one more place the variables would have to be
+# honoured. So the guest is told nothing, dials 80 and 443 normally, and a
+# uid-keyed DNAT lands it on this workload's own inspector, which reads the
+# Host header or the SNI and applies the `hosts` patterns. The guest's
+# cooperation is not part of the enforcement path.
+#
+# There is no advertised endpoint. Every workload's broker is on a uid-derived
+# loopback address the guest is never told (ADR 007 decision 6), so nothing
+# needs one; the dummy link carries each filtered workload's own
+# 198.18.x.y/32 and 2001:2::/128 inspector addresses and that is its whole job.
+#
+# 192.0.2.0/24 is therefore an ordinary internal-drop range: a documentation
+# range no guest can legitimately want. It must be in INTERNAL_PREFIXES4
+# AND in the skeleton, because that list is also what decides whether an
+# operator may write a [[vm.network.internal]] exemption (_internal_refusal).
+# Armed on one side only, a site that genuinely routes TEST-NET-1 internally
+# would be refused with no writable escape hatch.
+
+
+# The sidecar slice. Pinned rather than taken from [resources].slice so the
+# cgroup path is always exactly two components and the rule's `level 2` is
+# exact. These sidecars are not the payload; resource control belongs on the VM.
+SIDECAR_SLICE = "workloads.slice"

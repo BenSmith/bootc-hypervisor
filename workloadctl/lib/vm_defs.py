@@ -13,8 +13,10 @@ what they enforce IS the constant beside them -- parse_memory_mib against the
 bounds, parse_vm_port against the reserved ranges -- and separating a bound
 from the code that checks it is how a bound stops being checked.
 
-Nothing here imports vm; vm imports this and re-exports every public name, so
-no caller changed.
+Only the VM's own vocabulary lives here. The runtime directory both
+substrates share is config_parser.SOCKET_DIR, and the internal-drop ranges
+and the sidecar slice -- read on the container arming path too -- are
+nft_constants'.
 
 Installed to /usr/libexec/workloadctl/vm_defs.py.
 """
@@ -25,11 +27,8 @@ import re
 from pathlib import Path
 from typing import NamedTuple
 
+from config_parser import SOCKET_DIR
 from workload_addr import VmInspectAddress  # noqa: F401  (FamilyPair annotation)
-
-
-# Runtime socket directory for VM workloads: /run/workload-vm/{name}/
-SOCKET_DIR = Path("/run/workload-vm")
 
 
 # virtio-serial port name qemu-guest-agent binds to inside the guest. Fixed by
@@ -251,51 +250,6 @@ REGISTRATION_DOMAIN_PARENTS = (
 )
 
 
-# The private ranges the skeleton's internal drop matches on, restated here so
-# the arming path can refuse an element the drop would never have caught.
-#
-# Duplicating them is the lesser evil and the test is what makes it safe:
-# tests/test_vm_egress.py asserts these against the elements the .nft actually
-# arms, so a range added on one side and not the other fails rather than
-# silently making the refusal wrong. Parsing the .nft at runtime was the
-# alternative and it puts a parser on the start path of every VM to answer a
-# question about a constant.
-INTERNAL_PREFIXES4 = (
-    "0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8",
-    "169.254.0.0/16", "172.16.0.0/12", "192.0.2.0/24", "192.168.0.0/16",
-    "255.255.255.255",
-)
-INTERNAL_PREFIXES6 = (
-    "::/128", "::1/128", "::ffff:0.0.0.0/96", "64:ff9b::/96",
-    "64:ff9b:1::/48", "2002::/16", "fc00::/7", "fe80::/10",
-)
-# fixed names of objects the code below creates and the code above reads, and
-# a name that appears in two files is a name that can disagree with itself.
-
-# Kernel rules match addresses; policy is written about names, and the
-# resolution is transparent interception rather than a proxy.
-#
-# A PROXY IS ADVISORY. A guest process that ignores HTTPS_PROXY simply does not
-# use it, and a default-deny chain can only turn that into a failure — never
-# into a filtered request; every language runtime, every static binary and
-# every vendored HTTP client is one more place the variables would have to be
-# honoured. So the guest is told nothing, dials 80 and 443 normally, and a
-# uid-keyed DNAT lands it on this workload's own inspector, which reads the
-# Host header or the SNI and applies the `hosts` patterns. The guest's
-# cooperation is not part of the enforcement path.
-#
-# There is no advertised endpoint. Every workload's broker is on a uid-derived
-# loopback address the guest is never told (ADR 007 decision 6), so nothing
-# needs one; the dummy link carries each filtered workload's own
-# 198.18.x.y/32 and 2001:2::/128 inspector addresses and that is its whole job.
-#
-# 192.0.2.0/24 is therefore an ordinary internal-drop range: a documentation
-# range no guest can legitimately want. It must be in INTERNAL_PREFIXES4
-# AND in the skeleton, because that list is also what decides whether an
-# operator may write a [[vm.network.internal]] exemption (_internal_refusal).
-# Armed on one side only, a site that genuinely routes TEST-NET-1 internally
-# would be refused with no writable escape hatch.
-
 # What [vm.cloud_init].seed_provides may name — the concerns a custom seed can
 # declare it handles itself, suppressing the matching completeness check in
 # build_cloud_init_iso.
@@ -334,19 +288,10 @@ class SeedContractError(RuntimeError):
     """A custom [vm.cloud_init].user_data_file does not satisfy a contract the
     built-in seed would have satisfied. The message is written for the operator
     and names the fix."""
-# The sidecar slice. Pinned rather than taken from [resources].slice so the
-# cgroup path is always exactly two components and the rule's `level 2` is
-# exact. These sidecars are not the payload; resource control belongs on the VM.
-SIDECAR_SLICE = "workloads.slice"
 
 def vm_allowed_hosts(net: dict) -> list[str]:
     """The hostname allowlist for one workload, or [] if it has none."""
     hosts = net.get("hosts", [])
     return list(hosts) if isinstance(hosts, list) else []
-
-
-def runtime_dir(name: str) -> str:
-    """Where one instance's config, allowlist, log and pid file live."""
-    return f"{SOCKET_DIR}/{name}"
 
 

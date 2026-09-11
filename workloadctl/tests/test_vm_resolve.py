@@ -30,7 +30,7 @@ from pathlib import Path
 
 from egress_policy import uses_resolve
 from vm import vm_filter_elements
-from vm_defs import SIDECAR_SLICE
+from nft_constants import SIDECAR_SLICE
 from vm_network_config import (
     vm_allow_resolved, vm_resolve_policy, vm_resolve_policy_path,
 )

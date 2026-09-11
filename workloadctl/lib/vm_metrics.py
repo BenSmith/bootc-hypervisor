@@ -12,7 +12,7 @@ import subprocess
 from pathlib import Path
 
 from qmp import QMPClient
-from vm_defs import SOCKET_DIR
+from config_parser import SOCKET_DIR
 from workload_lib import workload_service_name
 
 # Unified cgroup v2 mount. A module constant so tests can redirect it.

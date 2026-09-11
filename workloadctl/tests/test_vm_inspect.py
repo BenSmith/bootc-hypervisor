@@ -32,7 +32,8 @@ from nft_constants import (
     NFT_SET_INSPECT_SELF, NFT_SET_INSPECT_SELF6, NFT_SET_INSPECT_LIVE,
     NFT_SET_INSPECT_LIVE6, NFT_SET_EGRESS_CG, NFT_TABLE,
 )
-from vm_defs import vm_allowed_hosts, runtime_dir
+from config_parser import runtime_dir
+from vm_defs import vm_allowed_hosts
 from vm_network_config import policy_permits
 from workload_addr import IP_BIN, ADVERTISED_IFACE
 

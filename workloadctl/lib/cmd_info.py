@@ -12,7 +12,7 @@ import pwd
 import subprocess
 from typing import Any
 
-from vm_defs import SOCKET_DIR
+from config_parser import SOCKET_DIR
 from qmp import QMPClient
 from service_runtime import parse_active_since, systemctl_show
 from substrate import get_substrate

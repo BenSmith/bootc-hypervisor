@@ -20,6 +20,14 @@ from typing import NamedTuple
 # Persistent workload data directory
 WORKLOADS_BASE = Path("/var/lib/workloads")
 
+# Per-instance runtime directory, /run/workload-vm/<name>/, for BOTH
+# substrates: a VM keeps its QMP and guest-agent sockets there, and any
+# workload with an egress inspector -- container or VM -- keeps the
+# inspector's policy and status documents there. The path keeps the name it
+# shipped with; it is an SELinux fcontext pattern and live state on deployed
+# hosts, not just a string.
+SOCKET_DIR = Path("/run/workload-vm")
+
 
 VALID_WORKLOAD_MODES = ("single", "pod", "bridge")
 
@@ -46,6 +54,11 @@ def workload_root_dir(name: str) -> Path:
     use this for writable-path grants and containment checks.
     """
     return WORKLOADS_BASE / name
+
+
+def runtime_dir(name: str) -> str:
+    """Where one instance's config, allowlist, log and pid file live."""
+    return f"{SOCKET_DIR}/{name}"
 
 
 # --- Validation ---

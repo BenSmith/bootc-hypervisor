@@ -31,7 +31,8 @@ from pathlib import Path
 from typing import NamedTuple
 
 from config_parser import normalise_hostname, parse_policy_entries
-from vm_defs import EGRESS_DEFAULT, SOCKET_DIR, vm_allowed_hosts
+from config_parser import SOCKET_DIR
+from vm_defs import EGRESS_DEFAULT, vm_allowed_hosts
 
 
 # --- The two TLS modes, and the hostname rules every list is matched by ---

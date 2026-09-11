@@ -59,7 +59,7 @@ from pcap import (
     pcap_rule_commands, pcap_shift_timestamps, tcpdump_argv,
 )
 from nft_constants import NFT_BIN, NFT_TABLE, NFT_SKELETON
-from vm_defs import SOCKET_DIR
+from config_parser import SOCKET_DIR
 from workload_addr import MGMT_SSH_PORT, management_address, nflog_group
 from qmp import QMPClient
 from podman import Podman

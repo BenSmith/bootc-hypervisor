@@ -39,10 +39,18 @@ from workload_addr import (INSPECT_ADDR6_PREFIX, INSPECT_NETWORK,
                            inspect_address, reserved_range)
 from egress_ca import RESERVED_GUEST_ENV
 from broker_config import VmCredential
-from vm_defs import (SEED_PROVIDES_CHOICES, SEED_PROVIDES_RETIRED,
-                     EGRESS_DEFAULT, EGRESS_MODES,
-                     REGISTRATION_DOMAIN_PARENTS, SOCKET_DIR, TLS_UNBUILT, parse_memory_mib, parse_vm_port,
-                     vm_allowed_hosts)
+from config_parser import SOCKET_DIR
+from vm_defs import (
+    SEED_PROVIDES_CHOICES,
+    SEED_PROVIDES_RETIRED,
+    EGRESS_DEFAULT,
+    EGRESS_MODES,
+    REGISTRATION_DOMAIN_PARENTS,
+    TLS_UNBUILT,
+    parse_memory_mib,
+    parse_vm_port,
+    vm_allowed_hosts,
+)
 
 
 # --- `allow`: the address-scoped bypass, now a table with a reason ---

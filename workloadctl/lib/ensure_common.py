@@ -39,7 +39,7 @@ from egress_ca import (
     ca_cert_path, ca_dir, denial_dir, leaf_dir, ca_key_path,
     ca_openssl_argv,
 )
-from vm_defs import SOCKET_DIR
+from config_parser import SOCKET_DIR
 
 def log(msg):
     """Print to stdout (captured by systemd journal)."""

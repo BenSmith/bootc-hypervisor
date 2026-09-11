@@ -37,9 +37,14 @@ from egress_ca import (
     ca_cert_path,
 )
 from broker_config import vm_credential_env
+from config_parser import SOCKET_DIR
 from vm_defs import (
-    SOCKET_DIR, VM_DEFAULT_GUEST_USER, VM_GUEST_HOME_BASE, VM_GUEST_UID,
-    VM_HOME_SELINUX_CONTEXT, VM_HOME_SELINUX_TYPES, SeedContractError,
+    VM_DEFAULT_GUEST_USER,
+    VM_GUEST_HOME_BASE,
+    VM_GUEST_UID,
+    VM_HOME_SELINUX_CONTEXT,
+    VM_HOME_SELINUX_TYPES,
+    SeedContractError,
     find_ovmf_vars,
 )
 from vm_ptp import vm_ptp_kvm_runcmd_lines, vm_ptp_kvm_seed_files

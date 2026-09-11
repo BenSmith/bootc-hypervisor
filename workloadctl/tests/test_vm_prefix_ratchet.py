@@ -273,8 +273,8 @@ class TestTheValuePinnedConstants(unittest.TestCase):
     """
 
     def test_the_socket_dir_value_is_unchanged(self):
-        import vm_defs
-        self.assertEqual(str(vm_defs.SOCKET_DIR), "/run/workload-vm")
+        import config_parser
+        self.assertEqual(str(config_parser.SOCKET_DIR), "/run/workload-vm")
 
     def test_the_listener_path_is_unchanged(self):
         import workload_addr

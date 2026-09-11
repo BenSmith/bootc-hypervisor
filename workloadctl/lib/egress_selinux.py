@@ -16,7 +16,7 @@ Installed to /usr/libexec/workloadctl/egress_selinux.py.
 
 import os
 
-from vm_defs import SOCKET_DIR
+from config_parser import SOCKET_DIR
 
 
 # QEMU runs as svirt_t (alias qemu_t), the domain the shipped policy already

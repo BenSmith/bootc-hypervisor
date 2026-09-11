@@ -432,7 +432,7 @@ class TestInternalDestinationGuard(unittest.TestCase):
         """
         import ipaddress
         from vm import internal_ok_elements
-        from vm_defs import INTERNAL_PREFIXES4
+        from nft_constants import INTERNAL_PREFIXES4
         self.assertIn("192.0.2.0/24", INTERNAL_PREFIXES4)
         self.assertTrue(internal_ok_elements(
             10007, [ipaddress.ip_address("192.0.2.5")]))
@@ -3453,7 +3453,7 @@ class TestInternalOkAccept(unittest.TestCase):
         else would notice.
         """
         from nft_constants import NFT_SET_INTERNAL4, NFT_SET_INTERNAL6
-        from vm_defs import INTERNAL_PREFIXES4, INTERNAL_PREFIXES6
+        from nft_constants import INTERNAL_PREFIXES4, INTERNAL_PREFIXES6
         text = SKELETON.read_text()
         for set_name, prefixes in ((NFT_SET_INTERNAL4, INTERNAL_PREFIXES4),
                                    (NFT_SET_INTERNAL6, INTERNAL_PREFIXES6)):

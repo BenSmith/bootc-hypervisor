@@ -18,7 +18,7 @@ import time
 sys.dont_write_bytecode = True
 
 from egress_selinux import qemu_launch_argv
-from vm_defs import SOCKET_DIR
+from config_parser import SOCKET_DIR
 from qmp import QMPClient
 from vm_provision import (marker_reports_failure, marker_vouches_for,
                           read_provision_marker, record_guest_provision_result)

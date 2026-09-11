@@ -37,9 +37,8 @@ from substrate import (
     systemctl_or_raise,
 )
 from egress_policy import vm_uses_inspect
-from vm_defs import (
-    SOCKET_DIR, parse_memory_mib, vm_guest_agent_socket, mac_address,
-)
+from config_parser import SOCKET_DIR
+from vm_defs import parse_memory_mib, vm_guest_agent_socket, mac_address
 from workload_addr import MGMT_SSH_PORT, management_address
 from vm_clock import GUEST_AGENT_TIMEOUT, guest_agent_sync
 from vm_metrics import get_vm_qmp_metrics

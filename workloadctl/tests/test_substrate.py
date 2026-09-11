@@ -2076,7 +2076,7 @@ class TestVMControl(unittest.TestCase):
         return VMSubstrate(config, None)
 
     def test_control_sends_qmp_command(self):
-        from vm_defs import SOCKET_DIR
+        from config_parser import SOCKET_DIR
         substrate = self._substrate()
         mock_qmp = MagicMock()
         mock_qmp.execute.return_value = {"return": {}}

@@ -33,10 +33,16 @@ from broker_config import (
     broker_credential, vm_broker_hosts, broker_runtime_directory,
     vm_broker_upstream_addresses, host_resolver_addresses,
 )
+from config_parser import SOCKET_DIR
+from nft_constants import SIDECAR_SLICE
 from vm_defs import (
-    VM_REBOOT_EXIT_CODE, VM_GUEST_UID, VM_GUEST_AGENT_PORT, SIDECAR_SLICE,
-    mac_address, parse_vm_port, find_ovmf_code, parse_memory_mib,
-    SOCKET_DIR,
+    VM_REBOOT_EXIT_CODE,
+    VM_GUEST_UID,
+    VM_GUEST_AGENT_PORT,
+    mac_address,
+    parse_vm_port,
+    find_ovmf_code,
+    parse_memory_mib,
 )
 from workload_addr import (
     MGMT_SSH_PORT, INSPECT_LISTENER_BIN, management_address,
