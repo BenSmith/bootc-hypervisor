@@ -312,7 +312,7 @@ def render_broker_config(name: str, uid: int, hosts, credentials) -> str:
     request. The broker refuses to start without the key for the same reason.
     """
     lines = [
-        f"# Generated for workload {name} by workload-vm-broker. DO NOT EDIT:",
+        f"# Generated for workload {name} by workload-broker-config. DO NOT EDIT:",
         "# this file is a pure function of the workload's egress tables and",
         "# is rewritten from them at every start of the broker unit.",
         "",

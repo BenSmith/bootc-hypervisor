@@ -112,8 +112,8 @@ names a `credential` and sends that request to the broker instead of to the
 origin. So a workload cannot name the broker, cannot choose to use it, and
 cannot be pointed at another workload's.
 
-`libexec/workload-vm-broker` is not the broker: it is the one-verb helper that
-writes an instance's `broker.toml` (`workload-vm-broker config <name>`), run as
+`libexec/workload-broker-config` is not the broker: it is the one-verb helper that
+writes an instance's `broker.toml` (`workload-broker-config config <name>`), run as
 that unit's `ExecStartPre`. `tests/test_vm_broker.py` covers both halves.
 
 There was a host-wide `agent-broker.service` reached by every guest at an

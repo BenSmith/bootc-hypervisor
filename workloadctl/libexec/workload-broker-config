@@ -1,8 +1,8 @@
 #!/usr/bin/python3
 """
-workload-vm-broker: write one workload's broker.toml (either substrate).
+workload-broker-config: write one workload's broker.toml (either substrate).
 
-Usage: workload-vm-broker config <name>
+Usage: workload-broker-config config <name>
 
 Runs as the ExecStartPre of that workload's own broker instance
 (workload-<name>-broker.service) and writes the instance's config into the

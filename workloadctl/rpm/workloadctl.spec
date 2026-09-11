@@ -138,8 +138,8 @@ install -Dpm 0755 %{_sourcedir}/libexec/workload-vm-inspect-listener \
     %{buildroot}%{_libexecdir}/workloadctl/workload-vm-inspect-listener
 install -Dpm 0755 %{_sourcedir}/libexec/workload-vm-resolve \
     %{buildroot}%{_libexecdir}/workloadctl/workload-vm-resolve
-install -Dpm 0755 %{_sourcedir}/libexec/workload-vm-broker \
-    %{buildroot}%{_libexecdir}/workloadctl/workload-vm-broker
+install -Dpm 0755 %{_sourcedir}/libexec/workload-broker-config \
+    %{buildroot}%{_libexecdir}/workloadctl/workload-broker-config
 install -Dpm 0755 %{_sourcedir}/libexec/workload-vm-notify \
     %{buildroot}%{_libexecdir}/workloadctl/workload-vm-notify
 install -Dpm 0755 %{_sourcedir}/libexec/workload-vm-qmp \
@@ -152,7 +152,7 @@ install -Dpm 0755 %{_sourcedir}/libexec/workload-vm-shutdown \
 # the sandbox makes through it (docs/agent-broker.md).
 #
 # It keeps its own name instead of a workload-* one. libexec already holds
-# workload-vm-broker, which is a different thing entirely -- the helper that
+# workload-broker-config, which is a different thing entirely -- the helper that
 # writes one instance's broker.toml -- and two names a hyphen apart for the
 # config writer and the daemon is a confusion nobody needs at 3am.
 #
@@ -228,7 +228,7 @@ install -Dpm 0644 %{_sourcedir}/docs/schema-reference.toml \
 
 # The broker's design doc and its annotated config. The generated units'
 # Documentation= points at the first; the second documents the shape of the
-# broker.toml that workload-vm-broker now RENDERS, and an operator no longer
+# broker.toml that workload-broker-config now RENDERS, and an operator no longer
 # copies or edits it -- the config is a pure function of the workload TOML,
 # written into /run at every start. It ships under docdir, where it always did,
 # and the reason has changed from "so upgrades never touch a real broker.toml"
@@ -522,7 +522,7 @@ fi
 %{_libexecdir}/workloadctl/workload-vm-inspect
 %{_libexecdir}/workloadctl/workload-vm-inspect-listener
 %{_libexecdir}/workloadctl/workload-vm-resolve
-%{_libexecdir}/workloadctl/workload-vm-broker
+%{_libexecdir}/workloadctl/workload-broker-config
 %{_libexecdir}/workloadctl/workload-vm-qmp
 %{_libexecdir}/workloadctl/workload-vm-shutdown
 %{_libexecdir}/workloadctl/agent-broker

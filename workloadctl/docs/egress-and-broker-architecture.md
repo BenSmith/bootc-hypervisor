@@ -243,7 +243,7 @@ flowchart TB
   subgraph shared["Shared, byte-for-byte"]
     LST["workload-vm-inspect-listener<br/>TLS termination, SNI/Host policy, broker dial"]
     NFT2["inet workload_filter + inet workload_proxy skeletons"]
-    BRK["libexec/agent-broker + workload-vm-broker config"]
+    BRK["libexec/agent-broker + workload-broker-config config"]
     PI["lib/peer_identity.py — caller identified by the uid owning the far end"]
   end
 

@@ -459,7 +459,7 @@ def generate_broker_service(config, uid: int, *, before: str,
     # And not `-` either: a broker started against a stale or missing config is
     # a broker serving the wrong credentials or none.
     svc.add("ExecStartPre",
-            f"/usr/libexec/workloadctl/workload-vm-broker config {dq(name)}")
+            f"/usr/libexec/workloadctl/workload-broker-config config {dq(name)}")
     svc.add("ExecStart", f"{BROKER_BIN} {dq(str(broker_config_path(name)))}")
     svc.blank()
     # One line per DECLARED credential, not per credential-backed host: two

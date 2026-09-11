@@ -274,11 +274,11 @@ class TestTheGeneratedUnit(unittest.TestCase):
         wrong credential to a request, silently."""
         unit = self.unit()
         self.assertIn('ExecStartPre=/usr/libexec/workloadctl/'
-                      'workload-vm-broker config "agent"', unit)
+                      'workload-broker-config config "agent"', unit)
         self.assertNotIn("ExecStartPre=+/usr/libexec/workloadctl/"
-                         "workload-vm-broker config", unit)
+                         "workload-broker-config config", unit)
         self.assertNotIn("ExecStartPre=-/usr/libexec/workloadctl/"
-                         "workload-vm-broker config", unit)
+                         "workload-broker-config config", unit)
 
     def test_the_runtime_directory_is_private_to_the_instance(self):
         unit = self.unit()
@@ -526,7 +526,7 @@ class TestDriftSeesAHandEditedInstance(unittest.TestCase):
 
 
 class TestTheHelperWritesTheConfig(unittest.TestCase):
-    """`workload-vm-broker config` -- the ExecStartPre that materialises D2.
+    """`workload-broker-config config` -- the ExecStartPre that materialises D2.
 
     It runs unprivileged, as the instance's own DynamicUser, inside the unit's
     sandbox: everything it reads is world-readable and the only thing it writes
@@ -536,7 +536,7 @@ class TestTheHelperWritesTheConfig(unittest.TestCase):
 
     def setUp(self):
         from unittest import mock
-        self.mod = load_script("libexec/workload-vm-broker")
+        self.mod = load_script("libexec/workload-broker-config")
         self.tmp = Path(tempfile.mkdtemp(prefix="broker-config-"))
         self.addCleanup(__import__("shutil").rmtree, self.tmp,
                         ignore_errors=True)
@@ -1242,7 +1242,7 @@ class TestTheMapSweepIsGone(unittest.TestCase):
     """The generator's SECOND broker block, which no grep for a config key
     finds.
 
-    It emitted `workload-vm-broker up`/`down` on EVERY VM -- bridged ones
+    It emitted `workload-broker-config up`/`down` on EVERY VM -- bridged ones
     included -- to scrub an element a reused uid could inherit from a deleted
     workload. That sweep was load-bearing while the map existed and is deleted
     with it: the entitlement now lives in the workload's own generated unit,
@@ -1250,7 +1250,7 @@ class TestTheMapSweepIsGone(unittest.TestCase):
 
     Asserted by absence, which is the shape [[unit-gates-dont-see-the-seam]]
     warns about -- so it is pinned against the verb that DOES survive rather
-    than against the string `workload-vm-broker`, which would pass just as
+    than against the string `workload-broker-config`, which would pass just as
     happily if the helper were deleted outright.
     """
 
@@ -1266,18 +1266,18 @@ class TestTheMapSweepIsGone(unittest.TestCase):
             with self.subTest(label):
                 unit = self._unit({"workload": {"name": "agent"},
                                    "vm": {"network": net}})
-                self.assertNotIn("workload-vm-broker up", unit)
-                self.assertNotIn("workload-vm-broker down", unit)
+                self.assertNotIn("workload-broker-config up", unit)
+                self.assertNotIn("workload-broker-config down", unit)
 
     def test_the_helper_still_has_its_config_verb(self):
         """The negative above is only meaningful while the helper exists.
 
-        Deleting libexec/workload-vm-broker entirely would satisfy every
+        Deleting libexec/workload-broker-config entirely would satisfy every
         assertion in the class above and break the broker instance's
         ExecStartPre, which is the one caller left.
         """
         source = (Path(__file__).resolve().parent.parent
-                  / "libexec" / "workload-vm-broker").read_text()
+                  / "libexec" / "workload-broker-config").read_text()
         self.assertIn("def write_config(", source)
         self.assertNotIn("def up(", source)
         self.assertNotIn("def down(", source)

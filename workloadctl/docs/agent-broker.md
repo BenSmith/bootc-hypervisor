@@ -284,7 +284,7 @@ mechanism, described below in the VM's terms — gets a
 `workload-<name>-broker.service` written by the boot generator:
 `DynamicUser=yes`, bound to `broker_listen_address(uid)` — `127.129.0.0` plus
 the workload's offset from `UID_MIN`, port 8081 — with a `broker.toml`
-regenerated into `/run` at every start by `workload-vm-broker config <name>`.
+regenerated into `/run` at every start by `workload-broker-config config <name>`.
 Its only caller is that workload's own egress inspector.
 
 A request therefore goes: guest → passt (re-originates as the workload uid) →
