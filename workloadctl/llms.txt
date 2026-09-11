@@ -489,6 +489,7 @@ lib/vm_disk_build.py               # A VM's disks built: system.qcow2 from cloud
 lib/passt_dns_host.py              # What the host has: default gateway and first nameserver per family
 lib/passt_dns_fragment.py          # What the guest is told: the netdev DNS fragment builders and the per-family rule
 lib/filter_arm.py                  # One workload's uid-keyed egress filter armed and retired (both substrates): the skeleton, the stale purge, the allow elements, and the VM's responder document; VM and CONTAINER are the Substrate each helper binds
+lib/secrets_env.py                 # One container's decrypted-secret EnvironmentFile: container selection, ${SECRET:name} resolution against CREDENTIALS_DIRECTORY, the 0600 write, and the stale-file removal
 lib/inspect_arm.py                 # One workload's inspection armed and retired (both substrates): both skeletons, the eight redirect elements, the internal exemptions, the broker's own; VM and CONTAINER are the Substrate each helper binds
 lib/inspect_listener.py            # The inspector process: the accept loop, the connection ceiling, the plane from the accepting port, and the status file; each plane is one call into inspect_tls or inspect_http
 lib/inspect_tls.py                 # The TLS plane: peek the ClientHello, match the name, then splice byte-exact, terminate with a minted leaf, or relay h2 at the frame level
@@ -507,7 +508,7 @@ lib/pcap_container_tap.py          # Container guest vantage: tcpdump in the net
 generators/workload-generator      # Tiny shell systemd generator (emits workload-generate.service)
 generators/workload-generate       # Python script run by workload-generate.service at early boot
 libexec/workload-ensure-user       # Per-workload user setup (ExecStartPre)
-libexec/workload-write-env         # EnvironmentFile rendering (incl. ${SECRET:name})
+libexec/workload-write-env         # main() over lib/secrets_env.py
 libexec/workload-vm-*              # VM helpers: build-disk, qmp, shutdown, notify, netdev, filter,
                                    #   inspect, resolve
 libexec/workload-inspect-listener  # The inspector's entrypoint: reads the policy, recovers the activated sockets, runs lib/inspect_listener.py; both substrates
