@@ -35,9 +35,10 @@ from types import SimpleNamespace
 from unittest import mock
 
 import cmd_diagnose
+import egress_policy
 from egress_policy import (
-    INSPECT_DIGEST_KEY, INSPECT_DIGEST_SHORT, inspect_digest_short,
-    inspect_policy_digest, vm_inspect_policy_text,
+    INSPECT_DIGEST_KEY, INSPECT_DIGEST_SHORT, Policy, inspect_digest_short,
+    inspect_policy_digest, load_policy, vm_inspect_policy_text,
 )
 from egress_ca import CA_EXPIRY_WARN_DAYS
 
@@ -89,7 +90,7 @@ class TestTheListenerReportsWhatItLoaded(unittest.TestCase):
 
     def test_the_loaded_policy_carries_the_documents_digest(self):
         text = vm_inspect_policy_text(NET)
-        policy = self.mod.load_policy(self._write(text))
+        policy = load_policy(self._write(text))
         self.assertEqual(policy.digest, inspect_policy_digest(text))
 
     def test_the_digest_is_of_the_bytes_that_were_parsed(self):
@@ -114,8 +115,9 @@ class TestTheListenerReportsWhatItLoaded(unittest.TestCase):
             opened.append(args[0] if args else kwargs.get("file"))
             return io.StringIO(first if len(opened) == 1 else second)
 
-        with mock.patch.object(self.mod, "open", versioned_open, create=True):
-            policy = self.mod.load_policy(path)
+        with mock.patch.object(egress_policy, "open", versioned_open,
+                               create=True):
+            policy = load_policy(path)
         self.assertEqual(len(opened), 1)
         self.assertEqual(policy.digest, inspect_policy_digest(first))
         self.assertNotEqual(policy.digest, inspect_policy_digest(second))
@@ -124,7 +126,7 @@ class TestTheListenerReportsWhatItLoaded(unittest.TestCase):
         """The status file is the only channel from a running listener to the
         host. A digest held in memory and never written is unreadable by the
         check that exists to read it."""
-        policy = self.mod.load_policy(self._write(vm_inspect_policy_text(NET)))
+        policy = load_policy(self._write(vm_inspect_policy_text(NET)))
         listener = self.mod.Listener([], policy=policy)
         self.assertEqual(listener.status()[INSPECT_DIGEST_KEY],
                          policy.digest)
@@ -133,7 +135,7 @@ class TestTheListenerReportsWhatItLoaded(unittest.TestCase):
         """A key that appeared only when non-empty would make "no digest" and
         "a listener from before this rung" indistinguishable, and the reader
         treats one of those as silence."""
-        listener = self.mod.Listener([], policy=self.mod.Policy(
+        listener = self.mod.Listener([], policy=Policy(
             tls="inspect", hosts=("example.com",)))
         self.assertIn(INSPECT_DIGEST_KEY, listener.status())
         self.assertEqual(listener.status()[INSPECT_DIGEST_KEY], "")

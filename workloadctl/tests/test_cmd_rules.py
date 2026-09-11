@@ -76,7 +76,7 @@ class CompositionRuleTest(unittest.TestCase):
         self.assertIn("any method, any path", text)
 
     def test_a_policy_entry_admits_its_own_host(self):
-        """Mirrors the listener's Policy.admits(): a name in `policy` need not
+        """Mirrors egress_policy.Policy.admits(): a name in `policy` need not
         also appear in `hosts`. A report checking `hosts` alone would print
         `not allowlisted` for a host the operator's file plainly names."""
         d = doc(policy=[entry("api.example.com", methods=["GET"])])

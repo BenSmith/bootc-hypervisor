@@ -25,8 +25,8 @@ from egress_policy import INSPECT_GUEST_AGENT_KEY
 from config_parser import normalise_hostname
 from workload_lib import container_inspect_policy
 from egress_policy import (
-    INSPECT_PORT_CLEARTEXT, INSPECT_PORT_TLS, VmPolicyEntry, hostname_match,
-    vm_inspect_policy,
+    INSPECT_PORT_CLEARTEXT, INSPECT_PORT_TLS, Policy, VmPolicyEntry,
+    hostname_match, load_policy, vm_inspect_policy,
 )
 from sd_listen import NotSocketActivated
 from workload_addr import INSPECT_LISTENER_BIN
@@ -586,10 +586,9 @@ class TestPolicyLoading(unittest.TestCase):
         """The two halves are tested against each other, not against a literal:
         a listener reading a key the helper does not write is a policy that
         loads clean and authorises nothing."""
-        mod = _mod()
         path = self._write(json.dumps(vm_inspect_policy(
             {"hosts": ["example.com"], "tls": "splice"})))
-        policy = mod.load_policy(path)
+        policy = load_policy(path)
         self.assertEqual(policy.hosts, ("example.com",))
         self.assertEqual(policy.tls, "splice")
 
@@ -628,7 +627,6 @@ class TestPolicyLoading(unittest.TestCase):
         its own digest would stop being a pure function of the TOML, and every
         drift comparison would then have to know to ignore one of its own keys.
         """
-        mod = _mod()
         doc = vm_inspect_policy({
             "hosts": ["example.com"],
             "internal": [{"host": "nas.example.com", "reason": "nas"}],
@@ -639,12 +637,12 @@ class TestPolicyLoading(unittest.TestCase):
             "hosts": ["example.com"],
             "policy": [{"host": "api.example.com", "methods": ["GET"]}]})
         self.assertEqual(set(doc) | set(container_doc),
-                         set(mod.Policy._fields) - NON_DOCUMENT_FIELDS)
+                         set(Policy._fields) - NON_DOCUMENT_FIELDS)
         # Each writer on its own may be short of the reader, but neither may
         # exceed it: a key with no field behind it is the silent half.
         for written in (doc, container_doc):
             self.assertLessEqual(
-                set(written), set(mod.Policy._fields) - NON_DOCUMENT_FIELDS)
+                set(written), set(Policy._fields) - NON_DOCUMENT_FIELDS)
         # The other direction of the exemption: a digest that leaked INTO the
         # document is the thing decision 3 refuses, and it would pass the line
         # above unnoticed.
@@ -679,12 +677,12 @@ class TestPolicyLoading(unittest.TestCase):
                                   lambda *a, **kw: built.update(kw)), \
                 unittest.mock.patch.object(mod, "resync_guest_clock_if_skewed",
                                   lambda name: "RESYNCED-SENTINEL"):
-            mod.build_minter("w", mod.Policy(tls="inspect", hosts=(),
+            mod.build_minter("w", Policy(tls="inspect", hosts=(),
                                              guest_agent=False))
             self.assertIsNone(built["clock_check"]())
 
             built.clear()
-            mod.build_minter("w", mod.Policy(tls="inspect", hosts=(),
+            mod.build_minter("w", Policy(tls="inspect", hosts=(),
                                              guest_agent=True))
             self.assertEqual(built["clock_check"](), "RESYNCED-SENTINEL")
 
@@ -709,16 +707,14 @@ class TestPolicyLoading(unittest.TestCase):
         clock repair on every one of them until it was re-armed -- with no
         error, and no counter that moves to say so.
         """
-        mod = _mod()
         path = self._write(json.dumps(vm_inspect_policy(
             {"hosts": ["example.com"]})))
-        self.assertIs(mod.load_policy(path).guest_agent, True)
+        self.assertIs(load_policy(path).guest_agent, True)
 
     def test_a_container_document_turns_the_clock_remedy_off(self):
-        mod = _mod()
         path = self._write(json.dumps(container_inspect_policy(
             {"hosts": ["example.com"]})))
-        self.assertIs(mod.load_policy(path).guest_agent, False)
+        self.assertIs(load_policy(path).guest_agent, False)
 
     def test_only_a_literal_false_turns_it_off(self):
         """A malformed value keeps the remedy rather than dropping it.
@@ -728,12 +724,11 @@ class TestPolicyLoading(unittest.TestCase):
         loses it goes on serving leaves from a skewed clock -- which is the
         condition the remedy exists for and the one nothing else detects.
         """
-        mod = _mod()
         for value in ("false", 0, None, "no"):
             with self.subTest(value=value):
                 path = self._write(json.dumps(
                     {"hosts": [], "guest_agent": value}))
-                self.assertIs(mod.load_policy(path).guest_agent, True)
+                self.assertIs(load_policy(path).guest_agent, True)
 
     def test_the_document_carries_the_internal_list_through(self):
         """The listener's copy of [[vm.network.internal]] authorises nothing --
@@ -741,23 +736,21 @@ class TestPolicyLoading(unittest.TestCase):
         simply down. Dropped on load, every internal-destination refusal is
         misfiled as 'upstream unreachable' and the counter that exists to name
         the wildcard trap never moves."""
-        mod = _mod()
         path = self._write(json.dumps(vm_inspect_policy({
             "hosts": ["nas.example.com"], "tls": "splice",
             "internal": [{"host": "nas.example.com"}]})))
-        policy = mod.load_policy(path)
+        policy = load_policy(path)
         self.assertEqual(policy.internal, ("nas.example.com",))
 
     def test_the_document_carries_the_policy_entries_through(self):
         """Both halves against each other, not against a literal: a listener
         reading a key the helper does not write governs nothing while the
         config says every request is constrained."""
-        mod = _mod()
         path = self._write(json.dumps(vm_inspect_policy({
             "hosts": ["a.example"],
             "policy": [{"host": "a.example", "methods": ["GET"],
                         "paths": ["/v2/*"]}]})))
-        entry, = mod.load_policy(path).policy
+        entry, = load_policy(path).policy
         self.assertEqual(entry.host, "a.example")
         self.assertEqual(entry.methods, ("GET",))
         self.assertEqual(entry.paths, ("/v2/*",))
@@ -773,10 +766,9 @@ class TestPolicyLoading(unittest.TestCase):
         only symptom is a guest that gets a 403 for a request its config
         permits.
         """
-        mod = _mod()
         path = self._write(json.dumps(vm_inspect_policy({
             "policy": [{"host": "a.example"}]})))
-        entry, = mod.load_policy(path).policy
+        entry, = load_policy(path).policy
         self.assertIsNone(entry.methods)
         self.assertIsNone(entry.paths)
         self.assertTrue(entry.permits("DELETE", "/anything"))
@@ -785,26 +777,23 @@ class TestPolicyLoading(unittest.TestCase):
         """Both halves against each other. A listener that dropped this on load
         offers `http/1.1` to a host the operator listed for h2, which fails as
         that one host being broken rather than as a key being ignored."""
-        mod = _mod()
         path = self._write(json.dumps(vm_inspect_policy({
             "hosts": ["grpc.example.com"],
             "http2": [{"host": "grpc.example.com", "reason": "gRPC"}]})))
-        policy = mod.load_policy(path)
+        policy = load_policy(path)
         self.assertEqual(policy.http2, ("grpc.example.com",))
         self.assertTrue(policy.speaks_h2("grpc.example.com"))
 
     def test_a_malformed_http2_list_is_an_error(self):
-        mod = _mod()
         path = self._write(json.dumps({"hosts": [], "http2": "grpc.example"}))
         with self.assertRaises(ValueError):
-            mod.load_policy(path)
+            load_policy(path)
 
     def test_a_malformed_policy_entry_is_an_error(self):
-        mod = _mod()
         with self.assertRaises(ValueError):
-            mod.load_policy(self._write('{"hosts": [], "policy": "a.example"}'))
+            load_policy(self._write('{"hosts": [], "policy": "a.example"}'))
         with self.assertRaises(ValueError):
-            mod.load_policy(self._write('{"hosts": [], "policy": [{"m": 1}]}'))
+            load_policy(self._write('{"hosts": [], "policy": [{"m": 1}]}'))
 
     def test_a_lowercase_method_in_the_document_is_normalised_on_load(self):
         """The reader normalises as well as the writer, which is the
@@ -813,12 +802,11 @@ class TestPolicyLoading(unittest.TestCase):
         document carrying `["get"]` would deny every GET on that host -- fails
         closed, and therefore in silence, on a file that reads as permitting
         it."""
-        mod = _mod()
         path = self._write(json.dumps({
             "tls": "inspect", "hosts": ["a.example"],
             "policy": [{"host": "a.example", "methods": ["get"],
                         "paths": ["/v1/*"]}]}))
-        policy = mod.load_policy(path)
+        policy = load_policy(path)
         self.assertEqual(policy.policy[0].methods, ("GET",))
         self.assertTrue(policy.permits("a.example", "GET", "/v1/x"))
 
@@ -827,12 +815,11 @@ class TestPolicyLoading(unittest.TestCase):
         request path -- one guest request killing the connection on a
         malformed line in a file, rather than being ignored the way every
         other reader here ignores a shape validation owns."""
-        mod = _mod()
         path = self._write(json.dumps({
             "tls": "inspect", "hosts": ["a.example"],
             "policy": [{"host": "a.example", "methods": ["GET", 7],
                         "paths": ["/v1/*", None]}]}))
-        entry, = mod.load_policy(path).policy
+        entry, = load_policy(path).policy
         self.assertEqual(entry.methods, ("GET",))
         self.assertEqual(entry.paths, ("/v1/*",))
 
@@ -840,11 +827,10 @@ class TestPolicyLoading(unittest.TestCase):
         """None and () are still different after it. A normaliser that turned
         an absent `methods` into an empty tuple would make every
         unconstrained entry permit nothing."""
-        mod = _mod()
         path = self._write(json.dumps({
             "tls": "inspect", "hosts": ["a.example"],
             "policy": [{"host": "a.example"}]}))
-        entry, = mod.load_policy(path).policy
+        entry, = load_policy(path).policy
         self.assertIsNone(entry.methods)
         self.assertIsNone(entry.paths)
 
@@ -853,16 +839,14 @@ class TestPolicyLoading(unittest.TestCase):
         fell back to one could not tell "the operator allowed nothing" from
         "the file was not there" -- and would enforce the strictest reading of
         a policy it never read while reporting itself healthy."""
-        mod = _mod()
         with self.assertRaises(OSError):
-            mod.load_policy("/nonexistent/inspect.json")
+            load_policy("/nonexistent/inspect.json")
 
     def test_a_malformed_document_is_an_error(self):
-        mod = _mod()
         with self.assertRaises(ValueError):
-            mod.load_policy(self._write("[]"))
+            load_policy(self._write("[]"))
         with self.assertRaises(ValueError):
-            mod.load_policy(self._write('{"hosts": "example.com"}'))
+            load_policy(self._write('{"hosts": "example.com"}'))
 
     def test_main_refuses_without_a_workload_name(self):
         """argv[1] is how the listener knows which policy is its own; without
@@ -879,7 +863,7 @@ class TestTlsPlane(unittest.TestCase):
         mod = _mod()
         out = io.StringIO()
         listener = mod.Listener(
-            [], out, policy=mod.Policy(tls="splice", hosts=tuple(hosts)))
+            [], out, policy=Policy(tls="splice", hosts=tuple(hosts)))
         return mod, listener, out
 
     def _client(self, payload):
@@ -994,7 +978,7 @@ class TestPerHostSplice(unittest.TestCase):
         out = io.StringIO()
         listener = mod.Listener(
             [], out,
-            policy=mod.Policy(tls=tls, hosts=tuple(hosts),
+            policy=Policy(tls=tls, hosts=tuple(hosts),
                               splice=tuple(splice)),
             minter=unittest.mock.Mock())
         return mod, listener, out
@@ -1011,14 +995,12 @@ class TestPerHostSplice(unittest.TestCase):
         """One question, asked in one place. `tls == "splice"` in one branch
         and a list check in another is how a path gets one of the two and
         reads correct at its own call site."""
-        mod = _mod()
-        policy = mod.Policy(tls="splice", hosts=("a.example",), splice=())
+        policy = Policy(tls="splice", hosts=("a.example",), splice=())
         self.assertTrue(policy.splices("a.example"))
         self.assertTrue(policy.splices("anything.at.all"))
 
     def test_the_per_host_list_is_matched_as_patterns(self):
-        mod = _mod()
-        policy = mod.Policy(tls="inspect", hosts=("*.golang.org",),
+        policy = Policy(tls="inspect", hosts=("*.golang.org",),
                             splice=("*.golang.org",))
         self.assertTrue(policy.splices("sum.golang.org"))
         self.assertFalse(policy.splices("github.com"))
@@ -1106,7 +1088,6 @@ class TestPerHostSplice(unittest.TestCase):
         """Both halves against each other, not against a literal: a listener
         reading a key the helper does not write splices nothing while the
         config says it does."""
-        mod = _mod()
         d = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, d)
         path = os.path.join(d, "inspect.json")
@@ -1114,7 +1095,7 @@ class TestPerHostSplice(unittest.TestCase):
             json.dump(vm_inspect_policy({
                 "hosts": ["sum.golang.org"],
                 "splice": [{"host": "sum.golang.org", "reason": "a log"}]}), f)
-        self.assertEqual(mod.load_policy(path).splice, ("sum.golang.org",))
+        self.assertEqual(load_policy(path).splice, ("sum.golang.org",))
 
     def test_the_list_is_carried_even_under_tls_splice(self):
         """The document describes the FILE, not the file filtered through the
@@ -1239,7 +1220,7 @@ class TestHttp2AlpnSelection(unittest.TestCase):
     """
 
     def _policy(self, mod, **kw):
-        return mod.Policy(tls="inspect", hosts=("a.example", "grpc.example"),
+        return Policy(tls="inspect", hosts=("a.example", "grpc.example"),
                           **kw)
 
     def test_speaks_h2_is_the_list_and_not_the_mode(self):
@@ -1249,8 +1230,7 @@ class TestHttp2AlpnSelection(unittest.TestCase):
         self.assertFalse(policy.speaks_h2("a.example"))
 
     def test_speaks_h2_matches_by_pattern_and_normalises_the_name(self):
-        mod = _mod()
-        policy = mod.Policy(tls="inspect", hosts=("*.example",),
+        policy = Policy(tls="inspect", hosts=("*.example",),
                             http2=("*.grpc.example",))
         self.assertTrue(policy.speaks_h2("a.GRPC.example."))
         self.assertFalse(policy.speaks_h2("grpc.example"),
@@ -1287,7 +1267,7 @@ class TestLogInjection(unittest.TestCase):
         mod = _mod()
         out = io.StringIO()
         listener = mod.Listener(
-            [], out, policy=mod.Policy(tls="splice", hosts=tuple(hosts)))
+            [], out, policy=Policy(tls="splice", hosts=tuple(hosts)))
         return mod, listener, out
 
     _forged = "evil.example\nsplice plane=tls local=127.0.0.1:1 " \
@@ -1389,7 +1369,7 @@ class _CleartextRig(unittest.TestCase):
         out = io.StringIO()
         listener = mod.Listener(
             [], out,
-            policy=policy or mod.Policy(tls="splice", hosts=tuple(hosts)))
+            policy=policy or Policy(tls="splice", hosts=tuple(hosts)))
         ours, guest = self._pair()
         guest.sendall(request_bytes)
         guest.shutdown(socket.SHUT_WR)
@@ -1464,8 +1444,7 @@ class TestPolicyGovernsIsAskedWhereThereIsNoRequest(unittest.TestCase):
     """
 
     def _policy(self, *entries, hosts=("a.example",)):
-        mod = _mod()
-        return mod.Policy(
+        return Policy(
             tls="inspect", hosts=tuple(hosts),
             policy=tuple(VmPolicyEntry(host=h, methods=m, paths=pa)
                          for h, m, pa in entries))
@@ -1511,8 +1490,7 @@ class TestPolicyEnforcement(_CleartextRig):
     """
 
     def _policy(self, hosts, *entries):
-        mod = _mod()
-        return mod.Policy(
+        return Policy(
             tls="splice", hosts=tuple(hosts),
             policy=tuple(VmPolicyEntry(host=h, methods=m, paths=p)
                          for h, m, p in entries))
@@ -2042,7 +2020,7 @@ class TestCleartextPerRequest(unittest.TestCase):
         """
         mod = _mod()
         listener = mod.Listener([], io.StringIO(),
-                                policy=mod.Policy(tls="splice",
+                                policy=Policy(tls="splice",
                                                   hosts=("a.example",)))
         near, far = self._pair()
         upstreams = {}
@@ -2088,7 +2066,7 @@ class TestCleartextPerRequest(unittest.TestCase):
         replaced."""
         mod = _mod()
         listener = mod.Listener([], io.StringIO(),
-                                policy=mod.Policy(tls="inspect",
+                                policy=Policy(tls="inspect",
                                                   hosts=("a.example",)))
         where = Where("t", cid="c0", plane="tls")
         seen = {}
@@ -2138,7 +2116,7 @@ class TestCleartextPerRequest(unittest.TestCase):
         """
         mod = _mod()
         listener = mod.Listener([], io.StringIO(),
-                                policy=mod.Policy(tls="inspect",
+                                policy=Policy(tls="inspect",
                                                   hosts=("a.example",)))
         origin, far = self._pair()
         upstreams = {"a.example": _Stream(origin)}
@@ -2167,7 +2145,7 @@ class TestCleartextPerRequest(unittest.TestCase):
         for the broker leg, or every request on a session redials it."""
         mod = _mod()
         listener = mod.Listener([], io.StringIO(),
-                                policy=mod.Policy(tls="inspect",
+                                policy=Policy(tls="inspect",
                                                   hosts=("a.example",)))
         upstreams = {}
         dialled = []
@@ -2357,7 +2335,7 @@ class TestCleartextTimeouts(unittest.TestCase):
         mod = _mod()
         out = io.StringIO()
         listener = mod.Listener(
-            [], out, policy=mod.Policy(tls="splice", hosts=tuple(hosts)))
+            [], out, policy=Policy(tls="splice", hosts=tuple(hosts)))
         ours, guest = self._pair()
         guest.sendall(feed)
         pumps = []
@@ -2645,7 +2623,7 @@ class TestCleartextUpstreamFailure(unittest.TestCase):
         mod = _mod()
         out = io.StringIO()
         listener = mod.Listener(
-            [], out, policy=mod.Policy(tls="splice", hosts=("a.example",)))
+            [], out, policy=Policy(tls="splice", hosts=("a.example",)))
         ours, guest = self._pair()
         guest.sendall(b"GET / HTTP/1.1\r\nHost: a.example\r\n\r\n")
         guest.shutdown(socket.SHUT_WR)
@@ -2721,7 +2699,7 @@ class TestEchTripwire(unittest.TestCase):
         mod = _mod()
         out = io.StringIO()
         return mod, mod.Listener(
-            [], out, policy=mod.Policy(tls="splice", hosts=tuple(hosts))), out
+            [], out, policy=Policy(tls="splice", hosts=tuple(hosts))), out
 
     def _serve(self, listener, payload):
         guest, ours = socket.socketpair()
@@ -2799,7 +2777,7 @@ class TestCounters(unittest.TestCase):
                   http2=(), policy=()):
         mod = _mod()
         out = io.StringIO()
-        return mod, mod.Listener([], out, policy=mod.Policy(
+        return mod, mod.Listener([], out, policy=Policy(
             tls="splice", hosts=tuple(hosts),
             internal=tuple(internal), splice=tuple(splice),
             http2=tuple(http2),
@@ -2964,7 +2942,7 @@ class TestCounters(unittest.TestCase):
         """
         mod, listener, _ = self._listener()
         policy = listener._policy
-        lists = {f for f in mod.Policy._fields
+        lists = {f for f in Policy._fields
                  if isinstance(getattr(policy, f), tuple)}
         self.assertIn("policy", lists)      # the derivation found something
         self.assertEqual(set(listener.status()["lists"]), lists | {"tls"})
@@ -3089,7 +3067,7 @@ class TestInternalAttribution(unittest.TestCase):
 
     def _listener(self, internal=()):
         mod = _mod()
-        return mod, mod.Listener([], io.StringIO(), policy=mod.Policy(
+        return mod, mod.Listener([], io.StringIO(), policy=Policy(
             tls="splice", hosts=("host.example",), internal=tuple(internal)))
 
     def test_a_name_resolving_into_private_space_is_an_internal_refusal(self):
@@ -3151,7 +3129,7 @@ class TestStatusFile(unittest.TestCase):
     def _listener(self, path):
         mod = _mod()
         return mod, mod.Listener(
-            [], io.StringIO(), policy=mod.Policy(tls="splice", hosts=()),
+            [], io.StringIO(), policy=Policy(tls="splice", hosts=()),
             status_path=path)
 
     def test_it_writes_the_counters(self):
@@ -3182,7 +3160,7 @@ class TestStatusFile(unittest.TestCase):
         mod = _mod()
         out = io.StringIO()
         listener = mod.Listener(
-            [], out, policy=mod.Policy(tls="splice", hosts=()),
+            [], out, policy=Policy(tls="splice", hosts=()),
             status_path=os.path.join(self.dir, "no", "such", "status.json"))
         listener.write_status()
         self.assertIn("could not write", out.getvalue())
@@ -3197,7 +3175,7 @@ class TestStatusFile(unittest.TestCase):
         mod = _mod()
         out = io.StringIO()
         listener = mod.Listener(
-            [], out, policy=mod.Policy(tls="splice", hosts=()),
+            [], out, policy=Policy(tls="splice", hosts=()),
             status_path=self.path)
         listener.status = lambda: {"a_later_rungs_counter": object()}
         listener.write_status()   # must not raise

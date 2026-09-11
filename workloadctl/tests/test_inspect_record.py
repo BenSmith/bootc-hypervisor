@@ -42,6 +42,7 @@ from egress_record import (
 from egress_policy import (
     INSPECT_RECORD_FILE,
     INSPECT_RECORD_ROOT,
+    Policy,
     inspect_logs_directory,
     inspect_record_dir,
     inspect_record_path,
@@ -92,7 +93,7 @@ class _Harness(unittest.TestCase):
         out = io.StringIO()
         listener = mod.Listener(
             [_listener_with(local)], out,
-            policy=mod.Policy(tls="splice", hosts=tuple(hosts)))
+            policy=Policy(tls="splice", hosts=tuple(hosts)))
         ours, guest = self._pair()
         guest.sendall(feed)
         guest.shutdown(socket.SHUT_WR)
@@ -647,7 +648,7 @@ class _Records(_Harness):
         out = io.StringIO()
         listener = mod.Listener(
             [_listener_with(local)], out,
-            policy=policy or mod.Policy(tls="splice", hosts=()),
+            policy=policy or Policy(tls="splice", hosts=()),
             record_path=self.path)
         ours, guest = self._pair()
         guest.sendall(feed)
@@ -682,11 +683,10 @@ class TestTheRecordOfAnAllowedRequest(_Records):
     """The shape every other case is a variation on."""
 
     def _one(self):
-        mod = _mod()
         _log, records = self._drive(
             b"GET /v1/messages?stream=true HTTP/1.1\r\nHost: ok.example\r\n"
             b"Connection: close\r\n\r\n",
-            policy=mod.Policy(tls="splice", hosts=("ok.example",)),
+            policy=Policy(tls="splice", hosts=("ok.example",)),
             origin=self._origin())
         self.assertEqual(len(records), 1, records)
         return records[0]
@@ -722,11 +722,10 @@ class TestTheRecordOfAnAllowedRequest(_Records):
 
     def test_a_request_with_no_query_records_null_not_empty(self):
         """"" would say the guest sent a bare `?`. It did not."""
-        mod = _mod()
         _log, records = self._drive(
             b"GET /plain HTTP/1.1\r\nHost: ok.example\r\n"
             b"Connection: close\r\n\r\n",
-            policy=mod.Policy(tls="splice", hosts=("ok.example",)),
+            policy=Policy(tls="splice", hosts=("ok.example",)),
             origin=self._origin())
         self.assertIsNone(records[0]["query"])
 
@@ -749,7 +748,6 @@ class TestTheRecordOfAnAllowedRequest(_Records):
         socket has no address pair to report, so a mocked upstream would leave
         this field null and the assertion would be measuring the mock.
         """
-        mod = _mod()
         server = socket.socket()
         server.bind(("127.0.0.1", 0))
         server.listen(1)
@@ -780,15 +778,14 @@ class TestTheRecordOfAnAllowedRequest(_Records):
             _log, records = self._drive(
                 b"GET / HTTP/1.1\r\nHost: ok.example\r\n"
                 b"Connection: close\r\n\r\n",
-                policy=mod.Policy(tls="splice", hosts=("ok.example",)))
+                policy=Policy(tls="splice", hosts=("ok.example",)))
         self.assertEqual(records[0]["upstream"],
                          f"{addr[0]}:{addr[1]}")
 
     def test_the_id_joins_it_to_the_journal(self):
-        mod = _mod()
         log, records = self._drive(
             b"GET / HTTP/1.1\r\nHost: ok.example\r\nConnection: close\r\n\r\n",
-            policy=mod.Policy(tls="splice", hosts=("ok.example",)),
+            policy=Policy(tls="splice", hosts=("ok.example",)),
             origin=self._origin())
         self.assertEqual(records[0][LOG_ID_FIELD],
                          ID.search(log).group(1))
@@ -801,7 +798,6 @@ class TestNoHeaderOrBodyEverReachesIt(_Records):
     one --verbose away from being the thing it was written not to be."""
 
     def test_neither_a_header_value_nor_a_body_byte_appears(self):
-        mod = _mod()
         body = b"tok_SECRETBODY"
         self._drive(
             b"POST /x HTTP/1.1\r\nHost: ok.example\r\n"
@@ -809,7 +805,7 @@ class TestNoHeaderOrBodyEverReachesIt(_Records):
             b"X-Custom: tok_SECRETCUSTOM\r\n"
             b"Content-Length: %d\r\nConnection: close\r\n\r\n%s"
             % (len(body), body),
-            policy=mod.Policy(tls="splice", hosts=("ok.example",)),
+            policy=Policy(tls="splice", hosts=("ok.example",)),
             origin=self._origin())
         text = self.path.read_text()
         for secret in (b"SECRETHEADER", b"SECRETCUSTOM", b"SECRETBODY"):
@@ -864,10 +860,9 @@ class TestWhatIsNotARequest(_Records):
     """Two passes end without a decision, and neither may invent a request."""
 
     def test_a_guest_that_closes_between_requests_records_nothing(self):
-        mod = _mod()
         _log, records = self._drive(
             b"GET / HTTP/1.1\r\nHost: ok.example\r\n\r\n",
-            policy=mod.Policy(tls="splice", hosts=("ok.example",)),
+            policy=Policy(tls="splice", hosts=("ok.example",)),
             origin=self._origin())
         # One request, then EOF. The second pass reads nothing and is not one.
         self.assertEqual(len(records), 1, records)
@@ -887,7 +882,7 @@ class TestTheConnectionLevelRecords(_Records):
     def test_a_spliced_connection_is_recorded_as_an_exemption(self):
         mod = _mod()
         listener, _out = self._tls_listener(
-            mod.Policy(tls="splice", hosts=("ok.example",)))
+            Policy(tls="splice", hosts=("ok.example",)))
         ours, guest = self._pair()
         from tests.test_inspect_listener import _hello_bytes
         guest.sendall(_hello_bytes(server_name="ok.example"))
@@ -909,7 +904,7 @@ class TestTheConnectionLevelRecords(_Records):
 
     def test_a_hello_with_no_name_is_recorded(self):
         mod = _mod()
-        listener, _out = self._tls_listener(mod.Policy(tls="splice", hosts=()))
+        listener, _out = self._tls_listener(Policy(tls="splice", hosts=()))
         ours, guest = self._pair()
         guest.sendall(b"\x16\x03\x01\x00\x05rubbish")
         guest.shutdown(socket.SHUT_WR)
@@ -960,7 +955,7 @@ class TestTheRecordNeverKillsARequest(_Records):
         out = io.StringIO()
         listener = mod.Listener(
             [_listener_with(CLEARTEXT)], out,
-            policy=mod.Policy(tls="splice", hosts=("ok.example",)),
+            policy=Policy(tls="splice", hosts=("ok.example",)),
             record_path=Path(self._tmp.name) / "no-such-dir" / "requests.log")
         ours, guest = self._pair()
         guest.sendall(b"GET / HTTP/1.1\r\nHost: ok.example\r\n"

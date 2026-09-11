@@ -37,7 +37,7 @@ import unittest.mock
 from pathlib import Path
 
 from tests import load_script
-from egress_policy import VmPolicyEntry
+from egress_policy import Policy, VmPolicyEntry
 from egress_ca import (
     ca_cert_path, ca_key_path, ca_openssl_argv, leaf_openssl_argv,
 )
@@ -252,7 +252,7 @@ class TerminationCase(unittest.TestCase):
                   minter=None, http2=(), entries=()):
         out = io.StringIO()
         # `entries` is [[vm.network.policy]] as (host, methods, paths) triples.
-        policy = mod.Policy(
+        policy = Policy(
             tls="inspect", hosts=tuple(hosts), http2=tuple(http2),
             policy=tuple(VmPolicyEntry(host=h, methods=m, paths=pa)
                          for h, m, pa in entries))
@@ -1106,14 +1106,14 @@ class TestTheStartRefusesWhatItCannotDo(unittest.TestCase):
             with unittest.mock.patch.object(
                     mod, "workload_state_dir", lambda n: Path(tmp)):
                 with self.assertRaises(FileNotFoundError) as caught:
-                    mod.build_minter("demo", mod.Policy(tls="inspect",
+                    mod.build_minter("demo", Policy(tls="inspect",
                                                         hosts=("a.example",)))
         self.assertIn("egress CA", str(caught.exception))
 
     def test_splice_needs_no_minter(self):
         mod = _mod()
         self.assertIsNone(
-            mod.build_minter("demo", mod.Policy(tls="splice", hosts=())))
+            mod.build_minter("demo", Policy(tls="splice", hosts=())))
 
     def test_a_terminating_listener_with_no_minter_drops_loudly(self):
         """Unreachable through main(), and it still must not be silent.
@@ -1124,7 +1124,7 @@ class TestTheStartRefusesWhatItCannotDo(unittest.TestCase):
         mod = _mod()
         out = io.StringIO()
         listener = mod.Listener([unittest.mock.Mock()], out,
-                                policy=mod.Policy(tls="inspect",
+                                policy=Policy(tls="inspect",
                                                   hosts=("a.example",)))
         ours, guest = _tcp_pair()
         self.addCleanup(ours.close)

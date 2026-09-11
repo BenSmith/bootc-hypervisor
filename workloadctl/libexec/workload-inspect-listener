@@ -101,7 +101,6 @@ report each break as a request that could not be read.
 """
 
 import ipaddress
-import json
 import os
 import secrets
 import selectors
@@ -111,7 +110,6 @@ import ssl
 import sys
 import threading
 import time
-from typing import NamedTuple
 
 sys.dont_write_bytecode = True
 
@@ -119,11 +117,9 @@ from config_parser import (
     INSPECT_ORIG_CLEARTEXT, INSPECT_ORIG_TLS, normalise_hostname,
 )
 from egress_policy import (
-    INSPECT_GUEST_AGENT_KEY, INSPECT_PORT_CLEARTEXT,
-    INSPECT_PORT_TLS, TLS_DEFAULT,
-    hostname_match, INSPECT_DIGEST_KEY, inspect_policy_digest,
-    inspect_policy_path, inspect_record_path, inspect_status_path,
-    VmPolicyEntry, policy_governs,
+    INSPECT_DIGEST_KEY, INSPECT_PORT_CLEARTEXT, INSPECT_PORT_TLS, TLS_DEFAULT,
+    Policy, inspect_policy_path, inspect_record_path, inspect_status_path,
+    load_policy,
 )
 from egress_ca import LeafRefused, ca_cert_path, ca_key_path
 from tls_hello import HelloUnreadable, TLS_EXT_ECH, read_client_hello
@@ -267,242 +263,6 @@ def plane_for_port(port):
     if port == INSPECT_PORT_TLS:
         return "tls"
     return None
-
-
-# --- the policy document ---
-
-
-class Policy(NamedTuple):
-    """One workload's inspection lists, as read at start.
-
-    `hosts` is a tuple, not a list, because nothing may edit it after load: the
-    recovery contract is that an edited list applies on a RESTART, and a
-    listener that could mutate its own policy would make the restart optional
-    and the running policy unknowable from the file.
-
-    `internal` is the [[vm.network.internal]] host names, and it admits
-    nothing. The kernel's wl_internal_ok4/6 elements are the one enforcement
-    point; this copy exists so a failed dial into private space can be
-    attributed to the wildcard trap rather than to a host that is down. See
-    vm_inspect_policy.
-    """
-
-    tls: str
-    hosts: tuple
-    internal: tuple = ()
-    splice: tuple = ()
-    http2: tuple = ()
-    policy: tuple = ()
-    # The digest of the document text this was parsed from, echoed into the
-    # status file so `diagnose` can tell a listener enforcing the file on disk
-    # from one enforcing an older one it still holds in memory. Defaulted so
-    # every Policy() a test constructs by hand keeps working; the empty string
-    # reads downstream as "this listener does not report a digest", which is a
-    # state the check is required to pass over in silence anyway.
-    digest: str = ""
-    # Whether this workload has a QEMU guest agent to ask. DEFAULTS TRUE, and
-    # the default is the load-bearing half: a document written before the key
-    # existed is a VM's, and reading absence as "no agent" would silently
-    # switch off a working clock remedy on every VM until each was re-armed.
-    # A container's renderer states the false explicitly. See
-    # container_inspect_policy.
-    guest_agent: bool = True
-
-    @property
-    def summary(self) -> str:
-        return (f"tls={self.tls} hosts={len(self.hosts)} "
-                f"internal={len(self.internal)} splice={len(self.splice)} "
-                f"http2={len(self.http2)} policy={len(self.policy)}")
-
-    def admits(self, host: str) -> bool:
-        """Whether this name is on a list at all -- the CONNECTION question.
-
-        Asked at the front of a TLS connection, where there is no request yet
-        and the only thing known is the name in the ClientHello. A `policy`
-        entry allowlists its own host (§3: a name in `policy` need not also
-        appear in `hosts`), so a workload whose entire allowlist is written as
-        policy entries has to be admitted here -- otherwise the connection dies
-        before the request the rules were written about ever exists, and the
-        operator sees `not allowlisted` for a host their file plainly names.
-        """
-        return (hostname_match(host, self.hosts)
-                or bool(policy_governs(host, self.policy)))
-
-    def permits(self, host: str, method: str, path: str) -> bool:
-        """Whether one request is authorised -- §3's composition rule.
-
-        A host ANY policy entry matches is governed by those entries alone and
-        `hosts` is not consulted for it; a host no entry matches is allowed by
-        `hosts` with no method or path constraint. The rule is not "union the
-        two lists", and the difference is the whole feature: under the union
-        reading one wildcard in `hosts` written for an unrelated reason
-        contributes "any method, any path" to every host it covers, silently
-        removing the restriction somebody wrote a policy entry for.
-        """
-        governing = policy_governs(host, self.policy)
-        if governing:
-            return any(e.permits(method, path) for e in governing)
-        return hostname_match(host, self.hosts)
-
-    def governs(self, host: str) -> bool:
-        """Whether ANY policy entry names this host.
-
-        Not "whether the request was permitted" -- this is asked where there is
-        no request to permit, about a connection that turned out not to carry
-        HTTP at all. It answers the operator's question instead: are there
-        `methods` and `paths` here that never got to run?
-        """
-        return bool(policy_governs(host, self.policy))
-
-    def splices(self, host: str) -> bool:
-        """Whether this host is exempt from termination.
-
-        True on the whole-workload mode as well as the per-host list, so that
-        every caller asks one question. Splitting it -- `tls == "splice"` in one
-        place and a list check in another -- is how a path gets one of the two
-        and reads correct: the connection is spliced by the mode and terminated
-        by the list, or the reverse, depending on which branch it took.
-        """
-        return self.tls == "splice" or hostname_match(host, self.splice)
-
-    def speaks_h2(self, host: str) -> bool:
-        """Whether this host is offered h2 and relayed at the frame level.
-
-        Asked only of a host that is being TERMINATED, and it does not ask
-        about the mode: under `tls = "splice"` no ALPN of ours is offered on
-        any connection, so a listener that consulted this there would be
-        answering a question nothing had asked. Validation accepts `http2`
-        entries under that mode for the same reason it accepts `splice` ones --
-        they ask for something already true -- so this list is populated and
-        inert, and the one caller reaches it only past a `splices()` check.
-        """
-        return hostname_match(host, self.http2)
-
-    def credential_for(self, host: str):
-        """The credstore NAME this host's requests are brokered with, or None.
-
-        Asked once per authorised request, and it decides only WHERE the
-        request is sent -- to this workload's broker instance instead of to the
-        origin. Nothing about the credential itself is known here and nothing
-        needs to be: ADR 007 decision 9 keys the broker's table by `(uid,
-        Host)`, so the name travels on no wire and exists in this process for
-        one purpose, which is naming the credential in the record and the
-        figures.
-
-        THE FIRST governing entry that carries one, not a merge. `validate`
-        already refuses two entries that match the same host and disagree about
-        `credential`, so on a document written by the generator there is at most
-        one answer -- but this reads a FILE, which an operator can edit, and a
-        reader that raised or picked arbitrarily on a hand-edited document would
-        turn an editing mistake into a dead workload. First-match is
-        deterministic and matches the order the file states.
-        """
-        for entry in policy_governs(host, self.policy):
-            if entry.credential:
-                return entry.credential
-        return None
-
-
-def load_policy(path):
-    """Read the policy document, or raise.
-
-    Deliberately without a default: a missing or unreadable document must fail
-    the start. The tempting fallback — an empty policy — is the worst of the
-    options, because an empty `hosts` list is a valid configuration (a workload
-    reachable only through `allow`), so the listener could not tell "the
-    operator allowed nothing" from "the file was not there" and would enforce
-    the strictest reading of a policy it never read.
-    """
-    with open(path) as f:
-        text = f.read()
-    # Digested from the TEXT THIS PARSED, never from a re-read of the path.
-    # The whole value of the figure is that it says what this process is
-    # enforcing; a second open() would report the file as it is now, so a
-    # rewrite landing between the two would give a listener that advertises the
-    # new document's digest while enforcing the old one -- green on the one
-    # case the comparison exists for.
-    digest = inspect_policy_digest(text)
-    doc = json.loads(text)
-    if not isinstance(doc, dict):
-        raise ValueError(f"{path}: expected a JSON object, got {type(doc).__name__}")
-    hosts = doc.get("hosts") or []
-    if not isinstance(hosts, list):
-        raise ValueError(f"{path}: 'hosts' is not a list")
-    internal = doc.get("internal") or []
-    if not isinstance(internal, list):
-        raise ValueError(f"{path}: 'internal' is not a list")
-    # Tolerated absent, unlike `hosts`: a policy document written before this
-    # key existed is a policy with no internal entries, which is the common
-    # case and not an error. `hosts` gets no such tolerance because there the
-    # empty reading and the missing reading are different configurations.
-    splice = doc.get("splice") or []
-    if not isinstance(splice, list):
-        raise ValueError(f"{path}: 'splice' is not a list")
-    # NOT normalised here, unlike `internal`: these are fnmatch PATTERNS and
-    # hostname_match normalises both sides at the point of comparison.
-    # Normalising a pattern early is harmless today and would silently stop
-    # being so the moment a pattern could carry something a hostname cannot.
-    http2 = doc.get("http2") or []
-    if not isinstance(http2, list):
-        raise ValueError(f"{path}: 'http2' is not a list")
-    # Unnormalised, like `splice` and for the same reason: these are fnmatch
-    # PATTERNS, and hostname_match normalises both sides where they are
-    # compared.
-    entries = doc.get("policy") or []
-    if not isinstance(entries, list):
-        raise ValueError(f"{path}: 'policy' is not a list")
-    policy = []
-    for item in entries:
-        if not isinstance(item, dict) or not isinstance(item.get("host"), str):
-            raise ValueError(f"{path}: a 'policy' entry is not a table with a "
-                             f"host: {item!r}")
-        # None and [] are DIFFERENT and the document distinguishes them, so
-        # this must too: absent means any, empty would mean none. A `or ()`
-        # here would turn every unconstrained entry into one permitting
-        # nothing, which fails closed and therefore quietly -- the workload
-        # reaches nothing and every unit test still passes.
-        #
-        # Uppercased and string-filtered HERE as well as in
-        # vm_policy_entries, which is the convention this file already holds
-        # for `internal` and the responder holds for its static map: the
-        # writer normalises, and the reader normalises again so that a
-        # hand-edited document cannot introduce a rule that never matches.
-        # `methods` is the one that needs it -- VmPolicyEntry.permits compares
-        # `method.upper()` against these, so a document carrying `["get"]`
-        # would deny every GET on that host while the file reads as
-        # permitting it. Fails closed, and therefore in silence.
-        methods = item.get("methods")
-        paths = item.get("paths")
-        # `.get`, not `[...]`: the document emits the key only on the entries
-        # that carry one (vm_inspect_policy explains why the sparseness is
-        # load-bearing there), so absent and null mean the same thing here and
-        # the reader is the side that pays for it. A non-string is dropped to
-        # None rather than refused -- the value's only use is as a name, and a
-        # document that named a number would otherwise fail the listener's
-        # START, which is a worse outcome than one brokered host reaching the
-        # origin unbrokered and saying so in the record.
-        credential = item.get("credential")
-        if not isinstance(credential, str) or not credential.strip():
-            credential = None
-        else:
-            credential = credential.strip()
-        policy.append(VmPolicyEntry(
-            host=item["host"],
-            methods=None if methods is None else tuple(
-                m.upper() for m in methods if isinstance(m, str)),
-            paths=None if paths is None else tuple(
-                p for p in paths if isinstance(p, str)),
-            credential=credential))
-    # `is not False` rather than `.get(..., True)`: the only value that turns
-    # the remedy off is a literal false written by the container renderer, so
-    # a document carrying a malformed value keeps the VM behaviour instead of
-    # disabling a remedy on the strength of a typo.
-    guest_agent = doc.get(INSPECT_GUEST_AGENT_KEY) is not False
-    return Policy(tls=doc.get("tls") or TLS_DEFAULT, hosts=tuple(hosts),
-                  internal=tuple(normalise_hostname(h) for h in internal),
-                  splice=tuple(splice), http2=tuple(http2),
-                  policy=tuple(policy), digest=digest,
-                  guest_agent=guest_agent)
 
 
 # The body every POLICY denial shows the guest: generic, and identical for the

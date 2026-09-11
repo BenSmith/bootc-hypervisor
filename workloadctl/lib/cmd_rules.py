@@ -193,7 +193,7 @@ def load_document(name: str, config) -> tuple:
 def explain(doc: dict, host: str) -> dict:
     """Everything the document says about one hostname.
 
-    `admitted` mirrors the listener's `Policy.admits()` and not just the
+    `admitted` mirrors `egress_policy.Policy.admits()` and not just the
     allowlist: a `policy` entry allowlists its own host (§3 -- a name in
     `policy` need not also appear in `hosts`), so a workload whose entire
     allowlist is written as policy entries is admitted. A report that checked

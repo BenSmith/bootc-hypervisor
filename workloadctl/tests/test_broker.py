@@ -633,7 +633,9 @@ from egress_record import (
     Where,
 )
 from egress_policy import (
+    Policy,
     VmPolicyEntry,
+    load_policy,
     vm_inspect_policy,
     vm_inspect_policy_text,
 )
@@ -722,8 +724,7 @@ class _BrokerRig(unittest.TestCase):
         return near, far
 
     def _policy(self, entries, hosts=()):
-        mod = listener_mod()
-        return mod.Policy(tls="splice", hosts=tuple(hosts),
+        return Policy(tls="splice", hosts=tuple(hosts),
                           policy=tuple(entries))
 
     def _serve(self, policy, request, responses=(), refuse=False,
@@ -1027,11 +1028,10 @@ class TestTheListenerReadsTheCredentialFromTheDocument(unittest.TestCase):
     the origin unbrokered."""
 
     def _load(self, net):
-        mod = listener_mod()
         with tempfile.TemporaryDirectory(prefix="policy-") as tmp:
             path = Path(tmp) / "policy.json"
             path.write_text(vm_inspect_policy_text(net))
-            return mod.load_policy(str(path))
+            return load_policy(str(path))
 
     def test_the_credential_survives_the_round_trip(self):
         policy = self._load({
@@ -1054,13 +1054,12 @@ class TestTheListenerReadsTheCredentialFromTheDocument(unittest.TestCase):
         """The listener reads a FILE. A refusal here fails the START, which
         takes the whole workload's egress down for a typo -- worse than one
         host reaching the origin unbrokered and saying so in the record."""
-        mod = listener_mod()
         with tempfile.TemporaryDirectory(prefix="policy-") as tmp:
             path = Path(tmp) / "policy.json"
             path.write_text(json.dumps({
                 "tls": "inspect", "hosts": [],
                 "policy": [{"host": "api.provider", "credential": 7}]}))
-            policy = mod.load_policy(str(path))
+            policy = load_policy(str(path))
         self.assertIsNone(policy.credential_for("api.provider"))
 
     def test_the_first_governing_entry_that_carries_one_wins(self):
@@ -1069,8 +1068,7 @@ class TestTheListenerReadsTheCredentialFromTheDocument(unittest.TestCase):
         hand-edited one, and first-match is deterministic and matches the
         order the file states -- an arbitrary pick would make an editing
         mistake behave differently on different boots."""
-        mod = listener_mod()
-        policy = mod.Policy(
+        policy = Policy(
             tls="inspect", hosts=(),
             policy=(VmPolicyEntry("api.provider", None, ("/a",), None),
                     VmPolicyEntry("api.provider", None, ("/b",), "second")))
