@@ -53,7 +53,17 @@ from egress_ca import (
     DENIAL_DIR_NAME, LEAF_DIR_NAME, LEAF_RENEW_WITHIN_SECONDS, LeafRefused,
     ca_cert_path, ca_key_path, leaf_openssl_argv,
 )
-from vm_clock import CLOCK_FAILED, CLOCK_RESYNCED, CLOCK_UNAVAILABLE
+# What a clock check concluded. Strings rather than booleans because three
+# outcomes matter separately to a caller and to the status document: the
+# clock was fine, it was wrong and is now right, and there is no agent to ask
+# (which is the state that silently keeps the old broken behaviour). The
+# vocabulary is the minter's: `clock_check` returns one of these (or None for
+# a substrate with no clock remedy at all), and the figures below are keyed
+# on them. vm_clock is one producer of them, not their owner.
+CLOCK_OK = "ok"
+CLOCK_RESYNCED = "resynced"
+CLOCK_UNAVAILABLE = "unavailable"
+CLOCK_FAILED = "failed"
 
 # Which clock_check outcomes get a counter, and which counter each lands in.
 # CLOCK_OK deliberately has none: it is what every healthy mint returns, so a

@@ -64,6 +64,9 @@ from __future__ import annotations
 import random
 import time
 
+from egress_mint import (
+    CLOCK_FAILED, CLOCK_OK, CLOCK_RESYNCED, CLOCK_UNAVAILABLE,
+)
 from qmp import QMPClient
 from vm_defs import vm_guest_agent_socket
 
@@ -189,17 +192,6 @@ def set_guest_time(name: str, *, now: float | None = None) -> bool:
     finally:
         qga.close()
     return "error" not in reply and reply.get("return") == {}
-
-
-# What a resync attempt concluded. Strings rather than booleans because three
-# outcomes matter separately to a caller and to the status document: the
-# clock was fine,
-# it was wrong and is now right, and there is no agent to ask (which is the
-# state that silently keeps the old broken behaviour).
-CLOCK_OK = "ok"
-CLOCK_RESYNCED = "resynced"
-CLOCK_UNAVAILABLE = "unavailable"
-CLOCK_FAILED = "failed"
 
 
 def resync_guest_clock_if_skewed(

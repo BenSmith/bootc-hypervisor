@@ -734,7 +734,7 @@ class TestAnUnwritableCacheIsAMintFailure(unittest.TestCase):
     """
 
     def _minter(self, state):
-        return egress_mint.Minter("wl", state, clock_check=lambda: vm_clock.CLOCK_OK)
+        return egress_mint.Minter("wl", state, clock_check=lambda: egress_mint.CLOCK_OK)
 
     def _broken_minter(self):
         """A minter whose leaf cache cannot be written by ANY uid."""
