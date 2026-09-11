@@ -14,9 +14,10 @@ as one.
 """
 
 import importlib
-from tests import load_script
+from sd_listen import NotSocketActivated
 import dns_wire
 import resolve_policy
+import resolve_server
 import ipaddress
 import json
 import os
@@ -137,20 +138,20 @@ class Reply:
         return out
 
 
-def _module():
-    """The responder, with its per-query logging captured rather than printed.
+def _silenced_log():
+    """The responder's per-query logging, captured rather than printed.
 
     Silenced here rather than left to print through the suite: it is one line
     per answer and the tests below build thousands. The log is not thereby
     untested -- TestLogging asserts what it says, reading the same list.
+
+    Both bindings: build_answer logs through dns_wire's own name, the serve
+    loop through the copy it imported, and silencing one of them would let the
+    other print through every fuzz case.
     """
-    mod = load_script("libexec/workload-vm-resolve")
-    mod.logged = []
-    # Both bindings: build_answer logs through dns_wire's own name, the serve
-    # loop through the copy it imported, and a fixture that silenced one of
-    # them would let the other print through every fuzz case.
-    mod.log = dns_wire.log = mod.logged.append
-    return mod
+    logged = []
+    dns_wire.log = resolve_server.log = logged.append
+    return logged
 
 
 def _policy(**overrides):
@@ -286,7 +287,6 @@ class TestPolicyDocument(unittest.TestCase):
         into Policy.__init__ loads clean and changes nothing -- which is
         exactly how `policy` went missing, with no traffic broken to point at
         it and the tunnelling counter loud on a correct config."""
-        mod = _module()
         self.assertEqual(set(vm_resolve_policy({}, UID)),
                          set(resolve_policy.Policy.DOCUMENT_KEYS))
 
@@ -369,7 +369,7 @@ class TestSynthesis(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.mod = _module()
+        cls.logged = _silenced_log()
         cls.policy = _policy()
         cls.inspect = inspect_address(UID)
 
@@ -431,7 +431,7 @@ class TestNodata(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.mod = _module()
+        cls.logged = _silenced_log()
         cls.policy = _policy()
 
     def answer(self, *args, **kwargs):
@@ -482,7 +482,7 @@ class TestStaticMap(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.mod = _module()
+        cls.logged = _silenced_log()
         cls.inspect = inspect_address(UID)
         cls.policy = _policy(static={
             "git.local": ["192.0.2.9"],
@@ -538,7 +538,7 @@ class TestEdns(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.mod = _module()
+        cls.logged = _silenced_log()
         cls.policy = _policy()
         cls.inspect = inspect_address(UID)
 
@@ -573,7 +573,7 @@ class TestMalformed(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.mod = _module()
+        cls.logged = _silenced_log()
         cls.policy = _policy()
 
     def test_a_non_query_opcode_gets_notimp(self):
@@ -644,7 +644,7 @@ class TestLogInjectionViaLabel(unittest.TestCase):
     """
 
     def setUp(self):
-        self.mod = _module()
+        self.logged = _silenced_log()
         self.policy = _policy(hosts=["allowed.example"])
 
     _forged = "evil\n  allowed.example A -> static: 1 record(s)"
@@ -654,11 +654,11 @@ class TestLogInjectionViaLabel(unittest.TestCase):
             dns_wire.build_answer(query(self._forged, TYPE_A), self.policy)
 
     def test_it_is_refused_before_it_is_logged_or_counted(self):
-        counters = self.mod.Counters()
+        counters = resolve_server.Counters()
         with self.assertRaises(dns_wire.Malformed):
             dns_wire.build_answer(query(self._forged, TYPE_A), self.policy,
                                   counters=counters)
-        self.assertEqual(self.mod.logged, [])
+        self.assertEqual(self.logged, [])
         snap = counters.snapshot()
         self.assertEqual(snap["unlisted_names"], {})
 
@@ -666,12 +666,12 @@ class TestLogInjectionViaLabel(unittest.TestCase):
         """serve_datagram logs the refusal itself, so the property has to hold
         over the refusal path too -- the name is not what it names."""
         sock = _RefusingSocket(query(self._forged, TYPE_A))
-        counters = self.mod.Counters()
-        self.mod.serve_datagram(sock, self.policy, counters=counters)
+        counters = resolve_server.Counters()
+        resolve_server.serve_datagram(sock, self.policy, counters=counters)
         self.assertEqual(Reply(sock.sent).rcode, 1)
         self.assertEqual(counters.snapshot()["queries"]["malformed"], 1)
-        self.assertTrue(self.mod.logged)
-        for line in self.mod.logged:
+        self.assertTrue(self.logged)
+        for line in self.logged:
             self.assertNotIn("evil", line)
             self.assertNotIn("\n", line)
 
@@ -726,12 +726,12 @@ class TestUdpSurvivesABugInItself(unittest.TestCase):
     """
 
     def setUp(self):
-        self.mod = _module()
+        self.logged = _silenced_log()
 
     def _serve(self, policy, msg=None):
         sock = _RefusingSocket(msg or query("broken.example", TYPE_A))
-        counters = self.mod.Counters()
-        self.mod.serve_datagram(sock, policy, counters=counters)
+        counters = resolve_server.Counters()
+        resolve_server.serve_datagram(sock, policy, counters=counters)
         return sock, counters
 
     def test_a_corrupt_static_literal_does_not_end_the_process(self):
@@ -758,13 +758,13 @@ class TestUdpSurvivesABugInItself(unittest.TestCase):
         policy = _policy(static={"broken.example": ("not-an-ip",)})
         self._serve(policy)
         self.assertTrue(any("could not answer" in line
-                            for line in self.mod.logged))
+                            for line in self.logged))
 
     def test_the_arm_is_wide_enough_for_a_bug_that_is_not_an_oserror(self):
         """The point of the arm is that it does not enumerate what a bug in
         this program can raise."""
         policy = _policy()
-        with mock.patch.object(self.mod, "build_answer",
+        with mock.patch.object(resolve_server, "build_answer",
                                side_effect=ZeroDivisionError("boom")):
             sock, _ = self._serve(policy)
         self.assertEqual(Reply(sock.sent).rcode, 2)
@@ -773,7 +773,7 @@ class TestUdpSurvivesABugInItself(unittest.TestCase):
         """Same disposition the Malformed arm has: under two bytes there is no
         id to echo, so there is nothing to reply to."""
         policy = _policy()
-        with mock.patch.object(self.mod, "build_answer",
+        with mock.patch.object(resolve_server, "build_answer",
                                side_effect=ZeroDivisionError("boom")):
             sock, _ = self._serve(policy, msg=b"\x01")
         self.assertIsNone(sock.sent)
@@ -784,7 +784,7 @@ class TestUdpBudget(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.mod = _module()
+        cls.logged = _silenced_log()
         # More v4 addresses than fit in 512 bytes at 16 bytes a record.
         cls.policy = _policy(static={
             "many.local": [f"192.0.2.{n}" for n in range(1, 60)]})
@@ -824,6 +824,7 @@ class TestNoUpstream(unittest.TestCase):
         "libexec/workload-vm-resolve",
         "lib/dns_wire.py",
         "lib/resolve_policy.py",
+        "lib/resolve_server.py",
     )
 
     def test_the_responder_never_calls_out(self):
@@ -915,7 +916,6 @@ class TestNoUpstream(unittest.TestCase):
         the socket module is imported at all in the answering path, and naming
         them here is what keeps the assertion above from being read as
         "the socket module is banned"."""
-        mod = _module()
         self.assertEqual(dns_wire.pack_address("192.0.2.1"), b"\xc0\x00\x02\x01")
         self.assertEqual(len(dns_wire.pack_address("2001:db8::1")), 16)
 
@@ -932,7 +932,7 @@ class TestOnTheWire(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.mod = _module()
+        cls.logged = _silenced_log()
         cls.policy = _policy(static={"git.local": ["192.0.2.9"]})
         cls.inspect = inspect_address(UID)
 
@@ -943,7 +943,7 @@ class TestOnTheWire(unittest.TestCase):
             server.bind(("127.0.0.1", 0))
             client.settimeout(5)
             client.sendto(query("example.com", TYPE_A), server.getsockname())
-            self.mod.serve_datagram(server, self.policy)
+            resolve_server.serve_datagram(server, self.policy)
             raw, _peer = client.recvfrom(4096)
         self.assertEqual(Reply(raw).addresses(), [self.inspect.v4])
 
@@ -955,7 +955,7 @@ class TestOnTheWire(unittest.TestCase):
             listener.listen(1)
             address = listener.getsockname()
             served = threading.Thread(
-                target=self.mod.serve_stream, args=(listener, self.policy))
+                target=resolve_server.serve_stream, args=(listener, self.policy))
             served.start()
             try:
                 with socket.create_connection(address, timeout=5) as client:
@@ -980,7 +980,7 @@ class TestOnTheWire(unittest.TestCase):
             listener.listen(1)
             address = listener.getsockname()
             served = threading.Thread(
-                target=self.mod.serve_stream, args=(listener, self.policy))
+                target=resolve_server.serve_stream, args=(listener, self.policy))
             served.start()
             replies = []
             try:
@@ -1011,7 +1011,7 @@ class TestTcpDoesNotHoldTheLoop(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.mod = _module()
+        cls.logged = _silenced_log()
         cls.policy = _policy(static={"git.local": ["192.0.2.9"]})
 
     def _listener(self):
@@ -1028,9 +1028,9 @@ class TestTcpDoesNotHoldTheLoop(unittest.TestCase):
         listener, address = self._listener()
         with socket.create_connection(address, timeout=5) as client:
             started = time.monotonic()
-            self.mod.serve_stream(listener, self.policy)
+            resolve_server.serve_stream(listener, self.policy)
             elapsed = time.monotonic() - started
-            self.assertLess(elapsed, self.mod.TCP_IDLE_TIMEOUT / 2,
+            self.assertLess(elapsed, resolve_server.TCP_IDLE_TIMEOUT / 2,
                             "the accept loop waited on the connection")
             self.assertTrue(client.fileno() >= 0)
 
@@ -1045,7 +1045,7 @@ class TestTcpDoesNotHoldTheLoop(unittest.TestCase):
         # A length prefix promising more than will ever arrive.
         far.sendall(struct.pack("!H", len(payload) + 64) + payload)
         started = time.monotonic()
-        self.mod.handle_stream(near, self.policy,
+        resolve_server.handle_stream(near, self.policy,
                                deadline=time.monotonic() + 0.3)
         elapsed = time.monotonic() - started
         self.assertLess(elapsed, 5.0,
@@ -1059,7 +1059,7 @@ class TestTcpDoesNotHoldTheLoop(unittest.TestCase):
         self.addCleanup(far.close)
         payload = query("git.local", TYPE_A)
         far.sendall((struct.pack("!H", len(payload)) + payload) * 50)
-        self.mod.handle_stream(near, self.policy,
+        resolve_server.handle_stream(near, self.policy,
                                deadline=time.monotonic() + 0.3)
         # It answered at least one, and it stopped: the assertion is that the
         # call returned at all, which a peer with more to send would never
@@ -1071,13 +1071,13 @@ class TestTcpDoesNotHoldTheLoop(unittest.TestCase):
         essentially every lookup arrives -- is unaffected. Queueing them is
         what turns a ceiling back into a wedge."""
         listener, address = self._listener()
-        slots = self.mod._TcpSlots(limit=1)
+        slots = resolve_server._TcpSlots(limit=1)
         clients = []
         for _ in range(2):
             client = socket.create_connection(address, timeout=5)
             self.addCleanup(client.close)
             clients.append(client)
-            self.mod.serve_stream(listener, self.policy, slots=slots)
+            resolve_server.serve_stream(listener, self.policy, slots=slots)
         # The second was refused: nothing was ever read from it, and it sees
         # the close rather than an answer.
         payload = query("git.local", TYPE_A)
@@ -1097,10 +1097,10 @@ class TestTcpDoesNotHoldTheLoop(unittest.TestCase):
         process, and the responder degrades to refusing everything while still
         reporting itself up."""
         listener, address = self._listener()
-        slots = self.mod._TcpSlots(limit=1)
+        slots = resolve_server._TcpSlots(limit=1)
         for _ in range(3):
             with socket.create_connection(address, timeout=5) as client:
-                self.mod.serve_stream(listener, self.policy, slots=slots)
+                resolve_server.serve_stream(listener, self.policy, slots=slots)
                 payload = query("git.local", TYPE_A)
                 client.sendall(struct.pack("!H", len(payload)) + payload)
                 client.settimeout(5)
@@ -1121,7 +1121,7 @@ class TestTcpDoesNotHoldTheLoop(unittest.TestCase):
         counter object owes BoundedCounts the lock its docstring asks its
         callers for -- and owes it to the snapshot too, since a status file
         assembled mid-observation reports figures that do not add up."""
-        counters = self.mod.Counters()
+        counters = resolve_server.Counters()
         errors = []
 
         def hammer():
@@ -1181,7 +1181,7 @@ class TestFuzz(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.mod = _module()
+        cls.logged = _silenced_log()
         # A deliberately awkward map: more addresses than fit in a UDP answer,
         # and both families, so the record-packing and budget paths are on the
         # hot path of the fuzz rather than skipped by a one-record answer.
@@ -1259,17 +1259,17 @@ class TestLogging(unittest.TestCase):
     """
 
     def test_the_name_type_and_source_are_logged(self):
-        mod = _module()
+        logged = _silenced_log()
         policy = _policy(static={"git.local": ["192.0.2.9"]})
         dns_wire.build_answer(query("git.local", TYPE_A), policy)
         dns_wire.build_answer(query("elsewhere.example", TYPE_AAAA), policy)
-        self.assertEqual(len(mod.logged), 2, mod.logged)
-        self.assertIn("git.local", mod.logged[0])
-        self.assertIn("A", mod.logged[0])
-        self.assertIn("static", mod.logged[0])
-        self.assertIn("elsewhere.example", mod.logged[1])
-        self.assertIn("AAAA", mod.logged[1])
-        self.assertIn("synthesised", mod.logged[1])
+        self.assertEqual(len(logged), 2, logged)
+        self.assertIn("git.local", logged[0])
+        self.assertIn("A", logged[0])
+        self.assertIn("static", logged[0])
+        self.assertIn("elsewhere.example", logged[1])
+        self.assertIn("AAAA", logged[1])
+        self.assertIn("synthesised", logged[1])
 
 
 class TestSocketActivation(unittest.TestCase):
@@ -1277,13 +1277,13 @@ class TestSocketActivation(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.mod = _module()
+        cls.logged = _silenced_log()
 
     def test_a_missing_activation_environment_is_refused(self):
         import unittest.mock
         with unittest.mock.patch.dict("os.environ", {}, clear=True):
-            with self.assertRaises(self.mod.NotSocketActivated) as caught:
-                self.mod.inherited_listening_sockets()
+            with self.assertRaises(NotSocketActivated) as caught:
+                resolve_server.inherited_listening_sockets()
         self.assertIn("LISTEN_PID", str(caught.exception))
 
     def test_an_activation_environment_for_another_process_is_refused(self):
@@ -1293,16 +1293,16 @@ class TestSocketActivation(unittest.TestCase):
         import unittest.mock
         env = {"LISTEN_PID": str(os.getpid() + 1), "LISTEN_FDS": "2"}
         with unittest.mock.patch.dict("os.environ", env, clear=True):
-            with self.assertRaises(self.mod.NotSocketActivated):
-                self.mod.inherited_listening_sockets()
+            with self.assertRaises(NotSocketActivated):
+                resolve_server.inherited_listening_sockets()
 
     def test_a_non_integer_fd_count_is_refused(self):
         import os
         import unittest.mock
         env = {"LISTEN_PID": str(os.getpid()), "LISTEN_FDS": "two"}
         with unittest.mock.patch.dict("os.environ", env, clear=True):
-            with self.assertRaises(self.mod.NotSocketActivated):
-                self.mod.inherited_listening_sockets()
+            with self.assertRaises(NotSocketActivated):
+                resolve_server.inherited_listening_sockets()
 
 
 class TestGeneratedUnits(unittest.TestCase):
@@ -1531,9 +1531,9 @@ class TestDnsCounters(unittest.TestCase):
     """
 
     def setUp(self):
-        self.mod = _module()
+        self.logged = _silenced_log()
         self.policy = _policy(hosts=["allowed.example", "*.ok.example"])
-        self.counters = self.mod.Counters()
+        self.counters = resolve_server.Counters()
 
     def answer(self, *args, **kwargs):
         return dns_wire.build_answer(query(*args, **kwargs), self.policy,
@@ -1657,15 +1657,15 @@ class TestDnsCounters(unittest.TestCase):
 class TestResponderStatusFile(unittest.TestCase):
 
     def setUp(self):
-        self.mod = _module()
+        self.logged = _silenced_log()
         self.dir = tempfile.mkdtemp()
         self.addCleanup(lambda: shutil.rmtree(self.dir))
         self.path = os.path.join(self.dir, "resolve-status.json")
 
     def test_it_writes_the_counters(self):
-        counters = self.mod.Counters()
+        counters = resolve_server.Counters()
         counters.record_answer("a.example", "synthesised", 1, True)
-        self.mod.emit_status(self.path, counters)
+        resolve_server.emit_status(self.path, counters)
         doc = json.loads(Path(self.path).read_text())
         self.assertEqual(doc["queries"]["synthesised"], 1)
         self.assertIn("written_at", doc)
@@ -1674,8 +1674,8 @@ class TestResponderStatusFile(unittest.TestCase):
         """A responder that died over a diagnostic would leave the guest
         unable to resolve anything -- a far worse failure than a missing
         file."""
-        counters = self.mod.Counters()
-        self.mod.emit_status(os.path.join(self.dir, "no", "such", "s.json"),
+        counters = resolve_server.Counters()
+        resolve_server.emit_status(os.path.join(self.dir, "no", "such", "s.json"),
                              counters)   # must not raise
 
     def test_an_unserialisable_counter_never_takes_the_responder_down(self):
@@ -1683,9 +1683,9 @@ class TestResponderStatusFile(unittest.TestCase):
         as wide as the docstring's promise, or a counter added in a later rung
         that is not a plain int costs the guest its DNS rather than costing a
         status file."""
-        counters = self.mod.Counters()
+        counters = resolve_server.Counters()
         counters.snapshot = lambda: {"a_later_rungs_counter": object()}
-        self.mod.emit_status(self.path, counters)   # must not raise
+        resolve_server.emit_status(self.path, counters)   # must not raise
         self.assertFalse(Path(self.path).exists())
 
     def test_the_loop_writes_before_the_first_query(self):
@@ -1698,14 +1698,14 @@ class TestResponderStatusFile(unittest.TestCase):
         same file behind and the test would pass over the bug. What has to be
         observed is the file existing at the moment the loop first asks whether
         to stop -- which is after the pre-loop emit and before any query."""
-        counters = self.mod.Counters()
+        counters = resolve_server.Counters()
         seen = []
 
         def stop():
             seen.append(Path(self.path).exists())
             return True
 
-        self.mod.serve([], resolve_policy.Policy(vm_resolve_policy({}, UID)),
+        resolve_server.serve([], resolve_policy.Policy(vm_resolve_policy({}, UID)),
                        counters, self.path, stop=stop)
         self.assertEqual(seen, [True],
                          "the status file did not exist before the first turn "
