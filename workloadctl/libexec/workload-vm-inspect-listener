@@ -150,7 +150,7 @@ from workload_lib import workload_state_dir
 
 # --- concurrency and timeout, module-local ---
 #
-# Nothing else in the tree reads these, and vm.py holds only what two programs
+# Nothing else in the tree reads these, and lib/ holds only what two programs
 # must agree on — the ports and the binary path — so the knobs live here,
 # beside the loop that spends them.
 
@@ -267,7 +267,7 @@ PEEK_ATTEMPTS_MAX = 16
 # back out of the journal to join a decision to the request it was taken on,
 # and nothing in lib/ can import this extension-less entrypoint -- the same
 # situation VM_DROP_* is in, and answered the same way:
-# INSPECT_LOG_ID_FIELD / INSPECT_LOG_REQ_FIELD in lib/vm.py are pinned
+# INSPECT_LOG_ID_FIELD / INSPECT_LOG_REQ_FIELD in lib/egress_policy.py are pinned
 # against these by tests/test_vm_inspect_diagnose.py. A rename here fails that
 # test rather than turning the join into a silent no-match, which is what a
 # reader looking for a field nobody emits any more would look like.
@@ -1998,7 +1998,7 @@ DROP_NOT_PERMITTED = "not permitted by policy"
 DROP_NOT_H2 = "not HTTP/2"
 
 # The dial to this workload's own credential broker failed, and it is NOT
-# DROP_UNREACHABLE. See lib/vm.py's twin for the argument; the short version is
+# DROP_UNREACHABLE. See lib/egress_policy.py's twin for the argument; the short version is
 # that the block below headed "THE UPSTREAM DIAL" records what a missing
 # SELinux rule looks like on this exact path -- an OSError caught by the relay
 # and counted as a dead upstream -- and the broker leg is the same shape with a
@@ -2090,7 +2090,7 @@ DROP_UNCLASSIFIED = "(unclassified)"
 
 
 # The record's field names, and the vocabularies of two of them. Stated once
-# here and restated in lib/vm.py for the reason the VM_DROP_* keys are: nothing
+# here and restated in lib/egress_policy.py for the reason the VM_DROP_* keys are: nothing
 # in lib/ can import this entrypoint, so T2's reader either restates them or
 # matches on a substring, and tests/test_vm_inspect_record.py pins each pair.
 RECORD_FIELDS = (
@@ -2264,7 +2264,7 @@ class RequestLog:
     journal is the right place for that. This carries the per-request detail
     for allowed and denied alike, which is evidence of what a sandboxed agent
     was doing, and lands in a file readable by root and the workload uid only.
-    vm.py's INSPECT_RECORD_ROOT comment carries the whole argument, including
+    egress_policy's INSPECT_RECORD_ROOT comment carries the whole argument, including
     why a LogNamespace= was not enough.
 
     NEVER RAISES, and the except clauses have to be as wide as that claim -- the

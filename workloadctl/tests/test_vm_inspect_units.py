@@ -21,7 +21,7 @@ import unittest.mock
 from egress_policy import (
     INSPECT_PORT_CLEARTEXT, INSPECT_PORT_TLS, vm_uses_inspect,
 )
-from vm import (
+from nft_elements import (
     inspect_cgroup, inspect_cgroup_command,
     inspect_cgroup_filter_command,
 )

@@ -22,7 +22,7 @@ import subprocess
 from helper_main import log, run
 from nft_constants import (NFT_BIN, NFT_SET_INTERNAL_OK4,
                            NFT_SET_INTERNAL_OK6, NFT_SETS, NFT_TABLE)
-from vm import (filter_delete_command, internal_ok_delete_commands,
+from nft_elements import (filter_delete_command, internal_ok_delete_commands,
                 internal_ok_list_commands, internal_ok_uid_elements)
 from broker_config import (inspect_link_address_commands,
                            inspect_link_delete_commands)

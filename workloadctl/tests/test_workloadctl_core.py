@@ -18,7 +18,6 @@ from unittest import mock
 
 import config_parser
 import workload_lib               # noqa: E402
-import vm                          # noqa: E402
 import workloadctl_core as core  # noqa: E402
 
 

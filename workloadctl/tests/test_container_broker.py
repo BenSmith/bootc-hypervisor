@@ -25,7 +25,7 @@ import unittest
 from pathlib import Path
 
 from tests.test_generator import run_generator, write_config
-from vm import internal_ok_elements
+from nft_elements import internal_ok_elements
 from broker_config import (
     BROKER_INSTANCE_PORT, container_broker_hosts,
     container_broker_upstream_addresses, container_uses_credentials,

@@ -93,7 +93,7 @@ ALLOWED_HOST = "example.com"
 RETIRED_PROXY_ADDR = "192.0.2.1"
 RETIRED_PROXY_PORT = 3128
 
-# Spelled out rather than imported from lib/vm.py: a rig that computes both
+# Spelled out rather than imported from lib/: a rig that computes both
 # sides from one constant cannot notice them drifting apart.
 PORT_CLEARTEXT = 8080
 PORT_TLS = 8443
@@ -115,7 +115,7 @@ PROBE_V6 = "2606:2800:220:1:248:1893:25c8:1946"
 PROBE_V6_NET = "2606:2800:220::/48"
 INSPECT_LINK = "workload-proxy"
 
-# Spelled out rather than imported from lib/vm.py, for the reason above the
+# Spelled out rather than imported from lib/, for the reason above the
 # port constants: a rig that computes both sides from one constant cannot
 # notice them drifting apart.
 VM_RUN_DIR = "/run/workload-vm"
@@ -130,7 +130,7 @@ RESOLVE_PROBE = "rig-probe.example.net"
 AUDIT_LOG = "/var/log/audit/audit.log"
 
 # The record's home, its filename, its join field and the one reason the plain
-# arm must produce. Spelled out rather than imported from lib/vm.py for the
+# arm must produce. Spelled out rather than imported from lib/ for the
 # reason the run dir and the ports are: a rig that computes both sides from one
 # constant cannot notice them drifting apart.
 RECORD_ROOT = "/var/log/workloadctl/egress"

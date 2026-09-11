@@ -1307,7 +1307,7 @@ def normalize_containers(config: dict) -> list[dict]:
 # --- Container [network] scalars ---
 #
 # Read the same way as VM's vm_allowed_hosts()/net.get("tls")/etc.
-# (lib/vm.py) -- no dedicated parse function on that side either. `tls` is
+# (lib/vm_network_config.py) -- no dedicated parse function on that side either. `tls` is
 # deliberately returned raw (None when absent), not defaulted here: unlike
 # the VM's fixed default, the container's effective tls is *computed* from
 # whether any policy entry is present, and that computation belongs to
@@ -1339,7 +1339,7 @@ def container_ca_mount_path(net: dict) -> str | None:
 #
 # Shape-tolerant, like the policy/credential pair in config_parser -- validation is
 # validate_container_network()'s job, not parsing's. Unlike VM's
-# _host_reason_hosts() (lib/vm.py:1520-1534), `reason` is kept rather than
+# _host_reason_hosts() (lib/egress_policy.py), `reason` is kept rather than
 # discarded: every entry is required to carry a reason, and unlike
 # the VM side -- where a malformed entry can never reach this code because
 # the boot path already ran validate_vm_network() -- there is no such
@@ -1384,7 +1384,7 @@ def _container_host_reason_entries(net: dict, key: str) -> list[ContainerHostRea
 #
 # The parse functions above are deliberately shape-tolerant; every semantic
 # rule lives here or nowhere. Mirrors validate_vm_network / _validate_egress
-# (lib/vm.py) where the two schemas share a rule. Diverges where the container
+# (lib/vm_network_config.py) where the two schemas share a rule. Diverges where the container
 # schema has no `egress` key (presence of a trigger is the whole statement)
 # and no bridge escape hatch. `mode = "host"` IS special-cased below:
 # a host-mode container's processes span the workload's whole subuid window
@@ -1860,7 +1860,7 @@ def validate_container_network(net: dict, config: dict | None = None) -> list[st
 #
 # The low-level uid-keyed nft builders (element commands for the DNAT maps,
 # the internal-destination exemptions, the cgroup exemptions) live in
-# lib/vm.py and take nothing but a uid and already-resolved addresses -- no
+# lib/nft_elements.py and take nothing but a uid and already-resolved addresses -- no
 # VM-specific state -- so they are reused verbatim for containers (imported
 # directly by libexec/workload-container-filter and
 # libexec/workload-container-inspect). What differs, and what lives here, is

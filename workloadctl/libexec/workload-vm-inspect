@@ -67,7 +67,7 @@ internal_failure.
 WHAT IS NOT ARMED HERE
 
 The cgroup elements in wl_egress_cg (inet workload_filter) and wl_inspect_cg
-(inet workload_proxy). The builders for both live in lib/vm.py, but the
+(inet workload_proxy). The builders for both live in lib/nft_elements.py, but the
 element is armed by the inspector's own unit, not this helper: an element
 resolves to a cgroup id at add time and systemd makes a fresh cgroup on
 every start, so the add belongs to the unit that owns the cgroup, and the
@@ -108,7 +108,7 @@ from egress_policy import (
     inspect_policy_path, vm_inspect_policy_text, internal_hosts,
     inspect_status_path, vm_uses_inspect,
 )
-from vm import (
+from nft_elements import (
     inspect_element_commands, internal_ok_commands, vm_internal_resolve,
 )
 from broker_config import vm_uses_credentials

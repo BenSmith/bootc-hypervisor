@@ -17,7 +17,7 @@ from egress_policy import (
     INSPECT_PORT_TLS, vm_inspect_policy, inspect_policy_path,
     TLS_DEFAULT, http2_hosts, vm_policy_entries, policy_governs,
 )
-from vm import (
+from nft_elements import (
     inspect_cgroup, inspect_cgroup_command,
     inspect_cgroup_filter_command, inspect_dst_elements,
     inspect_element_commands, inspect_map_elements,

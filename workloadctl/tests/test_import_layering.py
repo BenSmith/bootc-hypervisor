@@ -56,7 +56,7 @@ PLANE = frozenset({
 })
 
 # Everything the plane may not import. `cmd_*` is matched by prefix below.
-ABOVE_THE_PLANE = frozenset({"vm", "workload_lib"})
+ABOVE_THE_PLANE = frozenset({"nft_elements", "workload_lib"})
 
 UPWARD_EDGES = {}
 """Empty, and it stays that way.

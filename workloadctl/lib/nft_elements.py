@@ -1,5 +1,5 @@
 """
-The nftables elements and commands for one VM workload's egress filter.
+The nftables elements and commands for one workload's egress filter.
 
 Every function here answers the same question in a different vocabulary: given
 a workload uid and its policy, which set elements exist, and which `nft` argv
@@ -7,12 +7,17 @@ puts them there or takes them away. The sets themselves, their names and the
 family pairing are nft_constants'; the addresses are workload_addr's; the
 policy words are egress_policy's. This module is only the mapping between them.
 
-It used to be the whole VM surface, and re-exported nine other modules so that
-`from vm import <anything>` kept working. It no longer re-exports anything: a
-name is imported from the module that defines it, and what is left below is
-what vm.py itself defines.
+Both substrates arm through it: the inspector's element builders and the
+internal-exemption commands are what `workload-container-inspect` calls as
+much as `workload-vm-inspect`. Only the `vm_`-prefixed builders read the VM's
+own allow-entry shape.
 
-Installed to /usr/libexec/workloadctl/vm.py.
+This was vm.py: once the whole VM surface, re-exporting nine other modules so
+that `from vm import <anything>` kept working. It re-exports nothing: a name
+is imported from the module that defines it, and what is below is what this
+module itself defines.
+
+Installed to /usr/libexec/workloadctl/nft_elements.py.
 """
 
 import ipaddress

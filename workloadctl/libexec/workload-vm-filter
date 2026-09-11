@@ -31,7 +31,7 @@ sys.dont_write_bytecode = True
 from helper_main import log, run, run_helper, up_down_main
 from nft import purge_uid_elements
 from egress_policy import uses_resolve
-from vm import vm_filter_commands, vm_resolve_status_path
+from nft_elements import vm_filter_commands, vm_resolve_status_path
 from nft_constants import NFT_BIN, NFT_SKELETON
 from vm_defs import EGRESS_DEFAULT
 from vm_network_config import (

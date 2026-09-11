@@ -9,8 +9,8 @@ Three kinds of thing are held here.
 **The pins.** The reader restates two of the listener's vocabularies —
 `INSPECT_RECORD_REASONS` and the `id=`/`req=` field names — because nothing
 in `lib/` can import an extension-less entrypoint. Both directions are checked:
-a reason the listener writes and `lib/vm.py` omits is a filter that cannot
-select a real refusal, and one `lib/vm.py` carries that the listener never
+a reason the listener writes and `lib/egress_policy.py` omits is a filter that cannot
+select a real refusal, and one `lib/egress_policy.py` carries that the listener never
 writes is a filter that always returns nothing. Neither failure is visible in
 the output, which is what makes the pin the only place they can be caught.
 
@@ -99,7 +99,7 @@ def _write(path: Path, records, *, gz=False):
 # --- the pins ---------------------------------------------------------------
 
 class TestReasonPin(unittest.TestCase):
-    """lib/vm.py's reason set against the listener's own, both directions."""
+    """lib/egress_policy.py's reason set against the listener's own, both directions."""
 
     def test_every_reason_the_listener_writes_is_selectable(self):
         """A missing one is a refusal no --reason value can ask about."""

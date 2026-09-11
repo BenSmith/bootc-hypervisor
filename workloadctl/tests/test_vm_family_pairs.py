@@ -32,7 +32,7 @@ import unittest
 from pathlib import Path
 
 import nft_constants
-import vm
+import nft_elements
 import vm_network_config
 import workload_addr
 from nft_constants import (FamilyPair, NFT_PAIR_ALLOW, NFT_PAIR_INSPECT_DST,
@@ -58,11 +58,11 @@ def _derived():
     nothing, and nothing reports a set that never matched. A list of the
     things to check, maintained by hand, cannot see the thing nobody added.
 
-    So the table IS the call sites: every function in vm.py that calls
+    So the table IS the call sites: every function in nft_elements.py that calls
     both_families, paired with the FamilyPair it hands over. Adding a builder
     enrolls it; it cannot be added and forgotten.
     """
-    source = ast.parse(Path(vm.__file__).read_text())
+    source = ast.parse(Path(nft_elements.__file__).read_text())
     found = []
     for node in ast.walk(source):
         if not isinstance(node, ast.FunctionDef):
@@ -78,7 +78,7 @@ def _derived():
             assert isinstance(pair, ast.Name), (
                 f"{node.name} does not name its pair directly")
             found.append((getattr(nft_constants, pair.id),
-                          getattr(vm, node.name)))
+                          getattr(nft_elements, node.name)))
     return tuple(found)
 
 
@@ -91,7 +91,7 @@ def _entry(port):
 
 
 def _pairs():
-    return [v for v in vars(vm).values() if isinstance(v, FamilyPair)]
+    return [v for v in vars(nft_elements).values() if isinstance(v, FamilyPair)]
 
 
 class TestThePairTable(unittest.TestCase):
@@ -109,7 +109,7 @@ class TestThePairTable(unittest.TestCase):
         """
         v6_halves = {p.v6 for p in _pairs()}
         orphans = sorted(
-            name for name, value in vars(vm).items()
+            name for name, value in vars(nft_elements).items()
             if name.startswith(("NFT_SET_", "NFT_MAP_"))
             and isinstance(value, str) and value.endswith("6")
             and value not in v6_halves)
@@ -147,7 +147,7 @@ class TestTheDerivedBuildersFillBothHalves(unittest.TestCase):
         has permanently and a bad discovery has once.
         """
         self.assertTrue(DERIVED, "no uid-derived builders discovered")
-        calls = Path(vm.__file__).read_text().count("both_families(")
+        calls = Path(nft_elements.__file__).read_text().count("both_families(")
         self.assertEqual(len(DERIVED), calls)
         self.assertEqual(len({build for _, build in DERIVED}), len(DERIVED))
         for pair, _ in DERIVED:
@@ -198,7 +198,7 @@ class TestTheDerivedBuildersFillBothHalves(unittest.TestCase):
         constant, is back to writing the split by hand -- and the tests above
         would still pass for it while it stayed correct.
         """
-        source = ast.parse(Path(vm.__file__).read_text())
+        source = ast.parse(Path(nft_elements.__file__).read_text())
         by_name = {n.name: n for n in ast.walk(source)
                    if isinstance(n, ast.FunctionDef)}
         for _, build in DERIVED:
@@ -239,7 +239,7 @@ class TestSplitByFamily(unittest.TestCase):
     def test_the_allowlist_splits_and_keeps_the_family_agnostic_set(self):
         """wl_filtered carries the bare uid and belongs to neither family:
         "is this workload under policy at all?" has one answer."""
-        elements = vm.vm_filter_elements(
+        elements = nft_elements.vm_filter_elements(
             UID, [], resolved=[
                 (_entry(443), [ipaddress.ip_address("93.184.216.34"),
                                ipaddress.ip_address("2606:2800::1")])])
@@ -248,13 +248,13 @@ class TestSplitByFamily(unittest.TestCase):
         self.assertIn("2606:2800::1", " ".join(elements[NFT_PAIR_ALLOW.v6]))
 
     def test_a_v4_only_allowlist_emits_no_v6_set(self):
-        elements = vm.vm_filter_elements(
+        elements = nft_elements.vm_filter_elements(
             UID, [], resolved=[
                 (_entry(443), [ipaddress.ip_address("93.184.216.34")])])
         self.assertNotIn(NFT_PAIR_ALLOW.v6, elements)
 
     def test_internal_exemptions_split_the_same_way(self):
-        got = vm.internal_ok_elements(
+        got = nft_elements.internal_ok_elements(
             UID, [ipaddress.ip_address("192.168.0.5"),
                   ipaddress.ip_address("fd00::1")])
         self.assertEqual(set(got), {NFT_PAIR_INTERNAL_OK.v4,
@@ -264,7 +264,7 @@ class TestSplitByFamily(unittest.TestCase):
     def test_the_dump_reads_both_exemption_sets(self):
         """The teardown path is the one that reads them back, and a dump of
         one family purges one family."""
-        named = [argv[-1] for argv in vm.internal_ok_list_commands()]
+        named = [argv[-1] for argv in nft_elements.internal_ok_list_commands()]
         self.assertEqual(named, [NFT_PAIR_INTERNAL_OK.v4,
                                  NFT_PAIR_INTERNAL_OK.v6])
 

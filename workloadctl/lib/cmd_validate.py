@@ -22,7 +22,7 @@ from workload_lib import (
 from provisioning import shadowed_filecon_paths
 from egress_policy import internal_hosts, vm_uses_inspect
 from broker_config import vm_credential_entries
-from vm import internal_reserved_reason, vm_internal_resolve
+from nft_elements import internal_reserved_reason, vm_internal_resolve
 from vm_defs import parse_memory_mib, mac_address, mac_collisions
 from validation import (
     collect_config_warnings,

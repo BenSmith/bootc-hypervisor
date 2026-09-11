@@ -33,7 +33,7 @@ from egress_policy import (
     INSPECT_RECORD_MODES, INSPECT_RECORD_FILE, INSPECT_RECORD_ROOT,
     inspect_logs_directory, inspect_record_dir, inspect_record_path,
 )
-from vm import INSPECT_RECORD_SELINUX_TYPE
+from nft_elements import INSPECT_RECORD_SELINUX_TYPE
 
 ROOT = Path(__file__).resolve().parent.parent
 

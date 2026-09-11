@@ -44,7 +44,7 @@ from dataclasses import dataclass
 from typing import Callable
 
 from egress_policy import INSPECT_DIGEST_KEY, inspect_status_path
-from vm import vm_resolve_status_path
+from nft_elements import vm_resolve_status_path
 
 # Group keys. A group is present or absent as a whole, because what makes it
 # absent is one missing block in the document rather than one missing counter.

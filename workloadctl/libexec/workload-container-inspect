@@ -20,7 +20,7 @@ a cgroup id at add time and only that unit's own start/stop moment has the
 right id in scope.
 
 D6 in the build spec: the listener binary and the two nft tables are shared
-verbatim with the VM path (imported straight from lib/vm.py) -- the uid-keyed
+verbatim with the VM path (imported straight from lib/nft_elements.py) -- the uid-keyed
 element builders (inspect_element_commands, internal_ok_commands, the
 listener addressing) take nothing but a uid, so nothing here needed a
 container-flavoured twin. The container-specific work is entirely in parsing
@@ -56,7 +56,7 @@ from helper_main import log, run, run_helper, up_down_main
 from nft import (add_listener_addresses, purge_internal_exemptions,
                  remove_listener_addresses)
 from egress_policy import inspect_policy_path, inspect_status_path
-from vm import inspect_element_commands, internal_ok_commands
+from nft_elements import inspect_element_commands, internal_ok_commands
 from broker_config import container_uses_credentials
 from nft_constants import NFT_BIN, NFT_PROXY_SKELETON, NFT_SKELETON
 from workload_addr import ensure_advertised_interface, broker_listen_address

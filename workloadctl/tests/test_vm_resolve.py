@@ -29,7 +29,7 @@ from unittest import mock
 from pathlib import Path
 
 from egress_policy import uses_resolve
-from vm import vm_filter_elements
+from nft_elements import vm_filter_elements
 from nft_constants import SIDECAR_SLICE
 from vm_network_config import (
     vm_allow_resolved, vm_resolve_policy, vm_resolve_policy_path,
@@ -1342,11 +1342,11 @@ class TestGeneratedUnits(unittest.TestCase):
         would have it dropped by the default deny, with three comments
         asserting that cannot happen.
         """
-        import vm
+        import nft_elements
         self.assertNotIn("wl_egress_cg", self.service)
         self.assertNotIn("wl_inspect_cg", self.service)
         self.assertNotIn("nft", self.service)
-        self.assertFalse(hasattr(vm, "vm_resolve_cgroup"), (
+        self.assertFalse(hasattr(nft_elements, "vm_resolve_cgroup"), (
             "a vm_resolve_cgroup exists now, so the responder may be armed "
             "into wl_egress_cg -- update the nft comments this test guards"))
 
@@ -1356,7 +1356,7 @@ class TestGeneratedUnits(unittest.TestCase):
     CGROUP_SET_FILES = (
         ("nftables", "workload-filter.nft"),
         ("nftables", "workload-proxy.nft"),
-        ("lib", "vm.py"),
+        ("lib", "nft_elements.py"),
         ("libexec", "workload-vm-inspect"),
     )
 

@@ -7,7 +7,7 @@ next move, and in the non-HTTP case the count is the ONLY place that list of
 splice candidates exists, since whether a host speaks HTTP over 443 is not
 knowable from the file.
 
-Two things are held here. The keys `lib/vm.py` restates must be the listener's
+Two things are held here. The keys `lib/egress_policy.py` restates must be the listener's
 own strings -- `lib/` cannot import an extension-less entrypoint, so the reader
 restates them and this is what keeps the restatement honest. And each figure's
 message must carry the split it exists for, because both splits are prefix

@@ -459,5 +459,5 @@ class TestCodeCitations(unittest.TestCase):
         self.assertIn("tests/test_vm_proxy.py", RETIRED)
         self.assertFalse(
             _resolves_against(self.tracked,
-                              GIT_ROOT / "workloadctl" / "lib" / "vm.py",
+                              GIT_ROOT / "workloadctl" / "lib" / "nft_elements.py",
                               "tests/test_vm_proxy.py"))

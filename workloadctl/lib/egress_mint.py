@@ -78,7 +78,7 @@ _CLOCK_STATS = {
 
 # --- sizes ---
 #
-# Module-local: nothing outside this file needs to agree on them, and vm.py
+# Module-local: nothing outside this file needs to agree on them, and lib/
 # holds only what two programs must.
 
 # The working set. 1024 exact names is far above any guest's real destination

@@ -572,7 +572,7 @@ def _render_default_user_data(name: str, guest_user: str, pubkey: str,
     # the runtimes that carry their own root list and never consult the system
     # store. Either alone leaves a measured population of clients failing.
     # write_files is unconditional now: every built-in seed carries the two
-    # files that give the guest a paravirtual clock (see vm.py's ptp_kvm block).
+    # files that give the guest a paravirtual clock (see vm_ptp.py).
     lines.append("write_files:")
     for path, permissions, content in vm_ptp_kvm_seed_files():
         lines.append(f"  - path: {path}")

@@ -25,7 +25,7 @@ import cmd_diagnose
 from cmd_diagnose import (
     INSPECT_ACCEPT_SETS, INSPECT_GUARD_SETS, INSPECT_SELF_SETS,
 )
-from vm import (
+from nft_elements import (
     inspect_dst_elements, inspect_element_commands,
     inspect_live_elements, inspect_self_elements,
 )

@@ -42,12 +42,12 @@ import ipaddress
 import unittest
 from pathlib import Path
 
-import vm
+import nft_elements
 import workload_addr
 from workload_addr import (UID_MAX, UID_MIN, UidDerived, RESERVED_RANGES,
                            UID_DERIVED)
 
-LIB = Path(vm.__file__).resolve().parent
+LIB = Path(nft_elements.__file__).resolve().parent
 
 SPAN = UID_MAX - UID_MIN
 
@@ -79,7 +79,7 @@ class TestTheTableIsComplete(unittest.TestCase):
         assembled by hand and a row can be written and never joined to it.
         A row outside the table derives fine and is reserved by nothing.
 
-        Swept over EVERY lib module, not over vm. This test read `vars(vm)`
+        Swept over EVERY lib module, not over one. This test read `vars(vm)`
         while the rows lived in vm.py, and the moment they moved to workload_addr.py
         it passed over an orphan row -- vars() sees what a module imported, so
         a row defined in the new module and re-exported from neither the table
@@ -108,17 +108,18 @@ class TestTheTableIsComplete(unittest.TestCase):
         like a green run over all of them.
         """
         modules = [p.stem for p in LIB.glob("*.py")]
-        self.assertIn("vm", modules)
+        self.assertIn("nft_elements", modules)
         self.assertIn("workload_addr", modules)
         self.assertGreater(len(modules), 30, modules)
 
     def test_the_rows_are_defined_where_the_table_is_assembled_from(self):
-        """Every row is defined in workload_addr.py, and none in vm.py.
+        """Every row is defined in workload_addr.py, and none anywhere else.
 
-        Not a style rule. vm re-exports them, so `vm.UID_MGMT` resolves
-        either way and no import would break -- what breaks is the reader's
-        one place to look, and this file's first version proved that a row
-        outside the reader's one place is a row outside the table too.
+        Not a style rule. When vm.py (now nft_elements.py) re-exported them,
+        `vm.UID_MGMT` resolved either way and no import would break -- what
+        breaks is the reader's one place to look, and this file's first
+        version proved that a row outside the reader's one place is a row
+        outside the table too.
         """
         source = ast.parse((LIB / "workload_addr.py").read_text())
         assigned = {t.id for n in ast.walk(source)

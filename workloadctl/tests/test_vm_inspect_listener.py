@@ -398,7 +398,7 @@ class TestInstalledPath(unittest.TestCase):
         self.assertIn("libexec/workload-vm-inspect-listener", spec)
 
     def test_the_listener_source_has_no_literal_listener_ports(self):
-        """The plane comes from the vm.py constants, never a hardcoded 8080 or
+        """The plane comes from the lib/ constants, never a hardcoded 8080 or
         8443: a literal would let the port drift from the constant the redirect
         and the socket unit both key on."""
         source = LISTENER_FILE.read_text()

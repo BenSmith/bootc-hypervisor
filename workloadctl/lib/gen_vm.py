@@ -27,7 +27,7 @@ from egress_policy import (
     uses_resolve, inspect_logs_directory,
 )
 from egress_ca import denial_dir, leaf_dir
-from vm import inspect_cgroup_command, inspect_cgroup_filter_command
+from nft_elements import inspect_cgroup_command, inspect_cgroup_filter_command
 from broker_config import (
     BROKER_BIN, vm_uses_credentials, broker_config_path,
     broker_credential, vm_broker_hosts, broker_runtime_directory,
@@ -701,7 +701,7 @@ def generate_vm_inspect_service(config, user_name: str) -> str:
     # two lines are different documents with different readers: the journal
     # carries the decision and the remedy, and the record carries what the
     # guest actually asked for -- paths, and query strings that can carry a
-    # credential outright. vm.py's INSPECT_RECORD_ROOT comment has the
+    # credential outright. egress_policy's INSPECT_RECORD_ROOT comment has the
     # argument; the modes are the access decision.
     #
     # LogsDirectory= rather than a mkdir of ours, for three things at once:

@@ -43,7 +43,7 @@ LIB = REPO_ROOT / "lib"
 # Modules that must publish only what they define. `lib/` is flat, so there is
 # no such thing as a private import here: every `from X import name` in one of
 # these is a name its own callers can then read off it.
-NO_RE_EXPORTS = ("vm",)
+NO_RE_EXPORTS = ("nft_elements",)
 
 
 def _lib_modules():
@@ -77,7 +77,7 @@ class TestAFacadeReExportsNothing(unittest.TestCase):
     they do not define.
 
     `lib/` is flat, so an import IS a re-export: `from egress_ca import
-    CA_BACKDATE_SECONDS` inside vm.py does not merely make that name
+    CA_BACKDATE_SECONDS` inside vm.py (now nft_elements.py) does not merely make that name
     available to vm.py, it makes `vm.CA_BACKDATE_SECONDS` answer forever
     after. vm.py published 299 names it did not define, drawn from eleven
     modules, and the line count was the least of it. A reader who found `vm.X`

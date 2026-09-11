@@ -434,8 +434,7 @@ def validate_credential_entries(net: dict, *, table: str, noun: str,
 # with `.rstrip(".")`, which strips a doubled trailing dot the enforcer keeps --
 # so a container's validation and the listener that enforces it disagreed about
 # what a name was. They live at the bottom of the layering because everything
-# above matches against them and nothing here needs anything above; vm.py
-# re-exports both names, so every existing `from vm import ...` still resolves.
+# above matches against them and nothing here needs anything above.
 
 INSPECT_ORIG_CLEARTEXT = 80
 INSPECT_ORIG_TLS = 443

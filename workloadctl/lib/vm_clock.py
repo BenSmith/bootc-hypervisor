@@ -41,7 +41,7 @@ never configured for anything and does not know it was paused -- but only on a
 mint cache miss, and only if the guest runs qemu-guest-agent. That one repairs
 the guest on its own four-second poll with no agent and no host involvement --
 but only if the guest was seeded with it, which a custom
-[vm.cloud_init].user_data_file may not have been. See vm.py's ptp_kvm block for
+[vm.cloud_init].user_data_file may not have been. See vm_ptp.py for
 what the seed carries and tests/test_vm_ptp_kvm.py for what each piece is for.
 
 TWO FACTS ABOUT THE PROTOCOL THAT COST MEASUREMENT TO LEARN

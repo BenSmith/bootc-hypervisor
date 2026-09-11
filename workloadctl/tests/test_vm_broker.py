@@ -36,7 +36,7 @@ from broker_config import (BROKER_BIN, BROKER_INSTANCE_PORT,
                            vm_broker_upstream_addresses, vm_credential_entries,
                            vm_credential_env, host_resolver_addresses,
                            vm_uses_credentials)
-from vm import internal_ok_elements
+from nft_elements import internal_ok_elements
 from config_parser import (BROKER_DEFAULT_AUTH_FORMAT,
                            BROKER_DEFAULT_AUTH_HEADER)
 from vm_network_config import validate_vm_network
@@ -238,7 +238,7 @@ class TestTheGeneratedUnit(unittest.TestCase):
             self.assertIn(f"IPAddressAllow={addr}", unit)
 
     def test_resolved_upstreams_are_allowed(self):
-        import vm as vm_mod
+        import nft_elements as vm_mod
         real = vm_mod.socket.getaddrinfo
         try:
             vm_mod.socket.getaddrinfo = lambda host, *a, **k: [
@@ -1088,7 +1088,7 @@ class TestTheBrokerAddressComesFromTheUid(unittest.TestCase):
 
 
 class TestTheReasonIsPinnedAcrossTheTwoHalves(unittest.TestCase):
-    """lib/vm.py restates the listener's string because the listener is an
+    """lib/egress_policy.py restates the listener's string because the listener is an
     extension-less entrypoint nothing in lib/ can import. Restating is only
     safe with the pin."""
 
@@ -1316,8 +1316,8 @@ class TestTheAdvertisedAddressIsNotAdded(unittest.TestCase):
     def test_the_constant_is_gone_rather_than_unused(self):
         """An unused constant is the residue this rung exists to stop leaving,
         and it is what a later reader would wire back up."""
-        import vm
-        self.assertFalse(hasattr(vm, "VM_ADVERTISED_ADDR"))
+        import nft_elements
+        self.assertFalse(hasattr(nft_elements, "VM_ADVERTISED_ADDR"))
 
     def test_test_net_1_is_now_an_internal_destination(self):
         """The consequence, and the reason the range moves rather than simply
@@ -1328,7 +1328,7 @@ class TestTheAdvertisedAddressIsNotAdded(unittest.TestCase):
 
 
 class TestTheRetiredMechanismLeavesNoSymbols(unittest.TestCase):
-    """Every name F3 lists, asserted absent from lib/vm.py.
+    """Every name F3 lists, asserted absent from lib/nft_elements.py.
 
     One test rather than eight, and by attribute rather than by grep: a
     half-deleted mechanism is what leaves a caller importing a name that still
@@ -1336,14 +1336,14 @@ class TestTheRetiredMechanismLeavesNoSymbols(unittest.TestCase):
     """
 
     def test_none_of_them_resolve(self):
-        import vm
+        import nft_elements
         for name in ("VM_BROKER_PORT", "VM_BROKER_LISTEN_ADDR",
                      "VM_BROKER_LISTEN_PORT", "VM_BROKER_ENV_VAR",
                      "NFT_BROKER_SKELETON", "NFT_BROKER_TABLE",
                      "NFT_BROKER_MAP", "vm_uses_broker", "vm_broker_element",
                      "vm_broker_map_command", "vm_broker_env"):
             with self.subTest(name):
-                self.assertFalse(hasattr(vm, name))
+                self.assertFalse(hasattr(nft_elements, name))
 
     def test_the_guest_is_told_nothing_about_a_broker(self):
         """RESERVED_GUEST_ENV loses its second producer.

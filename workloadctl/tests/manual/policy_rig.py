@@ -103,7 +103,7 @@ UNLISTED = "nowhere.example"    # on no list of any kind
 
 HOSTNAMES = (PLAIN, OTHER, POLICED, SPLICED, H2, H1ONLY)
 
-# The drop-reason strings, restated for the reason lib/vm.py restates four of
+# The drop-reason strings, restated for the reason lib/egress_policy.py restates four of
 # them: the listener is an extension-less entrypoint and nothing can import it.
 # A rig that matched on substrings would be unable to tell either split apart,
 # which is the entire property under test here.
