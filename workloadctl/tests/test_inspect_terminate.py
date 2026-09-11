@@ -51,6 +51,8 @@ from http_framing import (
     Framing, H2_PREFACE, HTTP_METHOD_MAX, RequestUnreadable, _Stream,
     _is_count, is_http_request_start, request_framing, response_framing,
 )
+import egress_upstream
+from egress_upstream import tls_failure
 from egress_record import (
     DROP_INTERNAL,
     DROP_NOT_H2,
@@ -264,12 +266,11 @@ class TerminationCase(unittest.TestCase):
             # object would make an h2 test pass while the product offered
             # http/1.1 upstream, which is the drift the two-context split
             # exists to prevent.
-            for attr, alpn in (("_upstream_ctx", ["http/1.1"]),
-                               ("_upstream_ctx_h2", ["h2"])):
+            for attr, alpn in (("_ctx", ["http/1.1"]), ("_ctx_h2", ["h2"])):
                 ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
                 ctx.load_verify_locations(str(self.origin_ca_cert))
                 ctx.set_alpn_protocols(alpn)
-                setattr(listener, attr, ctx)
+                setattr(listener._upstream, attr, ctx)
         return listener, out
 
     def _guest_context(self):
@@ -296,8 +297,13 @@ class TerminationCase(unittest.TestCase):
         mod = _mod()
         served = threading.Thread(
             target=listener._serve_tls, args=(ours, _where("tls")), daemon=True)
-        with unittest.mock.patch.object(mod, "TLS",
-                                        TLS._replace(guest_port=origin.port)):
+        # The origin's port, on the plane object both the splice dial (the
+        # listener's) and the verifying dial (egress_upstream's) read.
+        with unittest.mock.patch.object(
+                mod, "TLS", TLS._replace(guest_port=origin.port)), \
+                unittest.mock.patch.object(
+                    egress_upstream, "TLS",
+                    TLS._replace(guest_port=origin.port)):
             served.start()
             ctx = guest_ctx or self._guest_context()
             response, error = b"", None
@@ -610,7 +616,7 @@ class TestTheClientCertificateCase(TerminationCase):
         listener, _ = self._listener(mod, unittest.mock.Mock(), trust=False)
         exc = ssl.SSLError("handshake failure")
         exc.reason = "SSLV3_ALERT_HANDSHAKE_FAILURE"
-        reason, text = listener._upstream_tls_failure("api.example", exc)
+        reason, text = tls_failure("api.example", exc)
         self.assertEqual(reason, DROP_UNVERIFIED)
         self.assertIn("not distinguishable", text)
         self.assertIn("api.example", text)
@@ -1521,8 +1527,13 @@ class TestAnHttp2HostIsRelayedAtFrameLevel(TerminationCase):
         served = threading.Thread(
             target=listener._serve_tls, args=(ours, _where("tls")), daemon=True)
         negotiated = []
-        with unittest.mock.patch.object(mod, "TLS",
-                                        TLS._replace(guest_port=origin.port)):
+        # The origin's port, on the plane object both the splice dial (the
+        # listener's) and the verifying dial (egress_upstream's) read.
+        with unittest.mock.patch.object(
+                mod, "TLS", TLS._replace(guest_port=origin.port)), \
+                unittest.mock.patch.object(
+                    egress_upstream, "TLS",
+                    TLS._replace(guest_port=origin.port)):
             served.start()
             ctx = self._guest_context()
             ctx.set_alpn_protocols(["h2"])
@@ -1688,14 +1699,14 @@ class TestAnHttp2HostIsRelayedAtFrameLevel(TerminationCase):
         origin = self._h2_origin()
         listener, _ = self._listener(mod, origin, http2=("localhost",))
         legs = []
-        real = listener._dial_upstream_tls
+        real = listener._upstream.dial_tls
 
         def capture(host, *args):
             leg = real(host, *args)
             legs.append(leg)
             return leg
 
-        listener._dial_upstream_tls = capture
+        listener._upstream.dial_tls = capture
         self._h2_exchange(listener, origin, H2_PREFACE + self.SETTINGS)
         self.assertEqual(len(legs), 1)
         # ON THE FD, not on a count of open descriptors. This file already
@@ -1788,14 +1799,14 @@ class TestAnHttp2HostIsRelayedAtFrameLevel(TerminationCase):
         origin = self._http11_origin()
         listener, _ = self._listener(mod, origin, http2=("localhost",))
         legs = []
-        real = listener._dial_upstream_tls
+        real = listener._upstream.dial_tls
 
         def capture(host, *args):
             leg = real(host, *args)
             legs.append(leg)
             return leg
 
-        listener._dial_upstream_tls = capture
+        listener._upstream.dial_tls = capture
         self._h2_exchange(listener, origin, H2_PREFACE + self.SETTINGS)
         self.assertEqual(len(legs), 1)
         self.assertEqual(legs[0].sock.fileno(), -1,
@@ -1944,7 +1955,7 @@ class TestARedialThatCannotBeVerifiedSaysSo(TerminationCase):
         guest.settimeout(3.0)
         guest.sendall(b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
         with unittest.mock.patch.object(
-                listener, "_upstream_for", side_effect=exc):
+                listener._upstream, "connection_for", side_effect=exc):
             listener._serve_one_request(
                 _Stream(ours), ours, _where("tls").request(1),
                 {}, True)

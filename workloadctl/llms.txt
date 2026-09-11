@@ -467,6 +467,7 @@ lib/egress_record.py               # What the inspector refuses with, and the pe
 lib/tls_hello.py                   # Reads the server name and extension list out of a ClientHello, peeked or consumed; not a TLS implementation
 lib/http_framing.py                # Where an HTTP/1.1 message ends, by refusal: head/body/chunk readers, the framing headers, the h2 preface check
 lib/egress_relay.py                # The byte splice both planes end in, and the two timeouts (decision, idle) every plane spends
+lib/egress_upstream.py             # The leg to the authorised name: the three dials (plain, verified TLS, broker), the per-connection pool, and what a failed leg is called
 lib/http_target.py                 # One canonical form for a request target, an authority and a redirect Location, per plane (Scheme)
 lib/http_request.py                # Request: one head parsed to the form the listener authorises, and rebuilt with OUR framing and the name we authorised
 lib/nft_elements.py                # A workload's egress filter (both substrates): which nft set elements exist, and the argv that arm them

@@ -39,6 +39,11 @@ from http_framing import (
 )
 import egress_record
 import egress_relay
+import egress_upstream
+from egress_upstream import (
+    ALPN_H2, BROKER_UPSTREAM_KEY, UPSTREAM_ALPN, UPSTREAMS_MAX,
+    dial_failure_reason,
+)
 from egress_record import (
     DROP_CEILING,
     DROP_CLIENT_CERT,
@@ -1259,9 +1264,9 @@ class TestHttp2AlpnSelection(unittest.TestCase):
         mod = _mod()
         listener = mod.Listener([], io.StringIO(),
                                 policy=self._policy(mod, http2=("grpc.example",)))
-        self.assertIsNot(listener._upstream_ctx, listener._upstream_ctx_h2)
-        self.assertEqual(mod.UPSTREAM_ALPN, ("http/1.1",))
-        self.assertEqual(mod.ALPN_H2, ("h2",))
+        self.assertIsNot(listener._upstream._ctx, listener._upstream._ctx_h2)
+        self.assertEqual(UPSTREAM_ALPN, ("http/1.1",))
+        self.assertEqual(ALPN_H2, ("h2",))
 
 
 class TestLogInjection(unittest.TestCase):
@@ -2043,7 +2048,7 @@ class TestCleartextPerRequest(unittest.TestCase):
         upstreams = {}
         with unittest.mock.patch.object(socket, "create_connection",
                                         return_value=near):
-            up = listener._upstream_for("a.example", upstreams,
+            up = listener._upstream.connection_for("a.example", upstreams,
                                         reusable=False)
         self.assertIs(up.sock, near)
         self.assertEqual({}, upstreams)
@@ -2071,7 +2076,7 @@ class TestCleartextPerRequest(unittest.TestCase):
         self.assertIn("credential_for(host)", fn)
         # Decided BEFORE the dial, or the dial has already happened.
         self.assertLess(fn.index("credential_for(host)"),
-                        fn.index("self._dial_upstream_tls("))
+                        fn.index("self._upstream.dial_tls("))
         # And the offer stays a configuration decision: h2 is forced off rather
         # than read off an origin connection that no longer exists.
         self.assertIn("h2 = False", fn)
@@ -2126,7 +2131,7 @@ class TestCleartextPerRequest(unittest.TestCase):
         guest held. Nothing said so: the record had already been told which
         credential was attached, and every layer downstream is identical.
 
-        Asserted on `_upstream_for` directly rather than through a session,
+        Asserted on `Upstream.connection_for` directly rather than through a session,
         because the seeding and the lookup are the two halves that have to
         disagree, and a session test that dialled its own origin would pass
         with the two collapsed back together.
@@ -2144,9 +2149,9 @@ class TestCleartextPerRequest(unittest.TestCase):
             dialled.append((host, near))
             return _Stream(near)
 
-        up = listener._upstream_for(
+        up = listener._upstream.connection_for(
             "a.example", upstreams,
-            key=mod.BROKER_UPSTREAM_KEY + "a.example", dial=dial)
+            key=BROKER_UPSTREAM_KEY + "a.example", dial=dial)
         self.assertEqual([h for h, _ in dialled], ["a.example"],
                          "the broker was never dialled")
         self.assertIsNot(up.sock, origin,
@@ -2154,7 +2159,7 @@ class TestCleartextPerRequest(unittest.TestCase):
         # And the origin entry is still there for anything that wants it: the
         # fix separates the two slots, it does not evict one with the other.
         self.assertIn("a.example", upstreams)
-        self.assertIn(mod.BROKER_UPSTREAM_KEY + "a.example", upstreams)
+        self.assertIn(BROKER_UPSTREAM_KEY + "a.example", upstreams)
         del far
 
     def test_two_brokered_requests_share_one_broker_connection(self):
@@ -2172,19 +2177,18 @@ class TestCleartextPerRequest(unittest.TestCase):
             dialled.append(host)
             return _Stream(near)
 
-        key = mod.BROKER_UPSTREAM_KEY + "a.example"
-        first = listener._upstream_for("a.example", upstreams, key=key,
-                                       dial=dial)
-        second = listener._upstream_for("a.example", upstreams, key=key,
-                                        dial=dial)
+        key = BROKER_UPSTREAM_KEY + "a.example"
+        first = listener._upstream.connection_for(
+            "a.example", upstreams, key=key, dial=dial)
+        second = listener._upstream.connection_for(
+            "a.example", upstreams, key=key, dial=dial)
         self.assertEqual(dialled, ["a.example"])
         self.assertIs(first.sock, second.sock)
 
     def test_the_brokered_slot_is_not_nameable_by_a_guest(self):
         """The separation is only a separation while no host can spell it. A
         NUL cannot appear in a hostname, which is why the prefix carries one."""
-        mod = _mod()
-        self.assertIn("\x00", mod.BROKER_UPSTREAM_KEY)
+        self.assertIn("\x00", BROKER_UPSTREAM_KEY)
 
     def test_an_http_11_request_still_reuses_one_upstream(self):
         """The other direction of the same change: 1.1 requests carry
@@ -2251,11 +2255,10 @@ class TestCleartextPerRequest(unittest.TestCase):
         uid. Past the cap the oldest is closed; a name that comes back is
         redialled, which is a round trip rather than a refusal.
         """
-        mod = _mod()
         request = b"".join(
             b"GET /%s HTTP/1.1\r\nHost: %s.example\r\n\r\n" % (h, h)
             for h in (b"a", b"b", b"c", b"a"))
-        with unittest.mock.patch.object(mod, "UPSTREAMS_MAX", 2):
+        with unittest.mock.patch.object(egress_upstream, "UPSTREAMS_MAX", 2):
             _, got, ups = self._run(["*.example"], request, [_OK] * 4)
         # Four dials for four requests: a was evicted when c arrived, so the
         # second a.example is a fresh socket rather than the first one reused.
@@ -2271,11 +2274,10 @@ class TestCleartextPerRequest(unittest.TestCase):
     def test_a_host_still_within_the_cap_is_reused_not_redialled(self):
         """The eviction is least-recently-USED, not least-recently-opened: a
         name the guest keeps returning to stays young and stays open."""
-        mod = _mod()
         request = b"".join(
             b"GET /%s HTTP/1.1\r\nHost: %s.example\r\n\r\n" % (h, h)
             for h in (b"a", b"b", b"a", b"c", b"a"))
-        with unittest.mock.patch.object(mod, "UPSTREAMS_MAX", 2):
+        with unittest.mock.patch.object(egress_upstream, "UPSTREAMS_MAX", 2):
             _, got, ups = self._run(
                 ["*.example"], request, [_OK + _OK + _OK, _OK, _OK])
         # a is touched before every eviction, so it is never the oldest: three
@@ -2288,7 +2290,7 @@ class TestCleartextPerRequest(unittest.TestCase):
     def test_the_cap_is_generous_enough_for_an_honest_connection(self):
         """A bound low enough to evict a real client's working set would trade
         a fd leak for a redial on every request."""
-        self.assertGreaterEqual(_mod().UPSTREAMS_MAX, 4)
+        self.assertGreaterEqual(UPSTREAMS_MAX, 4)
 
     def test_a_403_does_not_leave_the_next_request_read_out_of_the_body(self):
         """The bypass through the error path, which is the path every test
@@ -2889,8 +2891,11 @@ class TestCounters(unittest.TestCase):
         # or every entry in it would count as its own use and the guard would
         # assert nothing. (It was the tuple's own definition before the
         # reasons moved to egress_record; same hazard, one file over.)
-        source = re.sub(r"from egress_record import \([^)]*\)", "",
-                        LISTENER_FILE.read_text())
+        # Two files, because the upstream leg names its own refusals where
+        # it decides them (egress_upstream) and the listener names the rest.
+        source = "\n".join(
+            re.sub(r"from egress_record import \([^)]*\)", "", f.read_text())
+            for f in (LISTENER_FILE, ROOT / "lib" / "egress_upstream.py"))
         self.assertNotIn("from egress_record import (", source)
         named = {arg.strip() for arg in
                  re.findall(r"record_drop\(\s*([^,)]+)", source)
@@ -3082,57 +3087,56 @@ class TestInternalAttribution(unittest.TestCase):
     the one enforcement point. This only names what already happened.
     """
 
-    def _listener(self, internal=()):
-        mod = _mod()
-        return mod, mod.Listener([], io.StringIO(), policy=Policy(
-            tls="splice", hosts=("host.example",), internal=tuple(internal)))
+    def _internal(self, internal=()):
+        return Policy(tls="splice", hosts=("host.example",),
+                      internal=tuple(internal)).internal
 
     def test_a_name_resolving_into_private_space_is_an_internal_refusal(self):
-        mod, listener = self._listener()
+        internal = self._internal()
         with unittest.mock.patch.object(
-                mod.socket, "getaddrinfo",
+                socket, "getaddrinfo",
                 return_value=[(2, 1, 6, "", ("192.168.5.5", 443))]):
-            self.assertEqual(listener._dial_failure_reason("host.example"),
+            self.assertEqual(dial_failure_reason("host.example", internal),
                              "internal destination")
 
     def test_a_name_with_an_internal_entry_is_a_host_that_is_down(self):
         """It has the exemption the drop would otherwise have caught, so the
         failure is not the wildcard trap -- and reporting it as one sends an
         operator to edit a config line that is already correct."""
-        mod, listener = self._listener(internal=["host.example"])
+        internal = self._internal(["host.example"])
         with unittest.mock.patch.object(
-                mod.socket, "getaddrinfo",
+                socket, "getaddrinfo",
                 return_value=[(2, 1, 6, "", ("192.168.5.5", 443))]):
-            self.assertEqual(listener._dial_failure_reason("host.example"),
+            self.assertEqual(dial_failure_reason("host.example", internal),
                              "upstream unreachable")
 
     def test_a_public_address_is_a_host_that_is_down(self):
-        mod, listener = self._listener()
+        internal = self._internal()
         with unittest.mock.patch.object(
-                mod.socket, "getaddrinfo",
+                socket, "getaddrinfo",
                 return_value=[(2, 1, 6, "", ("93.184.216.34", 443))]):
-            self.assertEqual(listener._dial_failure_reason("host.example"),
+            self.assertEqual(dial_failure_reason("host.example", internal),
                              "upstream unreachable")
 
     def test_a_name_that_no_longer_resolves_degrades_to_the_generic_reason(self):
         """This runs on a path that has already failed. A counter is not worth
         raising a second exception over."""
-        mod, listener = self._listener()
+        internal = self._internal()
         with unittest.mock.patch.object(
-                mod.socket, "getaddrinfo", side_effect=OSError("no such host")):
-            self.assertEqual(listener._dial_failure_reason("host.example"),
+                socket, "getaddrinfo", side_effect=OSError("no such host")):
+            self.assertEqual(dial_failure_reason("host.example", internal),
                              "upstream unreachable")
 
     def test_the_internal_list_is_matched_on_the_normalised_name(self):
         """`Host.Example.` and `host.example` are the same name; a spelling
         that missed here would misattribute the counter."""
-        mod, listener = self._listener(internal=["host.example"])
+        internal = self._internal(["host.example"])
         with unittest.mock.patch.object(
-                mod.socket, "getaddrinfo",
+                socket, "getaddrinfo",
                 return_value=[(2, 1, 6, "", ("10.0.0.9", 443))]):
             self.assertEqual(
-                listener._dial_failure_reason(
-                    normalise_hostname("Host.Example.")),
+                dial_failure_reason(
+                    normalise_hostname("Host.Example."), internal),
                 "upstream unreachable")
 
 

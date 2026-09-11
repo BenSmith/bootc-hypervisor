@@ -641,6 +641,7 @@ from egress_policy import (
 )
 from workload_addr import broker_listen_address
 import egress_relay
+from egress_upstream import Upstream
 import inspect_figures
 
 LISTENER = Path(__file__).resolve().parent.parent / "libexec" / "workload-inspect-listener"
@@ -880,14 +881,14 @@ class TestTheRefusalWhenTheBrokerIsDown(_BrokerRig):
         self.assertIn(b"audit.log", self.answer)
 
     def test_the_failed_host_is_not_re_resolved(self):
-        """_dial_failure_reason exists to tell the wildcard trap from a dead
+        """dial_failure_reason exists to tell the wildcard trap from a dead
         host, and it does that by RE-RESOLVING the name. On this leg the name
         was never dialled -- a loopback address on this box was -- so running
         it would attribute a dead broker to whatever api.provider resolves to,
         and would pay a synchronous getaddrinfo for the wrong answer."""
         mod = listener_mod()
         with unittest.mock.patch.object(
-                mod.Listener, "_dial_failure_reason") as failure:
+                mod, "dial_failure_reason") as failure:
             self._serve(self._policy([BROKERED]), _GET_BROKERED, refuse=True)
         failure.assert_not_called()
 
@@ -896,7 +897,7 @@ class TestTheRefusalWhenTheBrokerIsDown(_BrokerRig):
         behaviour the broker path opts out of."""
         mod = listener_mod()
         with unittest.mock.patch.object(
-                mod.Listener, "_dial_failure_reason",
+                mod, "dial_failure_reason",
                 return_value=DROP_UNREACHABLE) as failure:
             self._serve(self._policy([PLAIN]), _GET_PLAIN, refuse=True)
         failure.assert_called_once()
@@ -907,12 +908,10 @@ class TestTheRefusalWhenTheBrokerIsDown(_BrokerRig):
         address. That has to reach the caller's broker arm as a legible
         refusal: a bare ValueError kills the connection thread with a
         traceback and tells the operator nothing about what is wrong."""
-        mod = listener_mod()
-        listener = mod.Listener([], io.StringIO(),
-                                policy=self._policy([BROKERED]))
+        upstream = Upstream()
         with unittest.mock.patch.object(os, "getuid", return_value=0):
             with self.assertRaises(OSError) as caught:
-                listener._dial_broker("api.provider")
+                upstream.dial_broker("api.provider")
         self.assertIn("outside the workload range", str(caught.exception))
 
 
@@ -1084,24 +1083,22 @@ class TestTheBrokerAddressComesFromTheUid(unittest.TestCase):
         """No registry and no allocation step: the inspector and the broker's
         unit reach the same address from the same uid, so the two halves
         cannot drift."""
-        mod = listener_mod()
-        listener = mod.Listener([], io.StringIO())
+        upstream = Upstream()
         with unittest.mock.patch.object(os, "getuid", return_value=10007), \
                 unittest.mock.patch.object(
                     socket, "create_connection") as dial:
-            listener._dial_broker("api.provider")
+            upstream.dial_broker("api.provider")
         dial.assert_called_once()
         self.assertEqual(dial.call_args[0][0],
                          (BROKER_ADDR, BROKER_INSTANCE_PORT))
 
     def test_it_is_derived_once_and_kept(self):
-        mod = listener_mod()
-        listener = mod.Listener([], io.StringIO())
+        upstream = Upstream()
         with unittest.mock.patch.object(os, "getuid", return_value=10007), \
                 unittest.mock.patch.object(socket, "create_connection"):
-            listener._dial_broker("api.provider")
-            listener._dial_broker("api.provider")
-        self.assertEqual(listener._broker_address, BROKER_ADDR)
+            upstream.dial_broker("api.provider")
+            upstream.dial_broker("api.provider")
+        self.assertEqual(upstream._broker_address, BROKER_ADDR)
 
 
 class TestTheReasonIsSelectable(unittest.TestCase):
