@@ -488,6 +488,7 @@ lib/vm_image_fetch.py              # A cloud image fetched and sha256-verified i
 lib/vm_disk_build.py               # A VM's disks built: system.qcow2 from cloud/local/bootc image with rotate-and-restore on update, data.qcow2 if sized
 lib/passt_dns_host.py              # What the host has: default gateway and first nameserver per family
 lib/passt_dns_fragment.py          # What the guest is told: the netdev DNS fragment builders and the per-family rule
+lib/filter_arm.py                  # One workload's uid-keyed egress filter armed and retired (both substrates): the skeleton, the stale purge, the allow elements, and the VM's responder document; VM and CONTAINER are the Substrate each helper binds
 lib/inspect_arm.py                 # One workload's inspection armed and retired (both substrates): both skeletons, the eight redirect elements, the internal exemptions, the broker's own; VM and CONTAINER are the Substrate each helper binds
 lib/inspect_listener.py            # The inspector process: the accept loop, the connection ceiling, the plane from the accepting port, and the status file; each plane is one call into inspect_tls or inspect_http
 lib/inspect_tls.py                 # The TLS plane: peek the ClientHello, match the name, then splice byte-exact, terminate with a minted leaf, or relay h2 at the frame level
