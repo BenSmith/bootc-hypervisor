@@ -14,9 +14,8 @@ the host, and the agent never holds the credential.
 **The guest is told nothing.** It has no endpoint, no variable and no name for
 the broker — so it cannot choose to use one, cannot decline to, and cannot be
 pointed at another workload's. The broker's own path involves no TLS
-interception and breaks no
-certificate pinning. (A *filtered* VM does carry a CA for a different
-reason — its egress inspector terminates TLS by default; see
+interception and breaks no certificate pinning. (A *filtered* VM does carry a CA for a
+different reason — its egress inspector terminates TLS by default; see
 `adr/008-transparent-egress-inspection.md`. That is egress policy, not
 this. The broker's argument does not rest on the guest being CA-free; it rests
 on the credential never entering the guest at all.)
@@ -577,17 +576,3 @@ AGENT_BROKER_SECRET='sk-...' /usr/libexec/workloadctl/agent-broker /tmp/b.toml
 
 Set `allow_unknown_callers = true` for that, since a caller from your own login
 is not a workload user and matches no sandbox.
-
----
-
-## 11. What is not built
-
-- **No consumer.** No deployed workload declares credential material, on either
-  substrate, and there is no sandbox VM and no guest image. The feature has zero
-  users; the two workloads the rig stands up are throwaways it creates and
-  destroys.
-- **Nothing runs the end-to-end check but a person.** The seam is proven (see
-  below) by a rig needing root and two VMs of its own, so it is neither a PR
-  gate nor part of the runtime rung. A regression in it surfaces when someone
-  next runs it by hand, not when it is introduced. Defects of this kind pass
-  the whole unit suite and reach hardware.
