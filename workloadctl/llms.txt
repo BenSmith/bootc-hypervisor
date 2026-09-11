@@ -476,6 +476,10 @@ lib/nft_elements.py                # A workload's egress filter (both substrates
 lib/vm_provision.py                # VM disk/seed provisioning
 lib/egress_status.py               # Egress inspector state derivation (both substrates)
 lib/vm_metrics.py                  # VM metric collectors (QMP balloon/vCPU, qemu cgroup) shared by the exporter and `stats`
+lib/workload_metrics.py            # Per-workload metric sources for the exporter: unit state, container health, cgroup usage, du
+lib/exporter_collect.py            # The exporter's discovery and its three passes (fast, inspect, disk)
+lib/exporter_render.py             # Prometheus exposition text for the fast and disk textfiles
+lib/exporter_textfile.py           # The exporter's drop: DROP_DIR, parse_args, atomic write, the two producers
 lib/egress_mint.py                 # Per-workload egress CA and leaf minting
 lib/vm_clock.py                    # Host-side guest clock resync on mint cache miss
 lib/inspect_listener.py            # The inspector process: the accept loop, the connection ceiling, the plane from the accepting port, and the status file; each plane is one call into inspect_tls or inspect_http
@@ -495,7 +499,7 @@ libexec/workload-inspect-listener  # The inspector's entrypoint: reads the polic
 libexec/workload-broker-config     # Writes one broker instance's broker.toml (ExecStartPre, either substrate)
 libexec/agent-broker               # The credential broker: a whole standalone program, not a helper
 libexec/workload-pcap              # Capture runner (SIGTERM → SystemExit)
-libexec/workload-exporter          # Prometheus metrics exporter (textfile drop)
+libexec/workload-exporter          # Prometheus metrics exporter: main() over lib/exporter_*.py
 workloads/<bundle>/                # Shipped bundles: workload.toml co-located with control files
                                    #   (Containerfile, build.sh, setup.sh, policy.cil, cloud-init — any subset)
 security/                          # Host-global CIL: workload-vm, workload-inspect, workload-resolve

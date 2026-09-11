@@ -20,6 +20,11 @@ onto its own infrequent timer (workload-exporter-disk.timer), writing a
 separate textfile in the same drop dir; node_exporter's textfile collector
 globs the directory and picks up both. The fast path never touches the disk.
 
+The program is lib/exporter_collect.py (which workloads, and one pass per
+producer), lib/exporter_render.py (the exposition text) and
+lib/exporter_textfile.py (the drop); the per-workload readers are
+lib/workload_metrics.py beside lib/vm_metrics.py. This file is main().
+
 Usage: workload-exporter [--disk] [output_path]
   --disk:      collect only disk usage (slow walk), for the disk timer
   output_path: file to write (defaults per mode, under /run/workload-exporter)

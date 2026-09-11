@@ -648,7 +648,7 @@ def container_uses_inspect(config: dict) -> bool:
     substrate: the single source of the predicate (D2 in the container
     egress-parity build spec). ``ContainerSubstrate.uses_inspect()`` delegates here rather than
     restating the logic, and ``get_enabled_workloads()``
-    (libexec/workload-exporter) calls it directly on the raw parsed TOML --
+    (lib/exporter_collect.py) calls it directly on the raw parsed TOML --
     it reads config off disk and cannot build a WorkloadConfig/Substrate.
     """
     net = config.get("network", {})

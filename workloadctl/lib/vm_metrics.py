@@ -3,7 +3,7 @@ VM metric collectors shared by the Prometheus exporter and the CLI.
 
 get_vm_qmp_metrics() (guest-side stats over QMP) and find_vm_cgroup()
 (host-side cgroup usage of the qemu process) are the two VM-specific metric
-sources workload-exporter's fast collection pass uses; kept here, importable,
+sources the exporter's fast pass (exporter_collect) uses; kept here, importable,
 so other callers (e.g. lib/substrate.py) can reuse them too.
 """
 
