@@ -474,6 +474,7 @@ lib/egress_status.py               # Egress inspector state derivation (both sub
 lib/vm_metrics.py                  # VM metric collectors (QMP balloon/vCPU, qemu cgroup) shared by the exporter and `stats`
 lib/egress_mint.py                 # Per-workload egress CA and leaf minting
 lib/vm_clock.py                    # Host-side guest clock resync on mint cache miss
+lib/inspect_counters.py            # The listener's figures: writer of inspect-status.json, read by inspect_figures
 lib/inspect_figures.py             # FIGURES table: the single producer behind doctor and the exporter
 lib/pcap.py                        # Capture planning (JSON plan shared with the helper)
 generators/workload-generator      # Tiny shell systemd generator (emits workload-generate.service)

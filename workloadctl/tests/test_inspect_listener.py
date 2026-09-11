@@ -2861,8 +2861,8 @@ class TestCounters(unittest.TestCase):
         self.assertGreater(len(calls), 5)
         for arg in calls:
             arg = arg.strip()
-            if arg in ("self", "reason", "reason: str"):
-                continue          # the definition and the docstring's own text
+            if arg == "reason":
+                continue          # chosen above the call site, by name
             self.assertFalse(arg.startswith(('"', "'")),
                              f"record_drop called with the literal {arg}")
             # Resolved against egress_record, where the reasons are defined,

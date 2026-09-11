@@ -49,6 +49,7 @@ from egress_policy import (
     inspect_record_path,
 )
 from nft_elements import INSPECT_RECORD_SELINUX_TYPE
+from inspect_counters import Counters
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -929,17 +930,17 @@ class TestTheH2BlindSpotIsCounted(unittest.TestCase):
     not in the file, rather than an operator concluding the guest sent none."""
 
     def test_the_counter_exists_and_starts_at_zero(self):
-        counters = _mod().Counters()
+        counters = Counters()
         self.assertEqual(counters.h2_unrecorded, 0)
 
     def test_it_is_reported(self):
-        snap = _mod().Counters().snapshot(open_now=0, refused=0)
+        snap = Counters().snapshot(open_now=0, refused=0)
         self.assertIn("h2_unrecorded", snap)
 
     def test_it_has_a_writer(self):
         """A counter with no writer reads 0, which is a legal value — so every
         test passes while the figure means nothing."""
-        counters = _mod().Counters()
+        counters = Counters()
         counters.record_h2_unrecorded()
         self.assertEqual(counters.h2_unrecorded, 1)
 
