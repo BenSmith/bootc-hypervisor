@@ -463,7 +463,7 @@ def validate_single(config: WorkloadConfig, manager: WorkloadManager, json_mode=
     # [[vm.network.internal]] names are resolved at VM START, by the inspect
     # socket's ExecStartPre, and one that does not resolve there fails that
     # prestart -- which the VM Requires=, so the guest does not boot. That is
-    # deliberate (see workload-vm-inspect's internal_failure), but it means a
+    # deliberate (see inspect_arm.internal_failure), but it means a
     # name that is merely wrong costs the whole workload at the worst moment,
     # on a host where the operator is not watching.
     #
@@ -503,17 +503,14 @@ def validate_single(config: WorkloadConfig, manager: WorkloadManager, json_mode=
                       f"nothing on its own; the guest simply loses reach "
                       f"to that host).")
 
-    # Container counterpart (G9 in the container egress-parity build spec):
-    # same validate-time resolve, sourced from [network].internal, and the
-    # SAME start-time consequence as the VM side now that P1-7..P1-11 have
-    # landed. This comment used to say the container inspector did not exist
-    # yet and that an unresolvable name therefore cost nothing at start; that
-    # expired in this same branch. workload-container-inspect's `up()` raises
-    # internal_failure() on a name it cannot resolve, it is the inspect
-    # socket's ExecStartPre with no `-` prefix, and the workload Requires=
-    # that socket -- so the workload does not start at all. The message below
-    # has to say so, exactly as the VM one does, or it warns about losing one
-    # exemption when what is actually at stake is the next restart.
+    # Container counterpart: same validate-time resolve, sourced from
+    # [network].internal, and the SAME start-time consequence as the VM side.
+    # inspect_arm.up raises internal_failure() on a name it cannot resolve, it
+    # is the inspect socket's ExecStartPre with no `-` prefix, and the workload
+    # Requires= that socket -- so the workload does not start at all. The
+    # message below has to say so, exactly as the VM one does, or it warns
+    # about losing one exemption when what is actually at stake is the next
+    # restart.
     if not config.config.get("vm") and container_uses_inspect(config.config):
         net = config.config.get("network", {}) or {}
         for entry in container_internal_entries(net):

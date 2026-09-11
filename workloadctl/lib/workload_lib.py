@@ -1862,8 +1862,8 @@ def validate_container_network(net: dict, config: dict | None = None) -> list[st
 # the internal-destination exemptions, the cgroup exemptions) live in
 # lib/nft_elements.py and take nothing but a uid and already-resolved addresses -- no
 # VM-specific state -- so they are reused verbatim for containers (imported
-# directly by libexec/workload-container-filter and
-# libexec/workload-container-inspect). What differs, and what lives here, is
+# directly by libexec/workload-container-filter and lib/inspect_arm.py). What
+# differs, and what lives here, is
 # resolving and shaping the CONTAINER schema's own entry types
 # (ContainerAllowEntry keeps `host`/`address`/`port` apart, where VmAllowEntry
 # packs them into one 'addr:port' string) into the inputs those builders take.
@@ -1919,7 +1919,7 @@ def container_filter_commands(uid: int, allow: list, action: str, resolved=None)
 def container_internal_resolve(host: str) -> list:
     """Resolve one [[network.internal]] host, or raise ValueError naming it.
     Mirrors vm_internal_resolve. Fatal by design (see that function and
-    workload-vm-inspect's internal_failure): an exemption armed for the wrong
+    inspect_arm.internal_failure): an exemption armed for the wrong
     address, or not armed at all, leaves the host refused by the drop the
     entry existed to except.
     """

@@ -30,10 +30,10 @@ from pathlib import Path
 from unittest import mock
 
 import cmd_drift  # noqa: E402
+import inspect_arm  # noqa: E402
 from egress_policy import vm_inspect_policy, vm_inspect_policy_text
 from workload_lib import container_inspect_policy_text  # noqa: E402
 
-from tests import load_script
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -68,10 +68,6 @@ class TestThereIsOneRenderer(unittest.TestCase):
     inspected workload as permanently drifted, which is how a signal stops being
     read. So the bytes come from one function."""
 
-    @classmethod
-    def setUpClass(cls):
-        cls.mod = load_script("libexec/workload-vm-inspect")
-
     def test_the_text_is_the_document_json_encoded(self):
         net = {"hosts": ["b.example.com", "a.example.com"], "tls": "inspect"}
         text = vm_inspect_policy_text(net)
@@ -95,14 +91,12 @@ class TestThereIsOneRenderer(unittest.TestCase):
         net = {"egress": "filtered", "hosts": ["api.example.com"]}
         with tempfile.TemporaryDirectory() as tmp:
             path = str(Path(tmp) / "inspect.json")
-            with mock.patch.object(self.mod, "network_config",
-                                   lambda _name: net), \
-                 mock.patch.object(self.mod, "inspect_policy_path",
+            with mock.patch.object(inspect_arm, "inspect_policy_path",
                                    lambda _name: path), \
-                 mock.patch.object(self.mod.os, "chown", lambda *a: None), \
-                 mock.patch.object(self.mod.pwd, "getpwnam",
+                 mock.patch.object(inspect_arm.os, "chown", lambda *a: None), \
+                 mock.patch.object(inspect_arm.pwd, "getpwnam",
                                    lambda _n: mock.Mock(pw_gid=10000)):
-                self.mod.write_policy("demo")
+                inspect_arm.write_policy(inspect_arm.VM, "demo", net)
             self.assertEqual(Path(path).read_text(), vm_inspect_policy_text(net))
 
 

@@ -8,8 +8,11 @@ asserted against the worked example in the design (uid 10004), not against
 the builder's own output.
 """
 
+import io
 import unittest
+from contextlib import redirect_stderr
 from pathlib import Path
+from unittest import mock
 
 from egress_plane import CLEARTEXT, PLANES, TLS
 from egress_policy import (
@@ -35,6 +38,8 @@ from config_parser import runtime_dir
 from vm_defs import vm_allowed_hosts
 from egress_policy import policy_permits
 from workload_addr import IP_BIN, ADVERTISED_IFACE
+import inspect_arm
+from tests import load_script
 
 ROOT = Path(__file__).resolve().parent.parent
 PROXY_SKELETON_FILE = ROOT / "nftables" / "workload-proxy.nft"
@@ -311,25 +316,26 @@ class TestLinkAddressCommands(unittest.TestCase):
 
 
 class TestHelperArmsBothTables(unittest.TestCase):
-    """libexec/workload-vm-inspect: both skeletons, both tables, no cgroups.
+    """lib/inspect_arm.py: both skeletons, both tables, no cgroups.
 
-    The helper is the first thing in the work that writes to the kernel; the
+    The arming is the first thing in the work that writes to the kernel; the
     properties worth pinning down are the ones a silent edit drops, so they
-    are asserted on the source the way test_vm_proxy.py does, plus a
-    mocked subprocess run for the order in which the writes happen.
+    are asserted on the source the way test_vm_proxy.py does. One body serves
+    both substrates, so these rows are the container helper's too.
     """
 
     @classmethod
     def setUpClass(cls):
-        from tests import load_script
-        cls.mod = load_script("libexec/workload-vm-inspect")
+        cls.source = (ROOT / "lib" / "inspect_arm.py").read_text()
+        cls.up = cls.source[cls.source.index("def up("):
+                            cls.source.index("def down(")]
+        cls.down = cls.source[cls.source.index("def down("):]
 
     def test_up_applies_both_skeletons_before_any_element(self):
         """The constants are what the source names (not their values): a
         skeleton applied after the first element would not create a table
         for a host that never had one, and the element add would fail."""
-        source = (ROOT / "libexec" / "workload-vm-inspect").read_text()
-        up = source[source.index("def up("):source.index("def down(")]
+        up = self.up
         self.assertLess(up.index("NFT_PROXY_SKELETON"),
                         up.index("inspect_element_commands"))
         self.assertLess(up.index("NFT_SKELETON"),
@@ -341,8 +347,7 @@ class TestHelperArmsBothTables(unittest.TestCase):
         a fresh cgroup on every start: the add belongs to the unit that owns
         the cgroup (T5), not to this helper, which runs as ExecStartPre while
         that cgroup is not yet the one being armed."""
-        source = (ROOT / "libexec" / "workload-vm-inspect").read_text()
-        up = source[source.index("def up("):source.index("def down(")]
+        up = self.up
         self.assertNotIn("inspect_cgroup_command", up)
         self.assertNotIn("inspect_cgroup_filter_command", up)
 
@@ -353,13 +358,11 @@ class TestHelperArmsBothTables(unittest.TestCase):
         the guest's first dial sees the LAST boot's ECH alarms and internal
         refusals with nothing marking them as stale. Cleared at arm rather than
         at stop because a stop is not guaranteed to run."""
-        source = (ROOT / "libexec" / "workload-vm-inspect").read_text()
-        up = source[source.index("def up("):source.index("def down(")]
+        up = self.up
         self.assertIn("clear_status(inspect_status_path(name))", up)
 
     def test_down_removes_elements_and_addresses_but_not_the_link(self):
-        source = (ROOT / "libexec" / "workload-vm-inspect").read_text()
-        down = source[source.index("def down("):source.index("def main(")]
+        down = self.down
         self.assertIn("inspect_element_commands(uid, \"delete\")", down)
         self.assertIn("remove_listener_addresses", down)
         # The shared link and the advertised address are never torn down.
@@ -372,8 +375,7 @@ class TestHelperArmsBothTables(unittest.TestCase):
         An element add against a table that does not exist yet fails the start,
         and the internal_ok sets live in the filter table the skeleton creates.
         """
-        source = (ROOT / "libexec" / "workload-vm-inspect").read_text()
-        up = source[source.index("def up("):source.index("def down(")]
+        up = self.up
         self.assertIn("internal_ok_commands", up)
         self.assertLess(up.index("NFT_SKELETON"),
                         up.index("internal_ok_commands"))
@@ -387,8 +389,7 @@ class TestHelperArmsBothTables(unittest.TestCase):
         config cannot name. Arming the new address without purging by uid
         leaves both live, and the workload is exempted for an address nothing
         asked for."""
-        source = (ROOT / "libexec" / "workload-vm-inspect").read_text()
-        up = source[source.index("def up("):source.index("def down(")]
+        up = self.up
         self.assertNotIn('internal_ok_commands(uid, addresses, "delete")', up)
 
     def test_down_clears_the_internal_exemptions_and_tolerates_absence(self):
@@ -398,8 +399,7 @@ class TestHelperArmsBothTables(unittest.TestCase):
         stop -- and by uid its elements are removable anyway, which is why the
         teardown no longer needs the name at all.
         """
-        source = (ROOT / "libexec" / "workload-vm-inspect").read_text()
-        down = source[source.index("def down("):source.index("def main(")]
+        down = self.down
         self.assertIn("purge_internal_exemptions(uid, name)", down)
         # The calls, not the prose -- the comment above them says "not
         # check=True" and a substring search would match that.
@@ -411,10 +411,9 @@ class TestHelperArmsBothTables(unittest.TestCase):
         names mean NOW: a record that moved while the VM ran leaves its old
         (uid, address) element armed, named by no config line and alive until
         reboot -- and the next start adds the new address beside it."""
-        source = (ROOT / "libexec" / "workload-vm-inspect").read_text()
-        down = source[source.index("def down("):source.index("def main(")]
-        self.assertNotIn("vm_internal_resolve", down)
-        self.assertNotIn("internal_hosts", down)
+        down = self.down
+        self.assertNotIn("sub.resolve", down)
+        self.assertNotIn("sub.internal_hosts", down)
 
     def test_up_writes_the_policy_before_it_arms_the_redirect(self):
         """The listener is socket-activated, so the guest's first dial can
@@ -422,18 +421,18 @@ class TestHelperArmsBothTables(unittest.TestCase):
         arming is a window in which the listener starts, cannot read its
         lists, and fails -- on a connection the guest already made.
         """
-        source = (ROOT / "libexec" / "workload-vm-inspect").read_text()
-        up = source[source.index("def up("):source.index("def down(")]
-        self.assertIn("write_policy(name)", up)
-        self.assertLess(up.index("write_policy(name)"),
+        up = self.up
+        self.assertIn("write_policy(sub, name, net)", up)
+        self.assertLess(up.index("write_policy(sub, name, net)"),
                         up.index("inspect_element_commands"))
 
     def test_the_policy_is_written_group_readable_and_not_world_readable(self):
         """The listener runs as _wl-<name> and must read it; 0640 rather than
         0644 keeps one workload's policy from being enumerable by another,
         exactly as the proxy's generated files are."""
-        source = (ROOT / "libexec" / "workload-vm-inspect").read_text()
-        write = source[source.index("def write_policy("):source.index("def up(")]
+        source = self.source
+        write = source[source.index("def write_policy("):
+                       source.index("def internal_failure(")]
         self.assertIn("0o640", write)
         self.assertIn("os.replace(tmp, path)", write)
 
@@ -756,14 +755,9 @@ class TestTheInternalFailureSaysWhatItCosts(unittest.TestCase):
     carry the join itself.
     """
 
-    @classmethod
-    def setUpClass(cls):
-        from tests import load_script
-        cls.mod = load_script("libexec/workload-vm-inspect")
-
     def _message(self):
-        return self.mod.internal_failure(
-            "forge", "git.local",
+        return inspect_arm.internal_failure(
+            inspect_arm.VM, "forge", "git.local",
             ValueError("[vm.network].internal names 'git.local', which does "
                        "not resolve on this host"))
 
@@ -791,17 +785,43 @@ class TestTheInternalFailureSaysWhatItCosts(unittest.TestCase):
         """A name that does not resolve and a name that resolves to a public
         address fail at different call sites and cost exactly the same thing,
         so neither may be the one that reaches the journal bare."""
-        source = (ROOT / "libexec" / "workload-vm-inspect").read_text()
+        source = (ROOT / "lib" / "inspect_arm.py").read_text()
         up = source[source.index("def up("):source.index("def down(")]
         self.assertEqual(up.count("internal_failure("), 2)
-        self.assertIn("vm_internal_resolve(host)", up)
+        self.assertIn("sub.resolve(host)", up)
         self.assertIn("internal_ok_commands(uid, addresses, \"add\")", up)
 
     def test_the_start_still_fails(self):
         """Loud, not lenient. Skipping the host would put the workload up
         looking configured with the one destination it was written for
         refused."""
-        source = (ROOT / "libexec" / "workload-vm-inspect").read_text()
+        source = (ROOT / "lib" / "inspect_arm.py").read_text()
         up = source[source.index("def up("):source.index("def down(")]
         self.assertIn("raise ValueError(internal_failure(", up)
         self.assertNotIn("continue", up)
+
+
+class TestVmShim(unittest.TestCase):
+    """libexec/workload-vm-inspect run end to end through main(): argv in,
+    inspect_arm.up bound to the VM substrate, down unbound, exit code out."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.mod = load_script("libexec/workload-vm-inspect")
+
+    def test_up_arms_the_vm_substrate(self):
+        with mock.patch.object(self.mod, "up", return_value=0) as up:
+            self.assertEqual(self.mod.main(["x", "up", "forge"]), 0)
+        up.assert_called_once_with(inspect_arm.VM, "forge")
+
+    def test_down_needs_no_substrate(self):
+        with mock.patch.object(self.mod, "down", return_value=0) as down:
+            self.assertEqual(self.mod.main(["x", "down", "forge"]), 0)
+        down.assert_called_once_with("forge")
+
+    def test_a_bad_verb_is_a_usage_error(self):
+        with mock.patch.object(self.mod, "up") as up, \
+             redirect_stderr(io.StringIO()):
+            self.assertEqual(self.mod.main(["x", "sideways", "forge"]), 2)
+        up.assert_not_called()
+

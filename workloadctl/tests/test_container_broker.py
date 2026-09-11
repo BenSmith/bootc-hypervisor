@@ -25,6 +25,7 @@ import unittest
 from pathlib import Path
 
 from tests.test_generator import run_generator, write_config
+import inspect_arm
 from nft_elements import internal_ok_elements
 from broker_config import (
     BROKER_INSTANCE_PORT, container_broker_hosts,
@@ -603,7 +604,7 @@ class TestTheInternalCarveOut(unittest.TestCase):
 
     def _up(self):
         source = (Path(__file__).resolve().parent.parent
-                  / "libexec" / "workload-container-inspect").read_text()
+                  / "lib" / "inspect_arm.py").read_text()
         return source[source.index("def up("):source.index("def down(")]
 
     def test_the_address_is_one_the_drop_would_match(self):
@@ -617,7 +618,9 @@ class TestTheInternalCarveOut(unittest.TestCase):
 
     def test_it_is_armed_only_for_a_workload_that_has_a_broker(self):
         up = self._up()
-        self.assertIn("container_uses_credentials(config)", up)
+        self.assertIn("sub.uses_credentials(config)", up)
+        self.assertIs(inspect_arm.CONTAINER.uses_credentials,
+                      container_uses_credentials)
         self.assertIn("broker_listen_address(uid)", up)
 
     def test_it_is_appended_before_the_commands_are_built(self):
