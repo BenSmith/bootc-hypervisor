@@ -492,6 +492,10 @@ lib/dns_wire.py                    # The DNS wire format the synthesising respon
 lib/resolve_policy.py              # The responder's answer document as read at start (Policy), beside its writer's seam
 lib/resolve_server.py              # The responder's serve loop (UDP inline, TCP on bounded threads), Counters and the status file
 lib/pcap.py                        # Capture planning (JSON plan shared with the helper)
+lib/pcap_session.py                # One capture: the run and its ExecStopPost cleanup
+lib/pcap_host_tap.py               # Host vantage: nft log rules + nflog reader
+lib/pcap_vm_tap.py                 # VM guest vantage: QMP filter-dump, probe, timestamp fix
+lib/pcap_container_tap.py          # Container guest vantage: tcpdump in the netns
 generators/workload-generator      # Tiny shell systemd generator (emits workload-generate.service)
 generators/workload-generate       # Python script run by workload-generate.service at early boot
 libexec/workload-ensure-user       # Per-workload user setup (ExecStartPre)
@@ -501,7 +505,7 @@ libexec/workload-vm-*              # VM helpers: build-disk, qmp, shutdown, noti
 libexec/workload-inspect-listener  # The inspector's entrypoint: reads the policy, recovers the activated sockets, runs lib/inspect_listener.py; both substrates
 libexec/workload-broker-config     # Writes one broker instance's broker.toml (ExecStartPre, either substrate)
 libexec/agent-broker               # The credential broker: a whole standalone program, not a helper
-libexec/workload-pcap              # Capture runner (SIGTERM → SystemExit)
+libexec/workload-pcap              # Capture runner main() (SIGTERM → SystemExit)
 libexec/workload-exporter          # Prometheus metrics exporter: main() over lib/exporter_*.py
 workloads/<bundle>/                # Shipped bundles: workload.toml co-located with control files
                                    #   (Containerfile, build.sh, setup.sh, policy.cil, cloud-init — any subset)

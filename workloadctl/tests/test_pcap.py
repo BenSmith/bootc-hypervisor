@@ -8,6 +8,7 @@ the snaplen default, what `filter-dump` cannot do, and that `log group` takes a
 literal.
 """
 
+import json
 import os
 import struct
 import tempfile
@@ -15,6 +16,8 @@ from unittest import mock
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+
+from tests import load_script
 
 from pcap import (
     CT_MARK_MASK, CT_MARK_TAG, CT_MARK_UID_MASK, DIRECTION_DEFAULT,
@@ -649,9 +652,11 @@ class TestHelperContract(unittest.TestCase):
         cls.vm_tap = (ROOT / "lib" / "pcap_vm_tap.py").read_text()
         cls.container_tap = (
             ROOT / "lib" / "pcap_container_tap.py").read_text()
+        cls.session = (ROOT / "lib" / "pcap_session.py").read_text()
 
     def test_teardown_runs_in_a_finally(self):
-        self.assertIn("finally:", self.source)
+        body = self.session[self.session.index("def run("):]
+        self.assertIn("finally:", body)
 
     def test_the_plan_is_read_not_recomputed(self):
         """If the helper re-derived it from the config the two could disagree,
@@ -662,7 +667,7 @@ class TestHelperContract(unittest.TestCase):
         """A probe emitted before the object exists is not in the file, and
         the correction would then be measured against whatever unrelated
         packet happened to be first."""
-        body = self.source[self.source.index("def main("):]
+        body = self.session[self.session.index("def run("):]
         self.assertLess(body.index("guest_vm_up"), body.index("emit_probe"))
 
     def test_the_correction_needs_nothing_from_the_guest(self):
@@ -702,7 +707,8 @@ class TestHelperContract(unittest.TestCase):
     def test_an_unfinalized_staged_file_is_reported_not_deleted(self):
         """The packets are real and the operator asked for them; only the
         timestamps are uncorrected."""
-        body = self.source[self.source.index("def cleanup"):]
+        body = self.session[self.session.index("def cleanup"):
+                            self.session.index("def run(")]
         self.assertNotIn("os.unlink(staging)", body[:1400])
 
     def test_no_wireshark_cli_tool_is_shelled_out_to(self):
@@ -733,7 +739,8 @@ class TestHelperContract(unittest.TestCase):
     def test_cleanup_is_idempotent_and_needs_no_plan(self):
         """It runs as ExecStopPost, including after a start that never got far
         enough to have a plan."""
-        self.assertIn("def cleanup(name: str)", self.source)
+        self.assertIn("def cleanup(name: str)", self.session)
+        self.assertIn('argv[1] == "cleanup"', self.source)
 
     def test_the_capture_chains_are_removed_with_the_rules(self):
         """An empty chain in the security-critical table is one more thing for
@@ -1106,3 +1113,39 @@ class TestPcapShift(unittest.TestCase):
             f.write(whole[:-4])
         self.assertEqual(pcap_shift_timestamps(self.src, self.dst, 1.0), 1)
         self.assertEqual(pcap_packet_count(self.dst), 1)
+
+
+class TestEntrypointWiring(unittest.TestCase):
+    """main() reaches the session with what argv carried. The module is
+    imported with the SIGTERM install stubbed, so the test process keeps its
+    own handler."""
+
+    @classmethod
+    def setUpClass(cls):
+        with mock.patch("signal.signal"):
+            cls.helper = load_script("libexec/workload-pcap")
+
+    def test_run_hands_the_decoded_plan_to_the_session(self):
+        plan = {"vantages": [], "uid": 10007, "write": None,
+                "substrate": "container", "bpf": []}
+        with mock.patch("pcap_session._wait") as wait:
+            rc = self.helper.main(["workload-pcap", "run", "fj",
+                                   json.dumps(plan)])
+        self.assertEqual(rc, 0)
+        wait.assert_called_once_with([], plan)
+
+    def test_cleanup_takes_the_host_rules_down_for_the_named_workload(self):
+        with mock.patch("pcap_session.pwd.getpwnam",
+                        return_value=SimpleNamespace(pw_uid=10007)), \
+             mock.patch("pcap_session.host_down") as down, \
+             mock.patch("pcap_session.qmp_command", side_effect=OSError), \
+             mock.patch("pcap_session.os.path.exists", return_value=False):
+            rc = self.helper.main(["workload-pcap", "cleanup", "fj"])
+        self.assertEqual(rc, 0)
+        down.assert_called_once_with(10007)
+
+    def test_anything_else_is_usage(self):
+        with mock.patch("sys.stderr"):
+            self.assertEqual(self.helper.main(["workload-pcap"]), 2)
+            self.assertEqual(
+                self.helper.main(["workload-pcap", "run", "fj"]), 2)
