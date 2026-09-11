@@ -484,6 +484,9 @@ lib/inspect_http.py                # The per-request loop: authorise by Host, re
 lib/inspect_scope.py               # What every connection decision is made against: one workload's policy, counters, record, upstream pool and minter
 lib/inspect_counters.py            # The listener's figures: writer of inspect-status.json, read by inspect_figures
 lib/inspect_figures.py             # FIGURES table: the single producer behind doctor and the exporter
+lib/dns_wire.py                    # The DNS wire format the synthesising responder speaks: build_answer, pure bytes -> bytes
+lib/resolve_policy.py              # The responder's answer document as read at start (Policy), beside its writer's seam
+lib/resolve_server.py              # The responder's serve loop (UDP inline, TCP on bounded threads), Counters and the status file
 lib/pcap.py                        # Capture planning (JSON plan shared with the helper)
 generators/workload-generator      # Tiny shell systemd generator (emits workload-generate.service)
 generators/workload-generate       # Python script run by workload-generate.service at early boot
