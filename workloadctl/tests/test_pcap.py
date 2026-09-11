@@ -647,6 +647,8 @@ class TestHelperContract(unittest.TestCase):
         cls.source = (ROOT / "libexec" / "workload-pcap").read_text()
         cls.host_tap = (ROOT / "lib" / "pcap_host_tap.py").read_text()
         cls.vm_tap = (ROOT / "lib" / "pcap_vm_tap.py").read_text()
+        cls.container_tap = (
+            ROOT / "lib" / "pcap_container_tap.py").read_text()
 
     def test_teardown_runs_in_a_finally(self):
         self.assertIn("finally:", self.source)
@@ -774,7 +776,8 @@ class TestHelperContract(unittest.TestCase):
         XDG_RUNTIME_DIR, HOME and that user's session bus. A hand-rolled
         `runuser` supplies none of them and does not even leave a cwd the
         workload user can enter."""
-        body = self.source[self.source.index("def container_netns_pid"):]
+        body = self.container_tap[
+            self.container_tap.index("def container_netns_pid"):]
         # Assert on the code, not the docstring, which names runuser to say
         # why it is not used.
         code = body.split('"""')[2]
@@ -784,7 +787,9 @@ class TestHelperContract(unittest.TestCase):
     def test_the_container_interface_is_discovered_not_assumed(self):
         """pasta names its tun after the host interface it templated from and
         podman may pass its own; measured, neither is tap0."""
-        body = self.source[self.source.index("def container_interface"):]
+        body = self.container_tap[
+            self.container_tap.index("def container_interface"):
+            self.container_tap.index("def container_reader")]
         self.assertIn("route", body[:800])
         self.assertNotIn('"tap0"', body[:800])
 
