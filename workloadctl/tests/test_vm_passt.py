@@ -17,29 +17,23 @@ disclosure the configuration exists to prevent. A test that only asked "does
 DNS work" would pass on a leaking configuration.
 """
 
-import importlib.machinery
-import importlib.util
 import socket
 import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
 
+import passt_dns_fragment
+import passt_dns_host
+import vm_netdev
+import workload_lib
+from tests import load_script
 from vm_defs import parse_vm_port
 from vm_network_config import validate_vm_network
-import workload_lib
 from workload_addr import (NFLOG_GROUP_BASE, UID_MAX, UID_MIN,
                            MGMT_SSH_PORT, management_address,
                            nflog_group)
 
-
-def _load(path, name):
-    """Load one of the extension-less entrypoints as a module."""
-    spec = importlib.util.spec_from_loader(
-        name, importlib.machinery.SourceFileLoader(name, path))
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
 
 
 class TestUidDerivedValues(unittest.TestCase):
@@ -248,7 +242,7 @@ class TestNetworkValidation(unittest.TestCase):
 
 
 class TestNetdevDnsDerivation(unittest.TestCase):
-    """libexec/workload-vm-netdev, for a workload with NO responder.
+    """passt_dns_host and passt_dns_fragment, for a workload with NO responder.
 
     An unfiltered or bridged VM: its guest really is handed the host's own
     nameservers, so the symmetric all-three-or-none loop still governs it, and
@@ -261,22 +255,18 @@ class TestNetdevDnsDerivation(unittest.TestCase):
     real nameservers over NDP RDNSS / DHCPv6.
     """
 
-    @classmethod
-    def setUpClass(cls):
-        cls.mod = _load("libexec/workload-vm-netdev", "workload_vm_netdev")
-
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
 
     def _resolv_conf(self, text):
-        """Point the module's RESOLV_CONF at a real file holding `text`."""
+        """Point passt_dns_host.RESOLV_CONF at a real file holding `text`."""
         path = Path(self.tmp.name) / "resolv.conf"
         path.write_text(text)
-        return mock.patch.object(self.mod, "RESOLV_CONF", path)
+        return mock.patch.object(passt_dns_host, "RESOLV_CONF", path)
 
     def test_single_family_uses_the_native_properties(self):
-        fragment, _ = self.mod.build_dns_fragment(
+        fragment, _ = passt_dns_fragment.build_dns_fragment(
             {4: "192.168.0.1"}, {4: "127.0.0.53"})
         self.assertEqual(
             fragment,
@@ -286,7 +276,7 @@ class TestNetdevDnsDerivation(unittest.TestCase):
         # The QEMU netdev's dns-forward/dns/dns-host properties are
         # single-valued, so only one family can use them; the other has to go
         # through the repeatable param= escape hatch.
-        fragment, _ = self.mod.build_dns_fragment(
+        fragment, _ = passt_dns_fragment.build_dns_fragment(
             {4: "192.168.0.1", 6: "fd00::1"},
             {4: "127.0.0.53", 6: "fd00::53"})
         self.assertIn("dns-forward=192.168.0.1", fragment)
@@ -298,13 +288,13 @@ class TestNetdevDnsDerivation(unittest.TestCase):
         # the scan that would have defaulted ip6.dns_host, so IPv6 DNS flows
         # get rewritten to an unspecified address. Omitting the family is safe:
         # the scan runs, finds nothing, advertises nothing.
-        fragment, _ = self.mod.build_dns_fragment(
+        fragment, _ = passt_dns_fragment.build_dns_fragment(
             {4: "192.168.0.1", 6: "fd00::1"}, {4: "127.0.0.53"})
         self.assertNotIn("fd00::1", fragment)
         self.assertNotIn("param=", fragment)
 
     def test_a_family_without_a_gateway_is_omitted_entirely(self):
-        fragment, _ = self.mod.build_dns_fragment(
+        fragment, _ = passt_dns_fragment.build_dns_fragment(
             {4: "192.168.0.1"}, {4: "127.0.0.53", 6: "fd00::53"})
         self.assertNotIn("fd00::53", fragment)
 
@@ -315,7 +305,7 @@ class TestNetdevDnsDerivation(unittest.TestCase):
             ({4: "192.168.0.1", 6: "fd00::1"}, {4: "127.0.0.53"}),
             ({6: "fd00::1"}, {6: "fd00::53"}),
         ):
-            fragment, _ = self.mod.build_dns_fragment(gateways, resolvers)
+            fragment, _ = passt_dns_fragment.build_dns_fragment(gateways, resolvers)
             # Count the option occurrences: forward and host must
             # appear the same number of times, once per configured family.
             forwards = fragment.count("dns-forward")
@@ -326,7 +316,7 @@ class TestNetdevDnsDerivation(unittest.TestCase):
         # An empty expansion would leave a dangling comma in the netdev
         # argument and QEMU would refuse to start, so "no DNS" has to be
         # spelled explicitly rather than as the empty string.
-        fragment, notes = self.mod.build_dns_fragment({}, {})
+        fragment, notes = passt_dns_fragment.build_dns_fragment({}, {})
         self.assertEqual(fragment, "dhcp-dns=off")
         self.assertTrue(fragment)
         self.assertTrue(any("no usable resolver" in n for n in notes))
@@ -341,7 +331,7 @@ class TestNetdevDnsDerivation(unittest.TestCase):
             "nameserver fd00::54\n"
         )
         with self._resolv_conf(text):
-            self.assertEqual(self.mod.host_resolvers(),
+            self.assertEqual(passt_dns_host.host_resolvers(),
                              {4: "127.0.0.53", 6: "fd00::53"})
 
     def test_loopback_resolvers_are_kept(self):
@@ -350,30 +340,31 @@ class TestNetdevDnsDerivation(unittest.TestCase):
         # is no reason to skip it — and skipping it would break DNS on every
         # systemd-resolved host.
         with self._resolv_conf("nameserver 127.0.0.53\n"):
-            self.assertEqual(self.mod.host_resolvers(), {4: "127.0.0.53"})
+            self.assertEqual(passt_dns_host.host_resolvers(), {4: "127.0.0.53"})
 
     def test_unreadable_resolv_conf_is_not_fatal(self):
         missing = Path(self.tmp.name) / "does-not-exist"
-        with mock.patch.object(self.mod, "RESOLV_CONF", missing):
-            self.assertEqual(self.mod.host_resolvers(), {})
+        with mock.patch.object(passt_dns_host, "RESOLV_CONF", missing):
+            self.assertEqual(passt_dns_host.host_resolvers(), {})
 
     def test_link_local_gateway_is_not_used(self):
         # An fe80::/10 gateway is scoped to an interface, so handing it to the
         # guest as a resolver address gives it something it cannot disambiguate.
         completed = mock.MagicMock(returncode=0,
                                    stdout="default via fe80::1 dev eth0\n")
-        with mock.patch.object(self.mod.subprocess, "run",
+        with mock.patch.object(passt_dns_host.subprocess, "run",
                                return_value=completed):
-            self.assertEqual(self.mod.default_gateways(), {})
+            self.assertEqual(passt_dns_host.default_gateways(), {})
 
     def test_missing_ip_binary_is_not_fatal(self):
-        with mock.patch.object(self.mod.subprocess, "run",
+        with mock.patch.object(passt_dns_host.subprocess, "run",
                                side_effect=OSError("no ip")):
-            self.assertEqual(self.mod.default_gateways(), {})
+            self.assertEqual(passt_dns_host.default_gateways(), {})
 
 
 class TestNetdevUnderSynthesis(unittest.TestCase):
-    """libexec/workload-vm-netdev, for a workload WITH a responder.
+    """passt_dns_fragment for a workload WITH a responder, and the dispatch in
+    vm_netdev.passt_dns, run end to end through libexec/workload-vm-netdev.
 
     Three fragments and no fourth, because only one of the three carries the v6
     flag and getting that wrong is invisible in a functional test: a guest with
@@ -389,7 +380,7 @@ class TestNetdevUnderSynthesis(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.mod = _load("libexec/workload-vm-netdev", "workload_vm_netdev")
+        cls.helper = load_script("libexec/workload-vm-netdev")
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -398,14 +389,14 @@ class TestNetdevUnderSynthesis(unittest.TestCase):
     # --- the fragment itself -------------------------------------------
 
     def test_row_one_points_dns_host_at_the_responder(self):
-        fragment, _ = self.mod.build_synthesis_fragment(
+        fragment, _ = passt_dns_fragment.build_synthesis_fragment(
             {4: "192.168.0.1"}, "127.130.0.5")
         self.assertIn("dns-forward=192.168.0.1", fragment)
         self.assertIn("dns=192.168.0.1", fragment)
         self.assertIn("dns-host=127.130.0.5", fragment)
 
     def test_row_one_carries_the_v6_black_hole(self):
-        fragment, _ = self.mod.build_synthesis_fragment(
+        fragment, _ = passt_dns_fragment.build_synthesis_fragment(
             {4: "192.168.0.1"}, "127.130.0.5")
         self.assertIn("param=--dns,param=::1", fragment)
 
@@ -413,7 +404,7 @@ class TestNetdevUnderSynthesis(unittest.TestCase):
         # --no-dhcp-dns is global (dhcp.c:437, dhcpv6.c:427, ndp.c:284), so
         # under dhcp-dns=off nothing is advertised on either family and a dead
         # ::1 would be a guest-visible artifact of a switched-off mechanism.
-        fragment, notes = self.mod.build_synthesis_fragment({}, "127.130.0.5")
+        fragment, notes = passt_dns_fragment.build_synthesis_fragment({}, "127.130.0.5")
         self.assertEqual(fragment, "dhcp-dns=off")
         self.assertNotIn("::1", fragment)
         self.assertTrue(any("no IPv4 default route" in n for n in notes))
@@ -422,7 +413,7 @@ class TestNetdevUnderSynthesis(unittest.TestCase):
         # IPv6 leaves the loop entirely. A host with a v6 default route must
         # still get exactly one v6 option, and it must be the black hole --
         # a symmetric loop here is what reopens the v6 resolver.
-        fragment, _ = self.mod.build_synthesis_fragment(
+        fragment, _ = passt_dns_fragment.build_synthesis_fragment(
             {4: "192.168.0.1", 6: "fd00::1"}, "127.130.0.5")
         self.assertNotIn("fd00::1", fragment)
         self.assertEqual(fragment.count("param=--dns"), 1)
@@ -433,14 +424,14 @@ class TestNetdevUnderSynthesis(unittest.TestCase):
         # Neither --dns nor --dns-forward can be 127.130.x.y -- that is the
         # guest's own loopback -- so with no v4 gateway there is no address to
         # advertise and intercept, whatever v6 the host has.
-        fragment, _ = self.mod.build_synthesis_fragment(
+        fragment, _ = passt_dns_fragment.build_synthesis_fragment(
             {6: "fd00::1"}, "127.130.0.5")
         self.assertEqual(fragment, "dhcp-dns=off")
 
     def test_the_note_no_longer_claims_queries_go_to_a_host_resolver(self):
         # The old string read "queries go to <resolver>", which is now false in
         # the strongest way available: nothing is forwarded at all.
-        _, notes = self.mod.build_synthesis_fragment(
+        _, notes = passt_dns_fragment.build_synthesis_fragment(
             {4: "192.168.0.1"}, "127.130.0.5")
         joined = " ".join(notes)
         self.assertIn("127.130.0.5", joined)
@@ -453,7 +444,7 @@ class TestNetdevUnderSynthesis(unittest.TestCase):
         # lost DNS on the family, because the gate demanded a nameserver from
         # /etc/resolv.conf as well. --dns-host is now an address that always
         # exists, so the resolver half of the gate is obsolete.
-        fragment, _ = self.mod.build_synthesis_fragment(
+        fragment, _ = passt_dns_fragment.build_synthesis_fragment(
             {4: "192.168.0.1"}, "127.130.0.5")
         self.assertIn("dns-host=127.130.0.5", fragment)
         self.assertNotEqual(fragment, "dhcp-dns=off")
@@ -472,16 +463,16 @@ class TestNetdevUnderSynthesis(unittest.TestCase):
         entry.pw_uid = uid
         with mock.patch.object(workload_lib, "workload_config_path",
                                return_value=str(config_path)), \
-                mock.patch.object(self.mod, "workload_env_dir",
+                mock.patch.object(vm_netdev, "workload_env_dir",
                                   return_value=env_dir), \
-                mock.patch.object(self.mod, "RESOLV_CONF", resolv), \
-                mock.patch.object(self.mod.pwd, "getpwnam",
+                mock.patch.object(passt_dns_host, "RESOLV_CONF", resolv), \
+                mock.patch.object(vm_netdev.pwd, "getpwnam",
                                   return_value=entry), \
-                mock.patch.object(self.mod, "default_gateways",
+                mock.patch.object(vm_netdev, "default_gateways",
                                   return_value=gateways
                                   if gateways is not None
                                   else {4: "192.168.0.1"}):
-            self.assertEqual(self.mod.main(["netdev", "vm1"]), 0)
+            self.assertEqual(self.helper.main(["netdev", "vm1"]), 0)
 
         written = (env_dir / "workload-vm1.passt").read_text()
         self.assertTrue(written.startswith("WL_PASST_DNS="), written)
