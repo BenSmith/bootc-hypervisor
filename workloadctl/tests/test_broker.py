@@ -21,7 +21,7 @@ import importlib
 from tests import load_script
 
 # `lib/` reaches sys.path via tests/__init__, so this import follows it.
-import ensure_vm
+import vm_default_seed
 import contextlib
 import io
 import tempfile
@@ -356,7 +356,7 @@ class TestTheGuestHalf(unittest.TestCase):
                                             "vm": {"network": {}}}), {})
 
     def test_the_rendered_seed_carries_it(self):
-        out = ensure_vm._render_default_user_data(
+        out = vm_default_seed.render_default_user_data(
             name="agent", guest_user="fedora", pubkey="ssh-ed25519 AAAA u@h",
             mounts=[], has_data_disk=False,
             guest_env=vm_credential_env(cred_config()))

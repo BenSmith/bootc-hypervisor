@@ -493,6 +493,7 @@ lib/gen_run.py                     # workload-generate's program: discover bundl
 lib/vm_notify.py                   # workload-vm-notify's program: QEMU as a child, READY=1 on running vCPUs, the cloud-init watch, the exit status
 lib/ensure_user.py                 # workload-ensure-user's program: the per-workload lock, and every provisioning step in order (ensure_common/ensure_vm/vm_ssh_keys/ensure_container)
 lib/vm_ssh_keys.py                 # The SSH material a VM is reached with: the per-workload keypair, the host keypair and its known_hosts pin, the home-share authorized_keys seed
+lib/vm_default_seed.py             # The built-in cloud-init user-data a VM gets when its bundle ships none, and the virtiofs mount options a custom seed gets too
 lib/egress_status.py               # Egress inspector state derivation (both substrates)
 lib/vm_metrics.py                  # VM metric collectors (QMP balloon/vCPU, qemu cgroup) shared by the exporter and `stats`
 lib/workload_metrics.py            # Per-workload metric sources for the exporter: unit state, container health, cgroup usage, du

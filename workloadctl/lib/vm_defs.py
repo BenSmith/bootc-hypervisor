@@ -63,7 +63,7 @@ VM_GUEST_HOME_BASE = "/home"
 # which is also why the type has to be one sshd can read through to a home.
 #
 # BOTH HALVES MUST AGREE. workload-ensure-user emits this value into the
-# built-in cloud-config (_virtiofs_mount_opts) and separately REFUSES a custom
+# built-in cloud-config (virtiofs_mount_opts) and separately REFUSES a custom
 # seed that does not carry one of these types (the seed contract in
 # build_cloud_init_iso). A drift between the emitter and the check looks like
 # the contract rejecting workloadctl's own output, which is what

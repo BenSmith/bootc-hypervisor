@@ -187,12 +187,11 @@ class TestTheGuestIsToldNothing(unittest.TestCase):
         pass against a renderer that still had the block in it."""
         import inspect
 
-        import ensure_vm
-        # Through the symbol, not a path plus two index() calls into it: the
-        # renderer moved to ensure_vm with the rest of the VM provisioning, and
-        # a scan that slices a file by def line reads whatever the wrong file
+        import vm_default_seed
+        # Through the symbol, not a path plus two index() calls into it: a
+        # scan that slices a file by def line reads whatever the wrong file
         # happens to contain.
-        body = inspect.getsource(ensure_vm._render_default_user_data)
+        body = inspect.getsource(vm_default_seed.render_default_user_data)
         for var in RETIRED_ENV_VARS:
             self.assertNotIn(f"{var}=", body, (
                 f"the default seed renderer still emits {var}"))
