@@ -35,9 +35,10 @@ from sd_listen import NotSocketActivated
 from workload_addr import INSPECT_LISTENER_BIN
 from tls_hello import HelloUnreadable, TLS_EXT_ECH, read_client_hello
 from http_target import (normalise_path, normalise_target)
+from h2_framing import H2_PREFACE, H2Framing, NotH2
 from http_framing import (
-    DRAIN_MAX, H2Framing, H2_PREFACE, MAX_TRAILER_LINES, NotH2, RELAY_CHUNK,
-    RequestUnreadable, _Stream, copy_body,
+    DRAIN_MAX, MAX_TRAILER_LINES, RELAY_CHUNK, RequestUnreadable, _Stream,
+    copy_body,
 )
 import egress_record
 import egress_relay

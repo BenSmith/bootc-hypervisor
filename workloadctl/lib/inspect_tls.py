@@ -51,9 +51,9 @@ import egress_relay
 from egress_upstream import (
     ALPN_H2, UPSTREAM_ALPN, dial_failure_reason, tls_failure,
 )
+from h2_framing import H2_PREFACE, H2Framing, NotH2
 from http_framing import (
-    H2_PREFACE, H2Framing, NotH2, RequestUnreadable, _Stream,
-    is_http_request_start, send_response,
+    RequestUnreadable, _Stream, is_http_request_start, send_response,
 )
 from http_target import SCHEME_HTTPS
 from inspect_http import POLICY_REFUSAL_BODY
