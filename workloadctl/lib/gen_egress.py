@@ -389,7 +389,7 @@ def generate_broker_service(config, uid: int, *, before: str,
     pod/bridge mode. There the umbrella carries `After=` its member services,
     so `Before=workload-<name>.service` orders the broker after every
     container has already started -- the same hole the inspector arming was
-    moved off the umbrella for (see _head_unit). The container branch passes
+    moved off the umbrella for (see gen_container_heads._head_unit). The container branch passes
     the pod/net head unit, which is the one workload-level unit ordered ahead
     of the members.
 

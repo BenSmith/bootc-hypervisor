@@ -12,7 +12,7 @@ unit (`workload-<name>-pod.service` / `-net.service`) in `pod`/`bridge`. NOT
 the umbrella -- it carries `After=` its members, so arming there would run
 only once every container was already up, and the workload would spend the
 whole of member startup unfiltered. See _head_unit()'s docstring in
-lib/gen_container.py.
+lib/gen_container_heads.py.
 
 The program is lib/filter_arm.py, which is one body for both substrates; this
 file is main(), bound to its container substrate.
