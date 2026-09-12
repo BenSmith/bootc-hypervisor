@@ -21,10 +21,10 @@ from provisioning import (
     ImageTransferError,
     preflight_checks,
     provision_user,
-    run_host_setup,
     start_service,
     transfer_image,
 )
+from host_setup import run_host_setup
 from workload_selinux import (
     apply_selinux_policy,
     apply_vm_fcontext,

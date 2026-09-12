@@ -27,7 +27,7 @@ from workloadctl_core import (
     format_size,
     require_root,
 )
-from provisioning import run_host_setup
+from host_setup import run_host_setup
 from workload_selinux import apply_selinux_policy, apply_vm_fcontext
 
 

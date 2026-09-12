@@ -11,10 +11,10 @@ kept beside them.
 from pathlib import Path
 import subprocess
 
-from provisioning import (
+from host_setup import (
     HOST_ARTIFACT_KINDS,
-    HOST_SETUP_ARTIFACTS_ACTION,
     host_setup_artifacts,
+    HOST_SETUP_ARTIFACTS_ACTION,
 )
 from vm_provision import (
     PROVISION_DONE, PROVISION_FAILED, PROVISION_UNVERIFIED,

@@ -731,6 +731,7 @@ import cmd_disable
 import cmd_enable
 import cmd_lifecycle
 import provisioning
+import host_setup
 import workload_selinux
 
 
@@ -1404,14 +1405,14 @@ class TestRunHostSetup(unittest.TestCase):
     def test_no_setup_configured_is_noop(self):
         with _cfg(_CONTAINER_TOML, 'test-wl') as cfg:
             with patch.object(provisioning.subprocess, 'run') as run_mock:
-                provisioning.run_host_setup(cfg, "enable")
+                host_setup.run_host_setup(cfg, "enable")
             run_mock.assert_not_called()
 
     def test_missing_script_warns_no_exit(self):
         with _cfg(_HOST_TOML, 'test-wl') as cfg:
             buf = io.StringIO()
             with redirect_stderr(buf):
-                provisioning.run_host_setup(cfg, "enable")
+                host_setup.run_host_setup(cfg, "enable")
             self.assertIn("not found", buf.getvalue())
 
     def test_script_failure_on_enable_raises_with_the_scripts_returncode(self):
@@ -1422,20 +1423,20 @@ class TestRunHostSetup(unittest.TestCase):
             with patch.object(provisioning.Path, 'exists', return_value=True):
                 with patch.object(provisioning.subprocess, 'run', return_value=MagicMock(returncode=3)):
                     with self.assertRaises(LifecycleError) as ctx:
-                        provisioning.run_host_setup(cfg, "enable")
+                        host_setup.run_host_setup(cfg, "enable")
         self.assertEqual(ctx.exception.returncode, 3)
 
     def test_script_failure_on_disable_does_not_raise(self):
         with _cfg(_HOST_TOML, 'test-wl') as cfg:
             with patch.object(provisioning.Path, 'exists', return_value=True):
                 with patch.object(provisioning.subprocess, 'run', return_value=MagicMock(returncode=1)):
-                    provisioning.run_host_setup(cfg, "disable")  # must not raise
+                    host_setup.run_host_setup(cfg, "disable")  # must not raise
 
     def test_script_success_runs(self):
         with _cfg(_HOST_TOML, 'test-wl') as cfg:
             with patch.object(provisioning.Path, 'exists', return_value=True):
                 with patch.object(provisioning.subprocess, 'run', return_value=MagicMock(returncode=0)) as run_mock:
-                    provisioning.run_host_setup(cfg, "enable")
+                    host_setup.run_host_setup(cfg, "enable")
             self.assertEqual(run_mock.call_args.args[0][1], "enable")
 
     def test_env_carries_instance_not_bundle(self):
@@ -1448,7 +1449,7 @@ class TestRunHostSetup(unittest.TestCase):
             with patch.object(provisioning.Path, 'exists', return_value=True):
                 with patch.object(provisioning.subprocess, 'run',
                                   return_value=MagicMock(returncode=0)) as run_mock:
-                    provisioning.run_host_setup(cfg, "enable")
+                    host_setup.run_host_setup(cfg, "enable")
             env = run_mock.call_args.kwargs["env"]
         self.assertEqual(env["WORKLOAD_NAME"], "games")
         self.assertEqual(env["WORKLOAD_BUNDLE"], "sunshine-streaming")
