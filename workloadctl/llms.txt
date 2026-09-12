@@ -458,7 +458,8 @@ lib/backup.py                      # capture() implementation shared by both sub
 lib/podman.py                      # Typed Podman wrapper (JSON output, PodmanError, root/user modes)
 lib/qmp.py                         # QMP client
 lib/workloadctl_core.py            # WorkloadConfig / WorkloadManager (TOML loading, paths, lifecycle field)
-lib/config_parser.py               # The TOML grammar both substrates read (hostname patterns, policy/credential blocks, volumes)
+lib/config_parser.py               # The TOML grammar both substrates read (hostname patterns, policy blocks, volumes)
+lib/credential_entries.py          # The [[network.credential]] block, parsed and validated once for both substrates
 lib/workload_lib.py                # Shared core: config locator, naming, state/data paths, token and volume expansion, quoting
 lib/workload_uid.py                # The workload uid: allocation (claim_uid), the subid lock, /etc/subuid entries and the derived range
 lib/run_files.py                   # The per-workload run-files a workload owns (workload_run_files), the run-tree scan, and the build stamp
