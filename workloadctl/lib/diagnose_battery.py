@@ -24,7 +24,8 @@ from diagnose_egress import (
     allow_drift_check, capture_check, container_resolver_check,
     vm_egress_check, vm_network_check,
 )
-from diagnose_inspect import inspect_check, vm_resolve_check
+from diagnose_inspect import inspect_check
+from diagnose_resolve import vm_resolve_check
 from diagnose_provisioning import collect_host_artifact_checks, vm_provisioning_check
 from diagnose_selinux import (
     HOST_SELINUX_MODULES, _check_mcs_labels, _fcontext_rule_present,

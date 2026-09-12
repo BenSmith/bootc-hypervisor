@@ -1788,8 +1788,8 @@ class TestResolveDiagnose(unittest.TestCase):
     """
 
     def setUp(self):
-        import diagnose_inspect
-        self.mod = diagnose_inspect
+        import diagnose_resolve
+        self.mod = diagnose_resolve
 
     def _config(self, egress="filtered", resolver=None, bridge=None,
                 is_vm=True, uid=10001):
@@ -1954,8 +1954,8 @@ class TestNetdevDnsFragment(unittest.TestCase):
     """
 
     def setUp(self):
-        import diagnose_inspect
-        self.mod = diagnose_inspect
+        import diagnose_resolve
+        self.mod = diagnose_resolve
         self.dir = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
         patcher = mock.patch.object(self.mod, "workload_env_dir",
