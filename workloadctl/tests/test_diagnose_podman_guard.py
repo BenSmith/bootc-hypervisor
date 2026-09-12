@@ -36,6 +36,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+import diagnose_inspect
+import diagnose_egress
 import cmd_diagnose
 import workload_lib
 from podman import PodmanError
@@ -106,6 +108,10 @@ class PodmanUnavailableTests(unittest.TestCase):
             return_value=mock.Mock(returncode=1, stdout="", stderr="")))
         self.enterContext(mock.patch.object(
             cmd_diagnose, "service_active", return_value=(False, "inactive")))
+        self.enterContext(mock.patch.object(
+            diagnose_inspect, "service_active", return_value=(False, "inactive")))
+        self.enterContext(mock.patch.object(
+            diagnose_egress, "service_active", return_value=(False, "inactive")))
 
     def _enable(self, name):
         (self.tmp / name / workload_lib.ENABLED_MARKER_NAME).touch()
@@ -219,6 +225,10 @@ class PodmanAvailableTests(unittest.TestCase):
             return_value=mock.Mock(returncode=1, stdout="", stderr="")))
         self.enterContext(mock.patch.object(
             cmd_diagnose, "service_active", return_value=(False, "inactive")))
+        self.enterContext(mock.patch.object(
+            diagnose_inspect, "service_active", return_value=(False, "inactive")))
+        self.enterContext(mock.patch.object(
+            diagnose_egress, "service_active", return_value=(False, "inactive")))
 
     def test_both_checks_still_report_and_nothing_is_announced(self):
         checks, _ = cmd_diagnose.collect_diagnose_checks(

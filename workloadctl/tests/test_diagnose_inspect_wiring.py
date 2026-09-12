@@ -21,6 +21,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+import diagnose_inspect
+import diagnose_egress
 import cmd_diagnose
 import workload_lib
 from workloadctl_core import WorkloadConfig
@@ -98,6 +100,10 @@ class InspectCheckIsWiredTests(unittest.TestCase):
             return_value=mock.Mock(returncode=1, stdout="", stderr="")))
         self.enterContext(mock.patch.object(
             cmd_diagnose, "service_active", return_value=(False, "inactive")))
+        self.enterContext(mock.patch.object(
+            diagnose_inspect, "service_active", return_value=(False, "inactive")))
+        self.enterContext(mock.patch.object(
+            diagnose_egress, "service_active", return_value=(False, "inactive")))
 
     def _names(self, name):
         checks, _ = cmd_diagnose.collect_diagnose_checks(

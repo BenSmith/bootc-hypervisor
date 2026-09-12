@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Unit tests for the NVIDIA-device-access SELinux check in cmd_diagnose.
+"""Unit tests for the NVIDIA-device-access SELinux check in diagnose_selinux.
 
 The image grants no device access host-wide (see the SELinux block in
 hypervisor.Containerfile): dri_device_t and hsa_device_t are covered without
@@ -24,7 +24,7 @@ import unittest
 from types import SimpleNamespace
 from unittest import mock
 
-import cmd_diagnose
+import diagnose_selinux
 
 from tests import REPO_ROOT
 
@@ -62,57 +62,57 @@ class GpuVendorsTest(unittest.TestCase):
 
 
 def _vendors(raw):
-    return cmd_diagnose._gpu_vendors(_config(raw))
+    return diagnose_selinux._gpu_vendors(_config(raw))
 
 
 class GetseboolTest(unittest.TestCase):
     def test_missing_binary_is_unknown_not_off(self):
-        with mock.patch.object(cmd_diagnose.shutil, "which", lambda _: None):
-            self.assertIsNone(cmd_diagnose._getsebool("container_use_devices"))
+        with mock.patch.object(diagnose_selinux.shutil, "which", lambda _: None):
+            self.assertIsNone(diagnose_selinux._getsebool("container_use_devices"))
 
     def test_nonzero_exit_is_unknown_not_off(self):
         """An undefined boolean (older policy) exits nonzero. Reporting that
         as "off" would send the operator chasing a denial that isn't there."""
         self._patch(returncode=1, stdout="")
-        self.assertIsNone(cmd_diagnose._getsebool("nonesuch"))
+        self.assertIsNone(diagnose_selinux._getsebool("nonesuch"))
 
     def test_on_and_off_are_parsed(self):
         self._patch(returncode=0, stdout="container_use_devices --> on\n")
-        self.assertTrue(cmd_diagnose._getsebool("container_use_devices"))
+        self.assertTrue(diagnose_selinux._getsebool("container_use_devices"))
         self._patch(returncode=0, stdout="container_use_devices --> off\n")
-        self.assertFalse(cmd_diagnose._getsebool("container_use_devices"))
+        self.assertFalse(diagnose_selinux._getsebool("container_use_devices"))
 
     def _patch(self, returncode, stdout):
         self.enterContext(
-            mock.patch.object(cmd_diagnose.shutil, "which", lambda _: "/usr/sbin/getsebool"))
+            mock.patch.object(diagnose_selinux.shutil, "which", lambda _: "/usr/sbin/getsebool"))
         self.enterContext(mock.patch.object(
-            cmd_diagnose.subprocess, "run",
+            diagnose_selinux.subprocess, "run",
             lambda *a, **k: subprocess.CompletedProcess(
                 a[0], returncode, stdout=stdout, stderr="")))
 
 
 class GpuSelinuxCheckTest(unittest.TestCase):
     def test_scoped_boolean_passes_clean(self):
-        passed, message, fix = cmd_diagnose.gpu_selinux_check(
+        passed, message, fix = diagnose_selinux.gpu_selinux_check(
             xserver=True, blanket=False, module=None)
         self.assertTrue(passed)
         self.assertIn("container_use_xserver_devices on", message)
         self.assertIsNone(fix)
 
     def test_blanket_boolean_passes_but_advises_narrowing(self):
-        passed, message, fix = cmd_diagnose.gpu_selinux_check(
+        passed, message, fix = diagnose_selinux.gpu_selinux_check(
             xserver=False, blanket=True, module=None)
         self.assertTrue(passed, "a working legacy host must not read as a fault")
         self.assertIn("container_use_devices off", message)
         self.assertIsNone(fix)
 
     def test_scoped_boolean_wins_over_blanket(self):
-        _, message, _ = cmd_diagnose.gpu_selinux_check(
+        _, message, _ = diagnose_selinux.gpu_selinux_check(
             xserver=True, blanket=True, module=None)
         self.assertNotIn("legacy", message)
 
     def test_own_policy_module_is_named_as_the_grant_path(self):
-        passed, message, fix = cmd_diagnose.gpu_selinux_check(
+        passed, message, fix = diagnose_selinux.gpu_selinux_check(
             xserver=False, blanket=False, module="wl_app")
         self.assertTrue(passed)
         self.assertIn("wl_app", message)
@@ -129,7 +129,7 @@ class GpuSelinuxCheckTest(unittest.TestCase):
         """
         for blanket in (True, False, None):
             with self.subTest(blanket=blanket):
-                passed, message, fix = cmd_diagnose.gpu_selinux_check(
+                passed, message, fix = diagnose_selinux.gpu_selinux_check(
                     xserver=True, blanket=blanket, module="wl_app")
                 self.assertTrue(passed)
                 self.assertIn("wl_app", message)
@@ -137,20 +137,20 @@ class GpuSelinuxCheckTest(unittest.TestCase):
                 self.assertIsNone(fix)
 
     def test_own_module_named_even_when_boolean_state_is_unknown(self):
-        _, message, _ = cmd_diagnose.gpu_selinux_check(
+        _, message, _ = diagnose_selinux.gpu_selinux_check(
             xserver=None, blanket=None, module="wl_app")
         self.assertIn("wl_app", message)
         self.assertNotIn("unknown", message)
 
     def test_no_path_at_all_fails_with_a_fix(self):
-        passed, message, fix = cmd_diagnose.gpu_selinux_check(
+        passed, message, fix = diagnose_selinux.gpu_selinux_check(
             xserver=False, blanket=False, module=None)
         self.assertFalse(passed)
         self.assertIn("xserver_misc_device_t", message)
         self.assertEqual(fix, "sudo setsebool -P container_use_xserver_devices on")
 
     def test_unknown_state_passes_rather_than_guessing(self):
-        passed, _, fix = cmd_diagnose.gpu_selinux_check(
+        passed, _, fix = diagnose_selinux.gpu_selinux_check(
             xserver=None, blanket=None, module=None)
         self.assertTrue(passed)
         self.assertIsNone(fix)
@@ -186,7 +186,7 @@ class ShippedBundleGrantsTest(unittest.TestCase):
                 continue  # runs as container_t; the boolean covers it
             with open(toml_path, "rb") as fh:
                 config = tomllib.load(fh)
-            if not cmd_diagnose._gpu_vendors(
+            if not diagnose_selinux._gpu_vendors(
                     SimpleNamespace(config=config, name="x")):
                 continue
             checked.append(toml_path.parent.name)

@@ -1163,21 +1163,21 @@ class TestWhatDiagnoseSaysAboutBrokeredTraffic(unittest.TestCase):
                                   "credential": "provider-key"}]}
 
     def _fragments(self, **status):
-        import cmd_diagnose
+        import diagnose_inspect
         doc = {"lists": self.BROKERED_LISTS, "dispositions": {"forwarded": 1},
                "drop_reasons": {}, "credentialed": 1,
                "credential_unauthorized": 0, "per_credential": {}}
         doc.update(status)
-        return cmd_diagnose._credential_usage_fragments(doc)
+        return diagnose_inspect._credential_usage_fragments(doc)
 
     def test_a_workload_that_brokers_nothing_says_nothing(self):
         """Gated on the LOADED policy, not on the config: this function
         describes what the running listener did, and on a workload with no
         credential there is nothing here to describe. Ungated, the idle line
         below would fire on every filtered VM on the fleet."""
-        import cmd_diagnose
+        import diagnose_inspect
         self.assertEqual(
-            cmd_diagnose._credential_usage_fragments(
+            diagnose_inspect._credential_usage_fragments(
                 {"lists": {"policy": [{"host": "a", "credential": None}]},
                  "dispositions": {"forwarded": 3}, "credentialed": 0}),
             [])

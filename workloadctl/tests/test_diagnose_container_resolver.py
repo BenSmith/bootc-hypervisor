@@ -38,6 +38,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+import diagnose_egress
+import diagnose_inspect
 import cmd_diagnose
 import workload_lib
 from workloadctl_core import WorkloadConfig
@@ -100,7 +102,7 @@ class ContainerResolverCheckTests(unittest.TestCase):
             return_value=UID))
 
     def _run(self, name="capp", **kwargs):
-        return cmd_diagnose.container_resolver_check(
+        return diagnose_egress.container_resolver_check(
             WorkloadConfig(name), **kwargs)
 
     # --- the host that has never been tested ---------------------------------
@@ -199,7 +201,7 @@ class HostNameserversTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             path = Path(d) / "resolv.conf"
             path.write_text(text)
-            return cmd_diagnose.host_nameservers(path)
+            return diagnose_egress.host_nameservers(path)
 
     def test_reads_every_nameserver_line(self):
         self.assertEqual(
@@ -232,7 +234,7 @@ class HostNameserversTests(unittest.TestCase):
 
     def test_a_missing_file_is_none_and_not_empty(self):
         self.assertIsNone(
-            cmd_diagnose.host_nameservers(Path("/nonexistent/resolv.conf")))
+            diagnose_egress.host_nameservers(Path("/nonexistent/resolv.conf")))
 
 
 class ResolverCheckIsWiredTests(unittest.TestCase):
@@ -263,9 +265,13 @@ class ResolverCheckIsWiredTests(unittest.TestCase):
         self.enterContext(mock.patch.object(
             cmd_diagnose, "service_active", return_value=(False, "inactive")))
         self.enterContext(mock.patch.object(
-            cmd_diagnose, "host_nameservers", return_value=_ip("192.168.0.1")))
+            diagnose_inspect, "service_active", return_value=(False, "inactive")))
         self.enterContext(mock.patch.object(
-            cmd_diagnose, "_nft_json", return_value=None))
+            diagnose_egress, "service_active", return_value=(False, "inactive")))
+        self.enterContext(mock.patch.object(
+            diagnose_egress, "host_nameservers", return_value=_ip("192.168.0.1")))
+        self.enterContext(mock.patch.object(
+            diagnose_egress, "nft_json", return_value=None))
 
     def _checks(self, name):
         checks, _ = cmd_diagnose.collect_diagnose_checks(

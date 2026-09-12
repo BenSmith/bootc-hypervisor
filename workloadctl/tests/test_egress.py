@@ -20,6 +20,7 @@ import dataclasses
 import io
 from contextlib import redirect_stderr
 
+from diagnose_probe import PROBE
 from egress_plane import PLANES
 from nft_elements import vm_filter_commands, filter_delete_command
 from netfilter_state import (
@@ -1346,8 +1347,8 @@ class TestEgressDiagnose(unittest.TestCase):
     """
 
     def setUp(self):
-        import cmd_diagnose
-        self.mod = cmd_diagnose
+        import diagnose_egress
+        self.mod = diagnose_egress
 
     def _config(self, egress="filtered", bridge=None, uid=10001, hosts=None):
         net = {} if egress is None else {"egress": egress}
@@ -1358,7 +1359,7 @@ class TestEgressDiagnose(unittest.TestCase):
 
     def _nft(self, *, table=True, armed=True, allow=(), dropped=None,
              guard=True):
-        """Stub _nft_json: model the host's nft state as data."""
+        """Stub nft_json: model the host's nft state as data."""
         def fake(*args):
             if not table:
                 return None
@@ -1376,7 +1377,7 @@ class TestEgressDiagnose(unittest.TestCase):
             rule = {"expr": [{"counter": {"packets": dropped or 0, "bytes": 0}},
                              {"drop": None}]}
             return {"nftables": [{"rule": rule}]} if dropped is not None else {"nftables": []}
-        return mock.patch.object(self.mod, "_nft_json", fake)
+        return mock.patch.object(self.mod, "nft_json", fake)
 
     def test_filtered_and_armed_passes_and_counts_entries(self):
         with self._nft(allow=[("10.0.0.1", 22)], dropped=7):
@@ -1601,8 +1602,8 @@ class TestInspectDiagnose(unittest.TestCase):
     """
 
     def setUp(self):
-        import cmd_diagnose
-        self.mod = cmd_diagnose
+        import diagnose_inspect
+        self.mod = diagnose_inspect
 
     def _config(self, egress="filtered", bridge=None, uid=10001, is_vm=True,
                 tls=None):
@@ -1758,7 +1759,7 @@ class TestInspectDiagnose(unittest.TestCase):
             _, passed, msg = self._run(
                 elements4=[self._elem(10001, 80)],
                 elements6=[self._elem(10001, 80)],
-                socket_active=self.mod.PROBE)
+                socket_active=PROBE)
         probe.assert_called_once_with("workload-vm1-inspect.socket")
         self.assertFalse(passed)
         self.assertIn("nothing accepts", msg)
@@ -1771,7 +1772,7 @@ class TestInspectDiagnose(unittest.TestCase):
             _, passed, _ = self._run(
                 elements4=[self._elem(10001, 80)],
                 elements6=[self._elem(10001, 80)],
-                socket_active=self.mod.PROBE)
+                socket_active=PROBE)
         self.assertTrue(passed)
 
 
@@ -1787,8 +1788,8 @@ class TestResolveDiagnose(unittest.TestCase):
     """
 
     def setUp(self):
-        import cmd_diagnose
-        self.mod = cmd_diagnose
+        import diagnose_inspect
+        self.mod = diagnose_inspect
 
     def _config(self, egress="filtered", resolver=None, bridge=None,
                 is_vm=True, uid=10001):
@@ -1880,7 +1881,7 @@ class TestResolveDiagnose(unittest.TestCase):
         the injected tests above cannot see a bare-tuple truthiness bug."""
         with mock.patch.object(self.mod, "service_active",
                                return_value=(False, "inactive")) as probe:
-            _, passed, _ = self._run(socket_active=self.mod.PROBE)
+            _, passed, _ = self._run(socket_active=PROBE)
         probe.assert_called_once_with("workload-vm1-resolve.socket")
         self.assertFalse(passed)
 
@@ -1936,7 +1937,7 @@ class TestResolveDiagnose(unittest.TestCase):
         the same defect reached two checks before."""
         with mock.patch.object(self.mod, "service_active",
                                return_value=(False, "inactive")) as probe:
-            _, passed, msg = self._run(vm_active=self.mod.PROBE,
+            _, passed, msg = self._run(vm_active=PROBE,
                                        netdev_dns="dhcp-dns=off")
         probe.assert_called_once_with("workload-vm1.service")
         self.assertTrue(passed)
@@ -1953,8 +1954,8 @@ class TestNetdevDnsFragment(unittest.TestCase):
     """
 
     def setUp(self):
-        import cmd_diagnose
-        self.mod = cmd_diagnose
+        import diagnose_inspect
+        self.mod = diagnose_inspect
         self.dir = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
         patcher = mock.patch.object(self.mod, "workload_env_dir",
@@ -1995,8 +1996,8 @@ class TestInspectMapKeyShapes(unittest.TestCase):
     """
 
     def setUp(self):
-        import cmd_diagnose
-        self.uid_of = cmd_diagnose._map_key_uid
+        import diagnose_inspect
+        self.uid_of = diagnose_inspect._map_key_uid
 
     def test_the_nft_list_shape(self):
         self.assertEqual(
@@ -2219,8 +2220,8 @@ class TestV6RouteProbeFailsQuiet(unittest.TestCase):
     """
 
     def setUp(self):
-        import cmd_diagnose
-        self.mod = cmd_diagnose
+        import diagnose_inspect
+        self.mod = diagnose_inspect
 
     def test_a_probe_that_cannot_run_reads_as_having_a_route(self):
         with mock.patch.object(self.mod.subprocess, "run",
@@ -2259,8 +2260,8 @@ class TestSelfDialCounterIsReported(unittest.TestCase):
     """
 
     def setUp(self):
-        import cmd_diagnose
-        self.mod = cmd_diagnose
+        import diagnose_inspect
+        self.mod = diagnose_inspect
 
     def _line(self, self_dials):
         cfg = SimpleNamespace(
@@ -2314,7 +2315,7 @@ class TestSelfDialCounterIsReported(unittest.TestCase):
             # v4-only reader reports as a healthy zero.
             return payload(0 if args[-1] == NFT_SET_INSPECT_SELF else 9)
 
-        with mock.patch.object(self.mod, "_nft_json", fake):
+        with mock.patch.object(self.mod, "nft_json", fake):
             total = self.mod._inspect_self_counter(10001)
         self.assertEqual(total, (9, 540))
         self.assertIn(NFT_SET_INSPECT_SELF6, seen)
@@ -2329,7 +2330,7 @@ class TestSelfDialCounterIsReported(unittest.TestCase):
                 {"elem": {"val": {"concat": [10001, "198.18.1.1"]},
                           "counter": {"packets": 4, "bytes": 240}}}]}}]}
 
-        with mock.patch.object(self.mod, "_nft_json", fake):
+        with mock.patch.object(self.mod, "nft_json", fake):
             self.assertEqual(self.mod._inspect_self_counter(10001), (4, 240))
 
     def test_an_unreadable_counter_says_nothing_rather_than_zero(self):

@@ -194,7 +194,7 @@ import sys, json
 sys.path.insert(0, "%s")
 sys.dont_write_bytecode = True
 from types import SimpleNamespace
-import cmd_diagnose
+import diagnose_inspect
 
 uid = %d
 # is_vm is not decoration: inspect_check dispatches its nouns, its
@@ -207,7 +207,7 @@ cfg = SimpleNamespace(name="wlsd", uid=uid, vm_bridge=None, is_vm=True,
 elems = [{"concat": [uid, 80]}, {"concat": [uid, 443]}]
 # self_dials is left to PROBE on purpose: this is the half no unit test can
 # cover, the real _inspect_self_counter reading the real nft in this netns.
-name, ok, detail = cmd_diagnose.inspect_check(
+name, ok, detail = diagnose_inspect.inspect_check(
     cfg, elements4=elems, elements6=elems, socket_active=True, v6_route=True)
 print(json.dumps({"ok": ok, "detail": detail}))
 ''' % (LIBDIR, UID)

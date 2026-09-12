@@ -28,6 +28,7 @@ import config_parser
 import workload_lib          # noqa: E402
 import workload_uid          # noqa: E402
 import cmd_create           # noqa: E402
+import diagnose_selinux
 import cmd_diagnose         # noqa: E402
 import cmd_edit             # noqa: E402
 import cmd_validate         # noqa: E402
@@ -1974,8 +1975,8 @@ class DiagnoseMcsLabelTest(unittest.TestCase):
         kwargs = ({"side_effect": side_effect} if side_effect
                   else {"return_value": mock.Mock(returncode=returncode,
                                                   stdout=stdout)})
-        with mock.patch.object(cmd_diagnose.subprocess, "run", **kwargs) as run:
-            cmd_diagnose._check_mcs_labels(self.config, _check)
+        with mock.patch.object(diagnose_selinux.subprocess, "run", **kwargs) as run:
+            diagnose_selinux._check_mcs_labels(self.config, _check)
         self.run_mock = run
         return checks
 
@@ -2045,9 +2046,9 @@ class HostSelinuxModuleCurrentTest(unittest.TestCase):
         self.tmp = Path(self.enterContext(tempfile.TemporaryDirectory()))
         self.store = self.tmp / "selinux"
         self.enterContext(mock.patch.object(
-            cmd_diagnose, "SELINUX_STORE_ROOTS", (self.store,)))
+            diagnose_selinux, "SELINUX_STORE_ROOTS", (self.store,)))
         self.enterContext(mock.patch.object(
-            cmd_diagnose, "SEMANAGE_CONF", self.tmp / "absent-semanage.conf"))
+            diagnose_selinux, "SEMANAGE_CONF", self.tmp / "absent-semanage.conf"))
 
     def _install(self, module, body, *, compress=True, priority="400",
                  policy="targeted"):
@@ -2062,14 +2063,14 @@ class HostSelinuxModuleCurrentTest(unittest.TestCase):
         shipped = self._install("workload-vm", body)
         shipped.write_bytes(body)
         self.assertIs(
-            cmd_diagnose._selinux_module_current("workload-vm", str(shipped)),
+            diagnose_selinux._selinux_module_current("workload-vm", str(shipped)),
             True)
 
     def test_differing_module_is_stale(self):
         shipped = self._install("workload-vm", b"(allow a b (file (read)))\n")
         shipped.write_bytes(b"(allow a b (file (read write)))\n")
         self.assertIs(
-            cmd_diagnose._selinux_module_current("workload-vm", str(shipped)),
+            diagnose_selinux._selinux_module_current("workload-vm", str(shipped)),
             False)
 
     def test_uncompressed_store_entry_is_read(self):
@@ -2079,7 +2080,7 @@ class HostSelinuxModuleCurrentTest(unittest.TestCase):
         shipped = self._install("workload-vm", body, compress=False)
         shipped.write_bytes(body)
         self.assertIs(
-            cmd_diagnose._selinux_module_current("workload-vm", str(shipped)),
+            diagnose_selinux._selinux_module_current("workload-vm", str(shipped)),
             True)
 
     def test_priority_and_policy_type_are_not_hardcoded(self):
@@ -2090,7 +2091,7 @@ class HostSelinuxModuleCurrentTest(unittest.TestCase):
                                 priority="450", policy="mls")
         shipped.write_bytes(body)
         self.assertIs(
-            cmd_diagnose._selinux_module_current("workload-vm", str(shipped)),
+            diagnose_selinux._selinux_module_current("workload-vm", str(shipped)),
             True)
 
     def test_module_not_in_store_is_unknown_not_stale(self):
@@ -2100,7 +2101,7 @@ class HostSelinuxModuleCurrentTest(unittest.TestCase):
         shipped = self.tmp / "workload-vm.cil"
         shipped.write_bytes(b"(allow a b (file (read)))\n")
         self.assertIsNone(
-            cmd_diagnose._selinux_module_current("workload-vm", str(shipped)))
+            diagnose_selinux._selinux_module_current("workload-vm", str(shipped)))
 
     def test_unreadable_store_is_unknown_not_stale(self):
         """The store is 0600. An unprivileged `diagnose` must not report every
@@ -2111,13 +2112,13 @@ class HostSelinuxModuleCurrentTest(unittest.TestCase):
         with mock.patch.object(Path, "read_bytes",
                                side_effect=PermissionError):
             self.assertIsNone(
-                cmd_diagnose._selinux_module_current(
+                diagnose_selinux._selinux_module_current(
                     "workload-vm", str(shipped)))
 
     def test_missing_shipped_cil_is_unknown(self):
         """A host without the RPM's data files has nothing to compare to."""
         self._install("workload-vm", b"(allow a b (file (read)))\n")
-        self.assertIsNone(cmd_diagnose._selinux_module_current(
+        self.assertIsNone(diagnose_selinux._selinux_module_current(
             "workload-vm", str(self.tmp / "absent.cil")))
 
     def test_enforced_asks_the_kernel_for_every_allow_rule(self):
@@ -2136,8 +2137,8 @@ class HostSelinuxModuleCurrentTest(unittest.TestCase):
             asked.append((src, tgt, cls, tuple(perms)))
             return True
 
-        with mock.patch.object(cmd_diagnose, "_policy_grants", fake):
-            self.assertIs(cmd_diagnose._selinux_module_enforced(str(cil)), True)
+        with mock.patch.object(diagnose_selinux, "_policy_grants", fake):
+            self.assertIs(diagnose_selinux._selinux_module_enforced(str(cil)), True)
         self.assertEqual(asked, [
             ("wlvfsd_t", "svirt_image_t", "filesystem", ("getattr",)),
             ("wlvfsd_t", "qemu_var_run_t", "file", ("create", "getattr", "lock")),
@@ -2150,18 +2151,18 @@ class HostSelinuxModuleCurrentTest(unittest.TestCase):
         cil.write_text(
             "(allow wlvfsd_t fs_t (filesystem (getattr)))\n"
             "(allow wlvfsd_t svirt_image_t (filesystem (getattr)))\n")
-        with mock.patch.object(cmd_diagnose, "_policy_grants",
+        with mock.patch.object(diagnose_selinux, "_policy_grants",
                                lambda s, t, c, p: t != "svirt_image_t"):
-            self.assertIs(cmd_diagnose._selinux_module_enforced(str(cil)), False)
+            self.assertIs(diagnose_selinux._selinux_module_enforced(str(cil)), False)
 
     def test_enforced_is_unknown_when_nothing_could_be_asked(self):
         """SELinux disabled, or a policy without these classes: an untestable
         condition must not read as a pass."""
         cil = self.tmp / "m.cil"
         cil.write_text("(allow wlvfsd_t svirt_image_t (filesystem (getattr)))\n")
-        with mock.patch.object(cmd_diagnose, "_policy_grants",
+        with mock.patch.object(diagnose_selinux, "_policy_grants",
                                lambda s, t, c, p: None):
-            self.assertIsNone(cmd_diagnose._selinux_module_enforced(str(cil)))
+            self.assertIsNone(diagnose_selinux._selinux_module_enforced(str(cil)))
 
     def test_self_target_resolves_to_the_source_type(self):
         """`self` means the source type. Resolving it rather than skipping it is
@@ -2172,9 +2173,9 @@ class HostSelinuxModuleCurrentTest(unittest.TestCase):
             "(allow wlvfsd_t self (process (setcap)))\n"
             "(allow wlvfsd_t fs_t (filesystem (getattr)))\n")
         asked = []
-        with mock.patch.object(cmd_diagnose, "_policy_grants",
+        with mock.patch.object(diagnose_selinux, "_policy_grants",
                                lambda s, t, c, p: asked.append((s, t)) or True):
-            cmd_diagnose._selinux_module_enforced(str(cil))
+            diagnose_selinux._selinux_module_enforced(str(cil))
         self.assertEqual(asked, [("wlvfsd_t", "wlvfsd_t"),
                                  ("wlvfsd_t", "fs_t")])
 
@@ -2187,7 +2188,7 @@ class HostSelinuxModuleCurrentTest(unittest.TestCase):
             "; a comment mentioning (allow bogus_t bogus2_t (file (read)))\n"
             "(allow wlvfsd_t svirt_image_t\n"
             "    (dir (read write)))\n")
-        rules = list(cmd_diagnose._cil_allow_rules(cil.read_text()))
+        rules = list(diagnose_selinux._cil_allow_rules(cil.read_text()))
         self.assertEqual(
             rules, [("wlvfsd_t", "svirt_image_t", "dir", ["read", "write"])])
 
@@ -2199,7 +2200,7 @@ class HostSelinuxModuleCurrentTest(unittest.TestCase):
         text = ("(block wl_alloy\n"
                 "  (allow process syslogd_var_run_t (dir (open read)))\n"
                 "  (allow process self (process (signal)))\n)")
-        rules = list(cmd_diagnose._cil_allow_rules(
+        rules = list(diagnose_selinux._cil_allow_rules(
             text, block_type="wl_alloy.process"))
         self.assertEqual(rules, [
             ("wl_alloy.process", "syslogd_var_run_t", "dir", ["open", "read"]),
@@ -2230,9 +2231,9 @@ class HostSelinuxModuleCurrentTest(unittest.TestCase):
         def fake_open(path, mode="r"):
             yield FakeAccess()
 
-        with mock.patch.object(cmd_diagnose, "SELINUXFS", fs), \
-             mock.patch.object(cmd_diagnose, "open", fake_open, create=True):
-            granted = cmd_diagnose._policy_grants(
+        with mock.patch.object(diagnose_selinux, "SELINUXFS", fs), \
+             mock.patch.object(diagnose_selinux, "open", fake_open, create=True):
+            granted = diagnose_selinux._policy_grants(
                 "wlvfsd_t", "svirt_image_t", "filesystem", ["getattr"])
         self.assertTrue(granted)
         self.assertTrue(seen["query"].endswith(" 5 8"),
@@ -2246,15 +2247,15 @@ class HostSelinuxModuleCurrentTest(unittest.TestCase):
         moved = self.tmp / "elsewhere"
         conf = self.tmp / "semanage.conf"
         conf.write_text(f"# comment\nstore-root={moved}\nignore=1\n")
-        with mock.patch.object(cmd_diagnose, "SEMANAGE_CONF", conf), \
-             mock.patch.object(cmd_diagnose, "SELINUX_STORE_ROOTS", ()):
+        with mock.patch.object(diagnose_selinux, "SEMANAGE_CONF", conf), \
+             mock.patch.object(diagnose_selinux, "SELINUX_STORE_ROOTS", ()):
             body = b"(allow a b (file (read)))\n"
             d = moved / "targeted" / "active" / "modules" / "400" / "workload-vm"
             d.mkdir(parents=True)
             (d / "cil").write_bytes(bz2.compress(body))
             shipped = self.tmp / "shipped.cil"
             shipped.write_bytes(body)
-            self.assertIs(cmd_diagnose._selinux_module_current(
+            self.assertIs(diagnose_selinux._selinux_module_current(
                 "workload-vm", str(shipped)), True)
 
 

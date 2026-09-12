@@ -34,7 +34,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-import cmd_diagnose
+import diagnose_inspect
 import egress_policy
 from egress_policy import (
     INSPECT_DIGEST_KEY, INSPECT_DIGEST_SHORT, Policy, inspect_digest_short,
@@ -154,7 +154,7 @@ class TestTheStaleChecks(unittest.TestCase):
             kw["disk_digest"] = disk_digest
         if disk_ca is not None:
             kw["disk_ca"] = disk_ca
-        return cmd_diagnose.inspect_check(
+        return diagnose_inspect.inspect_check(
             cfg, elements4=elems, elements6=elems, socket_active=True,
             v6_route=True, self_dials=None, status=status, filter_sets={},
             **kw)
@@ -263,8 +263,8 @@ class TestTheExpiryWarning(unittest.TestCase):
         status = {"mint": {"ca": {
             "sha256": "AA:BB",
             "not_after": now + remaining_days * self.DAY}}}
-        with mock.patch.object(cmd_diagnose.time, "time", return_value=now):
-            return cmd_diagnose._ca_fragments(status)
+        with mock.patch.object(diagnose_inspect.time, "time", return_value=now):
+            return diagnose_inspect._ca_fragments(status)
 
     def test_a_distant_expiry_says_nothing(self):
         """Ten years is the shipped validity. A line on every healthy workload
@@ -297,7 +297,7 @@ class TestTheExpiryWarning(unittest.TestCase):
         self.assertEqual(len(self._fragments(CA_EXPIRY_WARN_DAYS)), 1)
 
     def test_a_status_with_no_expiry_says_nothing(self):
-        self.assertEqual(cmd_diagnose._ca_fragments(
+        self.assertEqual(diagnose_inspect._ca_fragments(
             {"mint": {"ca": {"sha256": "AA:BB"}}}), [])
 
     def test_a_malformed_ca_report_says_nothing(self):
@@ -305,13 +305,13 @@ class TestTheExpiryWarning(unittest.TestCase):
         out the twenty other checks that were about to run."""
         for status in (None, {}, {"mint": None}, {"mint": {"ca": "no"}},
                        {"mint": {"ca": {"not_after": "soon"}}}):
-            self.assertEqual(cmd_diagnose._ca_fragments(status), [], status)
+            self.assertEqual(diagnose_inspect._ca_fragments(status), [], status)
 
 
 class TestTheStatusReadIsDefensiveEverywhere(unittest.TestCase):
     """Nothing wraps inspect_check, so a raise here is not one lost line.
 
-    `_inspect_status` guarantees only that the TOP LEVEL of the status document
+    `read_inspect_status` guarantees only that the TOP LEVEL of the status document
     is a dict. A truthy non-dict under `mint` -- a number, a string, a
     non-empty list -- only a bug in the writer produces, and a bug in the
     writer is precisely the state in which somebody runs `diagnose`. Before
@@ -326,8 +326,8 @@ class TestTheStatusReadIsDefensiveEverywhere(unittest.TestCase):
 
     def test_no_shape_of_status_raises_out_of_the_ca_read(self):
         for status in self.HOSTILE:
-            self.assertIsInstance(cmd_diagnose._ca_report(status), dict, status)
-            self.assertEqual(cmd_diagnose._ca_fragments(status), [], status)
+            self.assertIsInstance(diagnose_inspect._ca_report(status), dict, status)
+            self.assertEqual(diagnose_inspect._ca_fragments(status), [], status)
 
     def test_no_shape_of_status_raises_out_of_the_whole_check(self):
         cfg = SimpleNamespace(
@@ -336,7 +336,7 @@ class TestTheStatusReadIsDefensiveEverywhere(unittest.TestCase):
             config={"vm": {"network": {"egress": "filtered"}}}, is_vm=True)
         elems = [{"concat": [UID, 80]}, {"concat": [UID, 443]}]
         for status in self.HOSTILE:
-            cmd_diagnose.inspect_check(
+            diagnose_inspect.inspect_check(
                 cfg, elements4=elems, elements6=elems, socket_active=True,
                 v6_route=True, self_dials=None, status=status,
                 filter_sets={}, disk_digest="", disk_ca="AA:BB")
@@ -368,18 +368,18 @@ class TestTheDiskReadsAreDefensiveToo(unittest.TestCase):
     def test_a_ca_pem_that_is_not_text_reads_as_unknown(self):
         cert = self.dir / "ca.crt"
         cert.write_bytes(self.GARBAGE)
-        with mock.patch.object(cmd_diagnose, "workload_state_dir",
+        with mock.patch.object(diagnose_inspect, "workload_state_dir",
                                return_value=self.dir), \
-             mock.patch.object(cmd_diagnose, "ca_cert_path",
+             mock.patch.object(diagnose_inspect, "ca_cert_path",
                                return_value=cert):
-            self.assertIsNone(cmd_diagnose._ca_fingerprint_on_disk("vm1"))
+            self.assertIsNone(diagnose_inspect._ca_fingerprint_on_disk("vm1"))
 
     def test_a_policy_document_that_is_not_text_reads_as_unknown(self):
         doc = self.dir / "inspect.json"
         doc.write_bytes(b'{"hosts": ["\xff\xfe"]}')
-        with mock.patch.object(cmd_diagnose, "inspect_policy_path",
+        with mock.patch.object(diagnose_inspect, "inspect_policy_path",
                                return_value=str(doc)):
-            self.assertIsNone(cmd_diagnose._policy_digest_on_disk("vm1"))
+            self.assertIsNone(diagnose_inspect._policy_digest_on_disk("vm1"))
 
     def test_a_damaged_ca_does_not_end_the_check(self):
         """The whole point: silence, and the twenty checks after this one still
@@ -391,11 +391,11 @@ class TestTheDiskReadsAreDefensiveToo(unittest.TestCase):
             vm_network=dict(NET),
             config={"vm": {"network": dict(NET)}}, is_vm=True)
         elems = [{"concat": [UID, 80]}, {"concat": [UID, 443]}]
-        with mock.patch.object(cmd_diagnose, "workload_state_dir",
+        with mock.patch.object(diagnose_inspect, "workload_state_dir",
                                return_value=self.dir), \
-             mock.patch.object(cmd_diagnose, "ca_cert_path",
+             mock.patch.object(diagnose_inspect, "ca_cert_path",
                                return_value=cert):
-            _name, ok, detail = cmd_diagnose.inspect_check(
+            _name, ok, detail = diagnose_inspect.inspect_check(
                 cfg, elements4=elems, elements6=elems, socket_active=True,
                 v6_route=True, self_dials=None, filter_sets={},
                 disk_digest="", status={"mint": {"ca": {"sha256": "AA:BB"}}})
@@ -414,7 +414,7 @@ class TestTheFingerprintIsShownShort(unittest.TestCase):
     FULL = ":".join(f"{n:02X}" for n in range(32))
 
     def test_it_keeps_the_leading_bytes_and_marks_the_cut(self):
-        short = cmd_diagnose._short_fingerprint(self.FULL)
+        short = diagnose_inspect._short_fingerprint(self.FULL)
         self.assertTrue(self.FULL.startswith(short.rstrip(":\u2026")))
         self.assertLess(len(short), len(self.FULL))
         self.assertEqual(len(short.split(":")[:-1]),
@@ -423,17 +423,17 @@ class TestTheFingerprintIsShownShort(unittest.TestCase):
     def test_an_already_short_value_is_left_alone(self):
         """The tests and the rig use two-byte stand-ins; truncating one to a
         prefix of itself would make a mismatch render as a match."""
-        self.assertEqual(cmd_diagnose._short_fingerprint("AA:BB"), "AA:BB")
+        self.assertEqual(diagnose_inspect._short_fingerprint("AA:BB"), "AA:BB")
 
     def test_a_missing_fingerprint_is_a_word_not_an_exception(self):
-        self.assertEqual(cmd_diagnose._short_fingerprint(None), "unknown")
+        self.assertEqual(diagnose_inspect._short_fingerprint(None), "unknown")
 
     def test_two_different_cas_stay_different_when_shortened(self):
         """A shortening that collided would report a real mismatch as two
         identical strings, which reads as the check having lost its mind."""
         other = ":".join(f"{n:02X}" for n in range(100, 132))
-        self.assertNotEqual(cmd_diagnose._short_fingerprint(self.FULL),
-                            cmd_diagnose._short_fingerprint(other))
+        self.assertNotEqual(diagnose_inspect._short_fingerprint(self.FULL),
+                            diagnose_inspect._short_fingerprint(other))
 
 
 if __name__ == "__main__":
