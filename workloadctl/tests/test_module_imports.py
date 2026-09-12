@@ -169,11 +169,11 @@ class TestAFacadeReExportsNothing(unittest.TestCase):
 class TestASharedModuleIsNotShadowedByItsCaller(unittest.TestCase):
     """No entrypoint redefines a name it imports from a shared lib module.
 
-    The other end of the split hazard. generators/workload-generate does
-    `from gen_common import log_msg, generate_setup_service, ...`; if someone
-    later adds a `def log_msg` back into the generator -- restoring a helper
-    from a stale branch, or writing one without noticing the import forty lines
-    up -- Python takes the local definition and the import becomes dead. The
+    The other end of the split hazard. lib/gen_run.py does
+    `from gen_common import log_msg, pin_allocated_uid, ...`; if someone
+    later adds a `def log_msg` back into it -- restoring a helper from a
+    stale branch, or writing one without noticing the import forty lines up
+    -- Python takes the local definition and the import becomes dead. The
     generator then uses one implementation and gen_common's own internals use
     the other, and the two drift apart with every edit to either.
 
@@ -183,17 +183,16 @@ class TestASharedModuleIsNotShadowedByItsCaller(unittest.TestCase):
     then the failure reads as the shared helper being wrong rather than as
     there being two of it.
 
-    Checked by AST on the entrypoint alone: the extensionless entrypoints are
-    invisible to `_lib_modules()` and importing one runs its argv parsing.
+    Checked by AST on the named files alone, so it can also cover an
+    extensionless entrypoint, which `_lib_modules()` cannot see.
     """
 
     # file (repo-relative) -> lib modules it imports names from
     SHARED_IMPORTS = {
-        "generators/workload-generate": ("gen_common", "gen_vm",
-                                        "gen_container", "gen_egress"),
+        "lib/gen_run.py": ("gen_common", "gen_vm", "gen_container"),
         "lib/gen_vm.py": ("gen_common", "gen_egress"),
         "lib/gen_egress.py": ("gen_common",),
-        "lib/gen_container.py": ("gen_common",),
+        "lib/gen_container.py": ("gen_common", "gen_egress"),
         "lib/ensure_user.py": ("ensure_common", "ensure_vm",
                                "ensure_container"),
         "lib/ensure_vm.py": ("ensure_common",),

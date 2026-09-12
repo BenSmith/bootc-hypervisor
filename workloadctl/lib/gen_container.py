@@ -22,19 +22,29 @@ from pathlib import Path
 
 from config_parser import (
     workload_root_dir, container_credential_entries, container_uses_inspect,
+    infer_workload_mode,
 )
 from workload_lib import (
     GENERATED_BY, workload_state_dir, expand_volume_path,
     expand_workload_tokens, dq, uq, selinux_type_name,
-    container_ca_delivery, container_ca_mount_path,
+    container_ca_delivery, container_ca_mount_path, normalize_containers,
 )
 from egress_ca import CA_ENV_VARS, CA_BUNDLE_PATH, ca_cert_path
-from broker_config import container_uses_credentials
+from broker_config import (
+    container_broker_hosts, container_broker_upstream_addresses,
+    container_uses_credentials,
+)
 from secrets_template import (
     SECRET_PATTERN, auto_detect_credentials, validate_env_key,
 )
 from gen_common import (
-    log_msg, _external_host_path, _resource_overrides,
+    log_msg, _external_host_path, _resource_overrides, _RunFileConfig,
+    emitted_run_paths, generate_sysuser_config, generate_user_dropin,
+    generate_setup_service,
+)
+from gen_egress import (
+    generate_inspect_socket, generate_inspect_service,
+    generate_broker_service,
 )
 from validation import valid_userns_mode
 from unit_file import Unit
@@ -1562,3 +1572,131 @@ def container_broker_before(config, mode: str) -> str:
     if mode == "bridge":
         return f"workload-{name}-net.service"
     return f"workload-{name}.service"
+
+
+def generate_container_workload(config, user_name: str, uid: int) -> bool:
+    """Emit all unit files for a container workload; False if it was skipped.
+
+    The container counterpart of gen_vm.generate_vm_workload: sysusers and
+    the user-manager drop-in, the setup service, the egress inspector and
+    credential broker where the config selects them, then the main unit --
+    one service in single mode, a helper plus per-container services under an
+    umbrella in pod and bridge mode -- and the wants symlink. A single-mode
+    service the config cannot produce leaves the earlier files in place and
+    returns False; the caller then neither starts nor counts the workload.
+    """
+    name = config["workload"]["name"]
+    mode = infer_workload_mode(config)
+    view = _RunFileConfig(config=config, name=name, uid=uid, is_vm=False, mode=mode)
+    paths = emitted_run_paths(view)
+
+    sysuser_content = generate_sysuser_config(config, user_name, uid)
+    sysuser_file = paths[("sysusers", "sysusers")][0]
+    sysuser_file.write_text(sysuser_content)
+    log_msg(f"  Created sysusers config with UID {uid}")
+
+    # user@<uid>.service.d drop-in: redirect the user manager into
+    # workloads.slice and apply workload-level cgroup limits (ADR 001 option 1b).
+    dropin_file = paths[("dropin", "dropin")][0]
+    dropin_file.parent.mkdir(parents=True, exist_ok=True)
+    dropin_file.write_text(generate_user_dropin(config, uid))
+    log_msg(f"  Created user@{uid} drop-in (workloads.slice placement)")
+
+    # Setup service: creates user (runs as root, no User= directive)
+    setup_content = generate_setup_service(config, user_name)
+    setup_file = paths[("unit", "setup")][0]
+    setup_file.write_text(setup_content)
+    log_msg(f"  Created setup service at {setup_file}")
+
+    # Transparent egress inspection socket + service (P1-9), on the
+    # same terms as the VM path (generate_vm_workload) -- D6: the
+    # binary and unit shape do not change between substrates.
+    # generate_inspect_socket/service take nothing substrate-specific
+    # but the arming helper (config["workload"]["name"], uid, and
+    # uid-derived addressing otherwise), so they are shared rather
+    # than duplicated.
+    if container_uses_inspect(config):
+        socket_dests = paths.get(("unit", "inspect-socket"), [])
+        if socket_dests:
+            socket_dests[0].write_text(
+                generate_inspect_socket(
+                    config, user_name, uid,
+                    arming_helper="workload-container-inspect"))
+            log_msg("  Created egress inspector socket")
+        inspect_dests = paths.get(("unit", "inspect"), [])
+        if inspect_dests:
+            inspect_dests[0].write_text(
+                generate_inspect_service(config, user_name))
+            log_msg("  Created egress inspector service")
+
+    # The credential broker instance (P2-2), on the same reuse terms:
+    # generate_broker_service takes its substrate-specific values
+    # as parameters, so this is a call site and not a second
+    # generator. Gated on container_uses_credentials, which is also
+    # the run-file `present=` -- one predicate, so a workload that
+    # drops its last credential has the unit unlinked rather than
+    # left behind holding material nothing selects.
+    if container_uses_credentials(config):
+        broker_dests = paths.get(("unit", "broker"), [])
+        if broker_dests:
+            broker_dests[0].write_text(
+                generate_broker_service(
+                    config, uid,
+                    before=container_broker_before(config, mode),
+                    hosts=container_broker_hosts(config),
+                    upstream=container_broker_upstream_addresses(
+                        config)))
+            log_msg("  Created credential broker instance")
+
+    # Main service: Requires+After setup service so User= is resolvable
+    containers = normalize_containers(config)
+
+    if mode == "single":
+        service_content = generate_system_service(config, containers[0], user_name, uid)
+        if service_content is None:
+            log_msg(f"  Skipping {name} due to config errors", level="err")
+            return False
+        service_file = paths[("unit", "main")][0]
+        service_file.write_text(service_content)
+        log_msg(f"  Created system service at {service_file}")
+    else:
+        # Network helper service: pod-create (pod mode) or
+        # network-create (bridge mode).
+        if mode == "pod":
+            helper = generate_pod_service(config, user_name, uid)
+            paths[("unit", "pod")][0].write_text(helper)
+        else:  # bridge
+            if config.get("network", {}).get("ports"):
+                log_msg(f"  WARNING: {name}: workload-level [network].ports "
+                        f"is ignored in bridge mode; publish ports per "
+                        f"container under [containers.network]",
+                        level="warning")
+            helper = generate_net_service(config, user_name, uid)
+            paths[("unit", "net")][0].write_text(helper)
+        # Per-container services (podman's native user-manager healthcheck
+        # timer works under option 1b — no system-manager timer needed)
+        container_dest = dict(zip(view.container_names(), paths[("unit", "container")]))
+        for c in containers:
+            sc = generate_system_service(config, c, user_name, uid, mode=mode)
+            if sc is None:
+                log_msg(f"  Skipping container {c.get('name')} due to config errors", level="err")
+                continue
+            container_dest[c['name']].write_text(sc)
+        # Umbrella
+        slice_name = config.get("resources", {}).get("slice", "workloads.slice")
+        umbrella = generate_umbrella_service(
+            name, [c["name"] for c in containers], slice_name, mode=mode
+        )
+        paths[("unit", "main")][0].write_text(umbrella)
+        log_msg(f"  Created {mode}-mode units for {name} ({len(containers)} containers)")
+
+    # Create symlink for auto-start (equivalent to systemctl enable)
+    symlink_path = paths[("wants-symlink", "main")][0]
+    symlink_path.parent.mkdir(parents=True, exist_ok=True)
+
+    if symlink_path.exists() or symlink_path.is_symlink():
+        symlink_path.unlink()
+    symlink_path.symlink_to(f"../workload-{name}.service")
+    log_msg("  Enabled service for auto-start")
+
+    return True

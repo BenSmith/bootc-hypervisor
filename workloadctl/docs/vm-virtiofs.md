@@ -1,6 +1,6 @@
 # Sharing a host directory into a VM
 
-`generate_virtiofs_service` in `generators/workload-generate`, plus the
+`generate_virtiofs_service` in `lib/gen_vm.py`, plus the
 `wlvfsd_t` domain in `security/workload-vm.cil` — what a share costs, why the
 daemon serving it holds no privileges, what confines it instead, and the three
 ways to break it.

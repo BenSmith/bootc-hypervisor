@@ -17,6 +17,8 @@ from unittest import mock
 
 from covhelper import python_cmd
 
+import gen_common
+import gen_run
 from tests import REPO_ROOT, load_script, script_env
 
 GENERATOR = str(REPO_ROOT / "generators" / "workload-generate")
@@ -3130,9 +3132,6 @@ class TestEnqueueStarts(unittest.TestCase):
     never reach it. Drive it directly instead.
     """
 
-    def setUp(self):
-        self.gen = _load_generator_module()
-
     def _calls(self, returncodes):
         """Run enqueue_starts over 3 workloads; return the argv of each call."""
         seen = []
@@ -3142,7 +3141,7 @@ class TestEnqueueStarts(unittest.TestCase):
             seen.append(argv)
             return mock.MagicMock(returncode=next(codes, 0))
 
-        self.gen.enqueue_starts(["a", "b", "c"], run=fake_run)
+        gen_common.enqueue_starts(["a", "b", "c"], run=fake_run)
         return seen
 
     def test_one_call_for_the_whole_set(self):
@@ -3176,12 +3175,12 @@ class TestEnqueueStarts(unittest.TestCase):
                 raise OSError("boom")
             return mock.MagicMock(returncode=0)
 
-        self.gen.enqueue_starts(["a", "b"], run=fake_run)
+        gen_common.enqueue_starts(["a", "b"], run=fake_run)
         self.assertEqual(len(seen), 3, f"expected batch + 2 retries: {seen}")
 
     def test_no_workloads_makes_no_calls(self):
         seen = []
-        self.gen.enqueue_starts([], run=lambda *a, **k: seen.append(a))
+        gen_common.enqueue_starts([], run=lambda *a, **k: seen.append(a))
         self.assertEqual(seen, [])
 
 
@@ -3494,6 +3493,53 @@ class TestGeneratorContainerEgress(unittest.TestCase):
             "answer")
         self.assertIn("After=workload-br-net.service", member)
         self.assertIn("After=workload-br-inspect.socket", head)
+
+
+class TestParseArgs(unittest.TestCase):
+    """gen_run.parse_args: the output dir, the narrowing, the start switch."""
+
+    def test_output_dir_only(self):
+        self.assertEqual(gen_run.parse_args(["/tmp/out"]),
+                         (Path("/tmp/out"), None, False))
+
+    def test_no_arguments_means_the_live_dir_is_chosen_by_run(self):
+        self.assertEqual(gen_run.parse_args([]), (None, None, False))
+
+    def test_workload_in_both_spellings(self):
+        self.assertEqual(gen_run.parse_args(["--workload", "a", "/o"])[1], "a")
+        self.assertEqual(gen_run.parse_args(["/o", "--workload=b"])[1], "b")
+
+    def test_no_start(self):
+        self.assertEqual(gen_run.parse_args(["--no-start", "/o"]),
+                         (Path("/o"), None, True))
+
+
+class TestGenerateShim(unittest.TestCase):
+    """generators/workload-generate: argv to gen_run.run, its status back."""
+
+    def setUp(self):
+        self.mod = _load_generator_module()
+
+    def test_hands_argv_to_run(self):
+        with mock.patch.object(self.mod, "run", return_value=0) as run:
+            rc = self.mod.main(["prog", "/out", "--workload", "x", "--no-start"])
+        self.assertEqual(rc, 0)
+        run.assert_called_once_with(
+            ["prog", "/out", "--workload", "x", "--no-start"])
+
+    def test_the_run_status_is_the_exit_status(self):
+        with mock.patch.object(self.mod, "run", return_value=3):
+            self.assertEqual(self.mod.main(["prog", "/out"]), 3)
+
+    def test_a_failing_run_still_reports_success(self):
+        """Nothing may block boot: gen_run.run swallows and reports 0."""
+        with mock.patch.object(gen_run, "generate_all",
+                               side_effect=RuntimeError("boom")), \
+             mock.patch.object(gen_run, "set_output_dirs"), \
+             mock.patch.object(gen_run, "log_msg") as log:
+            self.assertEqual(gen_run.run(["prog", "/out"]), 0)
+        self.assertTrue(any("FATAL ERROR: boom" in c.args[0]
+                            for c in log.call_args_list))
 
 
 if __name__ == "__main__":
