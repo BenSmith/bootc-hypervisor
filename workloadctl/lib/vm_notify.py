@@ -187,8 +187,14 @@ def supervise(name: str, qemu_cmd: list[str]) -> int:
 
     qmp = QMPClient()
     try:
-        # Wait up to 60 s for QEMU to create the QMP socket
-        qmp.connect(qmp_sock, timeout=60.0)
+        # Wait up to 60 s for QEMU to create the QMP socket -- and give each
+        # read the same budget. QEMU opens the listener before machine init
+        # and only services the monitor once its main loop runs, so the
+        # greeting can lag a successful connect by seconds on a loaded host
+        # (the run that found this was nested, with a disk copy just landed).
+        # A read timeout is a TimeoutError and would land in the no-READY arm
+        # below, leaving a booted guest to sit out TimeoutStartSec.
+        qmp.connect(qmp_sock, timeout=60.0, recv_timeout=60.0)
         qmp.negotiate()
         # Wait up to 120 s for guest vCPUs to start running
         wait_running(qmp, timeout=120.0)
