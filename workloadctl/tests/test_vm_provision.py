@@ -32,7 +32,7 @@ from vm_provision import (
     should_heal,
     write_provision_marker,
 )
-from cmd_diagnose import vm_provisioning_check
+from diagnose_provisioning import vm_provisioning_check
 
 
 class TestMarkerPersistence(unittest.TestCase):

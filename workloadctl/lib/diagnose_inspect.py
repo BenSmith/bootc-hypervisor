@@ -739,7 +739,7 @@ def vm_resolve_check(config, *, socket_active=PROBE, policy_present=PROBE,
         uid = config.uid
     except Exception:
         # No user yet, so no units either: generation precedes user creation,
-        # and a first `enable` reaches this before _wl-<name> exists. Check 1
+        # and a first `enable` reaches this before _wl-<name> exists. user_exists
         # already reports that. inspect_check guards the same way, and
         # without it the address in the healthy line below raises straight out
         # of collect_diagnose_checks, which catches nothing -- one unresolvable

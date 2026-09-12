@@ -8,13 +8,11 @@ enabled and unhappy — what is wrong with it right now".
 
 The battery is here; the check families it calls into are lib/diagnose_selinux.py
 (labels, modules, confinement), lib/diagnose_inspect.py (the inspector and the
-resolver) and lib/diagnose_egress.py (the nft plane). What stays beside the
-battery are the checks with no family: the user and its subid range, the CA
-trust store, the host artifacts setup.sh installed, the VM's provisioning
-marker, and the fold that hides a disabled workload's consequences.
+resolver), lib/diagnose_egress.py (the nft plane), lib/diagnose_subid.py,
+lib/diagnose_ca_trust.py and lib/diagnose_provisioning.py (host artifacts and
+the VM's cloud-init marker). What stays beside the battery is the fold that
+hides a disabled workload's consequences.
 """
-import base64
-import hashlib
 import json
 from pathlib import Path
 import shutil
@@ -22,12 +20,14 @@ import subprocess
 import sys
 
 from cmd_validate import load_config_or_exit
+from diagnose_ca_trust import _ca_trust_facts, ca_trust_anchor_check
 from config_parser import SOCKET_DIR, workload_root_dir
 from diagnose_egress import (
     allow_drift_check, capture_check, container_resolver_check,
     vm_egress_check, vm_network_check,
 )
 from diagnose_inspect import inspect_check, vm_resolve_check
+from diagnose_provisioning import collect_host_artifact_checks, vm_provisioning_check
 from diagnose_selinux import (
     HOST_SELINUX_MODULES, _check_mcs_labels, _fcontext_rule_present,
     _getsebool, _gpu_vendors, _selinux_module_current,
@@ -35,23 +35,18 @@ from diagnose_selinux import (
     gpu_selinux_check, selinux_label_check, vm_confinement_check,
     vm_socket_dir_selinux_check,
 )
+from diagnose_subid import subid_derived_check, subid_overlap_check
 from egress_selinux import (
     VM_SOCKET_FCONTEXT_PATTERN, VM_SOCKET_SELINUX_TYPE,
     VM_SOCKET_SELINUX_TYPE_REAL,
 )
 from podman import PodmanError
-from provisioning import (
-    fcontext_pattern,
-    HOST_ARTIFACT_KINDS,
-    HOST_SETUP_ARTIFACTS_ACTION,
-    host_setup_artifacts,
-)
+from provisioning import fcontext_pattern
 from run_files import units_outdated, units_from_other_build
 from substrate import service_active
 from validation import uses_host_userns
 from vm_provision import (
-    PROVISION_DONE, PROVISION_FAILED, PROVISION_UNVERIFIED,
-    MAX_HEAL_ATTEMPTS,
+    PROVISION_DONE, PROVISION_FAILED,
     read_provision_marker, record_guest_provision_result,
 )
 from workload_lib import (
@@ -63,432 +58,6 @@ from workload_uid import (
     subgid_file, subid_files_with_entries, subuid_file,
 )
 from workloadctl_core import WorkloadManager, require_root
-
-
-# --- CA trust store ---
-#
-# Anchors an operator or the image installed, and the bundle that actually
-# grants trust. Kept relative to a root so the probe can be pointed at a
-# fixture tree, and so the /usr/etc comparison can reuse the same tail.
-CA_ANCHOR_DIR = "pki/ca-trust/source/anchors"
-CA_TLS_BUNDLE = "pki/ca-trust/extracted/pem/tls-ca-bundle.pem"
-
-
-def _cert_fingerprints(data: bytes) -> set[str]:
-    """SHA-256 over every certificate body in `data`, PEM or DER.
-
-    Hashing the decoded body rather than the file means the two encodings of
-    one certificate give one fingerprint, which is what lets an anchor be
-    matched against a bundle that re-encoded it.
-
-    Anything that is not a certificate yields the empty set: an operator's
-    README in the anchor dir must not read as an untrusted anchor, and a
-    truncated PEM must not raise. Discriminated on content, not extension —
-    a DER certificate opens with the SEQUENCE tag 0x30, which no text file
-    written by hand does.
-    """
-    marker = b"-----BEGIN CERTIFICATE-----"
-    if marker not in data:
-        return {hashlib.sha256(data).hexdigest()} if data[:1] == b"\x30" else set()
-    out = set()
-    for chunk in data.split(marker)[1:]:
-        body, _, _ = chunk.partition(b"-----END CERTIFICATE-----")
-        try:
-            der = base64.b64decode(body, validate=False)
-        except ValueError:
-            continue
-        if der:
-            out.add(hashlib.sha256(der).hexdigest())
-    return out
-
-
-def _ca_trust_facts(root: Path = Path("/")):
-    """Facts for ca_trust_anchor_check, or None when they can't be read.
-
-    Returns (unbundled, local_anchors):
-
-    - `unbundled` — anchor files whose certificates are absent from the
-      extracted TLS bundle. This is the property that actually matters and it
-      is mechanism-independent: it asks whether the trust the host was
-      configured to have is in effect, not how it got out of step.
-    - `local_anchors` — anchor files that differ from, or are absent from, the
-      booted deployment's /usr/etc copy. None when there is no /usr/etc, i.e.
-      no ostree /etc merge, so nothing can distinguish a locally added anchor
-      from a shipped one. Only ever used to pick the fix, never the verdict.
-    """
-    anchor_dir = root / "etc" / CA_ANCHOR_DIR
-    try:
-        bundle_fps = _cert_fingerprints((root / "etc" / CA_TLS_BUNDLE).read_bytes())
-        anchors = sorted(p for p in anchor_dir.iterdir() if p.is_file())
-    except OSError:
-        return None
-
-    unbundled = []
-    for path in anchors:
-        try:
-            fps = _cert_fingerprints(path.read_bytes())
-        except OSError:
-            continue
-        if fps and not fps <= bundle_fps:
-            unbundled.append(path.name)
-
-    shipped_dir = root / "usr/etc" / CA_ANCHOR_DIR
-    if not shipped_dir.is_dir():
-        return unbundled, None
-    local = []
-    for path in anchors:
-        shipped = shipped_dir / path.name
-        try:
-            if not shipped.is_file() or shipped.read_bytes() != path.read_bytes():
-                local.append(path.name)
-        except OSError:
-            local.append(path.name)
-    return unbundled, local
-
-
-def ca_trust_anchor_check(
-    unbundled: list[str],
-    local_anchors: list[str] | None,
-) -> tuple[bool, str, str | None]:
-    """Verdict: is every configured trust anchor actually in the TLS bundle?
-
-    The gap this closes is that installing an anchor and trusting it are two
-    steps, and only the first one is visible. `update-ca-trust` extracts
-    source/anchors into extracted/, but on a bootc host extracted/ is under
-    /etc — so a host that ever ran `update-ca-trust` by hand has that path
-    marked locally modified, ostree's 3-way merge keeps the host copy forever,
-    and the image's extraction is discarded. A *new* anchor file still lands;
-    nothing extracts it.
-
-    The shape it catches: a root in source/anchors sitting beside an older
-    extracted bundle that does not contain it, so every private-registry pull
-    fails `unable to get local issuer certificate` while the anchor is plainly
-    present. The symptom points away
-    from the cause — the trust store looks correct — which is why this is a
-    check and not a note.
-
-    Asks the direct question rather than the mechanical one. "Does extracted/
-    differ from /usr/etc" would also fire on a host with a deliberate local
-    anchor, which is a permanent and correct divergence, and would report
-    nothing on a non-ostree host. "Is this anchor in the bundle" is true or
-    false everywhere, and `local_anchors` only chooses which repair to name.
-    """
-    if not unbundled:
-        return (True, "Trust anchors are all in the extracted TLS bundle", None)
-
-    named = ", ".join(unbundled)
-    message = (f"Trust anchor not in the extracted bundle: {named} — the "
-               f"anchor is installed but grants no trust, so TLS to anything "
-               f"it signs fails with 'unable to get local issuer certificate'")
-
-    if local_anchors is None:
-        # No /usr/etc: no merge to converge back to, so regeneration is the
-        # only repair and carries none of the divergence cost it does below.
-        return (False, message, "sudo update-ca-trust")
-
-    if local_anchors:
-        # Restoring would silently drop these from the bundle — revoking trust
-        # the operator added by hand is a worse failure than the one being
-        # fixed, so it is not offered.
-        return (False, message,
-                f"sudo update-ca-trust  (this host carries locally added "
-                f"anchors — {', '.join(local_anchors)} — so extracted/ cannot "
-                f"be restored from the image without revoking them; it stays "
-                f"locally modified and every later anchor rotation needs this "
-                f"command again)")
-
-    # Every anchor is the image's, so the bundle can be restored from the
-    # booted deployment. That brings `ostree admin config-diff` clean, which
-    # is the point: the merge tracks the image again and later anchor
-    # rotations apply by themselves, instead of needing a repair each time.
-    return (False, message,
-            "sudo cp -a /usr/etc/pki/ca-trust/extracted/. "
-            "/etc/pki/ca-trust/extracted/ && "
-            "sudo restorecon -R /etc/pki/ca-trust/extracted  "
-            "(restores the merge, so later anchor rotations self-apply; "
-            "`sudo update-ca-trust` also restores trust but leaves this host "
-            "diverged from the image forever)")
-
-
-def _unit_props(unit: str) -> dict | None:
-    """systemd properties for a host-global unit, or None if it has no unit file.
-
-    `systemctl show` invents a stub for a nonexistent unit (LoadState=not-found)
-    rather than failing, so absence is read off LoadState, not the exit code.
-    """
-    result = subprocess.run(
-        ["systemctl", "show", unit,
-         "-p", "LoadState,ActiveState,SubState,Result,NRestarts"],
-        capture_output=True, text=True,
-    )
-    if result.returncode != 0:
-        return None
-    props = dict(
-        line.split("=", 1) for line in result.stdout.splitlines() if "=" in line
-    )
-    if props.get("LoadState") in ("not-found", "masked", "bad-setting", "error"):
-        return None
-    return props
-
-
-def host_artifact_check(artifact, state, name: str) -> tuple[bool, str, str | None]:
-    """Verdict for one declared host artifact.
-
-    `state` is whatever the probe for this kind produced: the `systemctl show`
-    property dict for a unit (None when the unit file is absent), a bool for a
-    file. Pure, so the verdicts are testable without a host — same split as
-    selinux_label_check().
-
-    NRestarts > 0 is a failure in its own right and is the reason this check
-    exists: `<name>-udev-relay.service` restart-looped 2012 times over seven
-    days on a deployed host while `systemctl list-units --failed` stayed clean, because
-    a unit that keeps being restarted never settles into `failed`.
-    """
-    fix = f"sudo workloadctl enable {name}  (re-runs the workload's setup.sh)"
-    if artifact.kind == "unit":
-        if state is None:
-            return (False,
-                    f"Declared host unit is not installed: {artifact.ref}", fix)
-        active = state.get("ActiveState", "unknown")
-        try:
-            n_restarts = int(state.get("NRestarts") or 0)
-        except ValueError:
-            n_restarts = 0
-        if n_restarts > 0:
-            return (False,
-                    f"Declared host unit is restart-looping: {artifact.ref} "
-                    f"(NRestarts={n_restarts}, currently {active}) — it never "
-                    f"reaches 'failed', so --failed will not show it",
-                    f"journalctl -u {artifact.ref} -n 50")
-        if active in ("failed", "activating"):
-            result = state.get("Result", "")
-            detail = f"{active}" + (f", Result={result}" if result else "")
-            return (False,
-                    f"Declared host unit is not running: {artifact.ref} ({detail})",
-                    f"journalctl -u {artifact.ref} -n 50")
-        return (True,
-                f"Host unit active: {artifact.ref} "
-                f"({active}/{state.get('SubState', '')})", None)
-
-    if state:
-        return (True, f"Host file present: {artifact.ref}", None)
-    return (False, f"Declared host file is missing: {artifact.ref}", fix)
-
-
-def collect_host_artifact_checks(config, _check) -> None:
-    """Check the host-global artifacts a workload's setup.sh declares.
-
-    Fills the gap `workload_run_files()` names in its own docstring — it covers
-    generator output only, so a `setup.sh` sidecar is invisible to every verb
-    built on it. The set is read from the script rather than inferred, because
-    the script is the only thing that knows: half of these are installed
-    conditionally (sunshine mints a TLS leaf only where the homelab CA is
-    readable, publishes mDNS only where avahi's service dir exists), and a
-    declaration made anywhere else would report those correct absences as
-    faults.
-
-    Gated on `enabled`: disable() removes these, so a disabled workload is
-    *supposed* to be missing them.
-    """
-    if not config.enabled:
-        return
-    declared = host_setup_artifacts(config)
-    if declared is None:
-        return  # no [host] setup, or the script is gone (enable reports that)
-
-    if declared.error:
-        _check("host_artifacts", False,
-               f"Could not read host artifact declaration: {declared.error}")
-        return
-
-    if not declared.supported:
-        # Unknown, not empty. Reported as a pass because an un-updated bundle is
-        # not a fault of the host being diagnosed — but reported at all, so the
-        # operator knows this workload's sidecars are outside the check.
-        _check("host_artifacts", True,
-               f"Host artifacts undeclared — setup.sh does not implement "
-               f"'{HOST_SETUP_ARTIFACTS_ACTION}', so any sidecars it installs "
-               f"are not checked here")
-        return
-
-    for line in declared.unparsed:
-        _check("host_artifacts", False,
-               f"setup.sh {HOST_SETUP_ARTIFACTS_ACTION} printed a line that is "
-               f"not a declaration: {line!r}",
-               fix=f"expected '<{'|'.join(HOST_ARTIFACT_KINDS)}> <ref>' per line, "
-                   f"nothing else on stdout")
-
-    if not declared.artifacts:
-        _check("host_artifacts", True,
-               "setup.sh declares no host-global artifacts")
-        return
-
-    for artifact in declared.artifacts:
-        state = (_unit_props(artifact.ref) if artifact.kind == "unit"
-                 else Path(artifact.ref).exists())
-        passed, message, fix = host_artifact_check(artifact, state, config.name)
-        _check(f"host_artifact[{artifact.ref}]", passed, message, fix=fix)
-
-
-def vm_provisioning_check(marker, instance_id: str | None,
-                          name: str) -> tuple[bool, str, str | None]:
-    """Did the guest's cloud-init actually finish, and what do we do if not?
-
-    The gap this closes: a VM whose first boot was cut short is `active`,
-    answers SSH and passes every other check here, while `fedora` was never
-    created, no sudo drop-in was written and cloud-init-main.service is failed
-    inside the guest. The host's only view of that is the marker written by the
-    VM service's provisioning watch (lib/vm_provision.py).
-
-    Only a *recorded failure* fails this check. "Not recorded" and "not yet
-    reported" are reported as facts and pass, because they mean the host could
-    not observe the guest — it never answered, or it is pinned to an
-    operator-provided bridge the watch does not probe — which is not evidence of
-    anything being wrong.
-    """
-    if not instance_id:
-        return (True, "cloud-init: no instance provisioned on this host yet", None)
-
-    recorded = (marker or {}).get("instance_id")
-    if recorded != instance_id:
-        return (True,
-                f"cloud-init outcome not recorded for instance {instance_id} "
-                f"(the guest never answered, it is pinned to a bridge, or it "
-                f"was provisioned by an older workloadctl)", None)
-
-    status = marker.get("status")
-    if status == PROVISION_DONE:
-        return (True, f"cloud-init finished cleanly (instance {instance_id})",
-                None)
-    if status == PROVISION_UNVERIFIED:
-        return (True,
-                f"cloud-init has not reported an outcome for instance "
-                f"{instance_id} yet", None)
-    if status != PROVISION_FAILED:
-        return (True, f"cloud-init status {status!r} for instance {instance_id}",
-                None)
-
-    errors = marker.get("errors") or []
-    detail = f": {errors[0]}" if errors else ""
-    attempts = marker.get("heal_attempts", 0)
-    if attempts and attempts >= MAX_HEAL_ATTEMPTS:
-        # The automatic re-provision has already been spent on this lineage and
-        # the guest still failed, so restarting would only reuse the same id.
-        # Rebuilding the system disk is the next escalation: it discards
-        # /var/lib/cloud entirely, so nothing survives to be skipped.
-        fix = (f"sudo workloadctl update {name}  (the one automatic "
-               f"re-provision was already used and cloud-init failed again; "
-               f"this rebuilds the system disk from the base image — data/ and "
-               f"virtiofs volumes are untouched, anything installed inside the "
-               f"guest is not)")
-    else:
-        fix = (f"sudo workloadctl restart {name}  (re-provisions once with a "
-               f"fresh instance-id, which is what makes cloud-init re-run the "
-               f"per-instance modules it already marked done)")
-    return (False,
-            f"cloud-init FAILED for instance {instance_id}{detail} — the guest "
-            f"is half-provisioned (users, sudo drop-ins and runcmd may be "
-            f"missing) and will not retry on its own", fix)
-
-
-def subid_derived_check(
-    entries: list[tuple[str, tuple[int, int] | None]],
-    expected: tuple[int, int],
-    uid: int,
-) -> tuple[bool, str, str | None]:
-    """Verdict: does each subid file's main range equal the derived one?
-
-    `entries` is [(file, (start, count) | None), …]; a None (no entry at all) is
-    Check 2's business, not this one.
-
-    Why this can't self-heal: `configure_subuid_subgid` grandfathers any
-    existing entry — deliberately, because shifting a UID mapping under a
-    running container corrupts its namespace. Correct behaviour, but it makes
-    drift permanent *and* invisible: every later enable leaves the old range
-    alone and reports success. Nothing else in the tree compares the two, which
-    is why three of six workload users on a lab host sat on pre-derivation
-    ranges for months.
-
-    This is the load-bearing half of the pair, for a reason worth stating
-    because it is not the one originally filed. `useradd` refuses to allocate
-    over an entry it can see in /etc/subuid (measured — see
-    subid_overlap_check), but `append_subid_entries` has no such courtesy: it
-    writes the derived range without consulting anything. Collision safety
-    therefore comes entirely from the derivation putting workload ranges above
-    the territory `useradd` allocates in. A range off the formula is a range
-    that has left the only guarantee there is.
-
-    It also predicts (per claim_uid) a re-created workload adopting the old UID
-    and grandfathering the wrong range straight back in.
-    """
-    off = [(f, e) for f, e in entries if e is not None and e != expected]
-    if not off:
-        return (True,
-                f"Subid ranges match the derived range "
-                f"({expected[0]}:{expected[1]})", None)
-    detail = ", ".join(f"{f} has {s}:{c}" for f, (s, c) in off)
-    return (False,
-            f"Subid range is not the derived range for UID {uid}: expected "
-            f"{expected[0]}:{expected[1]}, {detail}",
-            "Remapping is manual and must be done with the workload stopped: "
-            "rewrite the entry in /etc/subuid and /etc/subgid, then chown "
-            "state/ from the old range to the new one. Scope the chown to "
-            "state/ — every file in data/ is owned by the workload UID itself, "
-            "so only the reconstructible graphroot needs remapping")
-
-
-def subid_overlap_check(
-    entries: list[tuple[str, tuple[int, int] | None]],
-    window: tuple[int, int],
-) -> tuple[bool, str, str | None]:
-    """Verdict: does any main range sit inside `useradd`'s allocation window?
-
-    **`useradd` is not the naive allocator this was originally filed against.**
-    Measured on Fedora 44: park `_wl-caddy:589824:65536` in /etc/subuid where
-    the next allocation would land, and successive `useradd`s take 524288 and
-    then *655360* — they skip the parked range rather than overlapping it. Fill
-    the window so the only candidate would straddle an existing entry and
-    `useradd` refuses outright ("Can't get unique subordinate UID range"). So a
-    range inside the window is not, on its own, the two-namespaces-in-one
-    hazard this check was first justified by; that framing was wrong and this
-    docstring is the correction.
-
-    What it still catches is an **ordering** hazard, because the protection is
-    one-directional. `useradd` defends itself against entries it can see in
-    /etc/subuid. Nothing defends *us*: `append_subid_entries` writes the derived
-    range without consulting existing entries, so a workload provisioned after
-    a colliding human range would write straight over it. Living above the
-    window is what makes that unreachable — which is why subid_derived is the
-    load-bearing one and this check is its corroboration, not the reverse.
-
-    And `useradd` can only skip what it can see. /etc is per-deployment on a
-    bootc host while /etc/subuid entries accrue at runtime, so a rollback can
-    boot a deployment whose /etc/subuid never listed a workload enabled later,
-    while /var still holds files owned out of that range. A `useradd` there
-    allocates it legitimately. Same /etc-vs-/var asymmetry as claim_uid.
-
-    Scope is ranges starting strictly below SUB_UID_MAX. A range starting *at*
-    SUB_UID_MAX — which on stock Fedora is also SUBID_BASE, since the two
-    windows abut — cannot be taken while the entry is listed, per the refusal
-    measured above, so it is not reported.
-    """
-    sub_uid_min, sub_uid_max = window
-    inside = [(f, e) for f, e in entries if e is not None and e[0] < sub_uid_max]
-    if not inside:
-        return (True,
-                f"Subid ranges are clear of useradd's window "
-                f"({sub_uid_min}-{sub_uid_max})", None)
-    detail = ", ".join(f"{f} at {s}:{c}" for f, (s, c) in inside)
-    return (False,
-            f"Subid range sits inside the window useradd allocates from "
-            f"({sub_uid_min}-{sub_uid_max}): {detail} — useradd skips ranges "
-            f"it can see in /etc/subuid, but nothing protects this range if it "
-            f"is provisioned after a colliding one, or if a rollback boots an "
-            f"/etc/subuid that never listed it",
-            "Remap onto the derived range (see subid_derived's fix). Not "
-            "urgent on its own — check `/etc/subuid` for a human user's range "
-            "that already overlaps this one, which is the case that has "
-            "already gone wrong rather than one that might")
 
 
 # The runtime state `disable` tears down: linger, the runtime dir it implies,
@@ -503,8 +72,8 @@ def subid_overlap_check(
 # `volume_paths`. Those describe on-disk state that must stay correct while the
 # workload is off — it is what the next enable builds on — so their failures are
 # real findings, not consequences. `user_session` is absent rather than
-# excluded: Check 3b only runs when linger is on, which for a disabled workload
-# it is not.
+# excluded: it only runs when linger is on, which for a disabled workload it is
+# not.
 DISABLED_CONSEQUENCE_CHECKS = (
     "linger_enabled",
     "runtime_dir",

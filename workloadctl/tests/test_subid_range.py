@@ -40,7 +40,7 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-import cmd_diagnose
+import diagnose_subid
 import workload_uid
 import workload_addr
 from workload_addr import UID_MIN
@@ -131,7 +131,7 @@ class DerivedCheckTests(unittest.TestCase):
 
     def test_both_files_on_the_derived_range_passes(self):
         entries = [(SUBUID, self.expected), (SUBGID, self.expected)]
-        passed, message, fix = cmd_diagnose.subid_derived_check(
+        passed, message, fix = diagnose_subid.subid_derived_check(
             entries, self.expected, 10005)
         self.assertTrue(passed)
         self.assertIn(str(self.expected[0]), message)
@@ -139,7 +139,7 @@ class DerivedCheckTests(unittest.TestCase):
 
     def test_drifted_range_fails_and_names_the_file(self):
         entries = [(SUBUID, (200000, 65536)), (SUBGID, self.expected)]
-        passed, message, fix = cmd_diagnose.subid_derived_check(
+        passed, message, fix = diagnose_subid.subid_derived_check(
             entries, self.expected, 10005)
         self.assertFalse(passed)
         self.assertIn(SUBUID, message)
@@ -155,7 +155,7 @@ class DerivedCheckTests(unittest.TestCase):
         untouched by construction. A fix that said "chown the workload root"
         would be a data-destroying instruction.
         """
-        _, _, fix = cmd_diagnose.subid_derived_check(
+        _, _, fix = diagnose_subid.subid_derived_check(
             [(SUBUID, (200000, 65536))], self.expected, 10005)
         self.assertIn("state/", fix)
         self.assertIn("data/", fix)
@@ -163,13 +163,13 @@ class DerivedCheckTests(unittest.TestCase):
 
     def test_wrong_count_on_the_right_start_still_fails(self):
         entries = [(SUBUID, (self.expected[0], 1000))]
-        passed, _, _ = cmd_diagnose.subid_derived_check(
+        passed, _, _ = diagnose_subid.subid_derived_check(
             entries, self.expected, 10005)
         self.assertFalse(passed)
 
     def test_absent_entry_is_not_this_checks_business(self):
         """A missing entry is subid_configured's failure, not a drift."""
-        passed, _, _ = cmd_diagnose.subid_derived_check(
+        passed, _, _ = diagnose_subid.subid_derived_check(
             [(SUBUID, None), (SUBGID, None)], self.expected, 10005)
         self.assertTrue(passed)
 
@@ -196,9 +196,9 @@ class SupplementaryEntryRegressionTests(unittest.TestCase):
 
     def _both_checks(self, lines):
         entries = self._entries(lines)
-        derived, _, _ = cmd_diagnose.subid_derived_check(
+        derived, _, _ = diagnose_subid.subid_derived_check(
             entries, self.expected, self.uid)
-        overlap, _, _ = cmd_diagnose.subid_overlap_check(entries, FEDORA_WINDOW)
+        overlap, _, _ = diagnose_subid.subid_overlap_check(entries, FEDORA_WINDOW)
         return derived, overlap
 
     def test_both_checks_pass_with_the_main_range_written_last(self):
@@ -231,7 +231,7 @@ class SupplementaryEntryRegressionTests(unittest.TestCase):
 class OverlapCheckTests(unittest.TestCase):
     def test_derived_range_is_clear_of_the_window(self):
         entries = [(SUBUID, derived_subid_range(10005))]
-        passed, message, fix = cmd_diagnose.subid_overlap_check(
+        passed, message, fix = diagnose_subid.subid_overlap_check(
             entries, FEDORA_WINDOW)
         self.assertTrue(passed)
         self.assertIsNone(fix)
@@ -245,7 +245,7 @@ class OverlapCheckTests(unittest.TestCase):
         overlapping. So there is nothing here to report.
         """
         entries = [(SUBUID, derived_subid_range(UID_MIN))]
-        passed, _, _ = cmd_diagnose.subid_overlap_check(entries, FEDORA_WINDOW)
+        passed, _, _ = diagnose_subid.subid_overlap_check(entries, FEDORA_WINDOW)
         self.assertTrue(passed)
 
     def test_message_does_not_claim_the_next_useradd_will_collide(self):
@@ -253,7 +253,7 @@ class OverlapCheckTests(unittest.TestCase):
         message promising an imminent collision would be false, and a fix
         marked urgent would spend an operator's attention on the wrong thing.
         """
-        _, message, fix = cmd_diagnose.subid_overlap_check(
+        _, message, fix = diagnose_subid.subid_overlap_check(
             [(SUBUID, (600000, 65536))], FEDORA_WINDOW)
         self.assertIn("skips ranges", message)
         self.assertIn("rollback", message)
