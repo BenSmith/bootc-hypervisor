@@ -15,7 +15,6 @@ test_cmd_drift, substrate liveness via test_substrate). Pinned here:
 import argparse
 import io
 import json
-import sys
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
@@ -25,22 +24,16 @@ from unittest import mock
 
 import cmd_doctor
 
-from tests import load_script
-
-
-def _load_cli():
-    """Load the extensionless bin/workloadctl as a module (no __main__ side effects)."""
-    return load_script("bin/workloadctl", "workloadctl_bin")
+import cli_main
+import cli_parser
 
 
 class WiringTest(unittest.TestCase):
     def test_doctor_dispatches_to_cmd_doctor(self):
-        cli = _load_cli()
         fake = mock.Mock(name="cmd_doctor")
-        with mock.patch.object(cli, "cmd_doctor", fake), \
-                mock.patch.object(cli, "WorkloadManager"), \
-                mock.patch.object(sys, "argv", ["workloadctl", "doctor", "app"]):
-            cli.main()
+        with mock.patch.object(cli_parser, "cmd_doctor", fake), \
+                mock.patch.object(cli_main, "WorkloadManager"):
+            cli_main.main(["workloadctl", "doctor", "app"])
         args = fake.call_args.args[0]
         self.assertEqual(args.workload, "app")
         self.assertFalse(args.json)
