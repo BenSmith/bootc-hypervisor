@@ -666,7 +666,7 @@ class TestRuntimeFixture(unittest.TestCase):
     def test_the_fixture_is_a_config_workloadctl_would_accept(self):
         """A fixture that fails `validate` fails at enable, inside the harness
         guest, as a timeout with no useful message."""
-        from vm_network_config import validate_vm_network
+        from vm_validate import validate_vm_network
         self.assertEqual(validate_vm_network(self.net), [])
 
     def test_egress_is_filtered_so_the_redirect_is_armed(self):

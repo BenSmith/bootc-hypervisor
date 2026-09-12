@@ -29,7 +29,7 @@ import vm_netdev
 import workload_lib
 from tests import load_script
 from vm_defs import parse_vm_port
-from vm_network_config import validate_vm_network
+from vm_validate import validate_vm_network
 from workload_addr import (NFLOG_GROUP_BASE, UID_MAX, UID_MIN,
                            MGMT_SSH_PORT, management_address,
                            nflog_group)

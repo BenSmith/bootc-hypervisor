@@ -38,7 +38,7 @@ from broker_config import (BROKER_BIN, BROKER_INSTANCE_PORT,
                            vm_uses_credentials)
 import inspect_arm
 from nft_elements import internal_ok_elements
-from vm_network_config import validate_vm_network
+from vm_validate import validate_vm_network
 import broker_config
 from workload_addr import UID_MIN, broker_listen_address
 import ipaddress
@@ -1227,7 +1227,7 @@ class TestTheRetiredKeyIsARefusal(unittest.TestCase):
     """
 
     def _errors(self, **net):
-        from vm_network_config import validate_vm_network
+        from vm_validate import validate_vm_network
         return [e for e in validate_vm_network(net) if "broker" in e]
 
     def test_true_is_refused(self):

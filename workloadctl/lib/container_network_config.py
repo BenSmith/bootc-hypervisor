@@ -2,7 +2,7 @@
 The container [network] section: its scalars, its entries, its validation, and
 the nft/inspector artefacts it renders to.
 
-The container half of what lib/vm_network_config.py is for a VM. Read the same
+The container half of what lib/vm_network_config.py and lib/vm_validate.py are for a VM. Read the same
 way -- straight off the parsed table, no dedicated parse layer -- and validated
 by the same rules where the substrates share them.
 """
@@ -28,7 +28,7 @@ from workload_addr import allow_reserved_reason
 # --- Container [network] scalars ---
 #
 # Read the same way as VM's vm_allowed_hosts()/net.get("tls")/etc.
-# (lib/vm_network_config.py) -- no dedicated parse function on that side either. `tls` is
+# (lib/vm_defs.py) -- no dedicated parse function on that side either. `tls` is
 # deliberately returned raw (None when absent), not defaulted here: unlike
 # the VM's fixed default, the container's effective tls is *computed* from
 # whether any policy entry is present, and that computation belongs to
@@ -104,8 +104,9 @@ def _container_host_reason_entries(net: dict, key: str) -> list[ContainerHostRea
 # --- Container [network] validation ---
 #
 # The parse functions above are deliberately shape-tolerant; every semantic
-# rule lives here or nowhere. Mirrors validate_vm_network / _validate_egress
-# (lib/vm_network_config.py) where the two schemas share a rule. Diverges where the container
+# rule lives here or nowhere. Mirrors validate_vm_network (lib/vm_validate.py)
+# and validate_egress (lib/vm_egress_validate.py) where the two schemas share
+# a rule. Diverges where the container
 # schema has no `egress` key (presence of a trigger is the whole statement)
 # and no bridge escape hatch. `mode = "host"` IS special-cased below:
 # a host-mode container's processes span the workload's whole subuid window
