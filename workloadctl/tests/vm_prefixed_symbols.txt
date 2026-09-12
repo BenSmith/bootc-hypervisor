@@ -58,7 +58,7 @@ KEEP	vm_network_config.vm_resolve_policy_path
 KEEP	diagnose_selinux.vm_confinement_check
 KEEP	diagnose_egress.vm_egress_check
 KEEP	diagnose_egress.vm_network_check
-KEEP	cmd_diagnose.vm_provisioning_check
+KEEP	diagnose_provisioning.vm_provisioning_check
 KEEP	diagnose_inspect.vm_resolve_check
 KEEP	diagnose_selinux.vm_socket_dir_selinux_check
 KEEP	egress_selinux.VM_QEMU_CONTEXT

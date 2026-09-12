@@ -16,7 +16,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from cmd_diagnose import (
+from diagnose_ca_trust import (
     CA_ANCHOR_DIR,
     CA_TLS_BUNDLE,
     _ca_trust_facts,

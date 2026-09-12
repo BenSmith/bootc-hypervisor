@@ -14,7 +14,7 @@ set from the host or duplicating it in TOML. These tests cover both halves:
   * `provisioning.host_setup_artifacts()` — the three answers (undeclared /
     declares-nothing / declares-a-set), instance-vs-bundle naming, and the
     failure modes that must not be mistaken for any of them.
-  * `cmd_diagnose.host_artifact_check()` + `collect_host_artifact_checks()` —
+  * `diagnose_provisioning.host_artifact_check()` + `collect_host_artifact_checks()` —
     the verdicts, including the restart-loop case that is the whole point.
 
 Plus one guard over the shipped bundles: every setup.sh we ship answers the
@@ -28,7 +28,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-import cmd_diagnose
+import diagnose_provisioning
 import provisioning
 import workload_lib
 import workloadctl_core
@@ -38,7 +38,7 @@ from provisioning import (
     host_setup_artifacts,
     _parse_host_artifacts,
 )
-from cmd_diagnose import collect_host_artifact_checks, host_artifact_check
+from diagnose_provisioning import collect_host_artifact_checks, host_artifact_check
 
 from tests import REPO_ROOT
 
@@ -355,7 +355,7 @@ class CollectHostArtifactChecksTest(unittest.TestCase):
 
     def test_declared_unit_is_probed_by_name(self):
         with _Bundle(_script('echo "unit games-udev-relay.service"')) as cfg:
-            with patch.object(cmd_diagnose, "_unit_props",
+            with patch.object(diagnose_provisioning, "_unit_props",
                               return_value=None) as props:
                 checks = self._collect(cfg)
         props.assert_called_once_with("games-udev-relay.service")
