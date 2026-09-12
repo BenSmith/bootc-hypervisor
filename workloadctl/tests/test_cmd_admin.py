@@ -26,6 +26,7 @@ from unittest import mock
 
 import config_parser
 import workload_lib          # noqa: E402
+import workload_uid          # noqa: E402
 import cmd_create           # noqa: E402
 import cmd_diagnose         # noqa: E402
 import cmd_edit             # noqa: E402
@@ -703,7 +704,7 @@ class DiagnoseUserExistsTest(unittest.TestCase):
         # the *derived* one for UID 10005 (600100000 + 5 * 65536) — the healthy
         # fixture has to satisfy subid_derived/subid_overlap, which is the whole
         # point of those checks.
-        derived = workload_lib.derived_subid_range(10005)[0]
+        derived = workload_uid.derived_subid_range(10005)[0]
         self._subuid = f"_wl-app:{derived}:65536\n"
         self._subgid = f"_wl-app:{derived}:65536\n"
         # Pinned so the overlap check asserts against a known window instead of
@@ -751,7 +752,7 @@ class DiagnoseUserExistsTest(unittest.TestCase):
             else:
                 path.write_text(content)
             paths[attr] = path
-            self.enterContext(mock.patch.object(workload_lib, attr, path))
+            self.enterContext(mock.patch.object(workload_uid, attr, path))
         return paths
 
     def _run(self, json_mode=True, false_substrings=()):
@@ -946,7 +947,7 @@ class DiagnoseUserExistsTest(unittest.TestCase):
         data = json.loads(out)
         check = next(c for c in data["checks"] if c["check"] == "uid_mapping")
         self.assertTrue(check["passed"])
-        start = workload_lib.derived_subid_range(10005)[0]
+        start = workload_uid.derived_subid_range(10005)[0]
         self.assertIn(f"host UIDs {start}-{start + 65535}", check["message"])
 
     def test_uid_mapping_host_mode_no_subuid_entry(self):

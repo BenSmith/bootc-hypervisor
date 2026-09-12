@@ -5,7 +5,7 @@ Background: `docs/workload-run-files.md` is the authoritative definition of the
 per-workload run-files a workload owns, but that set is currently hand-enumerated
 in ~8 places plus the generator (grep `f"workload-{` across lib/ generators/
 libexec/). B15 replaces those with a single `workload_run_files(config)` family in
-`workload_lib`. This module is the *risky-step contract* for that work, written
+`run_files`. This module is the *risky-step contract* for that work, written
 the helper existed (TDD); it is now the enforcing contract for the shipped API:
 
   * TestCurrentDestructiveGolden pins the disable/purge deletion set — the
@@ -48,6 +48,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 
+import run_files
 import workload_lib
 from workloadctl_core import WorkloadConfig
 from covhelper import python_cmd
@@ -58,7 +59,7 @@ from tests import script_env
 # The helper under test does not exist yet (Stage 0). Guard the import so this
 # module is collectable today; the contract classes skip until it lands.
 try:
-    from workload_lib import workload_run_files  # noqa: F401
+    from run_files import workload_run_files  # noqa: F401
     HAVE_HELPER = True
 except ImportError:
     HAVE_HELPER = False
@@ -416,7 +417,7 @@ class TestRunFilesMembership(unittest.TestCase):
 
     def test_a_triggered_container_emits_its_own_inspector(self):
         """P1-15/G3: the container `else` branch's own container_inspects
-        gate (workload_lib.py, sibling of the VM block above), never
+        gate (run_files.py, sibling of the VM block above), never
         exercised here before -- a plain container fixture proves absence,
         this one proves presence."""
         with _Config(CONTAINER_FILTERED_TOML, 'web') as config:
@@ -536,7 +537,7 @@ class TestRunTreeScansCoverRunFiles(unittest.TestCase):
                         if rf.emitted and rf.kind not in self._ENV_KINDS:
                             emitted_kinds.add(rf.kind)
 
-        scan_kinds = {s.kind for s in workload_lib.RUN_TREE_SCANS}
+        scan_kinds = {s.kind for s in run_files.RUN_TREE_SCANS}
         self.assertEqual(scan_kinds, emitted_kinds)
 
 
@@ -670,7 +671,7 @@ class TestSysusersRender(unittest.TestCase):
         kw.setdefault('user_name', '_wl-app')
         kw.setdefault('uid', 10000)
         kw.setdefault('home_dir', '/var/lib/workloads/app/state')
-        return workload_lib.render_sysusers_config(**kw)
+        return run_files.render_sysusers_config(**kw)
 
     def test_container_basic(self):
         out = self._render()

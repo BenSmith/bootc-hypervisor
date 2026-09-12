@@ -20,13 +20,9 @@ from egress_policy import (
 )
 from config_parser import SOCKET_DIR
 from config_parser import container_uses_inspect
-from workload_lib import (
-    GENERATED_BY_RE,
-    container_inspect_policy_text,
-    RUN_TREE_SCANS,
-    workload_config_dir,
-    workload_config_path,
-)
+from workload_lib import workload_config_dir, workload_config_path
+from container_network_config import container_inspect_policy_text
+from run_files import GENERATED_BY_RE, RUN_TREE_SCANS
 
 
 # The generator script location (installed path first, dev checkout fallback)

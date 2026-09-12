@@ -3044,7 +3044,7 @@ allocates from (`SUB_UID_MIN=524288`, `SUB_UID_MAX=600100000` in
 `/etc/login.defs`). A lower base overlaps that window at low UIDs, so a workload
 and a `useradd`-created user could be handed the same subordinate IDs — which
 would let one workload's containers map into another's UID space. The formula is
-authoritative in `workload_lib.derived_subid_range()`; nothing else derives it.
+authoritative in `workload_uid.derived_subid_range()`; nothing else derives it.
 
 **Which side the protection is on.** `useradd` reads `/etc/subuid` and refuses
 to allocate over an entry already listed there — measured on Fedora 44: park a

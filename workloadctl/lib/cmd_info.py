@@ -16,7 +16,7 @@ from config_parser import SOCKET_DIR
 from qmp import QMPClient
 from service_runtime import parse_active_since, systemctl_show
 from substrate import get_substrate
-from workload_lib import read_subid_entry, subgid_file, subuid_file
+from workload_uid import read_subid_entry, subgid_file, subuid_file
 from workloadctl_core import (
     WorkloadConfig,
     WorkloadManager,

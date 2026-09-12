@@ -18,6 +18,9 @@ from unittest.mock import patch
 # Add lib to path for imports
 
 import config_parser
+import run_files
+import workload_uid
+import workload_addr
 import workload_lib
 import vm_network_config
 from config_parser import (
@@ -31,18 +34,17 @@ from workload_lib import (
     USERNAME_PREFIX, MAX_NAME_LENGTH, GENERATOR_OWNED_DIRECTIVES,
     workload_username, workload_service_name, workload_container_name,
     workload_home_dir, workload_state_dir, expand_volume_path,
-    expand_workload_tokens, dq,
-    normalize_containers,
-    virtiofs_tag, systemd_escape_path,
-    selinux_module_name, selinux_type_name,
-    container_tls_mode, container_tls_reason,
-    container_ca_delivery, container_ca_mount_path,
-    ContainerHostReasonEntry, container_internal_entries, container_splice_entries,
+    expand_workload_tokens, dq, normalize_containers, virtiofs_tag,
+    systemd_escape_path, selinux_module_name, selinux_type_name,
+)
+from container_network_config import (
+    container_tls_mode, container_tls_reason, container_ca_delivery,
+    container_ca_mount_path, ContainerHostReasonEntry,
+    container_internal_entries, container_splice_entries,
     container_effective_tls_mode, validate_container_network,
-    container_allow_resolved,
-    container_filter_elements, container_filter_commands,
-    container_internal_resolve, container_inspect_policy,
-    container_inspect_policy_text,
+    container_allow_resolved, container_filter_elements,
+    container_filter_commands, container_internal_resolve,
+    container_inspect_policy, container_inspect_policy_text,
 )
 from vm_defs import parse_memory_mib, mac_address, mac_collisions
 from validation import (
@@ -1417,14 +1419,14 @@ class TestGetNextUid(unittest.TestCase):
         # lock so these tests exercise only the UID-scan math. Real reentrant
         # locking is covered by TestSubidLock.
         self.enterContext(
-            patch.object(workload_lib, "subid_lock", contextlib.nullcontext)
+            patch.object(workload_uid, "subid_lock", contextlib.nullcontext)
         )
         # It also unions in UIDs pinned in /run sysusers configs; stub that to
         # empty so the passwd/allocated math is tested in isolation (the scan
         # itself is covered by TestReservedUidsInPendingSysusers).
         self.enterContext(
             patch.object(
-                workload_lib, "_reserved_uids_in_pending_sysusers",
+                workload_uid, "_reserved_uids_in_pending_sysusers",
                 return_value=set(),
             )
         )
@@ -1434,40 +1436,40 @@ class TestGetNextUid(unittest.TestCase):
         return types.SimpleNamespace(pw_uid=uid)
 
     def test_returns_uid_min_when_nothing_allocated(self):
-        with patch.object(workload_lib, '_allocated_uids', set()), \
-             patch.object(workload_lib.pwd, 'getpwall', return_value=[]):
-            uid = workload_lib.get_next_uid()
-        self.assertEqual(uid, workload_lib.UID_MIN)
+        with patch.object(workload_uid, '_allocated_uids', set()), \
+             patch.object(workload_uid.pwd, 'getpwall', return_value=[]):
+            uid = workload_uid.get_next_uid()
+        self.assertEqual(uid, workload_addr.UID_MIN)
 
     def test_skips_uids_in_live_passwd_and_already_allocated(self):
-        live = [self._pw(workload_lib.UID_MIN)]
-        with patch.object(workload_lib, '_allocated_uids', {workload_lib.UID_MIN + 1}), \
-             patch.object(workload_lib.pwd, 'getpwall', return_value=live):
-            uid = workload_lib.get_next_uid()
-        self.assertEqual(uid, workload_lib.UID_MIN + 2)
+        live = [self._pw(workload_addr.UID_MIN)]
+        with patch.object(workload_uid, '_allocated_uids', {workload_addr.UID_MIN + 1}), \
+             patch.object(workload_uid.pwd, 'getpwall', return_value=live):
+            uid = workload_uid.get_next_uid()
+        self.assertEqual(uid, workload_addr.UID_MIN + 2)
 
     def test_second_call_does_not_reuse_uid_from_first(self):
         # Two calls within the same process (no /etc/passwd entry written
         # yet in between) must not hand out the same slot twice.
-        with patch.object(workload_lib, '_allocated_uids', set()), \
-             patch.object(workload_lib.pwd, 'getpwall', return_value=[]):
-            first = workload_lib.get_next_uid()
-            second = workload_lib.get_next_uid()
+        with patch.object(workload_uid, '_allocated_uids', set()), \
+             patch.object(workload_uid.pwd, 'getpwall', return_value=[]):
+            first = workload_uid.get_next_uid()
+            second = workload_uid.get_next_uid()
         self.assertNotEqual(first, second)
 
     def test_getpwall_failure_falls_back_to_allocated_set_only(self):
-        with patch.object(workload_lib, '_allocated_uids', set()), \
-             patch.object(workload_lib.pwd, 'getpwall', side_effect=OSError("boom")):
-            uid = workload_lib.get_next_uid()
-        self.assertEqual(uid, workload_lib.UID_MIN)
+        with patch.object(workload_uid, '_allocated_uids', set()), \
+             patch.object(workload_uid.pwd, 'getpwall', side_effect=OSError("boom")):
+            uid = workload_uid.get_next_uid()
+        self.assertEqual(uid, workload_addr.UID_MIN)
 
     def test_raises_runtime_error_when_range_exhausted(self):
-        with patch.object(workload_lib, 'UID_MIN', 10000), \
-             patch.object(workload_lib, 'UID_MAX', 10000), \
-             patch.object(workload_lib, '_allocated_uids', set()), \
-             patch.object(workload_lib.pwd, 'getpwall', return_value=[self._pw(10000)]):
+        with patch.object(workload_uid, 'UID_MIN', 10000), \
+             patch.object(workload_uid, 'UID_MAX', 10000), \
+             patch.object(workload_uid, '_allocated_uids', set()), \
+             patch.object(workload_uid.pwd, 'getpwall', return_value=[self._pw(10000)]):
             with self.assertRaises(RuntimeError) as ctx:
-                workload_lib.get_next_uid()
+                workload_uid.get_next_uid()
         self.assertIn("No free UIDs", str(ctx.exception))
 
 
@@ -1485,17 +1487,17 @@ class TestClaimUid(unittest.TestCase):
 
     def setUp(self):
         self.enterContext(
-            patch.object(workload_lib, "subid_lock", contextlib.nullcontext)
+            patch.object(workload_uid, "subid_lock", contextlib.nullcontext)
         )
         self.enterContext(
             patch.object(
-                workload_lib, "_reserved_uids_in_pending_sysusers",
+                workload_uid, "_reserved_uids_in_pending_sysusers",
                 return_value=set(),
             )
         )
-        self.enterContext(patch.object(workload_lib, "_allocated_uids", set()))
+        self.enterContext(patch.object(workload_uid, "_allocated_uids", set()))
         self.enterContext(
-            patch.object(workload_lib.pwd, "getpwall", return_value=[])
+            patch.object(workload_uid.pwd, "getpwall", return_value=[])
         )
         self.base = Path(self.enterContext(tempfile.TemporaryDirectory()))
         self.enterContext(
@@ -1528,49 +1530,49 @@ class TestClaimUid(unittest.TestCase):
         self.enterContext(patch.object(Path, "stat", fake_stat))
 
     def test_no_state_dir_allocates_fresh(self):
-        uid, why = workload_lib.claim_uid("newbie")
-        self.assertEqual((uid, why), (workload_lib.UID_MIN, "fresh"))
+        uid, why = workload_uid.claim_uid("newbie")
+        self.assertEqual((uid, why), (workload_addr.UID_MIN, "fresh"))
 
     def test_adopts_the_uid_owning_an_existing_data_dir(self):
         # The whole point: not UID_MIN, which is what a fresh allocation gives.
-        self._make_state("rolled-back", workload_lib.UID_MIN + 5)
-        uid, why = workload_lib.claim_uid("rolled-back")
-        self.assertEqual((uid, why), (workload_lib.UID_MIN + 5, "adopted"))
+        self._make_state("rolled-back", workload_addr.UID_MIN + 5)
+        uid, why = workload_uid.claim_uid("rolled-back")
+        self.assertEqual((uid, why), (workload_addr.UID_MIN + 5, "adopted"))
 
     def test_adopts_from_state_dir_when_data_dir_is_absent(self):
-        self._make_state("vmish", workload_lib.UID_MIN + 7, subdir="state")
-        uid, why = workload_lib.claim_uid("vmish")
-        self.assertEqual((uid, why), (workload_lib.UID_MIN + 7, "adopted"))
+        self._make_state("vmish", workload_addr.UID_MIN + 7, subdir="state")
+        uid, why = workload_uid.claim_uid("vmish")
+        self.assertEqual((uid, why), (workload_addr.UID_MIN + 7, "adopted"))
 
     def test_root_owned_state_is_not_adoptable(self):
         # The root above data/ and state/ may legitimately stay root-owned, and
         # a root-owned data/ is not a workload's UID to adopt.
         self._make_state("freshly-made", 0)
-        uid, why = workload_lib.claim_uid("freshly-made")
-        self.assertEqual((uid, why), (workload_lib.UID_MIN, "fresh"))
+        uid, why = workload_uid.claim_uid("freshly-made")
+        self.assertEqual((uid, why), (workload_addr.UID_MIN, "fresh"))
 
     def test_reports_collision_when_the_old_uid_now_belongs_to_someone_else(self):
         """The one case nothing here can repair: the derived range is gone, so
         the tree is stranded and the caller has to say so out loud."""
-        taken = workload_lib.UID_MIN + 3
+        taken = workload_addr.UID_MIN + 3
         self._make_state("stranded", taken)
-        with patch.object(workload_lib.pwd, "getpwall",
+        with patch.object(workload_uid.pwd, "getpwall",
                           return_value=[self._pw(taken)]):
-            uid, why = workload_lib.claim_uid("stranded")
+            uid, why = workload_uid.claim_uid("stranded")
         self.assertEqual(why, "collision")
         self.assertNotEqual(uid, taken)
 
     def test_an_adopted_uid_is_not_handed_out_again_in_the_same_run(self):
         """An out-of-sequence adoption has to enter the allocated set, or the
         next workload in the same generator pass gets the same slot."""
-        self._make_state("adopter", workload_lib.UID_MIN)
-        adopted, why = workload_lib.claim_uid("adopter")
+        self._make_state("adopter", workload_addr.UID_MIN)
+        adopted, why = workload_uid.claim_uid("adopter")
         self.assertEqual(why, "adopted")
-        self.assertNotEqual(workload_lib.claim_uid("other")[0], adopted)
+        self.assertNotEqual(workload_uid.claim_uid("other")[0], adopted)
 
     def test_unreadable_var_is_treated_as_absent(self):
         with patch.object(Path, "stat", side_effect=PermissionError("nope")):
-            self.assertIsNone(workload_lib.state_owner_uid("whatever"))
+            self.assertIsNone(workload_uid.state_owner_uid("whatever"))
 
 
 class TestReservedUidsInPendingSysusers(unittest.TestCase):
@@ -1587,10 +1589,10 @@ class TestReservedUidsInPendingSysusers(unittest.TestCase):
         self.run_systemd.mkdir()
         self.sysusers_d.mkdir()
         self.enterContext(
-            patch.object(workload_lib, "RUN_SYSTEMD_SYSTEM", self.run_systemd)
+            patch.object(workload_uid, "RUN_SYSTEMD_SYSTEM", self.run_systemd)
         )
         self.enterContext(
-            patch.object(workload_lib, "RUN_SYSUSERS_D", self.sysusers_d)
+            patch.object(workload_uid, "RUN_SYSUSERS_D", self.sysusers_d)
         )
 
     def _write(self, d, name, body):
@@ -1606,7 +1608,7 @@ class TestReservedUidsInPendingSysusers(unittest.TestCase):
             'u _wl-beta 10007 "beta workload" /var/lib/y\nm _wl-beta kvm\n',
         )
         self.assertEqual(
-            workload_lib._reserved_uids_in_pending_sysusers(), {10005, 10007}
+            workload_uid._reserved_uids_in_pending_sysusers(), {10005, 10007}
         )
 
     def test_ignores_non_user_lines_and_junk(self):
@@ -1615,7 +1617,7 @@ class TestReservedUidsInPendingSysusers(unittest.TestCase):
             "# comment\nm _wl-gamma render\nu _wl-gamma notanint /home\n",
         )
         self.assertEqual(
-            workload_lib._reserved_uids_in_pending_sysusers(), set()
+            workload_uid._reserved_uids_in_pending_sysusers(), set()
         )
 
     def test_missing_dir_is_tolerated(self):
@@ -1626,7 +1628,7 @@ class TestReservedUidsInPendingSysusers(unittest.TestCase):
             'u _wl-delta 10009 "d" /home\n',
         )
         self.assertEqual(
-            workload_lib._reserved_uids_in_pending_sysusers(), {10009}
+            workload_uid._reserved_uids_in_pending_sysusers(), {10009}
         )
 
     def test_get_next_uid_skips_pinned_but_uncreated_uid(self):
@@ -1634,13 +1636,13 @@ class TestReservedUidsInPendingSysusers(unittest.TestCase):
         # allocate-then-create window. get_next_uid must skip it.
         self._write(
             self.run_systemd, "workload-eps.conf",
-            f'u _wl-eps {workload_lib.UID_MIN} "e" /home\n',
+            f'u _wl-eps {workload_addr.UID_MIN} "e" /home\n',
         )
-        with patch.object(workload_lib, "subid_lock", contextlib.nullcontext), \
-             patch.object(workload_lib, "_allocated_uids", set()), \
-             patch.object(workload_lib.pwd, "getpwall", return_value=[]):
-            uid = workload_lib.get_next_uid()
-        self.assertEqual(uid, workload_lib.UID_MIN + 1)
+        with patch.object(workload_uid, "subid_lock", contextlib.nullcontext), \
+             patch.object(workload_uid, "_allocated_uids", set()), \
+             patch.object(workload_uid.pwd, "getpwall", return_value=[]):
+            uid = workload_uid.get_next_uid()
+        self.assertEqual(uid, workload_addr.UID_MIN + 1)
 
 
 class TestSubidLock(unittest.TestCase):
@@ -1652,22 +1654,22 @@ class TestSubidLock(unittest.TestCase):
         tmp = Path(self.enterContext(tempfile.TemporaryDirectory()))
         # Point the flock at a writable path so the test runs unprivileged.
         self.enterContext(
-            patch.object(workload_lib, "SUBID_LOCK", tmp / "subid.lock")
+            patch.object(workload_uid, "SUBID_LOCK", tmp / "subid.lock")
         )
         # Reset reentrancy globals in case a prior test left them dirty.
-        self.enterContext(patch.object(workload_lib, "_subid_lock_fd", None))
-        self.enterContext(patch.object(workload_lib, "_subid_lock_depth", 0))
+        self.enterContext(patch.object(workload_uid, "_subid_lock_fd", None))
+        self.enterContext(patch.object(workload_uid, "_subid_lock_depth", 0))
 
     def test_reentrant_acquire_does_not_deadlock(self):
-        with workload_lib.subid_lock():
-            self.assertEqual(workload_lib._subid_lock_depth, 1)
-            with workload_lib.subid_lock():  # nested acquire, same process
-                self.assertEqual(workload_lib._subid_lock_depth, 2)
+        with workload_uid.subid_lock():
+            self.assertEqual(workload_uid._subid_lock_depth, 1)
+            with workload_uid.subid_lock():  # nested acquire, same process
+                self.assertEqual(workload_uid._subid_lock_depth, 2)
             # inner release must NOT drop the underlying flock yet
-            self.assertEqual(workload_lib._subid_lock_depth, 1)
-            self.assertIsNotNone(workload_lib._subid_lock_fd)
-        self.assertEqual(workload_lib._subid_lock_depth, 0)
-        self.assertIsNone(workload_lib._subid_lock_fd)
+            self.assertEqual(workload_uid._subid_lock_depth, 1)
+            self.assertIsNotNone(workload_uid._subid_lock_fd)
+        self.assertEqual(workload_uid._subid_lock_depth, 0)
+        self.assertIsNone(workload_uid._subid_lock_fd)
 
     def test_held_lock_blocks_a_separate_fd(self):
         # A distinct open file description competes with the held lock (the
@@ -1676,15 +1678,15 @@ class TestSubidLock(unittest.TestCase):
         # and succeed once released — proving the flock actually mutexes.
         import fcntl
 
-        with workload_lib.subid_lock():
-            other = open(workload_lib.SUBID_LOCK, "w")
+        with workload_uid.subid_lock():
+            other = open(workload_uid.SUBID_LOCK, "w")
             try:
                 with self.assertRaises(OSError):
                     fcntl.flock(other.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
             finally:
                 other.close()
 
-        released = open(workload_lib.SUBID_LOCK, "w")
+        released = open(workload_uid.SUBID_LOCK, "w")
         try:
             fcntl.flock(released.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
             fcntl.flock(released.fileno(), fcntl.LOCK_UN)
@@ -1695,11 +1697,11 @@ class TestSubidLock(unittest.TestCase):
         # An unprivileged caller can't open the root-owned lock; the body must
         # still run (fd stays None = unlocked) with reentrancy state balanced.
         with patch("builtins.open", side_effect=PermissionError("denied")):
-            with workload_lib.subid_lock():
-                self.assertEqual(workload_lib._subid_lock_depth, 1)
-                self.assertIsNone(workload_lib._subid_lock_fd)
-        self.assertEqual(workload_lib._subid_lock_depth, 0)
-        self.assertIsNone(workload_lib._subid_lock_fd)
+            with workload_uid.subid_lock():
+                self.assertEqual(workload_uid._subid_lock_depth, 1)
+                self.assertIsNone(workload_uid._subid_lock_fd)
+        self.assertEqual(workload_uid._subid_lock_depth, 0)
+        self.assertIsNone(workload_uid._subid_lock_fd)
 
     def test_non_permission_oserror_propagates_and_cleans_up(self):
         # A real fault (not a permission denial) must NOT silently degrade to an
@@ -1707,10 +1709,10 @@ class TestSubidLock(unittest.TestCase):
         # reentrancy depth behind.
         with patch("builtins.open", side_effect=OSError("I/O error")):
             with self.assertRaises(OSError):
-                with workload_lib.subid_lock():
+                with workload_uid.subid_lock():
                     self.fail("body must not run when acquire raises")
-        self.assertEqual(workload_lib._subid_lock_depth, 0)
-        self.assertIsNone(workload_lib._subid_lock_fd)
+        self.assertEqual(workload_uid._subid_lock_depth, 0)
+        self.assertIsNone(workload_uid._subid_lock_fd)
 
 
 class TestUnitsOutdated(unittest.TestCase):
@@ -1725,7 +1727,7 @@ class TestUnitsOutdated(unittest.TestCase):
         self.rundir.mkdir(parents=True)
         self._patches = [
             patch.object(workload_lib, "WORKLOAD_CONFIG_DIR", self.cfgdir),
-            patch.object(workload_lib, "RUN_SYSTEMD_SYSTEM", self.rundir),
+            patch.object(run_files, "RUN_SYSTEMD_SYSTEM", self.rundir),
         ]
         for p in self._patches:
             p.start()
@@ -1739,25 +1741,25 @@ class TestUnitsOutdated(unittest.TestCase):
 
     def test_false_when_unit_missing(self):
         self.cfg.write_text("x")
-        self.assertFalse(workload_lib.units_outdated("foo"))
+        self.assertFalse(run_files.units_outdated("foo"))
 
     def test_false_when_config_missing(self):
         self.unit.write_text("x")
-        self.assertFalse(workload_lib.units_outdated("foo"))
+        self.assertFalse(run_files.units_outdated("foo"))
 
     def test_false_when_unit_newer(self):
         self.cfg.write_text("x")
         os.utime(self.cfg, (1000, 1000))
         self.unit.write_text("x")
         os.utime(self.unit, (2000, 2000))
-        self.assertFalse(workload_lib.units_outdated("foo"))
+        self.assertFalse(run_files.units_outdated("foo"))
 
     def test_true_when_config_newer(self):
         self.unit.write_text("x")
         os.utime(self.unit, (1000, 1000))
         self.cfg.write_text("x")
         os.utime(self.cfg, (2000, 2000))
-        self.assertTrue(workload_lib.units_outdated("foo"))
+        self.assertTrue(run_files.units_outdated("foo"))
 
     def test_slack_swallows_same_second_enable(self):
         # enable writes both within the same second — must not flag stale.
@@ -1765,7 +1767,7 @@ class TestUnitsOutdated(unittest.TestCase):
         os.utime(self.unit, (1000.0, 1000.0))
         self.cfg.write_text("x")
         os.utime(self.cfg, (1000.4, 1000.4))
-        self.assertFalse(workload_lib.units_outdated("foo"))
+        self.assertFalse(run_files.units_outdated("foo"))
 
 
 class TestUnitsFromOtherBuild(unittest.TestCase):
@@ -1781,7 +1783,7 @@ class TestUnitsFromOtherBuild(unittest.TestCase):
         self.addCleanup(self._tmp.cleanup)
         self.rundir = Path(self._tmp.name) / "run"
         self.rundir.mkdir(parents=True)
-        p = patch.object(workload_lib, "RUN_SYSTEMD_SYSTEM", self.rundir)
+        p = patch.object(run_files, "RUN_SYSTEMD_SYSTEM", self.rundir)
         p.start()
         self.addCleanup(p.stop)
         self.unit = self.rundir / "workload-foo.service"
@@ -1793,12 +1795,12 @@ class TestUnitsFromOtherBuild(unittest.TestCase):
 
     def test_same_build_is_not_reported(self):
         self._write(f"# Generated by workload-generate ({workload_lib.WORKLOADCTL_VERSION})")
-        self.assertIsNone(workload_lib.units_from_other_build("foo"))
+        self.assertIsNone(run_files.units_from_other_build("foo"))
 
     def test_other_build_returns_the_stamped_version(self):
         self._write("# Generated by workload-generate (0.1.0-1.20250101000000)")
         self.assertEqual(
-            workload_lib.units_from_other_build("foo"), "0.1.0-1.20250101000000"
+            run_files.units_from_other_build("foo"), "0.1.0-1.20250101000000"
         )
 
     def test_unstamped_unit_is_reported(self):
@@ -1806,15 +1808,15 @@ class TestUnitsFromOtherBuild(unittest.TestCase):
         # every existing host makes exactly once, so it must not read as "fine".
         self._write("# Generated by workload-generate")
         self.assertEqual(
-            workload_lib.units_from_other_build("foo"), workload_lib.UNSTAMPED_BUILD
+            run_files.units_from_other_build("foo"), run_files.UNSTAMPED_BUILD
         )
 
     def test_missing_unit_says_nothing(self):
-        self.assertIsNone(workload_lib.units_from_other_build("foo"))
+        self.assertIsNone(run_files.units_from_other_build("foo"))
 
     def test_file_the_generator_did_not_write_says_nothing(self):
         self.unit.write_text("[Unit]\nDescription=hand-rolled\n")
-        self.assertIsNone(workload_lib.units_from_other_build("foo"))
+        self.assertIsNone(run_files.units_from_other_build("foo"))
 
     def test_stamp_is_found_past_a_workload_specific_first_line(self):
         # The cgroup drop-in leads with a workload-specific comment, so the
@@ -1824,7 +1826,7 @@ class TestUnitsFromOtherBuild(unittest.TestCase):
             "# Generated by workload-generate (9.9.9-1.20990101000000)\n"
         )
         self.assertEqual(
-            workload_lib.units_from_other_build("foo"), "9.9.9-1.20990101000000"
+            run_files.units_from_other_build("foo"), "9.9.9-1.20990101000000"
         )
 
 
@@ -1994,42 +1996,42 @@ class TestSubidFileHelpers(unittest.TestCase):
         self.dir = tmp
         self.subuid = tmp / "subuid"
         self.subgid = tmp / "subgid"
-        self.enterContext(patch.object(workload_lib, "SUBUID_FILE", self.subuid))
-        self.enterContext(patch.object(workload_lib, "SUBGID_FILE", self.subgid))
-        self.enterContext(patch.object(workload_lib, "SUBID_LOCK", tmp / "subid.lock"))
+        self.enterContext(patch.object(workload_uid, "SUBUID_FILE", self.subuid))
+        self.enterContext(patch.object(workload_uid, "SUBGID_FILE", self.subgid))
+        self.enterContext(patch.object(workload_uid, "SUBID_LOCK", tmp / "subid.lock"))
 
     def test_accessors_follow_a_redirected_constant(self):
         # The whole reason these are functions: an importing module must not
         # capture a stale copy (same contract as workload_config_dir()).
-        self.assertEqual(workload_lib.subuid_file(), self.subuid)
-        self.assertEqual(workload_lib.subgid_file(), self.subgid)
-        self.assertEqual(workload_lib.subid_files(), (self.subuid, self.subgid))
+        self.assertEqual(workload_uid.subuid_file(), self.subuid)
+        self.assertEqual(workload_uid.subgid_file(), self.subgid)
+        self.assertEqual(workload_uid.subid_files(), (self.subuid, self.subgid))
 
     def test_read_entry_parses_start_and_count(self):
         self.subuid.write_text("_wl-a:600100000:65536\n")
         self.assertEqual(
-            workload_lib.read_subid_entry("_wl-a", self.subuid), (600100000, 65536)
+            workload_uid.read_subid_entry("_wl-a", self.subuid), (600100000, 65536)
         )
 
     def test_read_entry_returns_none_when_absent_or_missing_file(self):
         self.subuid.write_text("_wl-other:600100000:65536\n")
-        self.assertIsNone(workload_lib.read_subid_entry("_wl-a", self.subuid))
+        self.assertIsNone(workload_uid.read_subid_entry("_wl-a", self.subuid))
         self.assertIsNone(
-            workload_lib.read_subid_entry("_wl-a", self.dir / "nope")
+            workload_uid.read_subid_entry("_wl-a", self.dir / "nope")
         )
 
     def test_read_entry_returns_none_on_malformed_line(self):
         # Callers (info, diagnose) are read-only reporters; a corrupt file must
         # not raise out of them.
         self.subuid.write_text("_wl-a:notanumber:alsobad\n")
-        self.assertIsNone(workload_lib.read_subid_entry("_wl-a", self.subuid))
+        self.assertIsNone(workload_uid.read_subid_entry("_wl-a", self.subuid))
 
     def test_read_entry_takes_only_the_main_range(self):
         # extra_groups add supplementary `user:GID:1` lines beside the main
         # range; only the main range is the mapping that matters.
         self.subuid.write_text("_wl-a:600100000:65536\n_wl-a:989:1\n")
         self.assertEqual(
-            workload_lib.read_subid_entry("_wl-a", self.subuid), (600100000, 65536)
+            workload_uid.read_subid_entry("_wl-a", self.subuid), (600100000, 65536)
         )
 
     def test_read_entry_finds_the_main_range_after_supplementary_entries(self):
@@ -2041,7 +2043,7 @@ class TestSubidFileHelpers(unittest.TestCase):
             "_wl-a:105:1\n_wl-a:966:1\n_wl-a:600100000:65536\n"
         )
         self.assertEqual(
-            workload_lib.read_subid_entry("_wl-a", self.subuid), (600100000, 65536)
+            workload_uid.read_subid_entry("_wl-a", self.subuid), (600100000, 65536)
         )
 
     def test_read_entry_returns_a_drifted_main_range_not_a_supplementary_one(self):
@@ -2051,7 +2053,7 @@ class TestSubidFileHelpers(unittest.TestCase):
         dropped — silently passing the check that exists to catch it."""
         self.subuid.write_text("_wl-a:989:1\n_wl-a:100000:10000\n")
         self.assertEqual(
-            workload_lib.read_subid_entry("_wl-a", self.subuid), (100000, 10000)
+            workload_uid.read_subid_entry("_wl-a", self.subuid), (100000, 10000)
         )
 
     def test_read_entry_falls_back_when_only_supplementary_entries_exist(self):
@@ -2060,7 +2062,7 @@ class TestSubidFileHelpers(unittest.TestCase):
         subid_files_with_entries still called the user configured."""
         self.subuid.write_text("_wl-a:105:1\n_wl-a:966:1\n")
         self.assertEqual(
-            workload_lib.read_subid_entry("_wl-a", self.subuid), (105, 1)
+            workload_uid.read_subid_entry("_wl-a", self.subuid), (105, 1)
         )
 
     def test_prefix_match_does_not_catch_a_longer_username(self):
@@ -2068,15 +2070,15 @@ class TestSubidFileHelpers(unittest.TestCase):
         a different, still-running workload's mapping."""
         self.subuid.write_text("_wl-app2:600200000:65536\n")
         self.subgid.write_text("_wl-app2:600200000:65536\n")
-        self.assertIsNone(workload_lib.read_subid_entry("_wl-app", self.subuid))
-        self.assertEqual(workload_lib.subid_files_with_entries("_wl-app"), [])
-        self.assertEqual(workload_lib.remove_subid_entries("_wl-app"), [])
+        self.assertIsNone(workload_uid.read_subid_entry("_wl-app", self.subuid))
+        self.assertEqual(workload_uid.subid_files_with_entries("_wl-app"), [])
+        self.assertEqual(workload_uid.remove_subid_entries("_wl-app"), [])
         self.assertIn("_wl-app2", self.subuid.read_text())
 
     def test_remove_strips_only_the_named_user(self):
         self.subuid.write_text("_wl-a:1:2\n_wl-b:3:4\n")
         self.subgid.write_text("_wl-a:1:2\n_wl-b:3:4\n_wl-a:989:1\n")
-        changed = workload_lib.remove_subid_entries("_wl-a")
+        changed = workload_uid.remove_subid_entries("_wl-a")
         self.assertEqual(changed, [self.subuid, self.subgid])
         self.assertEqual(self.subuid.read_text(), "_wl-b:3:4\n")
         self.assertEqual(self.subgid.read_text(), "_wl-b:3:4\n")
@@ -2085,12 +2087,12 @@ class TestSubidFileHelpers(unittest.TestCase):
         self.subuid.write_text("_wl-a:1:2\n")
         self.subgid.write_text("_wl-b:3:4\n")
         self.assertEqual(
-            workload_lib.remove_subid_entries("_wl-a"), [self.subuid]
+            workload_uid.remove_subid_entries("_wl-a"), [self.subuid]
         )
 
     def test_remove_of_last_entry_leaves_an_empty_file_not_a_stray_newline(self):
         self.subuid.write_text("_wl-a:1:2\n")
-        workload_lib.remove_subid_entries("_wl-a")
+        workload_uid.remove_subid_entries("_wl-a")
         self.assertEqual(self.subuid.read_text(), "")
 
     def test_remove_is_atomic_and_preserves_mode(self):
@@ -2111,7 +2113,7 @@ class TestSubidFileHelpers(unittest.TestCase):
             return real_replace(src, dst)
 
         with patch.object(workload_lib.os, "replace", spy_replace):
-            workload_lib.remove_subid_entries("_wl-a")
+            workload_uid.remove_subid_entries("_wl-a")
 
         self.assertEqual(seen, ["_wl-a:1:2\n_wl-b:3:4\n"])
         self.assertEqual(self.subuid.read_text(), "_wl-b:3:4\n")
@@ -2120,29 +2122,29 @@ class TestSubidFileHelpers(unittest.TestCase):
 
     def test_remove_leaves_no_temp_file_when_nothing_matches(self):
         self.subuid.write_text("_wl-b:3:4\n")
-        workload_lib.remove_subid_entries("_wl-a")
+        workload_uid.remove_subid_entries("_wl-a")
         self.assertEqual(list(self.dir.glob(".*.tmp")), [])
 
     def test_append_adds_lines_and_creates_nothing_for_empty(self):
         self.subuid.write_text("_wl-a:1:2\n")
-        workload_lib.append_subid_entries(self.subuid, ["_wl-b:3:4"])
+        workload_uid.append_subid_entries(self.subuid, ["_wl-b:3:4"])
         self.assertEqual(self.subuid.read_text(), "_wl-a:1:2\n_wl-b:3:4\n")
-        workload_lib.append_subid_entries(self.subuid, [])
+        workload_uid.append_subid_entries(self.subuid, [])
         self.assertEqual(self.subuid.read_text(), "_wl-a:1:2\n_wl-b:3:4\n")
 
     def test_append_is_reentrant_under_an_outer_lock(self):
         """workload-ensure-user appends while already holding subid_lock(); the
         inner acquire must be a no-op, not a same-process deadlock."""
         self.subuid.write_text("")
-        with workload_lib.subid_lock():
-            workload_lib.append_subid_entries(self.subuid, ["_wl-a:1:2"])
+        with workload_uid.subid_lock():
+            workload_uid.append_subid_entries(self.subuid, ["_wl-a:1:2"])
         self.assertEqual(self.subuid.read_text(), "_wl-a:1:2\n")
 
     def test_files_with_entries_skips_absent_files(self):
         self.subuid.write_text("_wl-a:1:2\n")
         # subgid intentionally not created
         self.assertEqual(
-            workload_lib.subid_files_with_entries("_wl-a"), [self.subuid]
+            workload_uid.subid_files_with_entries("_wl-a"), [self.subuid]
         )
 
 

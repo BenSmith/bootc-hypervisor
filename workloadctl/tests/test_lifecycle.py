@@ -31,6 +31,8 @@ from unittest.mock import MagicMock, patch
 
 import substrate_container
 import config_parser
+import run_files
+import workload_uid
 import workload_lib
 import workloadctl_core
 from workloadctl_core import WorkloadConfig
@@ -745,11 +747,11 @@ class TestSubidLockSharedConstant(unittest.TestCase):
 
     def test_mutators_share_the_lock_owning_helper(self):
         self.assertIs(substrate_container.remove_subid_entries,
-                      workload_lib.remove_subid_entries)
+                      workload_uid.remove_subid_entries)
         self.assertIs(cmd_cleanup.remove_subid_entries,
-                      workload_lib.remove_subid_entries)
+                      workload_uid.remove_subid_entries)
         self.assertEqual(
-            workload_lib.SUBID_LOCK, Path("/run/lock/workload-subid.lock")
+            workload_uid.SUBID_LOCK, Path("/run/lock/workload-subid.lock")
         )
 
     def test_remove_holds_the_lock_across_read_and_write(self):
@@ -771,17 +773,17 @@ class TestSubidLockSharedConstant(unittest.TestCase):
             subuid.write_text("_wl-gone:600100000:65536\n_wl-stay:600200000:65536\n")
             subgid.write_text("_wl-gone:600100000:65536\n")
 
-            real_rewrite = workload_lib._rewrite_subid_file
+            real_rewrite = workload_uid._rewrite_subid_file
 
             def tracking_rewrite(path, lines):
                 events.append(f"write:{path.name}")
                 return real_rewrite(path, lines)
 
-            with patch.object(workload_lib, 'subid_lock', tracking_lock), \
-                 patch.object(workload_lib, '_rewrite_subid_file', tracking_rewrite), \
-                 patch.object(workload_lib, 'SUBUID_FILE', subuid), \
-                 patch.object(workload_lib, 'SUBGID_FILE', subgid):
-                changed = workload_lib.remove_subid_entries("_wl-gone")
+            with patch.object(workload_uid, 'subid_lock', tracking_lock), \
+                 patch.object(workload_uid, '_rewrite_subid_file', tracking_rewrite), \
+                 patch.object(workload_uid, 'SUBUID_FILE', subuid), \
+                 patch.object(workload_uid, 'SUBGID_FILE', subgid):
+                changed = workload_uid.remove_subid_entries("_wl-gone")
 
         self.assertEqual(changed, [subuid, subgid])
         # Both writes land inside a single lock/unlock pair.
@@ -900,13 +902,13 @@ def _no_subid_files():
     a no-op.
 
     Redirects the constants rather than faking Path.exists: remove_subid_entries
-    reads and rewrites through workload_lib.SUBUID_FILE, so an exists() fake
+    reads and rewrites through workload_uid.SUBUID_FILE, so an exists() fake
     leaves it operating on the host's real /etc/subuid — which a root test runner
     would actually rewrite.
     """
     with tempfile.TemporaryDirectory() as td:
-        with patch.object(workload_lib, 'SUBUID_FILE', Path(td) / "absent-subuid"), \
-             patch.object(workload_lib, 'SUBGID_FILE', Path(td) / "absent-subgid"):
+        with patch.object(workload_uid, 'SUBUID_FILE', Path(td) / "absent-subuid"), \
+             patch.object(workload_uid, 'SUBGID_FILE', Path(td) / "absent-subgid"):
             yield
 
 
@@ -2505,8 +2507,8 @@ class TestCmdCleanup(unittest.TestCase):
             subgid.write_text(content)
 
             with _RootBypass(), \
-                 patch.object(workload_lib, 'SUBUID_FILE', subuid), \
-                 patch.object(workload_lib, 'SUBGID_FILE', subgid), \
+                 patch.object(workload_uid, 'SUBUID_FILE', subuid), \
+                 patch.object(workload_uid, 'SUBGID_FILE', subgid), \
                  patch.object(cmd_cleanup, 'iter_workloads', return_value=[]), \
                  patch('pwd.getpwall', return_value=[orphan]), \
                  patch.object(cmd_cleanup, 'WORKLOADS_BASE', Path("/nonexistent-dir-xyz")), \
@@ -2605,7 +2607,7 @@ class TestWorkloadRunFiles(unittest.TestCase):
     """The removable run-file set: VM and multi-container branches."""
 
     def _removable_names(self, cfg):
-        return [rf.path.name for rf in workload_lib.workload_run_files(cfg)
+        return [rf.path.name for rf in run_files.workload_run_files(cfg)
                 if rf.kind != "env-file"]
 
     def test_vm_includes_build_service_and_virtiofs_units(self):

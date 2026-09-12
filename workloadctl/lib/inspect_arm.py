@@ -117,9 +117,10 @@ from nft_elements import (
     inspect_element_commands, internal_ok_commands, vm_internal_resolve,
 )
 from workload_addr import broker_listen_address, ensure_advertised_interface
-from workload_lib import (
+from workload_lib import load_workload_config
+from container_network_config import (
     container_inspect_policy_text, container_internal_entries,
-    container_internal_resolve, load_workload_config,
+    container_internal_resolve,
 )
 
 

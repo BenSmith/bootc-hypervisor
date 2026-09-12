@@ -67,11 +67,11 @@ import instead: `vm_uses_credentials`/`container_uses_credentials` now come
 from `broker_config`, the nft set and table names from `nft_constants`, and
 `allow_reserved_reason` from `workload_addr`, beside the ranges it refuses.
 
-`workload_lib` still has exactly one deferred import of ours, `from
-workloadctl_core import WorkloadUserNotFound`. That one is not a layering
-defect and is not counted here: `workloadctl_core` is above `workload_lib` by
-construction and imports it, so the cycle is real and the deferral is the fix
-rather than the symptom.
+`run_files` has exactly one deferred import of ours, `from workloadctl_core
+import WorkloadUserNotFound`. That one is not a layering defect and is not
+counted here: `workloadctl_core` is above `run_files` by construction and
+imports it, so the cycle is real and the deferral is the fix rather than the
+symptom.
 """
 
 
@@ -115,8 +115,7 @@ def _upward_edges():
             above = imported in ABOVE_THE_PLANE or imported.startswith("cmd_")
             if path.stem == "workload_lib":
                 # workload_lib is above the plane, so only the substrate
-                # facade is upward for it. It legitimately imports vm_defs,
-                # vm_network_config and broker_config.
+                # facade is upward for it.
                 above = imported == "vm"
             if above and imported != path.stem:
                 counts[(path.stem, imported)] += 1

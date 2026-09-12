@@ -140,7 +140,7 @@ class TestGeneratedConfigs(unittest.TestCase):
         check that stays meaningful if the whole-document validator ever stops
         descending into [network].
         """
-        from workload_lib import validate_container_network
+        from container_network_config import validate_container_network
         for name, mod, arms in _rigs():
             for arm in arms:
                 with self.subTest(rig=name, arm=_arm_name(arm)):

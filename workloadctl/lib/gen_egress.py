@@ -21,7 +21,8 @@ Installed to /usr/libexec/workloadctl/gen_egress.py.
 """
 
 
-from workload_lib import GENERATED_BY, workload_state_dir, dq, uq
+from workload_lib import workload_state_dir, dq, uq
+from run_files import GENERATED_BY
 from egress_plane import PLANES
 from egress_policy import inspect_logs_directory
 from egress_ca import denial_dir, leaf_dir

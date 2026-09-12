@@ -19,7 +19,8 @@ from passt_dns_fragment import (
 )
 from passt_dns_host import default_gateways, host_resolvers
 from workload_addr import resolve_address
-from workload_lib import load_workload_config, workload_env_dir
+from workload_lib import load_workload_config
+from run_files import workload_env_dir
 
 
 def workload_config(name: str) -> dict:

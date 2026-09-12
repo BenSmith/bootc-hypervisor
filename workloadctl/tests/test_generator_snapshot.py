@@ -33,7 +33,7 @@ from pathlib import Path
 from covhelper import python_cmd
 
 from tests import script_env
-from workload_lib import GENERATED_BY_RE
+from run_files import GENERATED_BY_RE
 
 
 GENERATOR = os.path.join(os.path.dirname(__file__), '..', 'generators', 'workload-generate')

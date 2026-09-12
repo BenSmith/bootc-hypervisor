@@ -108,7 +108,7 @@ truth.
 The rollback hazard those fields would have addressed — passwd-absent but
 `/var`-present, so re-enabling allocates a *fresh* UID that re-points the derived
 range onto a tree owned by the old one — is real, and is handled where it belongs,
-by `claim_uid()` in `lib/workload_lib.py` adopting the existing owner at
+by `claim_uid()` in `lib/workload_uid.py` adopting the existing owner at
 allocation time.
 
 ## Consequences

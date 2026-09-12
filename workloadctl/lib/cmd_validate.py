@@ -14,11 +14,8 @@ import sys
 from typing import NoReturn
 
 from config_parser import container_credential_entries, container_uses_inspect
-from workload_lib import (
-    container_internal_entries,
-    expand_volume_path,
-    GENERATOR_OWNED_DIRECTIVES,
-)
+from workload_lib import expand_volume_path, GENERATOR_OWNED_DIRECTIVES
+from container_network_config import container_internal_entries
 from provisioning import shadowed_filecon_paths
 from egress_policy import internal_hosts, vm_uses_inspect
 from broker_config import vm_credential_entries

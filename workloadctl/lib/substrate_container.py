@@ -34,12 +34,9 @@ from substrate import (
     systemctl_or_raise,
 )
 from config_parser import container_uses_inspect
-from workload_lib import (
-    RUN_SYSTEMD_SYSTEM,
-    remove_subid_entries,
-    subid_files_with_entries,
-    workload_service_units,
-)
+from workload_lib import RUN_SYSTEMD_SYSTEM
+from run_files import workload_service_units
+from workload_uid import remove_subid_entries, subid_files_with_entries
 from workloadctl_core import WorkloadUserNotFound, resolve_container_target
 
 

@@ -11,12 +11,10 @@ import subprocess
 import deployment
 from config_parser import workload_root_dir
 from workload_lib import (
-    HOST_USERNS_OPT_IN,
-    units_outdated,
-    units_from_other_build,
-    WORKLOADCTL_VERSION,
-    workload_config_dir,
-    workload_service_units,
+    HOST_USERNS_OPT_IN, WORKLOADCTL_VERSION, workload_config_dir,
+)
+from run_files import (
+    units_outdated, units_from_other_build, workload_service_units,
 )
 from validation import uses_host_userns
 from service_runtime import parse_active_since, systemctl_show

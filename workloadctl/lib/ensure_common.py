@@ -32,9 +32,8 @@ import time
 
 import deployment
 from config_parser import workload_root_dir
-from workload_lib import (
-    workload_state_dir, workload_data_dir, workload_env_dir,
-)
+from workload_lib import workload_state_dir, workload_data_dir
+from run_files import workload_env_dir
 from egress_ca import (
     ca_cert_path, ca_dir, denial_dir, leaf_dir, ca_key_path,
     ca_openssl_argv,

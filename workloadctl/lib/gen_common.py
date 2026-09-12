@@ -28,10 +28,10 @@ import sys
 from pathlib import Path
 
 from config_parser import workload_root_dir
-from workload_lib import (GENERATED_BY, GENERATOR_OWNED_DIRECTIVES,
-                          RUN_SYSTEMD_SYSTEM, render_sysusers_config,
-                          workload_run_files,
-                          workload_state_dir)
+from workload_lib import (
+    GENERATOR_OWNED_DIRECTIVES, RUN_SYSTEMD_SYSTEM, workload_state_dir,
+)
+from run_files import GENERATED_BY, render_sysusers_config, workload_run_files
 from unit_file import Unit
 
 # Set by the entrypoint once argv is parsed; see the module docstring.
@@ -66,7 +66,7 @@ def _write_kmsg(priority, msg):
 
 class _RunFileConfig:
     """Minimal WorkloadConfig stand-in so the generator can drive the single
-    canonical run-file enumeration (workload_lib.workload_run_files) from its
+    canonical run-file enumeration (run_files.workload_run_files) from its
     raw-dict context. Carries exactly the attributes that helper reads; uid is
     the value the generator already allocated, not a passwd lookup (WorkloadConfig
     would drag workloadctl_core onto the generate step and raise before the user

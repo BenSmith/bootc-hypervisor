@@ -24,13 +24,9 @@ import tomllib
 import deployment
 from config_parser import WORKLOADS_BASE
 from workload_lib import (
-    iter_workloads,
-    remove_subid_entries,
-    selinux_module_name,
-    subid_files_with_entries,
-    USERNAME_PREFIX,
-    workload_username,
+    iter_workloads, selinux_module_name, USERNAME_PREFIX, workload_username,
 )
+from workload_uid import remove_subid_entries, subid_files_with_entries
 from workloadctl_core import WorkloadManager, require_root
 from cmd_backup import BACKUP_DIR
 

@@ -42,7 +42,7 @@ from vm_defs import parse_memory_mib, vm_guest_agent_socket, mac_address
 from workload_addr import MGMT_SSH_PORT, management_address
 from vm_clock import GUEST_AGENT_TIMEOUT, guest_agent_sync
 from vm_metrics import get_vm_qmp_metrics
-from workload_lib import workload_service_units
+from run_files import workload_service_units
 from workloadctl_core import WorkloadUserNotFound, format_size
 
 

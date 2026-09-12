@@ -23,8 +23,9 @@ from pathlib import Path
 
 from workload_lib import (
     WORKLOAD_CONFIG_DIR, ENABLED_MARKER_NAME, iter_workloads,
-    workload_username, infer_workload_kind, claim_uid, subid_lock,
+    workload_username, infer_workload_kind,
 )
+from workload_uid import claim_uid, subid_lock
 from validation import validate_workload_config
 from gen_container import generate_container_workload
 from gen_vm import generate_vm_workload

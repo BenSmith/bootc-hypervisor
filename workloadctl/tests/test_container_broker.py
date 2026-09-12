@@ -34,7 +34,7 @@ from broker_config import (
     broker_credential,
 )
 from workload_addr import UID_MIN, broker_listen_address
-from workload_lib import validate_container_network
+from container_network_config import validate_container_network
 
 import tomllib
 
@@ -549,6 +549,7 @@ class TestTheRunFileEntry(unittest.TestCase):
 
     def _entry(self, toml_text):
         from unittest import mock
+        import run_files
         import workload_lib
         from workloadctl_core import WorkloadConfig
         with tempfile.TemporaryDirectory() as d:
@@ -561,7 +562,7 @@ class TestTheRunFileEntry(unittest.TestCase):
                                       return_value=UID_MIN + 1):
                 wc = WorkloadConfig("capp")
                 config = wc.config
-                files = workload_lib.workload_run_files(wc)
+                files = run_files.workload_run_files(wc)
         entry = next(f for f in files
                      if f.path.name == "workload-capp-broker.service")
         return entry, config
