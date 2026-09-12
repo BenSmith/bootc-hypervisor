@@ -104,8 +104,9 @@ def _container_host_reason_entries(net: dict, key: str) -> list[ContainerHostRea
 # --- Container [network] validation ---
 #
 # The parse functions above are deliberately shape-tolerant; every semantic
-# rule lives here or nowhere. Mirrors validate_vm_network / _validate_egress
-# (lib/vm_validate.py) where the two schemas share a rule. Diverges where the container
+# rule lives here or nowhere. Mirrors validate_vm_network (lib/vm_validate.py)
+# and validate_egress (lib/vm_egress_validate.py) where the two schemas share
+# a rule. Diverges where the container
 # schema has no `egress` key (presence of a trigger is the whole statement)
 # and no bridge escape hatch. `mode = "host"` IS special-cased below:
 # a host-mode container's processes span the workload's whole subuid window

@@ -90,7 +90,7 @@ class TestGeneratedConfigs(unittest.TestCase):
         """The half that catches a retired spelling: parsing is not enough,
         because `allow = ["1.1.1.1:53"]` is perfectly good TOML and a refused
         config all the same."""
-        from vm_validate import _validate_egress
+        from vm_egress_validate import validate_egress
         for name, mod, arms in _rigs():
             for arm in arms:
                 with self.subTest(rig=name, arm=_arm_name(arm)):
@@ -98,14 +98,14 @@ class TestGeneratedConfigs(unittest.TestCase):
                     net = (doc.get("vm") or {}).get("network")
                     if net is None:
                         continue
-                    errors = _validate_egress(net)
+                    errors = validate_egress(net)
                     self.assertEqual(
                         errors, [], f"{name} arm {_arm_name(arm)}: {errors}")
 
     def test_every_generated_config_validates_whole(self):
         """The whole document, not only its network section.
 
-        `_validate_egress` above reads `[vm.network]` and nothing else, so
+        `validate_egress` above reads `[vm.network]` and nothing else, so
         every field a rig writes OUTSIDE it -- `local_image`, `vcpus`,
         `memory`, `user`, `rollback_keep`, and the whole `[workload]` block --
         was ungated, and a value the schema rejects there produces the same

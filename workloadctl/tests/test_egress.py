@@ -2112,8 +2112,8 @@ class TestListenerRangeRefusalReachesBothPaths(unittest.TestCase):
     """
 
     def test_validation_reports_it_as_an_allow_error(self):
-        from vm_validate import _validate_egress
-        errors = _validate_egress({"egress": "filtered",
+        from vm_egress_validate import validate_egress
+        errors = validate_egress({"egress": "filtered",
                                    "allow": [allow_entry("198.18.1.0:8080")]})
         self.assertTrue(any("listener range" in e for e in errors), errors)
         self.assertTrue(any("[vm.network].allow" in e for e in errors), errors)
@@ -2366,8 +2366,8 @@ class TestRung2Schema(unittest.TestCase):
     """
 
     def _egress(self, net):
-        from vm_validate import _validate_egress
-        return _validate_egress(net)
+        from vm_egress_validate import validate_egress
+        return validate_egress(net)
 
     # --- tls ---
 
@@ -2385,13 +2385,13 @@ class TestRung2Schema(unittest.TestCase):
         the next time a mode is written down before it works.
         """
         from unittest import mock
-        import vm_validate
+        import vm_egress_validate
         # Patched in the module that READS it, not the one that defines it
         # (vm_defs). `from x import name` copies the binding, so rebinding
         # vm_defs leaves the validator looking at the original empty map --
         # and the assertion below is what says so rather than the test
         # quietly passing.
-        with mock.patch.object(vm_validate, "TLS_UNBUILT",
+        with mock.patch.object(vm_egress_validate, "TLS_UNBUILT",
                                {"tunnel": "rung 9, with the thing it needs"}):
             errors = self._egress({"hosts": ["github.com"], "tls": "tunnel"})
         self.assertTrue(errors)
@@ -3236,8 +3236,8 @@ class TestRung2Warnings(unittest.TestCase):
         A stale copy shipped in an RPM that hard-fails a valid config is worse
         than a line of output -- the operator cannot edit the RPM.
         """
-        from vm_validate import _validate_egress
-        self.assertEqual(_validate_egress({"hosts": ["*.github.io"]}), [])
+        from vm_egress_validate import validate_egress
+        self.assertEqual(validate_egress({"hosts": ["*.github.io"]}), [])
 
     def test_a_named_host_under_such_a_parent_does_not_warn(self):
         # `pages.github.io` names one site; only a wildcard lets the guest pick.
@@ -3729,8 +3729,8 @@ class TestRung6CredentialSchema(unittest.TestCase):
     """
 
     def _egress(self, net):
-        from vm_validate import _validate_egress
-        return _validate_egress(net)
+        from vm_egress_validate import validate_egress
+        return validate_egress(net)
 
     def _net(self, **over):
         net = {"hosts": ["api.example"],

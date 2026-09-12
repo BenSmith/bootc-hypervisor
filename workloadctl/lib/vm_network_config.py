@@ -175,7 +175,7 @@ def parse_vm_allow(entry, *, filtered: bool = True) -> VmAllowEntry:
             f"where 80 and 443 are decided")
 
     # Checked here rather than beside the schema, because this is the single
-    # funnel every allow entry passes through: `_validate_egress` (vm_validate) calls it for
+    # funnel every allow entry passes through: `validate_egress` (vm_egress_validate) calls it for
     # the operator-facing error and `vm_filter_elements` calls it on the arming
     # path, so the refusal cannot be reached around by a config that never met
     # validation. The design asks for it "in the helper as well as the schema";
