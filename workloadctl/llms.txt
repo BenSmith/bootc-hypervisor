@@ -454,6 +454,7 @@ lib/deployment.py                  # ostree deployment identity for /var provena
 lib/substrate.py                   # Substrate port (ABC + exceptions + get_substrate router, computed capability matrix)
 lib/substrate_container.py         # ContainerSubstrate (rootless podman)
 lib/substrate_vm.py                # VMSubstrate (QEMU/KVM, SSH + QMP)
+lib/vm_guest_reach.py              # How the host reaches a VM's guest: the SSH endpoint and command, the console socket, the address cascade (agent, then ARP on a bridge)
 lib/backup.py                      # capture() implementation shared by both substrates
 lib/podman.py                      # Typed Podman wrapper (JSON output, PodmanError, root/user modes)
 lib/qmp.py                         # QMP client

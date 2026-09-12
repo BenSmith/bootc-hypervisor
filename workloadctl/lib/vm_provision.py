@@ -309,7 +309,7 @@ def _vm_probe_target(name: str) -> tuple[str, Path, str, int] | None:
     Such a VM simply gets no record, which reads as "not observed" and never
     heals.
 
-    Two topologies, same split as the CLI's ``_vm_ssh_endpoint``: under passt
+    Two topologies, same split as the CLI's ``vm_ssh_endpoint``: under passt
     the address is derived from the uid and known without asking anything, while
     on a bridge the guest has a LAN address of its own that has to be
     discovered. The discovery chain is the substrate's, imported lazily so the
@@ -330,8 +330,8 @@ def _vm_probe_target(name: str) -> tuple[str, Path, str, int] | None:
         return (guest_user, workload_state_dir(name),
                 management_address(uid), MGMT_SSH_PORT)
 
-    from substrate_vm import _vm_guest_addresses
-    addresses = _vm_guest_addresses(name, bridge)
+    from vm_guest_reach import vm_guest_addresses
+    addresses = vm_guest_addresses(name, bridge)
     if not addresses:
         return None
     return guest_user, workload_state_dir(name), addresses[0], 22

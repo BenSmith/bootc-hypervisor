@@ -19,7 +19,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 
-import substrate_vm as substrate
+import vm_guest_reach as reach
 from vm_defs import mac_address
 
 
@@ -48,15 +48,15 @@ class TestVmGuestIpArp(unittest.TestCase):
         # No managed-bridge marker -> skip lease, go straight to ARP.
         marker = mock.MagicMock()
         marker.exists.return_value = False
-        self._path_patch = mock.patch.object(substrate, "Path", return_value=marker)
+        self._path_patch = mock.patch.object(reach, "Path", return_value=marker)
         self._path_patch.start()
         self.addCleanup(self._path_patch.stop)
         # These cases are about the host-side chain. The agent socket path is
-        # built from a module constant rather than substrate.Path, so it escapes
+        # built from a module constant rather than reach.Path, so it escapes
         # the patch above and would otherwise be answered by whatever is really
         # in /run on the machine running the tests.
         self._agent_patch = mock.patch.object(
-            substrate, "_vm_guest_agent_addresses", return_value=[])
+            reach, "vm_guest_agent_addresses", return_value=[])
         self._agent_patch.start()
         self.addCleanup(self._agent_patch.stop)
 
@@ -71,16 +71,16 @@ class TestVmGuestIpArp(unittest.TestCase):
             f"{self.ip} lladdr {self.mac} REACHABLE\n"
             f"192.168.0.1 lladdr a0:63:91:2c:e5:ef STALE\n"
         )
-        with mock.patch.object(substrate.subprocess, "run",
+        with mock.patch.object(reach.subprocess, "run",
                                return_value=_completed(neigh)):
-            self.assertEqual(substrate._vm_guest_ip(self.name, "br0"), self.ip)
+            self.assertEqual(reach.vm_guest_ip(self.name, "br0"), self.ip)
 
     def test_unfiltered_format_still_works(self):
         """<ip> dev <iface> lladdr <mac> <state> (6 fields) also resolves."""
         neigh = f"{self.ip} dev br0 lladdr {self.mac} REACHABLE\n"
-        with mock.patch.object(substrate.subprocess, "run",
+        with mock.patch.object(reach.subprocess, "run",
                                return_value=_completed(neigh)):
-            self.assertEqual(substrate._vm_guest_ip(self.name, "br0"), self.ip)
+            self.assertEqual(reach.vm_guest_ip(self.name, "br0"), self.ip)
 
     def test_mac_mismatch_falls_through_to_mdns(self):
         """No matching MAC in ARP -> mDNS fallback supplies the IP."""
@@ -93,8 +93,8 @@ class TestVmGuestIpArp(unittest.TestCase):
                 return _completed(f"{self.ip} {self.name}.local\n", returncode=0)
             return _completed("", returncode=1)
 
-        with mock.patch.object(substrate.subprocess, "run", side_effect=fake_run):
-            self.assertEqual(substrate._vm_guest_ip(self.name, "br0"), self.ip)
+        with mock.patch.object(reach.subprocess, "run", side_effect=fake_run):
+            self.assertEqual(reach.vm_guest_ip(self.name, "br0"), self.ip)
 
     def test_nothing_matches_returns_none(self):
         def fake_run(argv, *a, **k):
@@ -102,8 +102,8 @@ class TestVmGuestIpArp(unittest.TestCase):
                 return _completed("", returncode=2)
             return _completed("")  # empty ARP table
 
-        with mock.patch.object(substrate.subprocess, "run", side_effect=fake_run):
-            self.assertIsNone(substrate._vm_guest_ip(self.name, "br0"))
+        with mock.patch.object(reach.subprocess, "run", side_effect=fake_run):
+            self.assertIsNone(reach.vm_guest_ip(self.name, "br0"))
 
 
 class TestVmGuestAgent(unittest.TestCase):
@@ -119,7 +119,7 @@ class TestVmGuestAgent(unittest.TestCase):
         # host that happens to be running managed-bridge VMs.
         marker = mock.MagicMock()
         marker.exists.return_value = False
-        self._path_patch = mock.patch.object(substrate, "Path", return_value=marker)
+        self._path_patch = mock.patch.object(reach, "Path", return_value=marker)
         self._path_patch.start()
         self.addCleanup(self._path_patch.stop)
 
@@ -140,8 +140,8 @@ class TestVmGuestAgent(unittest.TestCase):
         client = mock.MagicMock()
         client.execute.side_effect = execute
         return (
-            mock.patch.object(substrate, "vm_guest_agent_socket", return_value=sock),
-            mock.patch.object(substrate, "QMPClient", return_value=client),
+            mock.patch.object(reach, "vm_guest_agent_socket", return_value=sock),
+            mock.patch.object(reach, "QMPClient", return_value=client),
             client,
         )
 
@@ -153,7 +153,7 @@ class TestVmGuestAgent(unittest.TestCase):
         p_sock, p_client, _ = self._agent(interfaces)
         with p_sock, p_client:
             self.assertEqual(
-                substrate._vm_guest_addresses(self.name, "br0"),
+                reach.vm_guest_addresses(self.name, "br0"),
                 ["192.168.0.157", "fd00::157"],
             )
 
@@ -170,11 +170,11 @@ class TestVmGuestAgent(unittest.TestCase):
         arp = f"192.168.0.157 lladdr {self.mac} STALE\n"
         p_sock, p_client, _ = self._agent(interfaces)
         with p_sock, p_client, \
-             mock.patch.object(substrate.subprocess, "run",
+             mock.patch.object(reach.subprocess, "run",
                                return_value=_completed(arp)):
             # Falls through to ARP rather than handing back 10.88.0.1.
             self.assertEqual(
-                substrate._vm_guest_ip(self.name, "br0"), "192.168.0.157")
+                reach.vm_guest_ip(self.name, "br0"), "192.168.0.157")
 
     def test_stale_reply_is_discarded_by_the_sync_nonce(self):
         """A previous lookup that timed out mid-command leaves its reply queued
@@ -199,10 +199,10 @@ class TestVmGuestAgent(unittest.TestCase):
         client.execute.side_effect = execute
         client.next_message.side_effect = lambda: {"return": state["token"]}
 
-        with mock.patch.object(substrate, "vm_guest_agent_socket", return_value=sock), \
-             mock.patch.object(substrate, "QMPClient", return_value=client):
+        with mock.patch.object(reach, "vm_guest_agent_socket", return_value=sock), \
+             mock.patch.object(reach, "QMPClient", return_value=client):
             self.assertEqual(
-                substrate._vm_guest_addresses(self.name, "br0"),
+                reach.vm_guest_addresses(self.name, "br0"),
                 ["192.168.0.157"],
             )
 
@@ -214,12 +214,12 @@ class TestVmGuestAgent(unittest.TestCase):
         client.execute.return_value = {"return": "not-the-token"}
         client.next_message.return_value = None
         arp = f"192.168.0.157 lladdr {self.mac} STALE\n"
-        with mock.patch.object(substrate, "vm_guest_agent_socket", return_value=sock), \
-             mock.patch.object(substrate, "QMPClient", return_value=client), \
-             mock.patch.object(substrate.subprocess, "run",
+        with mock.patch.object(reach, "vm_guest_agent_socket", return_value=sock), \
+             mock.patch.object(reach, "QMPClient", return_value=client), \
+             mock.patch.object(reach.subprocess, "run",
                                return_value=_completed(arp)):
             self.assertEqual(
-                substrate._vm_guest_ip(self.name, "br0"), "192.168.0.157")
+                reach.vm_guest_ip(self.name, "br0"), "192.168.0.157")
 
     def test_wins_over_stale_arp(self):
         """The whole point: the agent answers even when the neighbour table has
@@ -227,9 +227,9 @@ class TestVmGuestAgent(unittest.TestCase):
         interfaces = [_iface("enp1s0", self.mac, ("ipv4", "192.168.0.157"))]
         p_sock, p_client, _ = self._agent(interfaces)
         with p_sock, p_client, \
-             mock.patch.object(substrate.subprocess, "run") as run:
+             mock.patch.object(reach.subprocess, "run") as run:
             self.assertEqual(
-                substrate._vm_guest_ip(self.name, "br0"), "192.168.0.157")
+                reach.vm_guest_ip(self.name, "br0"), "192.168.0.157")
         run.assert_not_called()
 
     def test_no_negotiate_on_the_agent_channel(self):
@@ -238,7 +238,7 @@ class TestVmGuestAgent(unittest.TestCase):
         p_sock, p_client, client = self._agent(
             [_iface("enp1s0", self.mac, ("ipv4", "10.0.0.9"))])
         with p_sock, p_client:
-            substrate._vm_guest_addresses(self.name, "br0")
+            reach.vm_guest_addresses(self.name, "br0")
         client.negotiate.assert_not_called()
         self.assertEqual(
             [c.args[0] for c in client.execute.call_args_list],
@@ -255,16 +255,16 @@ class TestVmGuestAgent(unittest.TestCase):
         ]
         p_sock, p_client, _ = self._agent(interfaces)
         with p_sock, p_client, \
-             mock.patch.object(substrate.subprocess, "run",
+             mock.patch.object(reach.subprocess, "run",
                                return_value=_completed("", returncode=2)):
-            self.assertEqual(substrate._vm_guest_addresses(self.name, "br0"), [])
+            self.assertEqual(reach.vm_guest_addresses(self.name, "br0"), [])
 
     def test_absent_socket_skips_agent_without_connecting(self):
         p_sock, p_client, client = self._agent([], socket_present=False)
         with p_sock, p_client, \
-             mock.patch.object(substrate.subprocess, "run",
+             mock.patch.object(reach.subprocess, "run",
                                return_value=_completed("", returncode=2)):
-            substrate._vm_guest_addresses(self.name, "br0")
+            reach.vm_guest_addresses(self.name, "br0")
         client.connect.assert_not_called()
 
     def test_agent_failure_falls_through_to_arp(self):
@@ -276,11 +276,11 @@ class TestVmGuestAgent(unittest.TestCase):
         client = mock.MagicMock()
         client.execute.side_effect = TimeoutError("no reply")
         neigh = f"{ip} lladdr {self.mac} STALE\n"
-        with mock.patch.object(substrate, "vm_guest_agent_socket", return_value=sock), \
-             mock.patch.object(substrate, "QMPClient", return_value=client), \
-             mock.patch.object(substrate.subprocess, "run",
+        with mock.patch.object(reach, "vm_guest_agent_socket", return_value=sock), \
+             mock.patch.object(reach, "QMPClient", return_value=client), \
+             mock.patch.object(reach.subprocess, "run",
                                return_value=_completed(neigh)):
-            self.assertEqual(substrate._vm_guest_ip(self.name, "br0"), ip)
+            self.assertEqual(reach.vm_guest_ip(self.name, "br0"), ip)
 
 
 class TestVmGuestIpPasst(unittest.TestCase):
@@ -298,17 +298,17 @@ class TestVmGuestIpPasst(unittest.TestCase):
         # question that only makes sense on a shared segment. Any subprocess
         # call here would be one of them, so the mock asserts by never firing.
         run = mock.MagicMock()
-        with mock.patch.object(substrate, "_vm_guest_agent_addresses",
+        with mock.patch.object(reach, "vm_guest_agent_addresses",
                                return_value=[]), \
-             mock.patch.object(substrate.subprocess, "run", run):
-            self.assertEqual(substrate._vm_guest_addresses("demo-vm"), [])
+             mock.patch.object(reach.subprocess, "run", run):
+            self.assertEqual(reach.vm_guest_addresses("demo-vm"), [])
         run.assert_not_called()
 
     def test_guest_agent_still_answers_under_passt(self):
         """The agent asks the guest's own kernel, so it works on any topology."""
-        with mock.patch.object(substrate, "_vm_guest_agent_addresses",
+        with mock.patch.object(reach, "vm_guest_agent_addresses",
                                return_value=["10.9.8.7"]):
-            self.assertEqual(substrate._vm_guest_ip("demo-vm"), "10.9.8.7")
+            self.assertEqual(reach.vm_guest_ip("demo-vm"), "10.9.8.7")
 
 
 if __name__ == "__main__":

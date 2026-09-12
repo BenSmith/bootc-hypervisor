@@ -29,7 +29,9 @@ from substrate import (
     service_active,
 )
 from substrate_container import ContainerSubstrate
-from substrate_vm import VMSubstrate, _vm_ssh_command
+from substrate_vm import VMSubstrate
+from vm_guest_reach import vm_ssh_command
+import vm_guest_reach as _reach_mod
 import cmd_drift
 import cmd_health
 import cmd_stats
@@ -105,12 +107,12 @@ class _WorkloadDir:
         shutil.rmtree(self._tmp, ignore_errors=True)
 
 
-# ── _vm_ssh_command host-key pinning (S1) ────────────────────────────────────
+# ── vm_ssh_command host-key pinning (S1) ────────────────────────────────────
 
 class TestVmSshCommandPinning(unittest.TestCase):
     def test_pins_host_key_no_permissive_options(self):
         config = _make_vm_config()
-        cmd = _vm_ssh_command(config, ("192.168.200.5", 22), exec_args=["true"])
+        cmd = vm_ssh_command(config, ("192.168.200.5", 22), exec_args=["true"])
         joined = " ".join(cmd)
         # Verifies against a per-workload known_hosts keyed by the stable name.
         self.assertIn("StrictHostKeyChecking=yes", cmd)
@@ -132,7 +134,7 @@ class TestVmSshCommandPinning(unittest.TestCase):
         """
         config = _make_vm_config()
         script = "mkfs.ext4 -qF /dev/vdb && echo done > /mnt/d/sentinel"
-        cmd = _vm_ssh_command(config, ("192.168.200.5", 22),
+        cmd = vm_ssh_command(config, ("192.168.200.5", 22),
                               exec_args=["sudo", "sh", "-c", script])
         # ssh's remote command is the single trailing word; unquoting it must
         # give back exactly the argv we asked for.
@@ -1282,20 +1284,20 @@ class TestCapabilityMatrix(unittest.TestCase):
     # must not be conflated with the NotApplicable below.
     def test_vm_addresses_returns_guest_ip(self):
         substrate = VMSubstrate(self._vm_config(), None)
-        with patch.object(_vm_mod, '_vm_guest_addresses', return_value=['10.0.0.5']):
+        with patch.object(_vm_mod, 'vm_guest_addresses', return_value=['10.0.0.5']):
             self.assertEqual(substrate.addresses(), ['10.0.0.5'])
 
     def test_vm_addresses_passes_through_multiple(self):
         """The guest agent can report several; addresses() must not truncate to
         one — that is _guest_ip's job, not this primitive's."""
         substrate = VMSubstrate(self._vm_config(), None)
-        with patch.object(_vm_mod, '_vm_guest_addresses',
+        with patch.object(_vm_mod, 'vm_guest_addresses',
                           return_value=['10.0.0.5', 'fd00::5']):
             self.assertEqual(substrate.addresses(), ['10.0.0.5', 'fd00::5'])
 
     def test_vm_addresses_empty_when_unresolvable(self):
         substrate = VMSubstrate(self._vm_config(), None)
-        with patch.object(_vm_mod, '_vm_guest_addresses', return_value=[]):
+        with patch.object(_vm_mod, 'vm_guest_addresses', return_value=[]):
             self.assertEqual(substrate.addresses(), [])
 
     # ContainerSubstrate: addresses absent → NotApplicable (a rootless container
@@ -2623,7 +2625,7 @@ class TestVMExecShell(unittest.TestCase):
 
     def test_exec_no_ip_exits_1(self):
         substrate = self._substrate()
-        with patch.object(_vm_mod, '_vm_ssh_endpoint', return_value=None), \
+        with patch.object(_vm_mod, 'vm_ssh_endpoint', return_value=None), \
              patch('sys.stderr', io.StringIO()):
             with self.assertRaises(LifecycleError) as cm:
                 substrate.exec(["ls"])
@@ -2631,7 +2633,7 @@ class TestVMExecShell(unittest.TestCase):
 
     def test_exec_runs_ssh_and_returns_code(self):
         substrate = self._substrate()
-        with patch.object(_vm_mod, '_vm_ssh_endpoint', return_value=('10.0.0.5', 22)), \
+        with patch.object(_vm_mod, 'vm_ssh_endpoint', return_value=('10.0.0.5', 22)), \
              patch('subprocess.run', return_value=_ok(returncode=7)) as mock_run:
             rc = substrate.exec(["ls"])
         self.assertEqual(rc, 7)
@@ -2641,7 +2643,7 @@ class TestVMExecShell(unittest.TestCase):
     def test_open_shell_ssh_success_returns_normally(self):
         """A clean SSH session is success: return, don't raise, don't fall back."""
         substrate = self._substrate()
-        with patch.object(_vm_mod, '_vm_ssh_endpoint', return_value=('10.0.0.5', 22)), \
+        with patch.object(_vm_mod, 'vm_ssh_endpoint', return_value=('10.0.0.5', 22)), \
              patch('subprocess.run', return_value=_ok(returncode=0)), \
              patch.object(_vm_mod.os, 'execvp') as mock_execvp:
             substrate.open_shell()
@@ -2650,7 +2652,7 @@ class TestVMExecShell(unittest.TestCase):
     def test_open_shell_ssh_remote_failure_propagates_code(self):
         """A nonzero exit from the remote shell surfaces as that exact code."""
         substrate = self._substrate()
-        with patch.object(_vm_mod, '_vm_ssh_endpoint', return_value=('10.0.0.5', 22)), \
+        with patch.object(_vm_mod, 'vm_ssh_endpoint', return_value=('10.0.0.5', 22)), \
              patch('subprocess.run', return_value=_ok(returncode=17)):
             with self.assertRaises(LifecycleError) as cm:
                 substrate.open_shell()
@@ -2658,7 +2660,7 @@ class TestVMExecShell(unittest.TestCase):
 
     def test_open_shell_ssh_failure_falls_back_to_console(self):
         substrate = self._substrate()
-        with patch.object(_vm_mod, '_vm_ssh_endpoint', return_value=('10.0.0.5', 22)), \
+        with patch.object(_vm_mod, 'vm_ssh_endpoint', return_value=('10.0.0.5', 22)), \
              patch('subprocess.run', return_value=_ok(returncode=255)), \
              patch('pathlib.Path.exists', return_value=False), \
              patch('sys.stderr', io.StringIO()):
@@ -2668,7 +2670,7 @@ class TestVMExecShell(unittest.TestCase):
 
     def test_open_shell_no_ip_falls_to_console_missing_socket(self):
         substrate = self._substrate()
-        with patch.object(_vm_mod, '_vm_ssh_endpoint', return_value=None), \
+        with patch.object(_vm_mod, 'vm_ssh_endpoint', return_value=None), \
              patch('pathlib.Path.exists', return_value=False), \
              patch('sys.stderr', io.StringIO()):
             with self.assertRaises(LifecycleError) as cm:
@@ -2677,7 +2679,7 @@ class TestVMExecShell(unittest.TestCase):
 
     def test_open_shell_console_connects_via_socat(self):
         substrate = self._substrate()
-        with patch.object(_vm_mod, '_vm_ssh_endpoint', return_value=None), \
+        with patch.object(_vm_mod, 'vm_ssh_endpoint', return_value=None), \
              patch('pathlib.Path.exists', return_value=True), \
              patch('os.execvp') as mock_exec, \
              patch('sys.stderr', io.StringIO()), \
@@ -2697,7 +2699,7 @@ class TestVMLifecycleReboot(unittest.TestCase):
 
     def test_reboot_no_ip_exits_1(self):
         substrate = self._substrate()
-        with patch.object(_vm_mod, '_vm_ssh_endpoint', return_value=None), \
+        with patch.object(_vm_mod, 'vm_ssh_endpoint', return_value=None), \
              patch('sys.stderr', io.StringIO()):
             with self.assertRaises(LifecycleError) as cm:
                 substrate.lifecycle("reboot")
@@ -2705,7 +2707,7 @@ class TestVMLifecycleReboot(unittest.TestCase):
 
     def test_reboot_ssh_success_prints_confirmation(self):
         substrate = self._substrate()
-        with patch.object(_vm_mod, '_vm_ssh_endpoint', return_value=('10.0.0.5', 22)), \
+        with patch.object(_vm_mod, 'vm_ssh_endpoint', return_value=('10.0.0.5', 22)), \
              patch('subprocess.run', return_value=_ok(returncode=0)):
             buf = io.StringIO()
             with patch('sys.stdout', buf):
@@ -2714,7 +2716,7 @@ class TestVMLifecycleReboot(unittest.TestCase):
 
     def test_reboot_ssh_failure_exits_1(self):
         substrate = self._substrate()
-        with patch.object(_vm_mod, '_vm_ssh_endpoint', return_value=('10.0.0.5', 22)), \
+        with patch.object(_vm_mod, 'vm_ssh_endpoint', return_value=('10.0.0.5', 22)), \
              patch('subprocess.run', return_value=_ok(returncode=1)), \
              patch('sys.stderr', io.StringIO()):
             with self.assertRaises(LifecycleError) as cm:
@@ -3077,7 +3079,7 @@ class TestBackupImplAndHelpers(unittest.TestCase):
         self.assertIn('5.0G', buf.getvalue())
 
 
-# ── _vm_guest_ip() lookup chain ────────────────────────────────────────────────
+# ── vm_guest_ip() lookup chain ────────────────────────────────────────────────
 
 class TestVmGuestIp(unittest.TestCase):
     """Host-side address inference, which now applies only to bridged VMs.
@@ -3090,35 +3092,35 @@ class TestVmGuestIp(unittest.TestCase):
     """
 
     def test_arp_match_on_a_bridge(self):
-        with patch.object(_vm_mod, 'mac_address', return_value='aa:bb:cc:dd:ee:ff'), \
-             patch.object(_vm_mod, '_vm_guest_agent_addresses', return_value=[]), \
+        with patch.object(_reach_mod, 'mac_address', return_value='aa:bb:cc:dd:ee:ff'), \
+             patch.object(_reach_mod, 'vm_guest_agent_addresses', return_value=[]), \
              patch('subprocess.run') as mock_run:
             mock_run.side_effect = [
                 _ok(stdout="192.168.1.9 lladdr aa:bb:cc:dd:ee:ff REACHABLE\n"),
             ]
-            ip = _vm_mod._vm_guest_ip('myvm', 'br0')
+            ip = _reach_mod.vm_guest_ip('myvm', 'br0')
         self.assertEqual(ip, '192.168.1.9')
 
     def test_arp_no_match_falls_to_mdns(self):
-        with patch.object(_vm_mod, 'mac_address', return_value='aa:bb:cc:dd:ee:ff'), \
-             patch.object(_vm_mod, '_vm_guest_agent_addresses', return_value=[]), \
+        with patch.object(_reach_mod, 'mac_address', return_value='aa:bb:cc:dd:ee:ff'), \
+             patch.object(_reach_mod, 'vm_guest_agent_addresses', return_value=[]), \
              patch('subprocess.run') as mock_run:
             mock_run.side_effect = [
                 _ok(stdout="192.168.1.9 lladdr 11:22:33:44:55:66 REACHABLE\n"),
                 _ok(returncode=0, stdout="192.168.1.20 myvm.local\n"),
             ]
-            ip = _vm_mod._vm_guest_ip('myvm', 'br0')
+            ip = _reach_mod.vm_guest_ip('myvm', 'br0')
         self.assertEqual(ip, '192.168.1.20')
 
     def test_all_lookups_fail_returns_none(self):
-        with patch.object(_vm_mod, 'mac_address', return_value='aa:bb:cc:dd:ee:ff'), \
-             patch.object(_vm_mod, '_vm_guest_agent_addresses', return_value=[]), \
+        with patch.object(_reach_mod, 'mac_address', return_value='aa:bb:cc:dd:ee:ff'), \
+             patch.object(_reach_mod, 'vm_guest_agent_addresses', return_value=[]), \
              patch('subprocess.run') as mock_run:
             mock_run.side_effect = [
                 _ok(stdout=""),
                 _ok(returncode=2, stdout=""),
             ]
-            ip = _vm_mod._vm_guest_ip('myvm', 'br0')
+            ip = _reach_mod.vm_guest_ip('myvm', 'br0')
         self.assertIsNone(ip)
 
 
