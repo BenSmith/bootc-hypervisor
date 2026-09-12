@@ -37,7 +37,7 @@ ALLOWED_NON_STDLIB = {
     # Generated at RPM build time into the install dir (workloadctl.spec, the
     # `cat > .../_version.py` block) so `workloadctl --version` reports the full
     # NEVR. Absent from a source checkout, hence the ImportError fallback in
-    # bin/workloadctl.
+    # lib/workload_lib.py.
     "_version",
 }
 

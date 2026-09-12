@@ -10,7 +10,7 @@ end the program".
 
 So the boundary is: `bin/workloadctl` and `lib/cmd_*.py` may exit; every other
 module in `lib/` must raise (see the typed exceptions in workloadctl_core and
-substrate, mapped to exit codes by `_run_cli()`).
+substrate, mapped to exit codes by `cli_main.run()`).
 
 That boundary held by convention alone. This module checks it, so the next
 `sys.exit()` to land in podman.py fails the suite instead of shipping.
@@ -75,5 +75,5 @@ class TestNoExitInLibraryCore(unittest.TestCase):
             "Library core must raise, not exit — the CLI (bin/workloadctl, "
             "lib/cmd_*.py) owns the exit code. Raise a typed exception "
             "(UsageError, NotRoot, LifecycleError, ProvisionFailed, …) and let "
-            "_run_cli() map it. Offenders:\n  " + "\n  ".join(offenders),
+            "cli_main.run() map it. Offenders:\n  " + "\n  ".join(offenders),
         )

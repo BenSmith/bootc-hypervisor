@@ -48,7 +48,7 @@ from pcap import (
     build_plan, parse_duration, parse_size, parse_snaplen, pcap_unit_name,
 )
 
-from tests import load_script
+from cli_parser import build_parser
 from tests.test_pcap import container_config, vm_config
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -56,28 +56,11 @@ ROOT = Path(__file__).resolve().parent.parent
 
 # --- the fixture ------------------------------------------------------------
 
-_CLI = None
 
 
 def _args(*argv):
-    """A real argparse Namespace for `workloadctl pcap ...`.
-
-    `set_defaults(func=cmd_pcap)` resolves the module global when main() runs,
-    so patching it captures the parsed args without dispatching.
-    """
-    global _CLI
-    if _CLI is None:
-        _CLI = load_script("bin/workloadctl")
-    captured = {}
-
-    def capture(args, manager):
-        captured["args"] = args
-
-    with mock.patch.object(_CLI, "cmd_pcap", capture), \
-            mock.patch.object(_CLI, "WorkloadManager", lambda: None), \
-            mock.patch.object(_CLI.sys, "argv", ["workloadctl", "pcap", *argv]):
-        _CLI.main()
-    return captured["args"]
+    """A real argparse Namespace for `workloadctl pcap ...`."""
+    return build_parser().parse_args(["pcap", *argv])
 
 
 class FakeRun:
