@@ -96,8 +96,8 @@ Virtiofs volumes have their own design doc, `workloadctl/docs/vm-virtiofs.md` â€
 coding-agent VM or a filtered container -- is never given, and attaches it to
 outbound requests that workload makes through it.
 It is a whole program shipped by the workloadctl RPM, stdlib only: the
-entrypoint is a `main()` shim over `lib/broker_config.py` (the document, read
-and rendered), `lib/broker_request.py` (what goes upstream), `lib/broker_server.py`
+entrypoint is a `main()` shim over `lib/broker_profiles.py` (the document, read),
+`lib/broker_config.py` (the document, rendered), `lib/broker_request.py` (what goes upstream), `lib/broker_server.py`
 (Handler, Server, the ceilings) and `lib/peer_identity.py` (caller
 identification, shared with the egress inspector's listener).
 Callers are identified by the uid owning the far end of the connection.

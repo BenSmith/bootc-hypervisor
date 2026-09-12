@@ -9,7 +9,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-import broker_config
+import broker_profiles
 import broker_server
 from tests import load_script
 
@@ -24,7 +24,7 @@ def config_file(text):
 
 def load(text):
     with config_file(text) as path:
-        return broker_config.load_config(path)
+        return broker_profiles.load_config(path)
 
 
 BASE = """
@@ -49,7 +49,7 @@ class TestStaleConfigIsRefused(unittest.TestCase):
     def assertExits(self, text, expect):
         stderr = io.StringIO()
         with contextlib.redirect_stderr(stderr):
-            with self.assertRaises(broker_config.BrokerConfigError) as caught:
+            with self.assertRaises(broker_profiles.BrokerConfigError) as caught:
                 load(text)
         self.assertIn(expect, str(caught.exception))
 
@@ -193,7 +193,7 @@ class TestTheShippedExampleIsValid(unittest.TestCase):
                    "docs" / "agent-broker.toml.example")
 
     def test_it_loads(self):
-        cfg = broker_config.load_config(self._example())
+        cfg = broker_profiles.load_config(self._example())
         # Not just that it parses: that the keys landed at the level that reads
         # them. A scalar swallowed by a preceding table still parses fine.
         self.assertEqual(cfg["listen_port"], 8081)
@@ -203,8 +203,8 @@ class TestTheShippedExampleIsValid(unittest.TestCase):
         """Loading is the weaker half. The example is copied and edited, so a
         shape that parses and then fails at build_profiles would send an
         operator to their own edits."""
-        cfg = broker_config.load_config(self._example())
-        profiles = broker_config.build_profiles(cfg, load=lambda n: f"secret-of-{n}")
+        cfg = broker_profiles.load_config(self._example())
+        profiles = broker_profiles.build_profiles(cfg, load=lambda n: f"secret-of-{n}")
         self.assertTrue(profiles)
         self.assertTrue(all(len(k) == 2 for k in profiles), list(profiles))
 
@@ -213,7 +213,7 @@ class TestProfiles(unittest.TestCase):
 
     def build(self, text):
         cfg = load(text)
-        return broker_config.build_profiles(cfg, load=lambda name: f"secret-of-{name}")
+        return broker_profiles.build_profiles(cfg, load=lambda name: f"secret-of-{name}")
 
 
     def test_a_host_entry_inherits_the_top_level_settings(self):
@@ -277,7 +277,7 @@ class TestProfiles(unittest.TestCase):
             with self.subTest(url=url):
                 stderr = io.StringIO()
                 with contextlib.redirect_stderr(stderr):
-                    with self.assertRaises(broker_config.BrokerConfigError) as caught:
+                    with self.assertRaises(broker_profiles.BrokerConfigError) as caught:
                         self.build(f"""
                             listen_address = "127.129.0.3"
                             credential = "main-key"
@@ -301,13 +301,13 @@ class TestProfiles(unittest.TestCase):
             [sandboxes.c.hosts."api.example.com"]
             credential = "other-key"
         """)
-        broker_config.build_profiles(cfg, load=lambda name: reads.append(name) or name)
+        broker_profiles.build_profiles(cfg, load=lambda name: reads.append(name) or name)
         self.assertEqual(sorted(reads), ["main-key", "other-key"])
 
     def test_a_host_entry_with_no_credential_anywhere_is_refused(self):
         stderr = io.StringIO()
         with contextlib.redirect_stderr(stderr):
-            with self.assertRaises(broker_config.BrokerConfigError) as caught:
+            with self.assertRaises(broker_profiles.BrokerConfigError) as caught:
                 self.build("""
                     listen_address = "127.129.0.3"
                     upstream = "https://api.example.com"
@@ -326,7 +326,7 @@ class TestProfiles(unittest.TestCase):
         """
         stderr = io.StringIO()
         with contextlib.redirect_stderr(stderr):
-            with self.assertRaises(broker_config.BrokerConfigError) as caught:
+            with self.assertRaises(broker_profiles.BrokerConfigError) as caught:
                 self.build(BASE + """
                     [sandboxes.agent.hosts."api.example.com"]
                     placeholder = "secret-of-main-key"
@@ -367,7 +367,7 @@ class TestProfiles(unittest.TestCase):
     def test_an_unusable_auth_format_is_refused_at_startup(self):
         stderr = io.StringIO()
         with contextlib.redirect_stderr(stderr):
-            with self.assertRaises(broker_config.BrokerConfigError) as caught:
+            with self.assertRaises(broker_profiles.BrokerConfigError) as caught:
                 self.build(BASE + """
                     [sandboxes.typo.hosts."api.example.com"]
                     auth_format = "Bearer {token}"
@@ -379,7 +379,7 @@ class TestProfiles(unittest.TestCase):
         """It is the string a secret is substituted into; a wrong one may
         already hold part of it."""
         with contextlib.redirect_stderr(io.StringIO()):
-            with self.assertRaises(broker_config.BrokerConfigError) as caught:
+            with self.assertRaises(broker_profiles.BrokerConfigError) as caught:
                 self.build(BASE + """
                     [sandboxes.typo.hosts."api.example.com"]
                     auth_format = "Bearer {token}-leaky"
@@ -389,7 +389,7 @@ class TestProfiles(unittest.TestCase):
     def test_a_non_https_upstream_is_refused(self):
         stderr = io.StringIO()
         with contextlib.redirect_stderr(stderr):
-            with self.assertRaises(broker_config.BrokerConfigError) as caught:
+            with self.assertRaises(broker_profiles.BrokerConfigError) as caught:
                 self.build(BASE + """
                     [sandboxes.plain.hosts."api.example.com"]
                     upstream = "http://api.example.com"
@@ -408,15 +408,15 @@ class TestHostKeysAreNormalised(unittest.TestCase):
         for raw in ("API.Example.com", "api.example.com:443",
                     "api.example.com.", "  api.example.com  "):
             with self.subTest(raw=raw):
-                self.assertEqual(broker_config.normalise_host(raw), "api.example.com")
+                self.assertEqual(broker_profiles.normalise_host(raw), "api.example.com")
 
     def test_an_unusable_value_is_none_and_never_a_fallback(self):
         for raw in (None, "", "   ", 7, ":443", "[unterminated"):
             with self.subTest(raw=raw):
-                self.assertIsNone(broker_config.normalise_host(raw))
+                self.assertIsNone(broker_profiles.normalise_host(raw))
 
     def test_a_bracketed_literal_keeps_its_brackets(self):
-        self.assertEqual(broker_config.normalise_host("[2001:db8::1]:8443"),
+        self.assertEqual(broker_profiles.normalise_host("[2001:db8::1]:8443"),
                          "[2001:db8::1]")
 
     def test_two_spellings_of_one_host_under_one_sandbox_are_refused(self):
@@ -424,8 +424,8 @@ class TestHostKeysAreNormalised(unittest.TestCase):
         order, which the file does not state."""
         stderr = io.StringIO()
         with contextlib.redirect_stderr(stderr):
-            with self.assertRaises(broker_config.BrokerConfigError) as caught:
-                broker_config.build_profiles(load(BASE + """
+            with self.assertRaises(broker_profiles.BrokerConfigError) as caught:
+                broker_profiles.build_profiles(load(BASE + """
                     [sandboxes.agent.hosts."api.example.com"]
                     [sandboxes.agent.hosts."API.example.com:443"]
                 """), load=lambda n: n)

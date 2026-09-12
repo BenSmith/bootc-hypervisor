@@ -20,7 +20,7 @@ import sys
 import threading
 import time
 
-from broker_config import normalise_host
+from broker_profiles import normalise_host
 from broker_request import forwarded_headers, request_framing, response_framing
 from peer_identity import local_endpoints, peer_uid, workload_name
 

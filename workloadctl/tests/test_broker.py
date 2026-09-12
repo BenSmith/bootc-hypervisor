@@ -39,7 +39,7 @@ from broker_config import (BROKER_BIN, BROKER_INSTANCE_PORT,
 import inspect_arm
 from nft_elements import internal_ok_elements
 from vm_validate import validate_vm_network
-import broker_config
+import broker_profiles
 from workload_addr import UID_MIN, broker_listen_address
 import ipaddress
 import tomllib
@@ -1499,8 +1499,8 @@ class TestTheProvidersAuthConvention(unittest.TestCase):
         """Rendered into the HOST table, which is the only level that takes
         them. A key at the wrong level is refused by the broker at startup,
         which for a generated unit is a restart loop."""
-        self.assertIn("auth_header", broker_config.HOST_KEYS)
-        self.assertIn("auth_format", broker_config.HOST_KEYS)
+        self.assertIn("auth_header", broker_profiles.HOST_KEYS)
+        self.assertIn("auth_format", broker_profiles.HOST_KEYS)
 
     def test_a_header_that_is_not_a_header_is_refused(self):
         for bad in ("X-Key: oops", "X Key", "X-Key\nInjected", ""):
