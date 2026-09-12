@@ -140,7 +140,7 @@ class TestSeccompBaseline(unittest.TestCase):
         # by path; when the container generators moved to gen_container the
         # regex found nothing, which is the same reading it would give for a
         # constant that had genuinely been deleted.
-        from gen_container import SECCOMP_BASELINE as baseline
+        from container_run_args import SECCOMP_BASELINE as baseline
         self.assertEqual(baseline.rsplit("/", 1)[-1], PROFILE.name)
         spec = SPEC.read_text()
         installed = baseline.replace("/usr/share", "%{_datadir}")
