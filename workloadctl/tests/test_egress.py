@@ -2112,7 +2112,7 @@ class TestListenerRangeRefusalReachesBothPaths(unittest.TestCase):
     """
 
     def test_validation_reports_it_as_an_allow_error(self):
-        from vm_network_config import _validate_egress
+        from vm_validate import _validate_egress
         errors = _validate_egress({"egress": "filtered",
                                    "allow": [allow_entry("198.18.1.0:8080")]})
         self.assertTrue(any("listener range" in e for e in errors), errors)
@@ -2366,7 +2366,7 @@ class TestRung2Schema(unittest.TestCase):
     """
 
     def _egress(self, net):
-        from vm_network_config import _validate_egress
+        from vm_validate import _validate_egress
         return _validate_egress(net)
 
     # --- tls ---
@@ -2385,13 +2385,13 @@ class TestRung2Schema(unittest.TestCase):
         the next time a mode is written down before it works.
         """
         from unittest import mock
-        import vm_network_config
-        # Patched in the module that READS it, which is neither the module that
-        # defines it (vm_defs) nor the one that re-exports it (vm). `from x
-        # import name` copies the binding, so rebinding either of the other two
-        # leaves the validator looking at the original empty map -- and the
-        # assertion below is what says so rather than the test quietly passing.
-        with mock.patch.object(vm_network_config, "TLS_UNBUILT",
+        import vm_validate
+        # Patched in the module that READS it, not the one that defines it
+        # (vm_defs). `from x import name` copies the binding, so rebinding
+        # vm_defs leaves the validator looking at the original empty map --
+        # and the assertion below is what says so rather than the test
+        # quietly passing.
+        with mock.patch.object(vm_validate, "TLS_UNBUILT",
                                {"tunnel": "rung 9, with the thing it needs"}):
             errors = self._egress({"hosts": ["github.com"], "tls": "tunnel"})
         self.assertTrue(errors)
@@ -3220,7 +3220,7 @@ class TestRung2Warnings(unittest.TestCase):
     """
 
     def _warn(self, net):
-        from vm_network_config import vm_network_warnings
+        from vm_validate import vm_network_warnings
         return vm_network_warnings(net)
 
     def test_a_registration_domain_wildcard_warns_wherever_it_appears(self):
@@ -3236,7 +3236,7 @@ class TestRung2Warnings(unittest.TestCase):
         A stale copy shipped in an RPM that hard-fails a valid config is worse
         than a line of output -- the operator cannot edit the RPM.
         """
-        from vm_network_config import _validate_egress
+        from vm_validate import _validate_egress
         self.assertEqual(_validate_egress({"hosts": ["*.github.io"]}), [])
 
     def test_a_named_host_under_such_a_parent_does_not_warn(self):
@@ -3332,7 +3332,7 @@ class TestReservedRanges(unittest.TestCase):
     """
 
     def _ports(self, spec):
-        from vm_network_config import validate_vm_network
+        from vm_validate import validate_vm_network
         return [e for e in validate_vm_network({"egress": "open",
                                                 "ports": [spec]})
                 if "ports" in e]
@@ -3729,7 +3729,7 @@ class TestRung6CredentialSchema(unittest.TestCase):
     """
 
     def _egress(self, net):
-        from vm_network_config import _validate_egress
+        from vm_validate import _validate_egress
         return _validate_egress(net)
 
     def _net(self, **over):

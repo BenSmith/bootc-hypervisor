@@ -22,7 +22,7 @@ import run_files
 import workload_uid
 import workload_addr
 import workload_lib
-import vm_network_config
+import vm_validate
 from config_parser import (
     WORKLOADS_BASE, infer_workload_mode, parse_volume_spec,
     ContainerPolicyEntry, container_policy_entries, ContainerCredential,
@@ -386,7 +386,7 @@ class TestVmNetworkValidation(unittest.TestCase):
 
     def _net_errors(self, **network):
         return [e for e in
-                vm_network_config.validate_vm_config(self._cfg(**network))
+                vm_validate.validate_vm_config(self._cfg(**network))
                 if "network" in e]
 
     def test_absent_network_needs_an_egress_decision(self):

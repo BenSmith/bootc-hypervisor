@@ -204,6 +204,7 @@ class TestASharedModuleIsNotShadowedByItsCaller(unittest.TestCase):
                                "ensure_container"),
         "lib/ensure_vm.py": ("ensure_common",),
         "lib/ensure_container.py": ("ensure_common",),
+        "lib/vm_validate.py": ("vm_network_config",),
     }
 
     @staticmethod

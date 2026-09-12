@@ -20,7 +20,7 @@ from workload_lib import (
     normalize_containers,
 )
 from container_network_config import validate_container_network
-from vm_network_config import validate_vm_config, vm_network_warnings
+from vm_validate import validate_vm_config, vm_network_warnings
 
 
 def validate_container_name(name: str):
@@ -204,7 +204,7 @@ def validate_workload_config(config: dict) -> list[str]:
         errors.append(str(e))
 
     # Mirrors validate_vm_network(vm.get("network", {})) below the VM branch
-    # above (vm_network_config.validate_vm_network) -- the container schema's own hard-error checks
+    # above (vm_validate.validate_vm_network) -- the container schema's own hard-error checks
     # (V1-V18 in the container egress-parity build spec), not yet run
     # anywhere until this call.
     # `config` as well as the table: whether `mode = "host"` is honoured is a
