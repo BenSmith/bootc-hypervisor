@@ -194,6 +194,32 @@ class NotifyTest(unittest.TestCase):
         self.assertEqual(code, 7)  # QEMU's exit code propagates
         sd.assert_any_call("READY=1")  # degraded path still readies the unit
 
+    def test_ready_handshake_reads_get_the_connect_budget(self):
+        # A connect succeeds as soon as QEMU opens the listener, but the
+        # greeting only arrives once the main loop runs after machine init.
+        # A read timeout shorter than the connect budget turns that lag into a
+        # TimeoutError, which the arm below deliberately answers with no READY
+        # -- a booted guest then sits out TimeoutStartSec. Measured at the
+        # 5 s default on a loaded nested host; the read budget must not be
+        # the shorter of the two.
+        fake = FakeQMP(handler=lambda c, a=None: {"return": {"running": True}})
+        seen = {}
+
+        def connect(path, timeout=10.0, recv_timeout=5.0):
+            seen.update(timeout=timeout, recv_timeout=recv_timeout)
+        fake.connect = connect
+        proc = mock.Mock()
+        proc.wait.return_value = 0
+        with mock.patch.object(notify.subprocess, "Popen", return_value=proc), \
+             mock.patch.object(notify, "QMPClient", return_value=fake), \
+             mock.patch.object(notify.signal, "signal"), \
+             mock.patch.object(notify, "monitor_shutdown_reason",
+                               return_value=None), \
+             mock.patch.object(notify, "sd_notify"), \
+             redirect_stderr(io.StringIO()):
+            notify.supervise("vm1", ["qemu", "-nographic"])
+        self.assertGreaterEqual(seen["recv_timeout"], seen["timeout"])
+
     def test_main_wait_timeout_does_not_ready_and_propagates_rc(self):
         # QMP connects/negotiates fine but the guest never enters "running":
         # wait_running raises TimeoutError. The unit must NOT be marked READY
