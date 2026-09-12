@@ -458,6 +458,7 @@ lib/backup.py                      # capture() implementation shared by both sub
 lib/podman.py                      # Typed Podman wrapper (JSON output, PodmanError, root/user modes)
 lib/qmp.py                         # QMP client
 lib/workloadctl_core.py            # WorkloadConfig / WorkloadManager (TOML loading, paths, lifecycle field)
+lib/scratch_vm.py                  # The VM stub `workloadctl init --scratch-vm` writes: the workload.toml and the seed the vm-base bundle must match
 lib/config_parser.py               # The TOML grammar both substrates read (hostname patterns, policy blocks, volumes)
 lib/credential_entries.py          # The [[network.credential]] block, parsed and validated once for both substrates
 lib/workload_lib.py                # Shared core: config locator, naming, state/data paths, token and volume expansion, quoting
