@@ -35,7 +35,7 @@ def _uncommented(text):
     another COMMENTED OUT (the egress CA, which must not install an empty
     anchor in an `egress = "open"` bundle) -- so the two are one editing
     mistake apart, and a substring assertion over the raw text cannot tell
-    them apart. lib/ensure_vm.py strips comments for exactly this reason
+    them apart. lib/vm_default_seed.py strips comments for exactly this reason
     before its own substring pins; a gate written to catch drift in
     those seeds has to see them the way cloud-init does.
     """
@@ -50,11 +50,11 @@ def _seeds():
 
 
 def _built_in_seed(**kwargs):
-    import ensure_vm as mod
+    import vm_default_seed as mod
     args = dict(name="myvm", guest_user="fedora", pubkey="ssh-ed25519 AAAA",
                 mounts=[], has_data_disk=False)
     args.update(kwargs)
-    return mod._render_default_user_data(**args)
+    return mod.render_default_user_data(**args)
 
 
 class TestTheDeviceIsSelectedByName(unittest.TestCase):

@@ -1,7 +1,7 @@
 """The provisioning a VM workload needs and a container workload never does.
 
-NVRAM, virtiofs host directories, the per-workload SSH keypair, the SSH host
-key, and the cloud-init seed ISO. The cut is by substrate and it is exact:
+NVRAM, virtiofs host directories, and the cloud-init seed ISO; the SSH
+keypairs the seed carries are vm_ssh_keys. The cut is by substrate and it is exact:
 nothing here calls anything in the container half and nothing there calls
 anything here -- the two sets were measured to have zero edges between them
 before a line moved. What both need lives in ensure_common, which is also
@@ -21,7 +21,6 @@ import hashlib
 import os
 import re
 import shutil
-import stat
 import subprocess
 import uuid
 from pathlib import Path, PurePosixPath
@@ -29,7 +28,7 @@ from pathlib import Path, PurePosixPath
 from config_parser import parse_volume_spec, workload_root_dir
 from workload_lib import (
     WORKLOAD_CONFIG_DIR, expand_volume_path, virtiofs_tags,
-    workload_state_dir, replace_file_atomically,
+    workload_state_dir,
 )
 from egress_policy import vm_uses_inspect
 from egress_ca import (
@@ -39,23 +38,31 @@ from egress_ca import (
 from broker_config import vm_credential_env
 from config_parser import SOCKET_DIR
 from vm_defs import (
-    VM_DEFAULT_GUEST_USER,
     VM_GUEST_HOME_BASE,
-    VM_GUEST_UID,
     VM_HOME_SELINUX_CONTEXT,
     VM_HOME_SELINUX_TYPES,
     SeedContractError,
     find_ovmf_vars,
 )
-from vm_ptp import vm_ptp_kvm_runcmd_lines, vm_ptp_kvm_seed_files
 from vm_provision import (
     MAX_HEAL_ATTEMPTS, PROVISION_UNVERIFIED, heal_attempts,
     read_provision_marker, should_heal, write_provision_marker,
 )
 from secrets_template import substitute_template
 import ensure_common
-from ensure_common import (
-    _provision_dir_secure, _descend_nofollow,
+from ensure_common import _provision_dir_secure
+from vm_default_seed import (
+    covers_guest_home,
+    render_default_user_data,
+    uncommented,
+    virtiofs_mount_opts,
+)
+from vm_ssh_keys import (
+    _read_ssh_pubkey,
+    _read_vm_host_private_key,
+    _read_vm_host_pubkey,
+    _validated_guest_user,
+    write_vm_known_hosts,
 )
 
 def setup_vm_volume_directories(pw, config):
@@ -103,259 +110,6 @@ def setup_nvram(pw, config: dict):
     ensure_common.log(f"  Copied NVRAM: {ovmf_vars} → {nvram_dst}")
 
 
-def _ssh_keygen(key_path: Path, comment: str, what: str):
-    """Write an Ed25519 keypair to key_path, or raise with what ssh-keygen said.
-
-    ssh-keygen talks on **stdout**, not stderr — the key paths, the fingerprint
-    and the randomart all go there on success, and a failure like
-    `Saving key "/x" failed: Permission denied` goes there too. Reporting
-    `result.stderr` alone therefore yields an empty diagnostic on precisely the
-    runs where one is needed, so take both streams and say so if there were
-    neither.
-    """
-    result = subprocess.run(
-        ["ssh-keygen", "-t", "ed25519", "-N", "", "-C", comment,
-         "-f", str(key_path)],
-        capture_output=True, text=True,
-    )
-    if result.returncode == 0:
-        return
-    if key_path.exists():
-        # The key appeared after the caller's exists() guard, so ssh-keygen
-        # refused to overwrite it (it wants an interactive "Overwrite?"). Only a
-        # concurrent provisioning run can have put it there, and it is as good a
-        # key as the one we were about to write — take it. ensure_user_lock()
-        # should make this unreachable; it stays because the alternative to
-        # losing this race gracefully is failing an `enable` for no reason.
-        return
-    said = " / ".join(s.strip() for s in (result.stdout, result.stderr) if s.strip())
-    raise RuntimeError(
-        f"ssh-keygen ({what}) failed: {said or f'no output, exit {result.returncode}'}")
-
-
-def generate_ssh_keypair(pw, name: str):
-    """Generate a per-workload Ed25519 SSH keypair if it doesn't exist.
-
-    Raises RuntimeError on failure: the cloud-init ISO depends on the pubkey
-    to inject an authorized_keys entry; a missing key would silently produce
-    a VM with a passwordless sudoer and no way for `workloadctl exec` to SSH
-    in. Better to fail provisioning loudly.
-    """
-    home_path = Path(pw.pw_dir)
-    ssh_dir = home_path / ".ssh"
-    ssh_dir.mkdir(mode=0o700, exist_ok=True)
-    os.chown(ssh_dir, pw.pw_uid, pw.pw_gid)
-
-    key_path = ssh_dir / "id_ed25519"
-    if key_path.exists():
-        return  # already generated
-
-    _ssh_keygen(key_path, f"workload-{name}@hypervisor", "client key")
-
-    os.chown(key_path, pw.pw_uid, pw.pw_gid)
-    os.chmod(key_path, 0o600)
-    pub_path = key_path.with_suffix(".pub")
-    if pub_path.exists():
-        os.chown(pub_path, pw.pw_uid, pw.pw_gid)
-        os.chmod(pub_path, 0o644)
-    ensure_common.log(f"  Generated SSH keypair: {key_path}")
-
-
-def _read_ssh_pubkey(pw) -> str:
-    """Return the workload's public SSH key, or '' if not generated yet."""
-    pub_path = Path(pw.pw_dir) / ".ssh" / "id_ed25519.pub"
-    try:
-        return pub_path.read_text().strip()
-    except OSError:
-        return ""
-
-
-def _validated_guest_user(vm_cfg) -> str:
-    """Return [vm].user, refusing anything that is not a POSIX username.
-
-    The value is interpolated unquoted into the built-in #cloud-config
-    (`- name: {guest_user}`, just above a NOPASSWD sudo grant) and is joined into
-    a host path by seed_vm_home_share_ssh_key, so both callers need the same
-    guarantee: a value carrying a newline could inject arbitrary cloud-config,
-    and one carrying a slash or '..' could aim the seed at another directory.
-    Fail closed — a bad name aborts VM provisioning.
-    """
-    guest_user = vm_cfg.get("user", VM_DEFAULT_GUEST_USER)
-    if not re.match(r'^[a-z_][a-z0-9_-]*$', guest_user) or len(guest_user) > 32:
-        raise RuntimeError(
-            f"[vm].user {guest_user!r} is not a valid POSIX username "
-            f"(^[a-z_][a-z0-9_-]*$, max 32 chars)"
-        )
-    return guest_user
-
-
-
-# An authorized_keys larger than this is not a real one — refuse to read it into
-# memory rather than let a workload-owned file dictate root's allocation.
-_AUTHORIZED_KEYS_MAX = 1 << 20
-
-def _seed_authorized_keys(root_dir, ssh_dir: Path, pubkey: str, uid, gid) -> bool:
-    """Ensure `pubkey` is present in <ssh_dir>/authorized_keys, as the workload user.
-
-    Runs as root inside a tree the workload user owns, so it reaches the file
-    through _descend_nofollow and opens it O_NOFOLLOW: a symlink swapped in for
-    authorized_keys must fail the open, never redirect root's write. Additive by
-    design — an operator's own keys in the file are kept, and a file that already
-    carries ours is left byte-identical.
-
-    Returns True if the key was written, False if it was already there.
-    Raises RuntimeError if the file cannot be reached or is not a plain file:
-    the caller has already decided the guest depends on it.
-    """
-    parts = (ssh_dir / "authorized_keys").relative_to(root_dir).parts
-    dir_fd = _descend_nofollow(root_dir, parts[:-1], f"seed {ssh_dir}")
-    if dir_fd is None:
-        raise RuntimeError(f"cannot reach {ssh_dir} safely")
-    try:
-        created = True
-        try:
-            fd = os.open("authorized_keys",
-                         os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
-                         0o600, dir_fd=dir_fd)
-        except FileExistsError:
-            created = False
-            try:
-                fd = os.open("authorized_keys", os.O_RDWR | os.O_NOFOLLOW,
-                             dir_fd=dir_fd)
-            except OSError as exc:
-                # ELOOP: authorized_keys is a symlink. O_NOFOLLOW turned an
-                # arbitrary-file write by the workload user into this error.
-                raise RuntimeError(
-                    f"{ssh_dir}/authorized_keys is not a plain file "
-                    f"({exc.strerror})") from exc
-        try:
-            st = os.fstat(fd)
-            if not stat.S_ISREG(st.st_mode):
-                raise RuntimeError(
-                    f"{ssh_dir}/authorized_keys is not a regular file")
-            # A hardlink to a file elsewhere would make this write — and the
-            # chown below — reach outside the tree.
-            if st.st_nlink != 1:
-                raise RuntimeError(
-                    f"{ssh_dir}/authorized_keys has {st.st_nlink} hardlinks")
-            if st.st_size > _AUTHORIZED_KEYS_MAX:
-                raise RuntimeError(
-                    f"{ssh_dir}/authorized_keys is {st.st_size} bytes — refusing to read")
-            existing = os.read(fd, st.st_size).decode("utf-8", "replace")
-            present = pubkey.strip() in (l.strip() for l in existing.splitlines())
-            if not present:
-                os.lseek(fd, 0, os.SEEK_END)
-                if existing and not existing.endswith("\n"):
-                    os.write(fd, b"\n")
-                os.write(fd, pubkey.strip().encode() + b"\n")
-            os.fchown(fd, uid, gid)
-            # Only force the mode when we made the file or when sshd's
-            # StrictModes would reject what is there (group/other bits): an
-            # operator's deliberate 0640 is none of our business.
-            if created or st.st_mode & 0o077:
-                os.fchmod(fd, 0o600)
-            return not present
-        finally:
-            os.close(fd)
-    finally:
-        os.close(dir_fd)
-
-
-def seed_vm_home_share_ssh_key(pw, config):
-    """Put the workload's pubkey in a [vm].volumes share mounted at the guest home.
-
-    cloud-init writes ~/.ssh/authorized_keys in its *init* stage and mounts
-    [vm].volumes in the *config* stage that follows, so a share whose guest path
-    is the login user's home covers the only key the CLI has. The guest boots
-    perfectly healthy and `workloadctl exec`/`shell` fail authentication — on
-    every boot, not just the first, since the fstab entry mounts before sshd.
-
-    Seeding the share host-side is what makes such a TOML self-sufficient:
-    without it the working configuration lives in an operator's shell history,
-    and a purge, a restore onto an empty share, or the same bundle stamped on
-    another host all produce a VM nobody can log into.
-
-    Skips (with a warning) a share outside the workload tree: the no-follow walk
-    needs a root-owned anchor to be safe, and an operator who mounts a directory
-    of their own at the guest home owns what is in it.
-    """
-    vm_cfg = config.get("vm", {})
-    volumes = vm_cfg.get("volumes", [])
-    if not volumes:
-        return
-    name = config["workload"]["name"]
-    guest_home = PurePosixPath(VM_GUEST_HOME_BASE) / _validated_guest_user(vm_cfg)
-    pubkey = _read_ssh_pubkey(pw)
-    if not pubkey:
-        return  # build_cloud_init_iso raises on this; nothing to add here.
-
-    state_dir = workload_state_dir(name)
-    root_dir = workload_root_dir(name)
-    for vol_spec in volumes:
-        expanded = expand_volume_path(vol_spec, str(state_dir))
-        host_str, guest_str, _opts = parse_volume_spec(expanded)
-        if not host_str or not guest_str:
-            continue
-        guest_path = PurePosixPath(guest_str)
-        # The share covers the home when it IS the home, or contains it (a share
-        # mounted at /home). A share *below* the home hides nothing.
-        try:
-            sub = guest_home.relative_to(guest_path)
-        except ValueError:
-            continue
-
-        home_host = Path(host_str) / sub if str(sub) != "." else Path(host_str)
-        try:
-            home_host.resolve().relative_to(root_dir.resolve())
-        except ValueError:
-            ensure_common.log(f"  WARNING: {guest_str} shares {host_str}, which is outside "
-                f"{root_dir} — it hides the guest's authorized_keys and only you "
-                f"can seed it. Copy {Path(pw.pw_dir) / '.ssh/id_ed25519.pub'} to "
-                f"{home_host}/.ssh/authorized_keys (0600) or `workloadctl exec` "
-                f"will not be able to log in.")
-            continue
-
-        if not _provision_dir_secure(root_dir, home_host, pw.pw_uid, pw.pw_gid,
-                                     0o755):
-            raise RuntimeError(f"could not provision guest home share {home_host}")
-        ssh_dir = home_host / ".ssh"
-        if not _provision_dir_secure(root_dir, ssh_dir, pw.pw_uid, pw.pw_gid,
-                                     0o700):
-            raise RuntimeError(f"could not provision {ssh_dir}")
-        if _seed_authorized_keys(root_dir, ssh_dir, pubkey, pw.pw_uid, pw.pw_gid):
-            ensure_common.log(f"  Seeded SSH key into {guest_str} share: "
-                f"{ssh_dir}/authorized_keys")
-
-
-def generate_vm_host_keypair(pw, name: str):
-    """Generate the VM's SSH *host* keypair if absent (S1 host-key pinning).
-
-    Symmetric to generate_ssh_keypair (the client key): the private half is
-    injected into the guest as /etc/ssh/ssh_host_ed25519_key via cloud-init, and
-    the public half is pinned into vm_known_hosts on the host, so the CLI can
-    verify the guest with StrictHostKeyChecking=yes and no trust-on-first-use.
-    Idempotent: generated once and reused across reseeds so the pin stays stable
-    — do NOT churn it, that would invalidate the pin.
-    """
-    ssh_dir = Path(pw.pw_dir) / ".ssh"
-    ssh_dir.mkdir(mode=0o700, exist_ok=True)
-    os.chown(ssh_dir, pw.pw_uid, pw.pw_gid)
-
-    key_path = ssh_dir / "vm_host_ed25519_key"
-    if key_path.exists():
-        return  # already generated — keep the pin stable
-
-    _ssh_keygen(key_path, f"workload-{name}-host@hypervisor", "VM host key")
-
-    os.chown(key_path, pw.pw_uid, pw.pw_gid)
-    os.chmod(key_path, 0o600)
-    pub_path = key_path.with_suffix(".pub")
-    if pub_path.exists():
-        os.chown(pub_path, pw.pw_uid, pw.pw_gid)
-        os.chmod(pub_path, 0o644)
-    ensure_common.log(f"  Generated VM host keypair: {key_path}")
-
-
 def _read_vm_egress_ca(name: str) -> str:
     """The egress CA certificate in PEM, or '' if this workload has none.
 
@@ -366,46 +120,6 @@ def _read_vm_egress_ca(name: str) -> str:
         return ca_cert_path(workload_state_dir(name)).read_text()
     except OSError:
         return ""
-
-
-def _read_vm_host_private_key(pw) -> str:
-    """Return the PEM of the VM host private key, or '' if not generated yet."""
-    priv = Path(pw.pw_dir) / ".ssh" / "vm_host_ed25519_key"
-    try:
-        return priv.read_text()
-    except OSError:
-        return ""
-
-
-def _read_vm_host_pubkey(pw) -> str:
-    """Return the VM host public key line, or '' if not generated yet."""
-    pub = Path(pw.pw_dir) / ".ssh" / "vm_host_ed25519_key.pub"
-    try:
-        return pub.read_text().strip()
-    except OSError:
-        return ""
-
-
-def write_vm_known_hosts(pw, name: str, host_pubkey: str):
-    """Pin the guest host key into ~/.ssh/vm_known_hosts, keyed by workload name.
-
-    The CLI connects with HostKeyAlias=<name>, so a single line keyed by the
-    bare name (not the churning DHCP address) is the pin the CLI verifies
-    against. Rewritten idempotently whenever the host pubkey changes.
-    """
-    known_hosts = Path(pw.pw_dir) / ".ssh" / "vm_known_hosts"
-    line = f"{name} {host_pubkey}\n"
-    try:
-        if known_hosts.exists() and known_hosts.read_text() == line:
-            return
-    except OSError:
-        pass
-    # Atomic: the CLI reads this file with StrictHostKeyChecking=yes and takes no
-    # lock, so a `vm ssh` running concurrently with a restart could otherwise
-    # read the pin mid-rewrite and fail against a truncated line.
-    replace_file_atomically(known_hosts, line, default_mode=0o644,
-                            owner=(pw.pw_uid, pw.pw_gid))
-    ensure_common.log(f"  Pinned VM host key in {known_hosts}")
 
 
 def _decrypt_systemd_credential(name: str) -> str:
@@ -433,224 +147,6 @@ def _decrypt_systemd_credential(name: str) -> str:
         f"credential {name!r} not found at {encrypted} or {plain}; "
         f"create it with `systemd-creds encrypt --name={name} <(echo SECRET) {encrypted}`"
     )
-
-
-def _uncommented(text: str) -> str:
-    """The seed with its comment lines removed, for the substring contracts.
-
-    THE CONTRACTS BELOW ARE SUBSTRING PINS, which is a deliberate choice -- they
-    establish that a seed refers to a thing at all, not that it wires it up
-    correctly -- and a commented-out recipe satisfies one without doing
-    anything. That is not hypothetical: the reference seed at
-    workloads/vm-base/cloud-init/user-data carries both recipes commented out,
-    because it is `egress = "open"` and must not install an empty anchor, and
-    copying it forward is the intended way to start a filtered workload. A pin
-    that counted the copy would pass every seed that was started and never
-    finished, which is the false green this style has to be watched for.
-
-    Only a line whose FIRST non-space character is `#` is dropped. A `#` part
-    way through a line is content in YAML as often as it is a comment, and
-    guessing which would make the contract's answer depend on a reading of the
-    seed that cloud-init does not share.
-    """
-    return "\n".join(line for line in text.splitlines()
-                      if not line.lstrip().startswith("#"))
-
-
-def _covers_guest_home(guest_path: str, guest_home: PurePosixPath) -> bool:
-    """Whether a volume mounted at `guest_path` contains the guest's home.
-
-    The shared predicate behind both halves of the home-context rule: the
-    built-in cloud-config adds `context=` to exactly these mounts
-    (_virtiofs_mount_opts), and the seed contract in build_cloud_init_iso
-    refuses a custom seed that mounts one of them without it. Split out so the
-    two halves cannot disagree about which volume is the home share.
-    """
-    try:
-        guest_home.relative_to(PurePosixPath(guest_path))
-    except ValueError:
-            return False
-    return True
-
-
-def _virtiofs_mount_opts(guest_path: str, opts_str: str,
-                          guest_home: PurePosixPath) -> str:
-    """Add an SELinux `context=` option when `guest_path` covers guest_home.
-
-    A share covering the guest's home directory carries ~/.ssh, and virtiofs
-    has no xattr passthrough here (no `--xattr` flag on the virtiofsd sidecar,
-    see generate_virtiofs_service), so every file under it lands in the guest
-    labelled bare `virtiofs_t` — a type sshd has no policy access to. That is
-    silent and late: the denial is logged but not enforced for however long
-    the guest happens to keep running its *current* loaded policy, then bites
-    on the next boot that actually reloads one — a `dnf upgrade` touching
-    selinux-policy is exactly such a boot, and the guest may run for hours on
-    the old policy first. `context=` pins every file under the mount to a type
-    sshd already has broad, correct access to, so login stops depending on a
-    hand-run `semanage permissive` surviving the guest's own next upgrade.
-
-    Only applied when `opts_str` is still the "rw" parse_volume_spec default —
-    a spec that already sets its own mount options made this call once and
-    should not be overridden.
-    """
-    if not _covers_guest_home(guest_path, guest_home):
-        return opts_str
-    if opts_str != "rw":
-        return opts_str
-    return opts_str + f',context="{VM_HOME_SELINUX_CONTEXT}"'
-
-
-def _render_default_user_data(name: str, guest_user: str, pubkey: str,
-                              mounts: list, has_data_disk: bool,
-                              host_private_key: str = "",
-                              host_public_key: str = "",
-                              guest_env: dict | None = None,
-                              ca_cert: str = "") -> str:
-    """Render the built-in #cloud-config when no user_data_file is set.
-
-    Stays in a simple, controlled subset of YAML so we never need a YAML
-    library — the structure here is small and fully owned by us.
-    """
-    lines = [
-        "#cloud-config",
-        f"hostname: {name}",
-        f"fqdn: {name}.local",
-        "users:",
-        f"  - name: {guest_user}",
-        # Pin the primary user to VM_GUEST_UID so virtiofsd's uid/gid
-        # translation (guest 1000 <-> host workload uid) is deterministic and
-        # the guest user can write virtiofs shares. Cloud images already assign
-        # the default user 1000, so this only makes the convention explicit.
-        f"    uid: {VM_GUEST_UID}",
-        "    sudo: ALL=(ALL) NOPASSWD:ALL",
-        "    ssh_authorized_keys:",
-        f"      - {pubkey}",
-    ]
-    # Host-key pinning (S1): install the host-generated SSH host key into the
-    # guest via cloud-init's ssh_keys module, so sshd presents a key the host
-    # already pinned in vm_known_hosts on first boot — no trust-on-first-use.
-    # The block scalar content is indented 4 spaces under `ed25519_private: |`.
-    if host_private_key and host_public_key:
-        lines.append("ssh_keys:")
-        lines.append("  ed25519_private: |")
-        for keyline in host_private_key.splitlines():
-            lines.append(f"    {keyline}")
-        lines.append(f"  ed25519_public: {host_public_key}")
-    # The guest environment block. Two files rather than one because they cover
-    # different consumers — /etc/environment is read by PAM so login sessions and
-    # systemd services inherit it, and profile.d covers interactive shells that
-    # never go through PAM. dnf, curl and git all read these names from the
-    # environment.
-    #
-    # WHAT IS AND IS NOT IN IT, AFTER RUNG 2. Through rung 1 this block carried
-    # http_proxy/https_proxy/no_proxy and the enforcement was advisory by
-    # construction: a guest process free to ignore the variables simply did, and
-    # only the default-deny chain turned that into a failure rather than a
-    # bypass. Those variables are gone. Egress filtering is now transparent — a
-    # uid-keyed redirect the guest is not told about and cannot opt out of — so
-    # NOTHING written here affects whether the guest is filtered. What remains
-    # is the CA bundle the inspector's spliced connections are presented under
-    # and the credential PLACEHOLDERS a guest's client library needs in order to
-    # send a request at all: conveniences, not controls. The broker endpoint used
-    # to be here too and is not, because rung 6 stopped telling the guest where
-    # the broker is -- a guest that cannot name it cannot choose to use it.
-    #
-    # That is worth stating because the block LOOKS the same and its failure
-    # mode inverted. A guest missing this block used to be a guest reaching
-    # nothing; now it is a guest that reaches everything it is allowed to and
-    # cannot verify a certificate.
-    #
-    # Only the built-in cloud-config gets this. A workload supplying its own
-    # user_data_file owns its guest configuration entirely, and this is
-    # documented there rather than merged into a file we do not parse.
-    #
-    # THE CA IS SEEDED FOR EVERY FILTERED VM, WHATEVER `tls` SAYS, and it goes
-    # in by TWO routes because they reach different clients. `ca_certs.trusted`
-    # below installs it into the guest's system trust store, which §5 measured
-    # as covering almost everything; the write_files entry puts the same PEM at
-    # a fixed path, which is what the five environment variables above name for
-    # the runtimes that carry their own root list and never consult the system
-    # store. Either alone leaves a measured population of clients failing.
-    # write_files is unconditional now: every built-in seed carries the two
-    # files that give the guest a paravirtual clock (see vm_ptp.py).
-    lines.append("write_files:")
-    for path, permissions, content in vm_ptp_kvm_seed_files():
-        lines.append(f"  - path: {path}")
-        lines.append(f"    permissions: '{permissions}'")
-        lines.append("    content: |")
-        for contentline in content.splitlines():
-            lines.append(f"      {contentline}")
-    if ca_cert:
-        lines.append(f"  - path: {CA_BUNDLE_PATH}")
-        lines.append("    permissions: '0644'")
-        lines.append("    content: |")
-        for certline in ca_cert.splitlines():
-            lines.append(f"      {certline}")
-    if guest_env:
-        lines.append("  - path: /etc/environment")
-        lines.append("    append: true")
-        lines.append("    content: |")
-        for key, value in guest_env.items():
-            lines.append(f"      {key}={value}")
-        # Filename kept as -proxy though it now carries the CA bundle and the
-        # credential placeholders and no proxy variable at all: renaming it
-        # would leave the
-        # old file behind on every existing guest, still exporting the retired
-        # https_proxy, since cloud-config runs once at first boot. A guest that
-        # keeps that stale export dials an address where nothing listens.
-        lines.append("  - path: /etc/profile.d/99-workload-proxy.sh")
-        lines.append("    permissions: '0644'")
-        lines.append("    content: |")
-        for key, value in guest_env.items():
-            lines.append(f"      export {key}={value}")
-    # cc_ca_certs, present in Fedora 44 Cloud-Base. This is the half that
-    # reaches clients using the system store, and it is why a guest usually
-    # works without any of the environment variables at all.
-    if ca_cert:
-        lines.append("ca_certs:")
-        lines.append("  trusted:")
-        lines.append("    - |")
-        for certline in ca_cert.splitlines():
-            lines.append(f"      {certline}")
-    if mounts:
-        lines.append("mounts:")
-        for tag, mp, fstype, opts in mounts:
-            lines.append(
-                f"  - [{tag!r}, {mp!r}, {fstype!r}, {opts!r}, '0', '0']"
-            )
-    # runcmd is assembled from independent blocks and emitted once, below.
-    # Each block is a single `- |` shell fragment, so a failure in one does not
-    # decide whether the next one runs.
-    runcmd_blocks = [vm_ptp_kvm_runcmd_lines()]
-    if has_data_disk:
-        # Mount /dev/vdb at /data on first boot, formatting it only if it has no
-        # filesystem yet. Formatting and mounting are separate steps on purpose:
-        # /etc/fstab lives on the *system* disk, which is reconstructible and is
-        # rebuilt by a restore or a re-provision, while data.qcow2 comes back
-        # from the archive already formatted. Gating the fstab line on the mkfs
-        # (as this once did) meant a restored data disk was attached and never
-        # mounted — the disk was there, /data was empty, and nothing said why.
-        # Each step is guarded independently so the whole block is idempotent.
-        runcmd_blocks.append([
-            "if [ -b /dev/vdb ]; then",
-            "  blkid /dev/vdb | grep -q TYPE || mkfs.ext4 -L workload-data /dev/vdb",
-            "  mkdir -p /data",
-            "  grep -q '^LABEL=workload-data ' /etc/fstab ||"
-            " echo 'LABEL=workload-data /data ext4 defaults 0 2' >> /etc/fstab",
-            "  mountpoint -q /data || mount /data",
-            "fi",
-        ])
-    lines.append("runcmd:")
-    for block in runcmd_blocks:
-        lines.append("  - |")
-        lines += [f"    {shline}" for shline in block]
-    lines += [
-        "package_update: false",
-        "package_upgrade: false",
-        f'final_message: "workload {name} cloud-init complete after $UPTIME seconds"',
-        "",
-    ]
-    return "\n".join(lines)
 
 
 def _bundle_workloadctl_rpm(seed_dir: Path) -> bool:
@@ -938,7 +434,7 @@ def build_cloud_init_iso(pw, config: dict, name: str, config_path: Path | None =
         # with the mount already in /etc/fstab, a guest-side CA store the image
         # builder populated).
         seed_provides = ci_cfg.get("seed_provides", []) or []
-        live = _uncommented(user_data_text)
+        live = uncommented(user_data_text)
 
         # The CA contract, which replaced the proxy contract this check used to
         # be. It is pinned on the BUNDLE PATH rather than on an address: when
@@ -995,7 +491,7 @@ def build_cloud_init_iso(pw, config: dict, name: str, config_path: Path | None =
                         f"the guest image mounts it already."
                     )
                 # The home share's SELinux context. Default mode adds this to
-                # the mount options itself (_virtiofs_mount_opts); template
+                # the mount options itself (virtiofs_mount_opts); template
                 # mode emits only what the operator wrote, so a seed that
                 # mounts the home share with plain `defaults` produces a guest
                 # whose every home file is `virtiofs_t` and whose sshd cannot
@@ -1019,14 +515,14 @@ def build_cloud_init_iso(pw, config: dict, name: str, config_path: Path | None =
                 # share is mounted with) is a realistic mistake that leaves
                 # sshd exactly as broken as omitting the option.
                 #
-                # Against `live`, not the raw text, for the reason _uncommented
+                # Against `live`, not the raw text, for the reason uncommented
                 # exists: workloads/vm-base/cloud-init/user-data carries this
                 # very mount as a COMMENTED example, so a pin over the raw seed
                 # would be satisfied by a copy of the reference that was
                 # started and never uncommented — the false green this style
                 # has to be watched for.
                 if ("home_context" not in seed_provides
-                        and _covers_guest_home(guest_path, guest_home)
+                        and covers_guest_home(guest_path, guest_home)
                         and not re.search(
                             r"context=[\"']?[\w.-]*:[\w.-]*:(?:"
                             + "|".join(VM_HOME_SELINUX_TYPES) + r"):",
@@ -1056,9 +552,9 @@ def build_cloud_init_iso(pw, config: dict, name: str, config_path: Path | None =
         mounts = []
         for tag, vol_spec in zip(virtiofs_tags(vm_volumes), vm_volumes):
             _host, guest_path, opts_str = parse_volume_spec(vol_spec)
-            opts_str = _virtiofs_mount_opts(guest_path, opts_str, guest_home)
+            opts_str = virtiofs_mount_opts(guest_path, opts_str, guest_home)
             mounts.append((tag, guest_path, "virtiofs", opts_str))
-        user_data_text = _render_default_user_data(
+        user_data_text = render_default_user_data(
             name=name,
             guest_user=guest_user,
             pubkey=pubkey,

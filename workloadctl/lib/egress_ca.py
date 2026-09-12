@@ -239,7 +239,7 @@ def ca_openssl_argv(name: str, key_path, cert_path, *, now: float) -> list[str]:
 # guest, not a degraded mode.
 #
 # THREE THINGS MOVE TOGETHER OR NONE OF THEM DO: this flag, the write_files
-# entry in _render_default_user_data that puts the PEM at CA_BUNDLE_PATH,
+# entry in render_default_user_data that puts the PEM at CA_BUNDLE_PATH,
 # and the seed contract in build_cloud_init_iso. Flipping this alone points
 # five variables at a file nothing writes, which is the total outage described
 # above -- so it is not a "safe" partial step, it is the worst of the three.

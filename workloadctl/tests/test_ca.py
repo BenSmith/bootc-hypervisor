@@ -26,7 +26,7 @@ from egress_ca import (CA_BACKDATE_SECONDS, CA_CERT_NAME, CA_KEY_NAME,
 
 # `lib/` reaches sys.path via tests/__init__, so this import follows it.
 import ensure_common
-import ensure_vm
+import vm_default_seed
 
 HAVE_OPENSSL = shutil.which("openssl") is not None
 
@@ -305,10 +305,10 @@ class TestTheCaReachesTheSeed(unittest.TestCase):
     PEM = "-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n"
 
     def setUp(self):
-        self.mod = ensure_vm
+        self.mod = vm_default_seed
 
     def _render(self, **kw):
-        return self.mod._render_default_user_data(
+        return self.mod.render_default_user_data(
             name="myvm", guest_user="fedora", pubkey="ssh-ed25519 AAAA u@h",
             mounts=[], has_data_disk=False, **kw)
 

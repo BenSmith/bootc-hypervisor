@@ -30,9 +30,10 @@ from ensure_common import (
     generate_egress_ca, provision_egress_pki_dirs,
 )
 from ensure_vm import (
-    setup_nvram, setup_vm_volume_directories, generate_ssh_keypair,
-    generate_vm_host_keypair, seed_vm_home_share_ssh_key,
-    build_cloud_init_iso,
+    setup_nvram, setup_vm_volume_directories, build_cloud_init_iso,
+)
+from vm_ssh_keys import (
+    generate_ssh_keypair, generate_vm_host_keypair, seed_vm_home_share_ssh_key,
 )
 from ensure_container import (
     configure_subuid_subgid, setup_required_file_ownership,

@@ -23,6 +23,8 @@ import ensure_common
 import ensure_container
 import ensure_user
 import ensure_vm
+import vm_default_seed
+import vm_ssh_keys
 from vm_provision import (PROVISION_FAILED, PROVISION_UNVERIFIED,
                           read_provision_marker, write_provision_marker)
 
@@ -74,10 +76,10 @@ def _fake_pw(home: Path, uid: int = 9999, gid: int = 9999):
 
 class TestRenderDefaultUserData(unittest.TestCase):
     def setUp(self):
-        self.mod = ensure_vm
+        self.mod = vm_default_seed
 
     def test_minimal_no_mounts_no_data_disk(self):
-        out = self.mod._render_default_user_data(
+        out = self.mod.render_default_user_data(
             name="myvm", guest_user="fedora",
             pubkey="ssh-ed25519 AAAA fedora@build",
             mounts=[], has_data_disk=False,
@@ -103,7 +105,7 @@ class TestRenderDefaultUserData(unittest.TestCase):
             ("shareA", "/mnt/a", "virtiofs", "defaults"),
             ("shareB", "/mnt/b", "virtiofs", "ro"),
         ]
-        out = self.mod._render_default_user_data(
+        out = self.mod.render_default_user_data(
             name="myvm", guest_user="fedora",
             pubkey="ssh-ed25519 X",
             mounts=mounts, has_data_disk=False,
@@ -118,7 +120,7 @@ class TestRenderDefaultUserData(unittest.TestCase):
         self.assertIn("'ro'", out)
 
     def test_with_data_disk_emits_format_runcmd(self):
-        out = self.mod._render_default_user_data(
+        out = self.mod.render_default_user_data(
             name="myvm", guest_user="fedora",
             pubkey="ssh-ed25519 X",
             mounts=[], has_data_disk=True,
@@ -138,7 +140,7 @@ class TestRenderDefaultUserData(unittest.TestCase):
         restored VM had its data disk attached and never mounted — /data was
         simply empty. Found by tests/cli_surface test_restore_vm_round_trip.
         """
-        out = self.mod._render_default_user_data(
+        out = self.mod.render_default_user_data(
             name="myvm", guest_user="fedora",
             pubkey="ssh-ed25519 X",
             mounts=[], has_data_disk=True,
@@ -151,7 +153,7 @@ class TestRenderDefaultUserData(unittest.TestCase):
         self.assertIn("grep -q '^LABEL=workload-data ' /etc/fstab ||", runcmd)
 
     def test_with_mounts_and_data_disk(self):
-        out = self.mod._render_default_user_data(
+        out = self.mod.render_default_user_data(
             name="myvm", guest_user="fedora",
             pubkey="ssh-ed25519 X",
             mounts=[("t", "/m", "virtiofs", "defaults")],
@@ -164,7 +166,7 @@ class TestRenderDefaultUserData(unittest.TestCase):
         self.assertLess(out.index("mounts:"), out.index("runcmd:"))
 
     def test_format_invariants(self):
-        out = self.mod._render_default_user_data(
+        out = self.mod.render_default_user_data(
             name="vm", guest_user="u", pubkey="K",
             mounts=[], has_data_disk=False,
         )
@@ -190,30 +192,30 @@ class TestVirtiofsMountOpts(unittest.TestCase):
     """
 
     def setUp(self):
-        self.mod = ensure_vm
+        self.mod = vm_default_seed
         self.guest_home = Path("/home/fedora")
 
     def test_share_at_home_gets_context(self):
-        out = self.mod._virtiofs_mount_opts("/home/fedora", "rw",
+        out = self.mod.virtiofs_mount_opts("/home/fedora", "rw",
                                              self.guest_home)
         self.assertIn('context="system_u:object_r:user_home_t:s0"', out)
         self.assertTrue(out.startswith("rw,"))
 
     def test_share_above_home_gets_context(self):
-        out = self.mod._virtiofs_mount_opts("/home", "rw", self.guest_home)
+        out = self.mod.virtiofs_mount_opts("/home", "rw", self.guest_home)
         self.assertIn('context="system_u:object_r:user_home_t:s0"', out)
 
     def test_share_below_home_is_untouched(self):
-        out = self.mod._virtiofs_mount_opts("/home/fedora/projects", "rw",
+        out = self.mod.virtiofs_mount_opts("/home/fedora/projects", "rw",
                                              self.guest_home)
         self.assertEqual(out, "rw")
 
     def test_unrelated_share_is_untouched(self):
-        out = self.mod._virtiofs_mount_opts("/data", "rw", self.guest_home)
+        out = self.mod.virtiofs_mount_opts("/data", "rw", self.guest_home)
         self.assertEqual(out, "rw")
 
     def test_custom_opts_are_not_overridden(self):
-        out = self.mod._virtiofs_mount_opts("/home/fedora", "ro",
+        out = self.mod.virtiofs_mount_opts("/home/fedora", "ro",
                                              self.guest_home)
         self.assertEqual(out, "ro")
 
@@ -286,7 +288,7 @@ class TestBuildCloudInitIsoTemplateMode(unittest.TestCase):
                     # because the pin was a bare substring search over the whole
                     # seed -- so the harness was itself standing on the false
                     # green the pin's own comment warns about. The contract now
-                    # ignores comment lines (see _uncommented), and the
+                    # ignores comment lines (see uncommented), and the
                     # injection has to be something a seed would really carry.
                     path.write_text(
                         body + f"\nca_bundle_path: "
@@ -1052,7 +1054,7 @@ class TestBuildCloudInitIsoTemplateMode(unittest.TestCase):
         self._run_build(cfg)
 
     def test_a_commented_context_does_not_satisfy_the_check(self):
-        """The context= pin runs against _uncommented(), like the others.
+        """The context= pin runs against uncommented(), like the others.
 
         This is the false green the substring style has to be watched for, and
         it is not hypothetical here: workloads/vm-base/cloud-init/user-data
@@ -1141,7 +1143,7 @@ class TestVmHostKeyGeneration(unittest.TestCase):
     """generate_vm_host_keypair + write_vm_known_hosts (S1)."""
 
     def setUp(self):
-        self.mod = ensure_vm
+        self.mod = vm_ssh_keys
         self.tmp = tempfile.mkdtemp()
         self.home = Path(self.tmp) / "home"
         self.home.mkdir()
@@ -1290,7 +1292,7 @@ class TestSeedVmHomeShareSshKey(unittest.TestCase):
     PUBKEY = "ssh-ed25519 AAAAFAKEKEY workload-vmx@hypervisor"
 
     def setUp(self):
-        self.mod = ensure_vm
+        self.mod = vm_ssh_keys
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
         (self.root / "state" / ".ssh").mkdir(parents=True)
@@ -2090,7 +2092,7 @@ class TestSetupVmSocketDir(unittest.TestCase):
 
 class TestGenerateSshKeypair(unittest.TestCase):
     def setUp(self):
-        self.mod = ensure_vm
+        self.mod = vm_ssh_keys
 
     def test_generates_keypair_when_missing(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -2171,7 +2173,7 @@ class TestGenerateSshKeypair(unittest.TestCase):
 
 class TestReadSshPubkey(unittest.TestCase):
     def setUp(self):
-        self.mod = ensure_vm
+        self.mod = vm_ssh_keys
 
     def test_returns_pubkey_when_present(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -2666,7 +2668,7 @@ class TestKeygenLosesTheRaceGracefully(unittest.TestCase):
     """If the lock ever degrades to unlocked, a lost keygen race is still benign."""
 
     def setUp(self):
-        self.mod = ensure_vm
+        self.mod = vm_ssh_keys
 
     def test_a_key_that_appeared_after_the_guard_is_adopted_not_fatal(self):
         # ssh-keygen refuses to overwrite and exits nonzero. Only a concurrent
