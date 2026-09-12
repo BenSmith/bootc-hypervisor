@@ -21,8 +21,8 @@ import unittest
 import unittest.mock
 from types import SimpleNamespace
 
-import cmd_diagnose
-from cmd_diagnose import (
+import diagnose_inspect
+from diagnose_inspect import (
     INSPECT_ACCEPT_SETS, INSPECT_GUARD_SETS, INSPECT_SELF_SETS,
 )
 from nft_elements import (
@@ -97,7 +97,7 @@ class TestTheVerdicts(unittest.TestCase):
             vm_network={"egress": "filtered"},
             config={"vm": {"network": {"egress": "filtered"}}}, is_vm=True)
         elems = [{"concat": [UID, 80]}, {"concat": [UID, 443]}]
-        return cmd_diagnose.inspect_check(
+        return diagnose_inspect.inspect_check(
             cfg, elements4=elems, elements6=elems, socket_active=True,
             v6_route=True, self_dials=None, status=None,
             filter_sets=filter_sets)
@@ -215,8 +215,8 @@ class TestTheReadCostsOneExec(unittest.TestCase):
             calls.append(argv)
             return payload
 
-        with unittest.mock.patch.object(cmd_diagnose, "_nft_json", fake):
-            return cmd_diagnose._inspect_filter_sets(UID), calls
+        with unittest.mock.patch.object(diagnose_inspect, "nft_json", fake):
+            return diagnose_inspect._inspect_filter_sets(UID), calls
 
     def test_all_six_come_from_a_single_nft_call(self):
         result, calls = self._read(self._table(names=ALL_SETS))
@@ -258,7 +258,7 @@ class TestTheReadCostsOneExec(unittest.TestCase):
         """nft renders a map under "map", not "set". A reader matching only on
         "set" reports a name that moved to a map as unreadable forever."""
         name = INSPECT_ACCEPT_SETS[0]
-        found, elements = cmd_diagnose._named_set_elements(
+        found, elements = diagnose_inspect._named_set_elements(
             {"nftables": [{"map": {"name": name, "elem": [1]}}]}, name)
         self.assertTrue(found)
         self.assertEqual(elements, [1])

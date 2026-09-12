@@ -55,12 +55,12 @@ KEEP	vm_network_config.VM_ALLOW_NAME_RE
 KEEP	vm_network_config.VM_NETWORK_SCALARS
 KEEP	vm_network_config.vm_network_warnings
 KEEP	vm_network_config.vm_resolve_policy_path
-KEEP	cmd_diagnose.vm_confinement_check
-KEEP	cmd_diagnose.vm_egress_check
-KEEP	cmd_diagnose.vm_network_check
+KEEP	diagnose_selinux.vm_confinement_check
+KEEP	diagnose_egress.vm_egress_check
+KEEP	diagnose_egress.vm_network_check
 KEEP	cmd_diagnose.vm_provisioning_check
-KEEP	cmd_diagnose.vm_resolve_check
-KEEP	cmd_diagnose.vm_socket_dir_selinux_check
+KEEP	diagnose_inspect.vm_resolve_check
+KEEP	diagnose_selinux.vm_socket_dir_selinux_check
 KEEP	egress_selinux.VM_QEMU_CONTEXT
 KEEP	egress_selinux.VM_QEMU_TYPE
 KEEP	egress_selinux.VM_RESOLVE_SELINUX_CIL

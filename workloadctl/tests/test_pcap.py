@@ -832,7 +832,7 @@ class TestDetachVerifies(unittest.TestCase):
 
 class TestDiagnose(unittest.TestCase):
     def setUp(self):
-        from cmd_diagnose import capture_check
+        from diagnose_egress import capture_check
         self.check = capture_check
         self.config = SimpleNamespace(name="fj", uid=10003, is_vm=True)
 
@@ -860,15 +860,15 @@ class TestDiagnose(unittest.TestCase):
         unpack it claimed a running capture on every workload on the host,
         capture or not, on a line about writes to the filter table.
         """
-        import cmd_diagnose
-        with mock.patch.object(cmd_diagnose, "service_active",
+        import diagnose_egress
+        with mock.patch.object(diagnose_egress, "service_active",
                                return_value=(False, "inactive")), \
-             mock.patch.object(cmd_diagnose, "_log_rule_count", return_value=0):
+             mock.patch.object(diagnose_egress, "_log_rule_count", return_value=0):
             self.assertIsNone(self.check(self.config))
 
-        with mock.patch.object(cmd_diagnose, "service_active",
+        with mock.patch.object(diagnose_egress, "service_active",
                                return_value=(True, "active")), \
-             mock.patch.object(cmd_diagnose, "_log_rule_count", return_value=1):
+             mock.patch.object(diagnose_egress, "_log_rule_count", return_value=1):
             name, ok, _msg = self.check(self.config)
             self.assertEqual((name, ok), ("capture", True))
 

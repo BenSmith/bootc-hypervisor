@@ -378,7 +378,7 @@ class TestConfinementDiagnose(unittest.TestCase):
 
     @staticmethod
     def check(config, **kw):
-        from cmd_diagnose import vm_confinement_check
+        from diagnose_selinux import vm_confinement_check
         return vm_confinement_check(config, **kw)
 
     def test_skips_container_workloads(self):
@@ -464,7 +464,7 @@ class TestQemuProcessLookup(unittest.TestCase):
         unconfined_service_t — and reports every confined VM as unconfined.
         Observed live, with `ps -eo label` showing svirt_t at the same moment.
         """
-        from cmd_diagnose import _vm_qemu_context
+        from diagnose_selinux import _vm_qemu_context
         import inspect
         # Body only: the docstring names /cmdline first while explaining this.
         body = inspect.getsource(_vm_qemu_context).split('"""')[-1]

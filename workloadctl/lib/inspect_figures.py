@@ -293,7 +293,7 @@ _GROUP_GATE = {CERTIFICATES: "mint"}
 def _read(path: str):
     """One status document, or None. Never distinguishes why.
 
-    The same silence `cmd_diagnose._inspect_status` chose and for the same
+    The silence `diagnose_inspect.inspect_check` relies on, and for this
     reason: the inspector is socket-activated, so a guest that has dialled
     nothing has never written this file, and a VM that has not started has no
     runtime directory. Neither is a fault, and a report that manufactured one

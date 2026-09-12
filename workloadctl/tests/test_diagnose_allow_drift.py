@@ -30,6 +30,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+import diagnose_egress
+import diagnose_inspect
 import cmd_diagnose
 import workload_lib
 from workloadctl_core import WorkloadConfig
@@ -131,16 +133,16 @@ class AllowDriftTests(unittest.TestCase):
         both with the same document would double-count if it did not. It does
         not: the merge is into a set.
         """
-        return mock.patch.object(cmd_diagnose, "_nft_json",
+        return mock.patch.object(diagnose_egress, "nft_json",
                                  return_value=_set(*concats))
 
     def _resolve(self, *addrs):
         return mock.patch.object(
-            cmd_diagnose, "container_allow_resolve",
+            diagnose_egress, "container_allow_resolve",
             return_value=[ipaddress.ip_address(a) for a in addrs])
 
     def _run(self, name="capp"):
-        return cmd_diagnose.allow_drift_check(WorkloadConfig(name))
+        return diagnose_egress.allow_drift_check(WorkloadConfig(name))
 
     # --- the happy case, which has to be a real assertion --------------------
 
@@ -187,7 +189,7 @@ class AllowDriftTests(unittest.TestCase):
     # --- the two neighbouring failures, which need different remedies --------
 
     def test_nothing_armed_at_all_is_its_own_message(self):
-        with mock.patch.object(cmd_diagnose, "_nft_json",
+        with mock.patch.object(diagnose_egress, "nft_json",
                                return_value=_set()), self._resolve("203.0.113.5"):
             _, ok, message = self._run()
         self.assertFalse(ok)
@@ -199,7 +201,7 @@ class AllowDriftTests(unittest.TestCase):
         and telling the operator to restart would be telling them to break it.
         """
         with self._arm((UID, "203.0.113.5", 8888)), \
-                mock.patch.object(cmd_diagnose, "container_allow_resolve",
+                mock.patch.object(diagnose_egress, "container_allow_resolve",
                                   side_effect=ValueError("does not resolve")):
             _, ok, message = self._run()
         self.assertFalse(ok)
@@ -223,7 +225,7 @@ class AllowDriftTests(unittest.TestCase):
 
     def test_the_vm_spelling_drifts_identically(self):
         with self._arm((UID, "203.0.113.5", 8888)), \
-                mock.patch.object(cmd_diagnose, "vm_allow_resolve",
+                mock.patch.object(diagnose_egress, "vm_allow_resolve",
                                   return_value=[ipaddress.ip_address("203.0.113.9")]):
             _, ok, message = self._run("vmw")
         self.assertFalse(ok)
@@ -260,6 +262,10 @@ class AllowDriftIsWiredTests(unittest.TestCase):
             return_value=mock.Mock(returncode=1, stdout="", stderr="")))
         self.enterContext(mock.patch.object(
             cmd_diagnose, "service_active", return_value=(False, "inactive")))
+        self.enterContext(mock.patch.object(
+            diagnose_inspect, "service_active", return_value=(False, "inactive")))
+        self.enterContext(mock.patch.object(
+            diagnose_egress, "service_active", return_value=(False, "inactive")))
 
     def _names(self, name):
         checks, _ = cmd_diagnose.collect_diagnose_checks(

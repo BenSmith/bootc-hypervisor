@@ -22,7 +22,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from cmd_diagnose import (
+from diagnose_probe import PROBE
+from diagnose_inspect import (
     _binding_fragments, _named_hosts, _not_http_fragments,
 )
 from egress_record import (
@@ -208,8 +209,8 @@ class TestTheFiguresReachTheLine(unittest.TestCase):
     """
 
     def setUp(self):
-        import cmd_diagnose
-        self.mod = cmd_diagnose
+        import diagnose_inspect
+        self.mod = diagnose_inspect
 
     def _line(self, status):
         cfg = SimpleNamespace(
@@ -265,7 +266,7 @@ class TestTheFiguresReachTheLine(unittest.TestCase):
             path = Path(tmp) / "inspect-status.json"
             path.write_text(json.dumps(
                 {"drop_reasons": {DROP_MISDIRECTED: 7}}))
-            # Patched on inspect_figures, not on cmd_diagnose: rung 5 T8
+            # Patched on inspect_figures, not on diagnose_inspect: rung 5 T8
             # moved the single read of this document there, because `doctor`
             # and the exporter became readers of it too and three parses with
             # three ideas of what a malformed document means is the thing that
@@ -273,7 +274,7 @@ class TestTheFiguresReachTheLine(unittest.TestCase):
             # reader uses the helper, never a hand-built path.
             with mock.patch.object(figures_mod, "inspect_status_path",
                                    return_value=str(path)) as spy:
-                _, _, detail = self._line(self.mod.PROBE)
+                _, _, detail = self._line(PROBE)
         spy.assert_called_once_with("vm1")
         self.assertIn("7 request(s)", detail)
 
@@ -286,7 +287,7 @@ class TestTheFiguresReachTheLine(unittest.TestCase):
             path.write_text("{not json")
             with mock.patch.object(figures_mod, "inspect_status_path",
                                    return_value=str(path)):
-                _, ok, detail = self._line(self.mod.PROBE)
+                _, ok, detail = self._line(PROBE)
         self.assertTrue(ok)
         self.assertIn("egress inspected on both families", detail)
 
