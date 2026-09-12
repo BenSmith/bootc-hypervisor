@@ -15,9 +15,9 @@ from broker_config import VmCredential
 from config_parser import (
     normalise_hostname,
     patterns_overlap,
-    validate_credential_entries,
     validate_host_pattern,
 )
+from credential_entries import validate_credential_entries
 from egress_ca import RESERVED_GUEST_ENV
 from egress_policy import (
     POLICY_METHODS,

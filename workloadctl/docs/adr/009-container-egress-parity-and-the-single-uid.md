@@ -48,7 +48,7 @@ that every rule has to pick between. That has already produced one real hole
    §5 tabulates the genuine differences.
 
 3. **A container is inspected by presence of a trigger, and only by that.**
-   `container_uses_inspect()` (`lib/config_parser.py`) is true when any one of
+   `container_uses_inspect()` (`lib/container_network_config.py`) is true when any one of
    `[network].hosts`, `[[network.allow]]` or `[[network.policy]]` is present.
    There is no `egress` key on the container side and no default-deny for a
    container that has not opted in. Host-network mode is never inspected.

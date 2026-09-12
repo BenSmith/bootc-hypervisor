@@ -13,21 +13,19 @@ in workload-filter.nft is keyed on. See container_uses_inspect().
 
 Installed to /usr/libexec/workloadctl/container_validate.py.
 """
-from config_parser import (
+from config_parser import patterns_overlap
+from container_network_config import (
     ContainerCredential,
     ContainerPolicyEntry,
     _validate_container_host_pattern,
-    container_runs_on_host_network,
-    patterns_overlap,
-    validate_credential_entries,
-)
-from container_network_config import (
     container_ca_delivery,
     container_ca_mount_path,
     container_effective_tls_mode,
+    container_runs_on_host_network,
     container_tls_mode,
     container_tls_reason,
 )
+from credential_entries import validate_credential_entries
 from egress_ca import RESERVED_GUEST_ENV
 from egress_policy import POLICY_METHODS, POLICY_METHODS_REFUSED, hostname_match
 

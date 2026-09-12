@@ -8,9 +8,11 @@ kernel, and the packet-capture chains.
 """
 from pathlib import Path
 
-from config_parser import (
-    ContainerAllowEntry, container_allow_entries, container_allow_resolve,
+from container_network_config import (
+    container_allow_entries,
+    container_allow_resolve,
     container_uses_inspect,
+    ContainerAllowEntry,
 )
 from diagnose_inspect import _uses_inspect
 from diagnose_probe import PROBE

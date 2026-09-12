@@ -34,8 +34,8 @@ from nft_constants import (both_families, split_by_family, NFT_BIN,
                            NFT_SET_EGRESS_CG,
                            NFT_SET_FILTERED, NFT_SET_INSPECT_CG, NFT_TABLE)
 from config_parser import SOCKET_DIR
+from container_network_config import container_allow_resolve
 from nft_constants import INTERNAL_PREFIXES4, INTERNAL_PREFIXES6, SIDECAR_SLICE
-from config_parser import container_allow_resolve
 from vm_network_config import vm_allow_resolved
 from workload_addr import allow_reserved_reason
 from workload_addr import inspect_address

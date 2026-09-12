@@ -103,7 +103,10 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 from broker_config import container_uses_credentials, vm_uses_credentials
-from config_parser import container_uses_inspect
+from container_network_config import (
+    container_internal_entries,
+    container_uses_inspect,
+)
 from egress_policy import (
     container_inspect_policy_text, inspect_policy_path, inspect_status_path,
     internal_hosts, vm_inspect_policy_text, vm_uses_inspect,
@@ -119,7 +122,6 @@ from nft_elements import (
 )
 from workload_addr import broker_listen_address, ensure_advertised_interface
 from workload_lib import load_workload_config
-from container_network_config import container_internal_entries
 
 
 @dataclass(frozen=True)

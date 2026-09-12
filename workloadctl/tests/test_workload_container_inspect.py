@@ -13,7 +13,7 @@ from contextlib import redirect_stderr
 from unittest import mock
 
 import inspect_arm
-from config_parser import container_uses_inspect
+from container_network_config import container_uses_inspect
 from tests import load_script
 
 

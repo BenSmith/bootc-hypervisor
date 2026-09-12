@@ -1263,7 +1263,7 @@ class TestContainerFilterSubstrate(_FilterFixture, unittest.TestCase):
         self._patch("load_workload_config", lambda name: {"network": cfg})
 
     def test_a_container_is_filtered_by_its_trigger_not_an_egress_key(self):
-        from config_parser import container_uses_inspect
+        from container_network_config import container_uses_inspect
         self.assertIsNone(self.sub.unfiltered({"network": {"hosts": ["a"]}},
                                               {"hosts": ["a"]}))
         self.assertIsNotNone(self.sub.unfiltered({"network": {}}, {}))

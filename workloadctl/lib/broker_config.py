@@ -28,11 +28,14 @@ import urllib.parse
 from pathlib import Path
 from typing import NamedTuple
 
-from config_parser import (BROKER_DEFAULT_AUTH_FORMAT,
-                           BROKER_DEFAULT_AUTH_HEADER,
-                           container_credential_entries,
-                           container_policy_entries, container_uses_inspect,
-                           parse_credential_entries)
+from container_network_config import (
+    container_credential_entries,
+    container_policy_entries,
+    container_uses_inspect,
+)
+from credential_entries import (BROKER_DEFAULT_AUTH_FORMAT,
+                                BROKER_DEFAULT_AUTH_HEADER,
+                                parse_credential_entries)
 from workload_addr import (IP_BIN, ADVERTISED_IFACE,
                            broker_listen_address, inspect_address)
 from egress_policy import vm_uses_inspect
