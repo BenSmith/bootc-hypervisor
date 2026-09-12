@@ -620,7 +620,7 @@ def container_runs_on_host_network(config: dict) -> bool:
     topology. `single` passes it to `podman run --network=` and `pod` passes it
     to `podman pod create --network=`, so `mode = "host"` means host networking
     in both. `bridge` mode ignores it outright -- every member joins
-    `workload-<name>-net` instead (see _network_args in the generator, which
+    `workload-<name>-net` instead (see _network_args in container_run_args, which
     warns that workload-level [network].ports is ignored there for the same
     reason).
 
