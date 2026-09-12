@@ -68,7 +68,7 @@ class TestTheInternalFailureSaysWhatItCosts(unittest.TestCase):
         so that name is safe to print. What Requires= that socket is not:
         workload-<name>.service in `single` mode, and the pod/net head unit in
         `pod`/`bridge` (the umbrella is After= its members, so the arming had
-        to move -- see _head_unit in generators/workload-generate). A literal
+        to move -- see _head_unit in lib/gen_container_heads.py). A literal
         `workload-web.service` here sends a pod-mode operator to the wrong
         journal.
         """

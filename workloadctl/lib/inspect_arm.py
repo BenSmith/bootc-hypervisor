@@ -165,7 +165,7 @@ VM = Substrate(
 
 # The requiring unit is not named: it is workload-<name>.service in `single`
 # mode and the pod/net head unit in `pod`/`bridge` (see _head_unit in
-# generators/workload-generate), so a literal name is wrong in one topology
+# lib/gen_container_heads.py), so a literal name is wrong in one topology
 # and sends the operator to the wrong journal. The remedy is the same either
 # way, so the unit adds nothing the operator can act on.
 CONTAINER = Substrate(
