@@ -32,7 +32,7 @@ from unittest import mock
 import cmd_drift  # noqa: E402
 import inspect_arm  # noqa: E402
 from egress_policy import vm_inspect_policy, vm_inspect_policy_text
-from container_network_config import container_inspect_policy_text
+from egress_policy import container_inspect_policy_text
 
 
 ROOT = Path(__file__).resolve().parent.parent

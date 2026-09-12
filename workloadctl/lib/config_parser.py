@@ -719,7 +719,7 @@ def container_allow_resolve(entry: ContainerAllowEntry) -> list:
     R3's "no default-deny for containers" is about the UNTRIGGERED case, and
     reading it as "a container is never default-denied" is a mistake this
     docstring used to make. A workload with any trigger is placed in
-    `wl_filtered` by container_filter_elements() below, and
+    `wl_filtered` by container_filter_elements() (lib/nft_elements.py), and
     nftables/workload-filter.nft's last output rule drops everything from a
     `wl_filtered` uid that no earlier rule accepted. What R3 rules out is an
     `egress` key that could default-deny a workload WITHOUT giving it an

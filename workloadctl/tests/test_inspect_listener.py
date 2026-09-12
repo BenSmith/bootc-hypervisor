@@ -25,7 +25,7 @@ from pathlib import Path
 from tests import load_script
 from egress_policy import INSPECT_GUEST_AGENT_KEY
 from config_parser import normalise_hostname
-from container_network_config import container_inspect_policy
+from egress_policy import container_inspect_policy
 from egress_plane import CLEARTEXT, TLS, plane_for_port
 from egress_policy import (
     Policy, VmPolicyEntry,

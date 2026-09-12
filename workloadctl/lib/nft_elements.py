@@ -9,8 +9,9 @@ policy words are egress_policy's. This module is only the mapping between them.
 
 Both substrates arm through it: the inspector's element builders and the
 internal-exemption commands are what lib/inspect_arm.py calls for a container
-as much as for a VM. Only the `vm_`-prefixed builders read the VM's own
-allow-entry shape.
+as much as for a VM. The `vm_`-prefixed builders read the VM's own
+allow-entry shape and the `container_`-prefixed ones the container's; the
+sets they fill are the same.
 
 This was vm.py: once the whole VM surface, re-exporting nine other modules so
 that `from vm import <anything>` kept working. It re-exports nothing: a name
@@ -29,10 +30,12 @@ from nft_constants import (both_families, split_by_family, NFT_BIN,
                            NFT_PAIR_ALLOW, NFT_PAIR_INSPECT_DST,
                            NFT_PAIR_INSPECT_LIVE, NFT_PAIR_INSPECT_MAP,
                            NFT_PAIR_INSPECT_SELF, NFT_PAIR_INTERNAL_OK,
-                           NFT_PROXY_TABLE, NFT_SET_EGRESS_CG,
+                           NFT_PROXY_TABLE, NFT_SET_ALLOW4, NFT_SET_ALLOW6,
+                           NFT_SET_EGRESS_CG,
                            NFT_SET_FILTERED, NFT_SET_INSPECT_CG, NFT_TABLE)
 from config_parser import SOCKET_DIR
 from nft_constants import INTERNAL_PREFIXES4, INTERNAL_PREFIXES6, SIDECAR_SLICE
+from config_parser import container_allow_resolve
 from vm_network_config import vm_allow_resolved
 from workload_addr import allow_reserved_reason
 from workload_addr import inspect_address
@@ -100,6 +103,46 @@ def vm_resolve_status_path(name: str) -> str:
 # the PKI rules there is nothing per-workload to register or to remove at
 # disable.
 INSPECT_RECORD_SELINUX_TYPE = "wlinspect_log_t"
+
+
+# The container builders take the container schema's own entry type
+# (ContainerAllowEntry keeps `host`/`address`/`port` apart, where VmAllowEntry
+# packs them into one 'addr:port' string) and shape it into the same sets.
+
+def container_allow_resolved(allow: list) -> list:
+    """[(ContainerAllowEntry, [addr...])] for every [[network.allow]] entry,
+    resolved once. Mirrors vm_allow_resolved."""
+    return [(entry, container_allow_resolve(entry)) for entry in allow]
+
+
+def container_filter_elements(uid: int, allow: list, resolved=None) -> dict:
+    """Map set name -> element expressions for one container workload.
+
+    Mirrors vm_filter_elements, but built from ContainerAllowEntry rather
+    than VmAllowEntry. Reuses the shared set names and the reserved-range
+    check (nft_constants.NFT_SET_FILTERED/ALLOW4/ALLOW6,
+    workload_addr.allow_reserved_reason): both substrates share the one
+    filter table (D3), so a container's would-be element in another workload's
+    listener range is refused by the identical rule a VM's is.
+    """
+    if resolved is None:
+        resolved = container_allow_resolved(allow)
+    elements: dict[str, list[str]] = {NFT_SET_FILTERED: [str(uid)]}
+    v4: list[str] = []
+    v6: list[str] = []
+    for entry, addresses in resolved:
+        for addr in addresses:
+            reserved = allow_reserved_reason(addr)
+            if reserved:
+                where = f"{entry.host!r} resolves there -- " if entry.host else ""
+                raise ValueError(f"[network].allow: {where}{reserved}")
+            (v6 if addr.version == 6 else v4).append(
+                f"{uid} . {addr} . {entry.port}")
+    if v4:
+        elements[NFT_SET_ALLOW4] = v4
+    if v6:
+        elements[NFT_SET_ALLOW6] = v6
+    return elements
 
 
 # --- The transparent redirect's per-workload elements (§7.1, §7.2) ---
@@ -351,6 +394,29 @@ def vm_internal_resolve(host: str) -> list[ipaddress.IPv4Address | ipaddress.IPv
     return seen
 
 
+def container_internal_resolve(host: str) -> list:
+    """Resolve one [[network.internal]] host, or raise ValueError naming it.
+    Mirrors vm_internal_resolve. Fatal by design (see that function and
+    inspect_arm.internal_failure): an exemption armed for the wrong
+    address, or not armed at all, leaves the host refused by the drop the
+    entry existed to except.
+    """
+    try:
+        infos = socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)
+    except OSError as exc:
+        raise ValueError(
+            f"[[network.internal]] names {host!r}, which does not resolve on "
+            f"this host ({exc}). The exemption is armed per ADDRESS, so an "
+            f"unresolvable name arms nothing and the host stays refused by "
+            f"the internal-destination drop the entry existed to except") from None
+    seen = []
+    for info in infos:
+        addr = ipaddress.ip_address(info[4][0])
+        if addr not in seen:
+            seen.append(addr)
+    return seen
+
+
 def inspect_cgroup(name: str) -> str:
     """The control group path of one workload's inspector unit.
 
@@ -426,5 +492,17 @@ def vm_filter_commands(uid: int, allow: list[str], action: str,
     commands = []
     for set_name, entries in vm_filter_elements(uid, allow, resolved).items():
         commands.append([NFT_BIN, action, "element", *table, set_name,
+                         "{ " + ", ".join(entries) + " }"])
+    return commands
+
+
+def container_filter_commands(uid: int, allow: list, action: str, resolved=None) -> list:
+    """argv lists that arm ('add') or disarm ('delete') one container
+    workload's allowlist elements. Mirrors vm_filter_commands."""
+    if action not in ("add", "delete"):
+        raise ValueError(f"action must be 'add' or 'delete', got {action!r}")
+    commands = []
+    for set_name, entries in container_filter_elements(uid, allow, resolved).items():
+        commands.append([NFT_BIN, action, "element", *NFT_TABLE.split(), set_name,
                          "{ " + ", ".join(entries) + " }"])
     return commands

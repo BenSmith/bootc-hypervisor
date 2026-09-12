@@ -195,6 +195,7 @@ class TestASharedModuleIsNotShadowedByItsCaller(unittest.TestCase):
         "lib/run_files.py": ("workload_lib",),
         "lib/container_network_config.py": ("config_parser",),
         "lib/container_validate.py": ("container_network_config",),
+        "lib/egress_policy.py": ("container_network_config",),
         "lib/gen_vm.py": ("gen_common", "gen_egress"),
         "lib/gen_egress.py": ("gen_common",),
         "lib/gen_container.py": ("gen_common", "gen_egress", "container_run_args",

@@ -28,7 +28,14 @@ import json
 from pathlib import Path
 from typing import NamedTuple
 
-from config_parser import normalise_hostname, parse_policy_entries
+from config_parser import (
+    container_allowed_hosts, container_policy_entries, normalise_hostname,
+    parse_policy_entries,
+)
+from container_network_config import (
+    container_effective_tls_mode, container_internal_entries,
+    container_splice_entries,
+)
 from config_parser import SOCKET_DIR
 from vm_defs import EGRESS_DEFAULT, vm_allowed_hosts
 
@@ -489,6 +496,57 @@ def vm_inspect_policy_text(net: dict) -> str:
     every hunk.
     """
     return json.dumps(vm_inspect_policy(net), indent=2, sort_keys=True) + "\n"
+
+
+def container_inspect_policy(net: dict) -> dict:
+    """The inspector's policy document for one container workload.
+
+    Same JSON shape as vm_inspect_policy (lib/egress_policy.py) -- D6: the
+    listener binary (workload-inspect-listener) does not change between
+    substrates, so whichever wrote the file, it reads the same keys. `http2`
+    is always empty: [[network.http2]] is deferred for containers (§5 of the
+    build spec). `tls` is the EFFECTIVE mode (container_effective_tls_mode),
+    not the literal key, since the container schema computes it per the
+    three-rung ladder rather than defaulting it the way the VM schema does.
+
+    `guest_agent` IS THE ONE KEY THIS RENDERER EMITS AND THE VM'S DOES NOT,
+    and it states a fact about the substrate rather than an instruction. A
+    container has no QEMU guest agent, so a remedy that works by asking one --
+    the mint-time clock check -- cannot run here. Left unsaid, the listener
+    wired that check for containers too, dialled a socket that has never
+    existed on this substrate once per mint miss, and counted each attempt
+    into `clock_unavailable`, whose exported meaning is "the mint-time clock
+    remedy is INERT in this guest". On a container that reading was
+    guaranteed and told an operator a remedy was broken rather than absent.
+
+    A FACT, not `clock_remedy: false`, so the next thing that turns on "there
+    is no agent to ask" reads this key instead of adding a second one. Emitted
+    only here, so a VM's document is byte-identical to what it was and the
+    drift comparison does not fire for every VM; a container's document DOES
+    change once, and reports drift until it is re-armed.
+    """
+    return {
+        "tls": container_effective_tls_mode(net),
+        INSPECT_GUEST_AGENT_KEY: False,
+        "hosts": container_allowed_hosts(net),
+        "internal": [e.host for e in container_internal_entries(net)],
+        "splice": [e.host for e in container_splice_entries(net)],
+        "http2": [],
+        "policy": [
+            {"host": e.host,
+             "methods": None if e.methods is None else list(e.methods),
+             "paths": None if e.paths is None else list(e.paths),
+             **({"credential": e.credential} if e.credential else {})}
+            for e in container_policy_entries(net)],
+    }
+
+
+def container_inspect_policy_text(net: dict) -> str:
+    """The policy document as the exact bytes that land on disk. Mirrors
+    vm_inspect_policy_text -- same formatting, so a future drift/digest
+    comparison cannot disagree with itself over which substrate rendered the
+    file."""
+    return json.dumps(container_inspect_policy(net), indent=2, sort_keys=True) + "\n"
 
 
 # How much of the digest an operator is shown. Twelve hex characters is enough
