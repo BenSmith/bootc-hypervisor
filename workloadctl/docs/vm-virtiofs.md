@@ -374,7 +374,7 @@ subsequent boot too, since the fstab entry mounts before sshd starts.
 The guest is fine. `status` is `active`, the console logs in, cloud-init reports
 `done` — and `workloadctl exec` fails authentication with nothing to point at.
 
-`seed_vm_home_share_ssh_key` in `libexec/workload-ensure-user` closes this. A
+`seed_vm_home_share_ssh_key` in `lib/vm_ssh_keys.py` closes this. A
 share covering the guest home gets `.ssh/authorized_keys` written **on the host**
 with the workload's own pubkey — the same key `${WORKLOADCTL_SSH_KEY}` would have
 put in the shadowed home — before the seed ISO is built. A share mounted at

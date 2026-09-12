@@ -23,6 +23,7 @@ import ensure_common
 import ensure_container
 import ensure_user
 import ensure_vm
+import vm_ssh_keys
 from vm_provision import (PROVISION_FAILED, PROVISION_UNVERIFIED,
                           read_provision_marker, write_provision_marker)
 
@@ -1141,7 +1142,7 @@ class TestVmHostKeyGeneration(unittest.TestCase):
     """generate_vm_host_keypair + write_vm_known_hosts (S1)."""
 
     def setUp(self):
-        self.mod = ensure_vm
+        self.mod = vm_ssh_keys
         self.tmp = tempfile.mkdtemp()
         self.home = Path(self.tmp) / "home"
         self.home.mkdir()
@@ -1290,7 +1291,7 @@ class TestSeedVmHomeShareSshKey(unittest.TestCase):
     PUBKEY = "ssh-ed25519 AAAAFAKEKEY workload-vmx@hypervisor"
 
     def setUp(self):
-        self.mod = ensure_vm
+        self.mod = vm_ssh_keys
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
         (self.root / "state" / ".ssh").mkdir(parents=True)
@@ -2090,7 +2091,7 @@ class TestSetupVmSocketDir(unittest.TestCase):
 
 class TestGenerateSshKeypair(unittest.TestCase):
     def setUp(self):
-        self.mod = ensure_vm
+        self.mod = vm_ssh_keys
 
     def test_generates_keypair_when_missing(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -2171,7 +2172,7 @@ class TestGenerateSshKeypair(unittest.TestCase):
 
 class TestReadSshPubkey(unittest.TestCase):
     def setUp(self):
-        self.mod = ensure_vm
+        self.mod = vm_ssh_keys
 
     def test_returns_pubkey_when_present(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -2666,7 +2667,7 @@ class TestKeygenLosesTheRaceGracefully(unittest.TestCase):
     """If the lock ever degrades to unlocked, a lost keygen race is still benign."""
 
     def setUp(self):
-        self.mod = ensure_vm
+        self.mod = vm_ssh_keys
 
     def test_a_key_that_appeared_after_the_guard_is_adopted_not_fatal(self):
         # ssh-keygen refuses to overwrite and exits nonzero. Only a concurrent
