@@ -17,6 +17,7 @@ from unittest import mock
 
 import workload_lib            # noqa: E402
 import cmd_catalog            # noqa: E402
+from scratch_vm import SCRATCH_VM_USER_DATA  # noqa: E402
 import vm_defs                # noqa: E402
 from workloadctl_core import WorkloadManager  # noqa: E402
 
@@ -237,9 +238,9 @@ class TestVmBaseBundle(CatalogTestBase):
         self.assertEqual(data["vm"]["cloud_init"]["user_data_file"], expected)
 
     def test_vm_base_cloud_init_user_data_matches_constant(self):
-        """workloads/vm-base/cloud-init/user-data must be byte-identical to _SCRATCH_VM_USER_DATA."""
+        """workloads/vm-base/cloud-init/user-data must be byte-identical to SCRATCH_VM_USER_DATA."""
         shipped = (REPO_BUNDLES / "vm-base" / "cloud-init" / "user-data").read_text()
-        self.assertEqual(shipped, cmd_catalog._SCRATCH_VM_USER_DATA)
+        self.assertEqual(shipped, SCRATCH_VM_USER_DATA)
 
     def test_vm_base_home_mount_example_satisfies_the_seed_contract(self):
         """The seed's worked example for a home share must carry a `context=`
@@ -338,7 +339,7 @@ class TestSeedsNeverSpliceRawMultilineVars(CatalogTestBase):
     def test_the_scratch_seed_constant_has_the_same_property(self):
         """The catalog's copy is what `workloadctl init --scratch-vm` writes."""
         self.assertEqual(
-            self._offenders(cmd_catalog._SCRATCH_VM_USER_DATA), [])
+            self._offenders(SCRATCH_VM_USER_DATA), [])
 
     def test_the_check_sees_the_shape_that_shipped(self):
         """The gate itself, against the exact text it was written for."""

@@ -29,6 +29,7 @@ from workloadctl_core import (
     toml_string,
 )
 from cmd_validate import validate_single
+from scratch_vm import SCRATCH_VM_USER_DATA, scratch_vm_toml
 
 BUNDLES_DIR = WORKLOAD_BUNDLES_DIR
 
@@ -148,257 +149,6 @@ def cmd_catalog(args, manager: WorkloadManager):
 # init — instantiate a catalog bundle into /etc
 # ---------------------------------------------------------------------------
 
-_SCRATCH_VM_CLOUD_IMAGE_URL = (
-    "https://download.fedoraproject.org/pub/fedora/linux/releases/44/Cloud/x86_64/images/"
-    "Fedora-Cloud-Base-Generic-44-1.7.x86_64.qcow2"
-)
-_SCRATCH_VM_CLOUD_IMAGE_CHECKSUM = (
-    "sha256:28680fe5b371a5a82ebf43a31926e086a168e59949d03969c5093e7071f90b7f"
-)
-
-# Raw, and with the leading newline trimmed rather than backslash-continued:
-# the seed contains a `printf '%s\n'`, and in a non-raw literal that backslash
-# would be read here instead of by the guest's shell. Byte-identical to
-# workloads/vm-base/cloud-init/user-data, which tests/test_catalog.py asserts.
-_SCRATCH_VM_USER_DATA = r"""
-#cloud-config
-# Starter cloud-init for a workloadctl VM. Substitution happens at seed-build
-# time (see docs/workloads.md "Bootstrapping a VM with cloud-init"):
-#   $${WORKLOADCTL_SSH_KEY}        the workload's auto-generated pubkey
-#   $${WORKLOADCTL_WORKLOAD_NAME}  this workload's name
-#   $${WORKLOADCTL_VM_USER}        [vm].user — the account the CLI logs in as
-#   $${WORKLOADCTL_VM_HOST_KEY_B64} the workload's SSH *host* key (base64 PEM)
-#   $${WORKLOADCTL_VM_HOST_PUBKEY}  matching host public key
-#   $${VAR}                        from [vm.cloud_init.template_vars] or env
-#   SECRET:name / SECRET?name   systemd-creds (?=optional, ""), $$ = literal $
-hostname: ${WORKLOADCTL_WORKLOAD_NAME}
-
-users:
-  - default
-  - name: ${WORKLOADCTL_VM_USER}
-    groups: [wheel]
-    sudo: ALL=(ALL) NOPASSWD:ALL
-    shell: /bin/bash
-    ssh_authorized_keys:
-      - ${WORKLOADCTL_SSH_KEY}
-
-ssh_pwauth: false
-
-# Install the workload's SSH host key so the CLI can verify the guest — the CLI
-# pins it (StrictHostKeyChecking=yes), so a custom seed MUST install it or
-# provisioning fails. base64 (encoding: b64) keeps the multi-line PEM on one
-# line; sshd picks it up on first boot before it starts.
-#
-# ssh_deletekeys: false is required, not optional. cc_ssh defaults it to true,
-# which wipes /etc/ssh/ssh_host_* and regenerates — and it runs *after*
-# write_files, so the pinned key would be installed and then discarded.
-ssh_deletekeys: false
-
-write_files:
-  - path: /etc/ssh/ssh_host_ed25519_key
-    permissions: '0600'
-    owner: root:root
-    encoding: b64
-    content: ${WORKLOADCTL_VM_HOST_KEY_B64}
-  - path: /etc/ssh/ssh_host_ed25519_key.pub
-    permissions: '0644'
-    owner: root:root
-    content: ${WORKLOADCTL_VM_HOST_PUBKEY}
-  - path: /etc/modules-load.d/ptp-kvm.conf
-    permissions: '0644'
-    content: |
-      ptp_kvm
-  - path: /etc/udev/rules.d/70-ptp-kvm.rules
-    permissions: '0644'
-    content: |
-      SUBSYSTEM=="ptp", ATTR{clock_name}=="KVM virtual PTP", SYMLINK+="ptp_kvm"
-
-# --- One thing this file must carry that the built-in seed would have -------
-#
-# Setting user_data_file replaces workloadctl's generated cloud-config outright.
-# That config is where the guest environment and the virtiofs mounts come from,
-# so once this file is in play they are yours to write. The block below is
-# commented out because the shipped defaults (no volumes) do not need it;
-# provisioning refuses to build a seed that needs it and lacks it, and names
-# what is missing, so you will be told rather than left to find out.
-
-# Egress filtering needs nothing from this file, by design. It is a uid-keyed
-# redirect the guest is neither told about nor able to opt out of: the guest
-# dials names normally and its own inspector reads the Host header or the SNI.
-# So there is no endpoint to advertise and no environment to export here.
-#
-# Do not add http_proxy/https_proxy/HTTP_PROXY/HTTPS_PROXY. They are not merely
-# redundant: they name an address nothing listens on, and they fail in the worst
-# shape available -- every client that honours them breaks while every client
-# that ignores them works, which reads as a flaky network rather than as
-# something the seed did.
-#
-# One consequence worth knowing: an allowlist of `*.fedoraproject.org` still
-# does not cover Fedora's mirrors (they live on mm.fcix.net, osuosl.org, ...).
-# Either pin the repos to a baseurl under dl.fedoraproject.org, or provision
-# with egress = "open" and switch to filtered once the guest is built.
-
-# Volume mounts — required once [vm] sets `volumes`.
-#    Each volume is attached as a virtiofs device tagged after its guest path
-#    (see virtiofs_tags in lib/workload_lib.py: sanitized, truncated to 36
-#    chars, index-suffixed on collision). The device is present and virtiofsd
-#    is running, but nothing mounts it guest-side unless you say so. Skipping
-#    this is silent: the guest path stays an ordinary directory on the system
-#    disk, so writes look fine, never reach the host, and are discarded by the
-#    next disk rebuild. For volumes = ["./home:/home/fedora"] the tag is
-#    `home-fedora`:
-#
-# write_files (append to the list above):
-#   - path: /etc/fstab
-#     append: true
-#     content: |
-#       home-fedora /home/fedora virtiofs defaults,nofail,context="system_u:object_r:user_home_t:s0" 0 0
-#
-#    THE context= IS LOAD-BEARING ON A SHARE THAT COVERS THE GUEST HOME, and
-#    provisioning refuses a seed that omits it. virtiofs carries no xattrs
-#    here, so without it every file under the mount is `virtiofs_t` in the
-#    guest — a type sshd has no access to at all — and ~/.ssh/authorized_keys
-#    becomes unreadable. What makes it worth refusing rather than warning is
-#    that it does NOT fail at boot: the guest keeps serving logins on whatever
-#    policy is already loaded, so it surfaces on the first reboot after an
-#    in-guest update reloads selinux-policy — days later, on a cloud image
-#    whose only account has no password to fall back on.
-#
-#    user_home_t is what stock policy grants sshd, via the user_home_type
-#    attribute (`sesearch -A -s sshd_t -t user_home_t -c file -p read`);
-#    ssh_home_t carries the same attribute and is accepted too. Do NOT copy a
-#    context from the host side — a cifs or nfs volume mounted underneath the
-#    share on the HOST needs svirt_image_t, which is what virtiofsd is granted.
-#    Same option, different layer, different type: aligning them breaks one end
-#    or the other.
-#
-#    Only a share COVERING the home needs this. One mounted inside it
-#    (./work:/home/fedora/work) inherits the parent mount's context.
-#
-# runcmd (add these as items to the `runcmd:` list AT THE END OF THIS FILE --
-# a second `runcmd:` key here would not merge with it, it would replace it, and
-# the paravirtual clock below would silently stop being wired):
-#    Seed the skeleton dotfiles into the share before mounting over them, or
-#    the first login lands in a home with no .bashrc. cp -n never clobbers the
-#    authorized_keys workloadctl already seeded into a home-mounted share.
-#   - mkdir -p /mnt/.seed
-#   - mount -t virtiofs home-fedora /mnt/.seed
-#   - cp -a -n /home/${WORKLOADCTL_VM_USER}/. /mnt/.seed/ || true
-#   - umount /mnt/.seed && rmdir /mnt/.seed
-#   - systemctl daemon-reload
-#   - mount /home/${WORKLOADCTL_VM_USER}
-#
-#    If the guest image already handles one of these — a mount baked into its
-#    own /etc/fstab, say — declare it instead of duplicating it:
-#      [vm.cloud_init]
-#      seed_provides = ["mounts"]   # and/or "ca"
-#
-#    "home_context" is the third value, and it is narrower than "mounts": it
-#    silences the SELinux check alone and keeps the check that the volume is
-#    mounted at all. Use it for a guest that labels the mount by means this
-#    file cannot show — an image-baked fstab entry, or local policy granting
-#    sshd some other type.
-
-# --- The egress CA — required once [vm.network] sets egress = "filtered" -----
-#
-# A filtered workload's HTTPS is terminated by its own inspector, which presents
-# a leaf signed by a CA minted for this workload alone. The guest has to trust
-# that CA or every HTTPS request fails as a bad certificate rather than as a
-# policy decision — and provisioning refuses to build a filtered seed that never
-# installs it, so you are told rather than left to find out.
-#
-# The built-in cloud-config does this and a custom seed replaces it, so the
-# pieces below are yours to write. They are commented out because this
-# bundle is `egress = "open"`: with no CA to install, ${WORKLOADCTL_VM_EGRESS_CA_B64}
-# substitutes to an empty string and the entries would write an empty anchor.
-# Uncomment them at the same moment you set egress = "filtered".
-#
-# TWO ROUTES, BOTH NEEDED. The guest's system trust store covers almost
-# everything; the copy at the fixed path is what the five environment variables
-# name, for the runtimes that carry their own root list and never consult the
-# system store. Either alone leaves a measured population of clients failing.
-#
-# BOTH ROUTES USE THE B64 FORM, AND THAT IS NOT A STYLE CHOICE. Substitution is
-# a plain textual replace, so a multi-line value keeps the placeholder's
-# indentation on its FIRST line only: splice the raw ${WORKLOADCTL_VM_EGRESS_CA} form
-# into an indented YAML block scalar and every line after the first lands at
-# column 0. That does not fail as a missing anchor -- cloud-init cannot parse
-# the document at all, and the guest loses the host key, the mounts and
-# everything else in this file. The raw variable is safe only where column 0 is
-# where the PEM belongs; encoded, the value is one line and cannot break the
-# seed whatever it is nested inside.
-#
-# The first entry is what a cloud-init `ca_certs: trusted:` block would do,
-# written as a file instead so the b64 form is available: on Fedora that module
-# writes this very directory and then runs update-ca-trust, which is the runcmd
-# below.
-#
-# write_files (append to the list above):
-#   - path: /etc/pki/ca-trust/source/anchors/workloadctl-egress.crt
-#     permissions: '0644'
-#     owner: root:root
-#     encoding: b64
-#     content: ${WORKLOADCTL_VM_EGRESS_CA_B64}
-#   - path: /usr/local/share/ca-certificates/workloadctl-egress.crt
-#     permissions: '0644'
-#     owner: root:root
-#     encoding: b64
-#     content: ${WORKLOADCTL_VM_EGRESS_CA_B64}
-#   - path: /etc/environment
-#     append: true
-#     content: |
-#       SSL_CERT_FILE=/usr/local/share/ca-certificates/workloadctl-egress.crt
-#       NODE_EXTRA_CA_CERTS=/usr/local/share/ca-certificates/workloadctl-egress.crt
-#       REQUESTS_CA_BUNDLE=/usr/local/share/ca-certificates/workloadctl-egress.crt
-#       GIT_SSL_CAINFO=/usr/local/share/ca-certificates/workloadctl-egress.crt
-#       PIP_CERT=/usr/local/share/ca-certificates/workloadctl-egress.crt
-#
-# runcmd (add as an item to the `runcmd:` list AT THE END OF THIS FILE, never as
-# a second `runcmd:` key -- see below):
-#   - update-ca-trust extract
-#
-# `tls = "splice"` on the workload (with the `tls_reason` it requires) is the
-# answer for a guest that cannot be given the anchor — a weaker property, not a
-# deprecated one, and it needs none of this. The CA is still minted and still seeded either way, so
-# switching between the two never rotates the instance-id.
-
-# An example of your own, for the `runcmd:` list at the end of this file. Add
-# it as an item there rather than opening a second `runcmd:` key, which YAML
-# resolves by keeping one of the two -- and the one it keeps is not the one
-# that wires the clock:
-#   - echo "first boot" > /etc/motd
-
-# --- The paravirtual clock, which a custom seed does NOT get for free --------
-#
-# A vCPU pause -- `backup --consistency crash`, a host suspend, `incant stop` --
-# is lost by the guest exactly and permanently, and NTP will not put it back: a
-# stock chrony steps only during its first three updates and slews forever
-# after, at a rate that needs months to walk off a two-hour jump. In a filtered
-# guest NTP is dead anyway, since this design closed the UDP path it needs.
-#
-# ptp_kvm costs nothing and needs no network: the guest reads the host's clock
-# over a KVM hypercall. Nothing is required on the host side. The three pieces
-# below are the module, a stable name for the device (/dev/ptpN is allocation-
-# ordered, so select on the driver's clock_name), and `makestep 1 -1` -- the
-# line that actually fixes the bug, by letting chrony step at any time rather
-# than only at startup.
-#
-# The host repairs a skewed guest too, on the egress inspector's mint path, but
-# only if the guest runs qemu-guest-agent and only when a certificate is minted.
-# Keep both: they cover each other's blind spot.
-runcmd:
-  - |
-    udevadm control --reload-rules || true
-    if modprobe ptp_kvm 2>/dev/null; then
-      for _ in 1 2 3 4 5; do [ -e /dev/ptp_kvm ] && break; sleep 1; done
-    fi
-    if [ -e /dev/ptp_kvm ] && [ -f /etc/chrony.conf ] && ! grep -qF '# workloadctl: paravirtual clock' /etc/chrony.conf; then
-      printf '%s\n' '# workloadctl: paravirtual clock' 'refclock PHC /dev/ptp_kvm poll 2 dpoll -2 offset 0' 'makestep 1 -1' >> /etc/chrony.conf
-      systemctl restart chronyd || true
-    fi
-"""[1:]
-
-
 def _scratch_vm(name: str, manager: WorkloadManager) -> None:
     """Stamp a self-contained VM stub under /etc/workloads.d/<name>/."""
     try:
@@ -413,30 +163,7 @@ def _scratch_vm(name: str, manager: WorkloadManager) -> None:
         sys.exit(1)
     dst.parent.mkdir()
 
-    stub = (
-        f'[workload]\n'
-        f'name = "{name}"\n'
-        f'\n'
-        f'[vm]\n'
-        f'# Fedora 44 Cloud-Base (bump with fedora-versions.yml `stable:`).\n'
-        f'cloud_image_url = "{_SCRATCH_VM_CLOUD_IMAGE_URL}"\n'
-        f'cloud_image_checksum = "{_SCRATCH_VM_CLOUD_IMAGE_CHECKSUM}"\n'
-        f'# --- or copy/reflink a local qcow2 instead: ---\n'
-        f'# local_image = "/path/to/image.qcow2"\n'
-        f'# --- or build from a bootc image ref (needs bootc-image-builder + /dev/kvm): ---\n'
-        f'# image = "ghcr.io/you/custom-bootc:latest"\n'
-        f'vcpus = 2\n'
-        f'memory = "2G"\n'
-        f'system_disk_size = "20G"\n'
-        f'# data_disk_size = "20G"   # uncomment for a persistent /dev/vdb data disk\n'
-        f'user = "fedora"\n'
-        f'\n'
-        f'[vm.cloud_init]\n'
-        f'user_data_file = "cloud-init/user-data"\n'
-        f'\n'
-        f'# [vm.cloud_init.template_vars]\n'
-        f'# MY_VAR = "value"   # referenced as ${{MY_VAR}} in cloud-init/user-data\n'
-    )
+    stub = scratch_vm_toml(name)
 
     if not _write_new(dst, stub):
         print(f"Error: workload '{name}' already exists: {dst}", file=sys.stderr)
@@ -444,7 +171,7 @@ def _scratch_vm(name: str, manager: WorkloadManager) -> None:
 
     cloud_init_dir = dst.parent / "cloud-init"
     cloud_init_dir.mkdir()
-    (cloud_init_dir / "user-data").write_text(_SCRATCH_VM_USER_DATA)
+    (cloud_init_dir / "user-data").write_text(SCRATCH_VM_USER_DATA)
 
     print(f"✓ Created VM stub workload '{name}'")
     print(f"  {dst}")
