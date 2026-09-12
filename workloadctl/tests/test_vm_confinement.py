@@ -11,7 +11,7 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
-from provisioning import LOCAL_FCONTEXT_ROOTS, shadowed_filecon_paths
+from workload_selinux import LOCAL_FCONTEXT_ROOTS, shadowed_filecon_paths
 from egress_selinux import (
     VM_QEMU_CONTEXT, VM_QEMU_TYPE, VM_RUNCON_BIN, VM_SELINUX_CIL,
     VM_SELINUX_MODULE, qemu_launch_argv,

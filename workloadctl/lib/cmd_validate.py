@@ -19,7 +19,7 @@ from container_network_config import (
     container_uses_inspect,
 )
 from workload_lib import expand_volume_path, GENERATOR_OWNED_DIRECTIVES
-from provisioning import shadowed_filecon_paths
+from workload_selinux import shadowed_filecon_paths
 from egress_policy import internal_hosts, vm_uses_inspect
 from broker_config import vm_credential_entries
 from nft_elements import internal_reserved_reason, vm_internal_resolve

@@ -17,16 +17,18 @@ from workload_lib import workload_config_path, workload_enabled_marker
 from workloadctl_core import WorkloadConfig, WorkloadManager, require_root
 from substrate import LifecycleError
 from provisioning import (
-    apply_selinux_policy,
-    apply_vm_fcontext,
     generate_units,
     ImageTransferError,
     preflight_checks,
     provision_user,
-    run_host_setup,
-    SelinuxPolicyError,
     start_service,
     transfer_image,
+)
+from host_setup import run_host_setup
+from workload_selinux import (
+    apply_selinux_policy,
+    apply_vm_fcontext,
+    SelinuxPolicyError,
 )
 
 

@@ -11,7 +11,7 @@ healthy.
 The fix asks the script — a third, read-only action — rather than inferring the
 set from the host or duplicating it in TOML. These tests cover both halves:
 
-  * `provisioning.host_setup_artifacts()` — the three answers (undeclared /
+  * `host_setup.host_setup_artifacts()` — the three answers (undeclared /
     declares-nothing / declares-a-set), instance-vs-bundle naming, and the
     failure modes that must not be mistaken for any of them.
   * `diagnose_provisioning.host_artifact_check()` + `collect_host_artifact_checks()` —
@@ -29,14 +29,14 @@ from pathlib import Path
 from unittest.mock import patch
 
 import diagnose_provisioning
-import provisioning
+import host_setup
 import workload_lib
 import workloadctl_core
-from provisioning import (
+from host_setup import (
+    _parse_host_artifacts,
+    host_setup_artifacts,
     HostArtifact,
     HostArtifacts,
-    host_setup_artifacts,
-    _parse_host_artifacts,
 )
 from diagnose_provisioning import collect_host_artifact_checks, host_artifact_check
 
@@ -161,7 +161,7 @@ class HostSetupArtifactsTest(unittest.TestCase):
         """A hung script must not stall a read verb, and must not be filed as
         either "undeclared" or "nothing" — both would be a silent pass."""
         with _Bundle(_script("sleep 30")) as cfg:
-            with patch.object(provisioning, "HOST_SETUP_ARTIFACTS_TIMEOUT", 1):
+            with patch.object(host_setup, "HOST_SETUP_ARTIFACTS_TIMEOUT", 1):
                 result = host_setup_artifacts(cfg)
         self.assertFalse(result.supported)
         self.assertIn("did not answer", result.error)
@@ -173,7 +173,7 @@ class HostSetupArtifactsTest(unittest.TestCase):
             result = host_setup_artifacts(cfg)
         self.assertEqual(
             result.artifacts,
-            [HostArtifact("file", "/" + provisioning.HOST_SETUP_ARTIFACTS_ACTION)])
+            [HostArtifact("file", "/" + host_setup.HOST_SETUP_ARTIFACTS_ACTION)])
 
     def test_env_carries_the_instance_name_not_the_bundle(self):
         """The reason host_setup_env() exists, applied to the read path: an
@@ -373,7 +373,7 @@ class CollectHostArtifactChecksTest(unittest.TestCase):
 
     def test_a_script_that_cannot_be_asked_is_a_failing_check(self):
         with _Bundle(_script("sleep 30")) as cfg:
-            with patch.object(provisioning, "HOST_SETUP_ARTIFACTS_TIMEOUT", 1):
+            with patch.object(host_setup, "HOST_SETUP_ARTIFACTS_TIMEOUT", 1):
                 checks = self._collect(cfg)
         self.assertEqual(len(checks), 1)
         self.assertFalse(checks[0]["passed"])
@@ -471,14 +471,14 @@ class ShippedSetupScriptsTest(unittest.TestCase):
         for script in self.scripts:
             with self.subTest(bundle=script.parent.name):
                 result = subprocess.run(
-                    [str(script), provisioning.HOST_SETUP_ARTIFACTS_ACTION],
+                    [str(script), host_setup.HOST_SETUP_ARTIFACTS_ACTION],
                     capture_output=True, text=True, timeout=30,
                     env=self._env(script.parent.name),
                 )
                 self.assertEqual(
                     result.returncode, 0,
                     f"{script.parent.name}/setup.sh does not implement "
-                    f"'{provisioning.HOST_SETUP_ARTIFACTS_ACTION}': "
+                    f"'{host_setup.HOST_SETUP_ARTIFACTS_ACTION}': "
                     f"{result.stderr}")
                 _, unparsed = _parse_host_artifacts(result.stdout)
                 self.assertEqual(
@@ -494,7 +494,7 @@ class ShippedSetupScriptsTest(unittest.TestCase):
             bundle = script.parent.name
             with self.subTest(bundle=bundle):
                 result = subprocess.run(
-                    [str(script), provisioning.HOST_SETUP_ARTIFACTS_ACTION],
+                    [str(script), host_setup.HOST_SETUP_ARTIFACTS_ACTION],
                     capture_output=True, text=True, timeout=30,
                     env=self._env(bundle, name="zzinstance"),
                 )

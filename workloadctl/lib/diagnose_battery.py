@@ -39,7 +39,7 @@ from egress_selinux import (
     VM_SOCKET_SELINUX_TYPE_REAL,
 )
 from podman import PodmanError
-from provisioning import fcontext_pattern
+from workload_selinux import fcontext_pattern
 from run_files import units_outdated, units_from_other_build
 from substrate import service_active
 from validation import uses_host_userns
