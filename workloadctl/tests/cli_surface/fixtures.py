@@ -32,6 +32,7 @@ and the TOML files in workloads/.
 import json
 import os
 import time
+import warnings
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -154,22 +155,39 @@ def unit_state(target: Target, service: str) -> str:
                       sudo=False, check=False).stdout.strip()
 
 
-def dump_journal(target: Target, name: str, lines: int = 120,
-                 *, extra_units: Sequence[str] = ()) -> None:
-    """Print the workload unit's journal tail — the diagnosis on any failure.
+def journal_tail(target: Target, name: str, lines: int = 120,
+                 *, extra_units: Sequence[str] = ()) -> str:
+    """The workload unit's journal tail, plus the ExecStartPre chain's, as text.
+
+    A VM workload's start failure is as often in `-setup`/`-build` (the
+    system-disk build) as in the QEMU unit itself, and a failed dependency
+    leaves the main unit's journal saying only that a dependency failed, so
+    those are read whether or not they exist for this workload -- journalctl
+    prints nothing for a unit it has no entries for.
 
     `extra_units` are dumped after the umbrella unit, as full unit names. A pod
     fails in its members (`workload-<name>-<container>.service`), not in the
     umbrella that merely binds them, so a pod test has to ask for those by name.
     """
-    for unit in (f"workload-{name}.service", *extra_units):
+    out = []
+    for unit in (f"workload-{name}.service",
+                 f"workload-{name}-setup.service",
+                 f"workload-{name}-build.service",
+                 *extra_units):
         r = target.run(
             ["journalctl", "--no-pager", "-n", str(lines), "-u", unit],
             sudo=True, check=False,
         )
-        print(f"\n----- journalctl -u {unit} (tail) -----\n"
-              f"{r.stdout}\n{r.stderr}\n"
-              f"--------------------------------------------------------")
+        out.append(f"\n----- journalctl -u {unit} (tail) -----\n"
+                   f"{r.stdout}\n{r.stderr}\n"
+                   f"--------------------------------------------------------")
+    return "".join(out)
+
+
+def dump_journal(target: Target, name: str, lines: int = 120,
+                 *, extra_units: Sequence[str] = ()) -> None:
+    """Print the workload unit's journal tail — the diagnosis on any failure."""
+    print(journal_tail(target, name, lines, extra_units=extra_units))
 
 
 # ---------------------------------------------------------------------------
@@ -217,10 +235,22 @@ def _enable_workload(target: Target, name: str, timeout: int = 120,
             if expect_container:
                 _wait_container_running(target, name, timeout=timeout)
             return
-        except TimeoutError:
+        except TimeoutError as exc:
             if attempt >= retries:
                 raise
             attempt += 1
+            # The retry must not be silent. A row that passes on its second
+            # enable has still watched the first one fail, and for a VM that
+            # first attempt is the only place the product's start failure is
+            # visible: the purge below erases the unit's journal state. A
+            # warning survives a green row (pytest's summary lists it) where
+            # a print() is captured and dropped.
+            warnings.warn(
+                f"first enable of {name!r} did not become active; retrying "
+                f"after purge. Masked failure:\n{exc}\n"
+                f"{journal_tail(target, name)}",
+                stacklevel=2,
+            )
             # Tear down to a clean slate (disable --purge keeps the config dir
             # /etc/workloads.d/<name>/, so the retry's enable still finds it) and clear
             # any failed/start-limit state before re-enabling.
@@ -236,18 +266,30 @@ def _wait_active(target: Target, name: str, timeout: int = 120):
     """Poll until the workload service is active or timeout."""
     service = f"workload-{name}.service"
     deadline = time.monotonic() + timeout
+    state = ""
     while time.monotonic() < deadline:
         r = target.run(
             ["systemctl", "is-active", service],
             sudo=False, check=False,
         )
-        if r.stdout.strip() == "active":
+        state = r.stdout.strip()
+        if state == "active":
             return
+        # `failed` is terminal: the unit has exhausted Restart= (start-limit
+        # hit) or has no restart policy, and nothing will change it until
+        # someone resets it. Polling on costs the whole remaining budget --
+        # measured at 7 of 15 minutes on a VM row -- and reports the same
+        # state at the end. `activating` and `auto-restart` are still in
+        # motion and keep waiting.
+        if state == "failed":
+            break
         time.sleep(2)
     # Last check with output for diagnosis
     r = target.run(["systemctl", "status", "--no-pager", service], sudo=False, check=False)
+    how = (f"entered 'failed' state" if state == "failed"
+           else f"did not become active within {timeout}s (last state: {state or '?'})")
     raise TimeoutError(
-        f"Workload '{name}' did not become active within {timeout}s:\n{r.stdout}\n{r.stderr}"
+        f"Workload '{name}' {how}:\n{r.stdout}\n{r.stderr}"
         f"{failed_dependency_report(target, service)}"
     )
 
