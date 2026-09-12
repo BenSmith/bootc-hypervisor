@@ -15,9 +15,8 @@ Installed to /usr/libexec/workloadctl/gen_container.py.
 import os
 from pathlib import Path
 
-from config_parser import (
-    workload_root_dir, container_uses_inspect, infer_workload_mode,
-)
+from config_parser import infer_workload_mode, workload_root_dir
+from container_network_config import container_uses_inspect
 from workload_lib import workload_state_dir, dq, uq, normalize_containers
 from run_files import GENERATED_BY
 from broker_config import (

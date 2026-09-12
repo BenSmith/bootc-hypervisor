@@ -15,15 +15,16 @@ import grp
 from dataclasses import dataclass
 from functools import cached_property
 
-from config_parser import (
-    workload_root_dir, container_credential_entries, container_uses_inspect,
+from config_parser import workload_root_dir
+from container_network_config import (
+    container_ca_delivery,
+    container_ca_mount_path,
+    container_credential_entries,
+    container_uses_inspect,
 )
 from workload_lib import (
     workload_state_dir, expand_volume_path, expand_workload_tokens, dq,
     selinux_type_name,
-)
-from container_network_config import (
-    container_ca_delivery, container_ca_mount_path,
 )
 from egress_ca import CA_ENV_VARS, CA_BUNDLE_PATH, ca_cert_path
 from broker_config import container_uses_credentials

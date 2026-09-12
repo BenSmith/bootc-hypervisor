@@ -12,7 +12,8 @@ exercised without writing a file and rendered without a host.
 from pathlib import Path
 
 import tomllib
-from config_parser import container_uses_inspect, workload_root_dir
+from config_parser import workload_root_dir
+from container_network_config import container_uses_inspect
 from egress_policy import vm_uses_inspect
 from inspect_figures import (
     drop_reasons,

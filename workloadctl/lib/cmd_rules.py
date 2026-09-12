@@ -50,7 +50,7 @@ from pathlib import Path
 
 import cli_log
 from cmd_validate import load_config_or_exit
-from config_parser import container_uses_inspect
+from container_network_config import container_uses_inspect
 from egress_policy import (
     TLS_DEFAULT, TLS_MODES, VmPolicyEntry, container_inspect_policy, hostname_match,
     vm_inspect_policy, inspect_policy_path, policy_governs,

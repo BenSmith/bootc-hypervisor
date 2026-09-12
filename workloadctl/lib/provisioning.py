@@ -27,7 +27,8 @@ import tempfile
 from typing import NamedTuple
 
 from cli_log import error, info, warn
-from config_parser import container_uses_inspect, workload_root_dir
+from config_parser import workload_root_dir
+from container_network_config import container_uses_inspect
 from workload_lib import (
     selinux_module_name,
     selinux_type_name,

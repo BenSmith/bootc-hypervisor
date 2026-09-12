@@ -24,11 +24,29 @@ import workload_addr
 import workload_lib
 import vm_validate
 from config_parser import (
-    WORKLOADS_BASE, infer_workload_mode, parse_volume_spec,
-    ContainerPolicyEntry, container_policy_entries, ContainerCredential,
-    container_credential_entries, container_allowed_hosts, ContainerAllowEntry,
-    container_allow_entries, container_runs_on_host_network,
-    container_uses_inspect, container_allow_resolve,
+    infer_workload_mode,
+    parse_volume_spec,
+    WORKLOADS_BASE,
+)
+from container_network_config import (
+    container_allow_entries,
+    container_allow_resolve,
+    container_allowed_hosts,
+    container_ca_delivery,
+    container_ca_mount_path,
+    container_credential_entries,
+    container_effective_tls_mode,
+    container_internal_entries,
+    container_policy_entries,
+    container_runs_on_host_network,
+    container_splice_entries,
+    container_tls_mode,
+    container_tls_reason,
+    container_uses_inspect,
+    ContainerAllowEntry,
+    ContainerCredential,
+    ContainerHostReasonEntry,
+    ContainerPolicyEntry,
 )
 from workload_lib import (
     USERNAME_PREFIX, MAX_NAME_LENGTH, GENERATOR_OWNED_DIRECTIVES,
@@ -36,12 +54,6 @@ from workload_lib import (
     workload_home_dir, workload_state_dir, expand_volume_path,
     expand_workload_tokens, dq, normalize_containers, virtiofs_tag,
     systemd_escape_path, selinux_module_name, selinux_type_name,
-)
-from container_network_config import (
-    container_tls_mode, container_tls_reason, container_ca_delivery,
-    container_ca_mount_path, ContainerHostReasonEntry,
-    container_internal_entries, container_splice_entries,
-    container_effective_tls_mode,
 )
 from nft_elements import (
     container_allow_resolved, container_filter_elements,

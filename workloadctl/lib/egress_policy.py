@@ -28,15 +28,14 @@ import json
 from pathlib import Path
 from typing import NamedTuple
 
-from config_parser import (
-    container_allowed_hosts, container_policy_entries, normalise_hostname,
-    parse_policy_entries,
-)
+from config_parser import normalise_hostname, parse_policy_entries, SOCKET_DIR
 from container_network_config import (
-    container_effective_tls_mode, container_internal_entries,
+    container_allowed_hosts,
+    container_effective_tls_mode,
+    container_internal_entries,
+    container_policy_entries,
     container_splice_entries,
 )
-from config_parser import SOCKET_DIR
 from vm_defs import EGRESS_DEFAULT, vm_allowed_hosts
 
 

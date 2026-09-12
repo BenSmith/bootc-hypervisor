@@ -28,8 +28,11 @@ import urllib.parse
 from pathlib import Path
 from typing import NamedTuple
 
-from config_parser import (container_credential_entries,
-                           container_policy_entries, container_uses_inspect)
+from container_network_config import (
+    container_credential_entries,
+    container_policy_entries,
+    container_uses_inspect,
+)
 from credential_entries import (BROKER_DEFAULT_AUTH_FORMAT,
                                 BROKER_DEFAULT_AUTH_HEADER,
                                 parse_credential_entries)

@@ -7,7 +7,7 @@ members'. Rendered text only; the per-container service is gen_container's.
 
 Installed to /usr/libexec/workloadctl/gen_container_heads.py.
 """
-from config_parser import container_uses_inspect
+from container_network_config import container_uses_inspect
 from workload_lib import workload_state_dir, dq
 from run_files import GENERATED_BY
 from broker_config import container_uses_credentials

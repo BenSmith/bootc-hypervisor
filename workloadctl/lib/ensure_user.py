@@ -15,7 +15,8 @@ import fcntl
 import pwd
 from pathlib import Path
 
-from config_parser import WORKLOADS_BASE, container_uses_inspect
+from config_parser import WORKLOADS_BASE
+from container_network_config import container_uses_inspect
 from workload_lib import (
     load_workload_config, workload_config_path,
     workload_username, infer_workload_kind,

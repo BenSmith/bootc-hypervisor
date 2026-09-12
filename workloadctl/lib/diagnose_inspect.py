@@ -12,8 +12,10 @@ import subprocess
 import time
 
 from broker_config import vm_broker_hosts
-from config_parser import container_uses_inspect
-from container_network_config import container_effective_tls_mode
+from container_network_config import (
+    container_effective_tls_mode,
+    container_uses_inspect,
+)
 from diagnose_probe import PROBE
 from egress_ca import CA_EXPIRY_WARN_DAYS, ca_cert_path
 from egress_mint import pem_fingerprint

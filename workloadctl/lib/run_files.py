@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from broker_config import container_uses_credentials, vm_uses_credentials
-from config_parser import container_uses_inspect
+from container_network_config import container_uses_inspect
 from egress_policy import uses_resolve, vm_uses_inspect
 from workload_lib import (
     RUN_SYSTEMD_SYSTEM, WORKLOADCTL_VERSION, virtiofs_tags,

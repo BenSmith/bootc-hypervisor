@@ -49,7 +49,10 @@ import pwd
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from config_parser import container_allow_entries, container_uses_inspect
+from container_network_config import (
+    container_allow_entries,
+    container_uses_inspect,
+)
 from egress_policy import uses_resolve
 from egress_status import clear_status
 from helper_main import log, run
