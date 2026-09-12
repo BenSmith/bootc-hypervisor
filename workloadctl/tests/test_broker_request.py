@@ -24,7 +24,7 @@ import unittest
 from email.message import Message
 from unittest import mock
 
-import broker_config
+import broker_profiles
 import broker_request
 import broker_server
 
@@ -39,7 +39,7 @@ def headers(**pairs):
 
 
 def profile(auth_header="x-api-key", auth_value="REAL-SECRET", host="api.example.com"):
-    return broker_config.Profile(
+    return broker_profiles.Profile(
         name="agent/api.example.com", host=host, port=443,
         auth_header=auth_header, auth_format="{secret}",
         secret="REAL-SECRET", auth_value=auth_value,

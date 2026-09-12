@@ -21,7 +21,7 @@ pivot with a credential welded to it — the exact failure this design exists to
 avoid.
 
 stdlib only (matches workloadctl's no-third-party-deps rule). This file is the
-entrypoint: the document is broker_config's, the request path broker_request's,
+entrypoint: the document is broker_profiles', the request path broker_request's,
 the server broker_server's, and the caller identification peer_identity's.
 
 Usage: agent-broker /run/workloadctl/broker/<name>/broker.toml
@@ -31,7 +31,7 @@ import os
 import sys
 from pathlib import Path
 
-from broker_config import BrokerConfigError, build_profiles, load_config
+from broker_profiles import BrokerConfigError, build_profiles, load_config
 from broker_server import (
     Handler, Server, guest_tls_context, log, upstream_tls_context,
 )
