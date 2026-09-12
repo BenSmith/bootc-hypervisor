@@ -267,8 +267,8 @@ class TestGuestProvisionResult(unittest.TestCase):
         # a stranger). This is the shape the live forgejo VM is in.
         self.toml.write_text('[vm]\nuser = "git"\n'
                              '[vm.network]\nbridge = "br0"\n')
-        with mock.patch.dict(sys.modules, {"substrate_vm": types.SimpleNamespace(
-                _vm_guest_addresses=lambda name, bridge: ["192.168.0.157"])}):
+        with mock.patch.dict(sys.modules, {"vm_guest_reach": types.SimpleNamespace(
+                vm_guest_addresses=lambda name, bridge: ["192.168.0.157"])}):
             answer = self._run(_probe_output("myvm-a", {"status": "done",
                                                         "errors": []}))
         self.assertEqual(answer[0], PROVISION_DONE)
@@ -278,8 +278,8 @@ class TestGuestProvisionResult(unittest.TestCase):
     def test_bridge_vm_with_no_resolvable_address_is_not_probed(self):
         self.toml.write_text('[vm]\nuser = "workload"\n'
                              '[vm.network]\nbridge = "br0"\n')
-        with mock.patch.dict(sys.modules, {"substrate_vm": types.SimpleNamespace(
-                _vm_guest_addresses=lambda name, bridge: [])}):
+        with mock.patch.dict(sys.modules, {"vm_guest_reach": types.SimpleNamespace(
+                vm_guest_addresses=lambda name, bridge: [])}):
             self.assertIsNone(self._run("ignored"))
         self.assertIsNone(self.argv)
 

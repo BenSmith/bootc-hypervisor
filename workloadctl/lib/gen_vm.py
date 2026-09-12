@@ -703,7 +703,7 @@ def generate_vm_service(config, user_name: str, uid: int, vfs_tags=None) -> str:
     # on a managed bridge and on a pre-existing LAN bridge alike, and needs
     # neither a dnsmasq lease nor a populated host ARP table nor working mDNS.
     # Every other source is an inference the host makes from outside — see the
-    # fallback chain in substrate_vm._vm_guest_addresses, which this fronts.
+    # fallback chain in vm_guest_reach.vm_guest_addresses, which this fronts.
     #
     # Always wired, with no [vm] toggle: a guest without qemu-ga installed simply
     # never opens its end of the port, which costs one idle virtio-serial device
