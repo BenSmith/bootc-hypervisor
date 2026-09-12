@@ -515,6 +515,7 @@ lib/dns_wire.py                    # The DNS wire format the synthesising respon
 lib/resolve_policy.py              # The responder's answer document as read at start (Policy), beside its writer's seam
 lib/resolve_server.py              # The responder's serve loop (UDP inline, TCP on bounded threads), Counters and the status file
 lib/pcap.py                        # Capture planning (JSON plan shared with the helper)
+lib/pcap_file.py                   # Classic pcap files read and rewritten with struct alone: packet count, first timestamp, the guest-side shift
 lib/pcap_session.py                # One capture: the run and its ExecStopPost cleanup
 lib/pcap_host_tap.py               # Host vantage: nft log rules + nflog reader
 lib/pcap_vm_tap.py                 # VM guest vantage: QMP filter-dump, probe, timestamp fix

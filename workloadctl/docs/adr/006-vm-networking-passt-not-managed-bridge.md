@@ -302,7 +302,7 @@ Five more, mostly teardown and ownership:
   times and the guest-side timestamp shift went through `capinfos`/`editcap`, which
   the spec listed as `Suggests:` — and they were called from a teardown block, so
   the `FileNotFoundError` aborted the rest of it and the guest-side file was never
-  moved. All three are read out of the file in `lib/pcap.py` now; classic pcap is a
+  moved. All three are read out of the file in `lib/pcap_file.py` now; classic pcap is a
   24-byte header and 16 bytes per record and both writers emit it. That also
   retires a silent failure of its own: capinfos renamed its first-packet label
   between releases, and matching one spelling skipped the timestamp correction
