@@ -40,7 +40,7 @@ from unittest import mock
 
 import diagnose_egress
 import diagnose_inspect
-import cmd_diagnose
+import diagnose_battery
 import workload_lib
 from workloadctl_core import WorkloadConfig
 
@@ -260,10 +260,10 @@ class ResolverCheckIsWiredTests(unittest.TestCase):
             WorkloadConfig, "uid", new_callable=mock.PropertyMock,
             return_value=UID))
         self.enterContext(mock.patch.object(
-            cmd_diagnose.subprocess, "run",
+            diagnose_battery.subprocess, "run",
             return_value=mock.Mock(returncode=1, stdout="", stderr="")))
         self.enterContext(mock.patch.object(
-            cmd_diagnose, "service_active", return_value=(False, "inactive")))
+            diagnose_battery, "service_active", return_value=(False, "inactive")))
         self.enterContext(mock.patch.object(
             diagnose_inspect, "service_active", return_value=(False, "inactive")))
         self.enterContext(mock.patch.object(
@@ -274,7 +274,7 @@ class ResolverCheckIsWiredTests(unittest.TestCase):
             diagnose_egress, "nft_json", return_value=None))
 
     def _checks(self, name):
-        checks, _ = cmd_diagnose.collect_diagnose_checks(
+        checks, _ = diagnose_battery.collect_diagnose_checks(
             WorkloadConfig(name), self.manager)
         return checks
 

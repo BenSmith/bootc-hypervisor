@@ -13,7 +13,7 @@ import json
 import subprocess
 import sys
 
-from cmd_diagnose import collect_diagnose_checks
+from diagnose_battery import collect_diagnose_checks
 from cmd_drift import collect_drift, collect_policy_drift
 from cmd_validate import report_config_load_failure
 from substrate import get_substrate

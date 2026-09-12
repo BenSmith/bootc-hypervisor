@@ -23,7 +23,7 @@ from unittest import mock
 
 import diagnose_inspect
 import diagnose_egress
-import cmd_diagnose
+import diagnose_battery
 import workload_lib
 from workloadctl_core import WorkloadConfig
 
@@ -96,17 +96,17 @@ class InspectCheckIsWiredTests(unittest.TestCase):
         # The rest of the battery still shells out; every door gets an answer
         # this suite discards. None of them can make a check appear or vanish.
         self.enterContext(mock.patch.object(
-            cmd_diagnose.subprocess, "run",
+            diagnose_battery.subprocess, "run",
             return_value=mock.Mock(returncode=1, stdout="", stderr="")))
         self.enterContext(mock.patch.object(
-            cmd_diagnose, "service_active", return_value=(False, "inactive")))
+            diagnose_battery, "service_active", return_value=(False, "inactive")))
         self.enterContext(mock.patch.object(
             diagnose_inspect, "service_active", return_value=(False, "inactive")))
         self.enterContext(mock.patch.object(
             diagnose_egress, "service_active", return_value=(False, "inactive")))
 
     def _names(self, name):
-        checks, _ = cmd_diagnose.collect_diagnose_checks(
+        checks, _ = diagnose_battery.collect_diagnose_checks(
             WorkloadConfig(name), self.manager)
         return {c["check"] for c in checks}
 
@@ -150,7 +150,7 @@ class InspectCheckIsWiredTests(unittest.TestCase):
         # machinery: it resolves a name, then dials what it was told. Hoisting
         # the call out of the is_vm block is exactly the edit that could
         # reorder them, and no other test would notice.
-        checks, _ = cmd_diagnose.collect_diagnose_checks(
+        checks, _ = diagnose_battery.collect_diagnose_checks(
             WorkloadConfig("vm1"), self.manager)
         order = [c["check"] for c in checks]
         for earlier, later in (("vm_network", "vm_egress"),
