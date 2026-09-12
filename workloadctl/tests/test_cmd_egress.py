@@ -31,6 +31,7 @@ import gzip
 import io
 import json
 import os
+import re
 import unittest
 import unittest.mock
 from contextlib import redirect_stdout, redirect_stderr
@@ -38,8 +39,10 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 import cmd_egress
-from cmd_egress import (
-    EgressUsage, build_filters, filters_active, format_record, generations,
+import egress_record_query
+from cmd_egress import format_record
+from egress_record_query import (
+    EgressUsage, build_filters, filters_active, generations,
     group_by_connection, group_is_partial, parse_when, read_records,
     resolve_id, resolve_reason, resolve_status, select,
 )
@@ -138,10 +141,10 @@ class TestIdPatternIsBuiltFromTheConstant(unittest.TestCase):
         self.assertEqual(resolve_id("a1b2c3"), "a1b2c3")
 
     def test_a_renamed_field_moves_the_pattern_with_it(self):
-        with unittest.mock.patch.object(cmd_egress, "LOG_ID_FIELD",
+        with unittest.mock.patch.object(egress_record_query, "LOG_ID_FIELD",
                                         "conn"):
-            pattern = cmd_egress.re.compile(
-                rf"\A(?:{cmd_egress.re.escape(cmd_egress.LOG_ID_FIELD)}=)?"
+            pattern = re.compile(
+                rf"\A(?:{re.escape(egress_record_query.LOG_ID_FIELD)}=)?"
                 r"([0-9a-fA-F]+)\Z")
             self.assertTrue(pattern.match("conn=a1b2c3"))
 
@@ -670,14 +673,14 @@ class TestRecordsWithNoIdDoNotMerge(unittest.TestCase):
     """
 
     def test_two_id_less_records_are_two_groups(self):
-        groups = cmd_egress.group_by_connection(
+        groups = egress_record_query.group_by_connection(
             [_rec(**{LOG_ID_FIELD: None, "host": "a.example"}),
              _rec(**{LOG_ID_FIELD: None, "host": "b.example"})])
         self.assertEqual(len(groups), 2)
         self.assertEqual([key for key, _ in groups], [None, None])
 
     def test_records_that_do_have_an_id_still_group(self):
-        groups = cmd_egress.group_by_connection(
+        groups = egress_record_query.group_by_connection(
             [_rec(**{LOG_ID_FIELD: "aa"}),
              _rec(**{LOG_ID_FIELD: None}),
              _rec(**{LOG_ID_FIELD: "aa"})])
