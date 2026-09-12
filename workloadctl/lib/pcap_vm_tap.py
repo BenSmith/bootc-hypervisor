@@ -14,9 +14,9 @@ import time
 
 from config_parser import SOCKET_DIR
 from helper_main import log
-from pcap import (
-    VANTAGE_GUEST, PcapFormatError, filter_dump_object, guest_staging_path,
-    pcap_first_timestamp, pcap_shift_timestamps,
+from pcap import VANTAGE_GUEST, filter_dump_object, guest_staging_path
+from pcap_file import (
+    PcapFormatError, pcap_first_timestamp, pcap_shift_timestamps,
 )
 from qmp import QMPClient
 from workload_addr import MGMT_SSH_PORT, management_address

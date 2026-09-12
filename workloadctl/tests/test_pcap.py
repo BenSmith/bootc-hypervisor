@@ -21,16 +21,20 @@ from tests import load_script
 
 from pcap import (
     CT_MARK_MASK, CT_MARK_TAG, CT_MARK_UID_MASK, DIRECTION_DEFAULT,
-    PCAP_INPUT_CHAIN, PCAP_OUTPUT_CHAIN, PCAP_UNIT_PREFIX, PcapFormatError,
+    PCAP_INPUT_CHAIN, PCAP_OUTPUT_CHAIN, PCAP_UNIT_PREFIX,
     QEMU_MAXLEN_UNLIMITED, SNAPLEN_DEFAULT, host_buffer_kib,
     VANTAGE_GUEST, VANTAGE_HOST, available_vantages, build_plan,
     filter_dump_object, parse_duration, parse_size, parse_snaplen,
-    log_rule_handles, pcap_delete_command, pcap_first_timestamp,
-    pcap_input_rule, pcap_output_rule, pcap_packet_count, pcap_rule_commands,
-    pcap_shift_timestamps, pcap_unit_name,
+    log_rule_handles, pcap_delete_command,
+    pcap_input_rule, pcap_output_rule, pcap_rule_commands,
+    pcap_unit_name,
     INSPECTED_HOST_VANTAGE, pcap_vantages, render_plan, systemd_run_argv,
     tcpdump_argv,
     validate_request,
+)
+from pcap_file import (
+    PcapFormatError, pcap_first_timestamp, pcap_packet_count,
+    pcap_shift_timestamps,
 )
 
 ROOT = Path(__file__).resolve().parent.parent

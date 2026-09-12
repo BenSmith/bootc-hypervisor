@@ -11,10 +11,10 @@ from helper_main import log, run
 from nft import nft_chain
 from nft_constants import NFT_BIN, NFT_SKELETON, NFT_TABLE
 from pcap import (
-    PCAP_CHAINS, VANTAGE_HOST, PcapFormatError, log_rule_handles, log_rule_packets,
-    pcap_delete_command, pcap_packet_count, pcap_rule_commands, tcpdump_argv,
-    vantage_path,
+    PCAP_CHAINS, VANTAGE_HOST, log_rule_handles, log_rule_packets,
+    pcap_delete_command, pcap_rule_commands, tcpdump_argv, vantage_path,
 )
+from pcap_file import PcapFormatError, pcap_packet_count
 from workload_addr import nflog_group
 
 

@@ -36,7 +36,7 @@ record is shifted by the difference. That needs nothing from the guest and is
 immune to both error terms. It is also self-neutralising: were QEMU fixed, the
 measured difference would be ~0 and the shift a no-op.
 
-Reading and rewriting those files is done in lib/pcap.py rather than through
+Reading and rewriting those files is done in lib/pcap_file.py rather than through
 capinfos and editcap, which ship in a package that is not installed by default.
 
 The program is lib/pcap_session.py (the run and its cleanup) over one module
