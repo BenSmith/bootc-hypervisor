@@ -41,11 +41,12 @@ from container_network_config import (
     container_tls_mode, container_tls_reason, container_ca_delivery,
     container_ca_mount_path, ContainerHostReasonEntry,
     container_internal_entries, container_splice_entries,
-    container_effective_tls_mode, validate_container_network,
+    container_effective_tls_mode,
     container_allow_resolved, container_filter_elements,
     container_filter_commands, container_internal_resolve,
     container_inspect_policy, container_inspect_policy_text,
 )
+from container_validate import validate_container_network
 from vm_defs import parse_memory_mib, mac_address, mac_collisions
 from validation import (
     validate_workload_name, validate_workload_config,

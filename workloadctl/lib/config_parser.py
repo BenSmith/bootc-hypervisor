@@ -656,7 +656,8 @@ def container_uses_inspect(config: dict) -> bool:
         return False
     if container_runs_on_host_network(config):
         # Host mode is never inspected, and validate_container_network()
-        # rejects the combination outright -- this is the belt to that
+        # (lib/container_validate.py) rejects the combination outright --
+        # this is the belt to that
         # braces, for a config already on disk when the rule landed.
         #
         # P0-1 measured it on hardware rather than assuming. Two findings,

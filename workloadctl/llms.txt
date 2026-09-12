@@ -462,7 +462,8 @@ lib/config_parser.py               # The TOML grammar both substrates read (host
 lib/workload_lib.py                # Shared core: config locator, naming, state/data paths, token and volume expansion, quoting
 lib/workload_uid.py                # The workload uid: allocation (claim_uid), the subid lock, /etc/subuid entries and the derived range
 lib/run_files.py                   # The per-workload run-files a workload owns (workload_run_files), the run-tree scan, and the build stamp
-lib/container_network_config.py    # The container [network] section: scalars, entries, validate_container_network, nft/inspector artefacts
+lib/container_network_config.py    # The container [network] section: scalars, entries, nft/inspector artefacts
+lib/container_validate.py          # validate_container_network: the rules a container [network] section must satisfy
 lib/broker_config.py               # broker.toml, rendered, written (write_instance_config) and read: the credential table, the unit's addresses, and the (workload, Host) profile table the broker starts from
 lib/broker_request.py              # What leaves the broker carrying a credential, decided without a socket: header replacement, request and response framing
 lib/broker_server.py               # The broker's Handler and Server: identity once per connection, the three ceilings that refuse rather than queue, the two TLS contexts

@@ -19,7 +19,7 @@ from workload_lib import (
     WORKLOAD_TOKEN_PATTERN, _LIFTED_CONTAINER_KEYS, infer_workload_kind,
     normalize_containers,
 )
-from container_network_config import validate_container_network
+from container_validate import validate_container_network
 from vm_validate import validate_vm_config, vm_network_warnings
 
 
