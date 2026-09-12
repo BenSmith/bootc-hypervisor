@@ -35,11 +35,12 @@ from types import SimpleNamespace
 from unittest import mock
 
 import diagnose_inspect
-import egress_policy
+import inspect_policy
 from egress_policy import (
-    INSPECT_DIGEST_KEY, INSPECT_DIGEST_SHORT, Policy, inspect_digest_short,
-    inspect_policy_digest, load_policy, vm_inspect_policy_text,
+    INSPECT_DIGEST_KEY, INSPECT_DIGEST_SHORT, inspect_digest_short,
+    inspect_policy_digest, vm_inspect_policy_text,
 )
+from inspect_policy import Policy, load_policy
 from egress_ca import CA_EXPIRY_WARN_DAYS
 
 from tests.test_inspect_listener import _mod
@@ -115,7 +116,7 @@ class TestTheListenerReportsWhatItLoaded(unittest.TestCase):
             opened.append(args[0] if args else kwargs.get("file"))
             return io.StringIO(first if len(opened) == 1 else second)
 
-        with mock.patch.object(egress_policy, "open", versioned_open,
+        with mock.patch.object(inspect_policy, "open", versioned_open,
                                create=True):
             policy = load_policy(path)
         self.assertEqual(len(opened), 1)
