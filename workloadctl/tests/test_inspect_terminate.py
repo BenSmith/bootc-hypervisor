@@ -47,9 +47,10 @@ from http_target import (
     SCHEME_HTTP, SCHEME_HTTPS, host_from_authority, redirect_host,
     redirect_target,
 )
+from h2_framing import H2_PREFACE
 from http_framing import (
-    Framing, H2_PREFACE, HTTP_METHOD_MAX, RequestUnreadable, _Stream,
-    _is_count, is_http_request_start, request_framing, response_framing,
+    Framing, HTTP_METHOD_MAX, RequestUnreadable, _Stream, _is_count,
+    is_http_request_start, request_framing, response_framing,
 )
 import egress_upstream
 from egress_upstream import tls_failure
