@@ -513,9 +513,8 @@ INSPECT_DIGEST_KEY = "policy_digest"
 #
 # NOT `VM_`-prefixed, unlike its neighbour, and deliberately: this key exists
 # to describe a CONTAINER, so the prefix would be false on the one substrate
-# that writes it. tests/vm_prefixed_symbols.txt is the record of how many
-# shared names already carry that prefix wrongly; this is not becoming one of
-# them for the sake of matching the line above it.
+# that writes it. The prefix is a claim about who a symbol serves, not a
+# naming convention to match the line above.
 INSPECT_GUEST_AGENT_KEY = "guest_agent"
 
 
