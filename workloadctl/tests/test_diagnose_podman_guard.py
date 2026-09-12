@@ -38,7 +38,7 @@ from unittest import mock
 
 import diagnose_inspect
 import diagnose_egress
-import cmd_diagnose
+import diagnose_battery
 import workload_lib
 from podman import PodmanError
 from workloadctl_core import WorkloadConfig
@@ -104,10 +104,10 @@ class PodmanUnavailableTests(unittest.TestCase):
         # The rest of the battery still shells out. Both doors get an answer
         # this suite discards; neither can make a check appear or vanish.
         self.enterContext(mock.patch.object(
-            cmd_diagnose.subprocess, "run",
+            diagnose_battery.subprocess, "run",
             return_value=mock.Mock(returncode=1, stdout="", stderr="")))
         self.enterContext(mock.patch.object(
-            cmd_diagnose, "service_active", return_value=(False, "inactive")))
+            diagnose_battery, "service_active", return_value=(False, "inactive")))
         self.enterContext(mock.patch.object(
             diagnose_inspect, "service_active", return_value=(False, "inactive")))
         self.enterContext(mock.patch.object(
@@ -117,7 +117,7 @@ class PodmanUnavailableTests(unittest.TestCase):
         (self.tmp / name / workload_lib.ENABLED_MARKER_NAME).touch()
 
     def _collect(self, name="app"):
-        return cmd_diagnose.collect_diagnose_checks(
+        return diagnose_battery.collect_diagnose_checks(
             WorkloadConfig(name), self.manager)
 
     def _entry(self, checks, check_name):
@@ -221,17 +221,17 @@ class PodmanAvailableTests(unittest.TestCase):
             WorkloadConfig, "uid", new_callable=mock.PropertyMock,
             return_value=10099))
         self.enterContext(mock.patch.object(
-            cmd_diagnose.subprocess, "run",
+            diagnose_battery.subprocess, "run",
             return_value=mock.Mock(returncode=1, stdout="", stderr="")))
         self.enterContext(mock.patch.object(
-            cmd_diagnose, "service_active", return_value=(False, "inactive")))
+            diagnose_battery, "service_active", return_value=(False, "inactive")))
         self.enterContext(mock.patch.object(
             diagnose_inspect, "service_active", return_value=(False, "inactive")))
         self.enterContext(mock.patch.object(
             diagnose_egress, "service_active", return_value=(False, "inactive")))
 
     def test_both_checks_still_report_and_nothing_is_announced(self):
-        checks, _ = cmd_diagnose.collect_diagnose_checks(
+        checks, _ = diagnose_battery.collect_diagnose_checks(
             WorkloadConfig("app"), self.manager)
         by_name = {c["check"]: c for c in checks}
         self.assertTrue(by_name["image_available"]["passed"])

@@ -30,6 +30,7 @@ import workload_uid          # noqa: E402
 import cmd_create           # noqa: E402
 import diagnose_selinux
 import cmd_diagnose         # noqa: E402
+import diagnose_battery     # noqa: E402
 import cmd_edit             # noqa: E402
 import cmd_validate         # noqa: E402
 import workloadctl_core      # noqa: E402
@@ -410,7 +411,7 @@ class DiagnoseTest(unittest.TestCase):
         self.manager.user_exists.return_value = False
         # All systemctl/loginctl probes report "not enabled / not active".
         self.enterContext(mock.patch.object(
-            cmd_diagnose.subprocess, "run",
+            diagnose_battery.subprocess, "run",
             return_value=mock.Mock(returncode=1, stdout="", stderr="")))
 
     def _run(self, json_mode):
@@ -428,7 +429,7 @@ class DiagnoseTest(unittest.TestCase):
         # The seam doctor consumes: (checks, passed), no root gate, no output.
         out = io.StringIO()
         with redirect_stdout(out):
-            checks, passed = cmd_diagnose.collect_diagnose_checks(
+            checks, passed = diagnose_battery.collect_diagnose_checks(
                 WorkloadConfig("app"), self.manager)
         self.assertEqual(out.getvalue(), "")
         self.assertFalse(passed)
@@ -501,13 +502,13 @@ class DiagnoseVmScopeTest(unittest.TestCase):
         # still shell out. Both doors get an answer this suite discards, and
         # neither can make a check appear or vanish.
         self.enterContext(mock.patch.object(
-            cmd_diagnose.subprocess, "run",
+            diagnose_battery.subprocess, "run",
             return_value=mock.Mock(returncode=1, stdout="", stderr="")))
         self.enterContext(mock.patch.object(
-            cmd_diagnose, "service_active", return_value=(False, "inactive")))
+            diagnose_battery, "service_active", return_value=(False, "inactive")))
 
     def _check_names(self, name):
-        checks, _ = cmd_diagnose.collect_diagnose_checks(
+        checks, _ = diagnose_battery.collect_diagnose_checks(
             WorkloadConfig(name), self.manager)
         return {c["check"] for c in checks}
 
@@ -689,11 +690,11 @@ class DiagnoseUserExistsTest(unittest.TestCase):
         self.home = self.tmp / "home-app"
         fake_pw = types.SimpleNamespace(pw_uid=10005, pw_gid=10005, pw_dir=str(self.home))
         self.enterContext(mock.patch("pwd.getpwnam", lambda n: fake_pw))
-        self.enterContext(mock.patch.object(cmd_diagnose, "units_outdated", lambda name: False))
+        self.enterContext(mock.patch.object(diagnose_battery, "units_outdated", lambda name: False))
         # Pinned for the same reason: the real reader stats
         # /run/systemd/system and would vary with the host.
         self.enterContext(mock.patch.object(
-            cmd_diagnose, "units_from_other_build", lambda name: None))
+            diagnose_battery, "units_from_other_build", lambda name: None))
 
         self.manager = mock.Mock()
         self.manager.user_exists.return_value = True
@@ -771,7 +772,7 @@ class DiagnoseUserExistsTest(unittest.TestCase):
             return mock.Mock(returncode=1, stdout="", stderr="")
 
         self.enterContext(mock.patch("builtins.open", side_effect=opener))
-        self.enterContext(mock.patch.object(cmd_diagnose.subprocess, "run", side_effect=_run_side_effect))
+        self.enterContext(mock.patch.object(diagnose_battery.subprocess, "run", side_effect=_run_side_effect))
         self.enterContext(mock.patch.object(Path, "exists", self._exists_patch(false_substrings)))
 
         out, err = io.StringIO(), io.StringIO()
@@ -875,7 +876,7 @@ class DiagnoseUserExistsTest(unittest.TestCase):
         self.assertIn("Build or provide", check["fix"])
 
     def test_config_current_outdated(self):
-        self.enterContext(mock.patch.object(cmd_diagnose, "units_outdated", lambda name: True))
+        self.enterContext(mock.patch.object(diagnose_battery, "units_outdated", lambda name: True))
         code, out = self._run(json_mode=True)
         data = json.loads(out)
         check = next(c for c in data["checks"] if c["check"] == "config_current")
@@ -887,7 +888,7 @@ class DiagnoseUserExistsTest(unittest.TestCase):
         # "workloadctl moved". An RPM upgrade changes neither file's mtime, so
         # config_current stays green while the units are last release's shape.
         self.enterContext(mock.patch.object(
-            cmd_diagnose, "units_from_other_build",
+            diagnose_battery, "units_from_other_build",
             lambda name: "0.1.0-1.20250101000000"))
         code, out = self._run(json_mode=True)
         data = json.loads(out)
@@ -968,7 +969,7 @@ class DiagnoseUserExistsTest(unittest.TestCase):
             '[workload]\nname = "app"\n\n[container]\nimage = "localhost/app:latest"\n'
             '\n[security]\nselinux_policy = true\n'
         )
-        with mock.patch.object(cmd_diagnose.shutil, "which", return_value=None):
+        with mock.patch.object(diagnose_battery.shutil, "which", return_value=None):
             code, out = self._run(json_mode=True)
         data = json.loads(out)
         check = next(c for c in data["checks"] if c["check"] == "selinux_module")
@@ -981,7 +982,7 @@ class DiagnoseUserExistsTest(unittest.TestCase):
             '\n[security]\nselinux_policy = true\n'
         )
         self._set_proc(["semodule", "-l"], returncode=0, stdout="some_other_module\n")
-        with mock.patch.object(cmd_diagnose.shutil, "which", return_value="/usr/sbin/semodule"):
+        with mock.patch.object(diagnose_battery.shutil, "which", return_value="/usr/sbin/semodule"):
             code, out = self._run(json_mode=True)
         data = json.loads(out)
         check = next(c for c in data["checks"] if c["check"] == "selinux_module")
@@ -1559,17 +1560,17 @@ class DiagnoseMultiContainerTest(unittest.TestCase):
         )
         fake_pw = types.SimpleNamespace(pw_uid=10005, pw_gid=10005, pw_dir=str(self.tmp / "h"))
         self.enterContext(mock.patch("pwd.getpwnam", lambda n: fake_pw))
-        self.enterContext(mock.patch.object(cmd_diagnose, "units_outdated", lambda name: False))
+        self.enterContext(mock.patch.object(diagnose_battery, "units_outdated", lambda name: False))
         # Pinned for the same reason: the real reader stats
         # /run/systemd/system and would vary with the host.
         self.enterContext(mock.patch.object(
-            cmd_diagnose, "units_from_other_build", lambda name: None))
+            diagnose_battery, "units_from_other_build", lambda name: None))
         self.manager = mock.Mock()
         self.manager.user_exists.return_value = True
         self.pod = mock.Mock()
         self.manager.podman.return_value = self.pod
         self.enterContext(mock.patch.object(
-            cmd_diagnose.subprocess, "run",
+            diagnose_battery.subprocess, "run",
             return_value=mock.Mock(returncode=1, stdout="", stderr="")))
 
     def _run(self):
@@ -1656,7 +1657,7 @@ class DiagnoseEdgeBranchesTest(DiagnoseUserExistsTest):
             '\n[security]\nselinux_policy = true\n')
         module = workload_lib.selinux_module_name("app")
         self._set_proc(["semodule", "-l"], returncode=0, stdout=f"foo\n{module}\nbar\n")
-        with mock.patch.object(cmd_diagnose.shutil, "which", return_value="/usr/sbin/semodule"):
+        with mock.patch.object(diagnose_battery.shutil, "which", return_value="/usr/sbin/semodule"):
             code, out = self._run(json_mode=True)
         data = json.loads(out)
         check = next(c for c in data["checks"] if c["check"] == "selinux_module")

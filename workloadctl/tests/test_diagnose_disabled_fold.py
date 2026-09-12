@@ -30,9 +30,9 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-import cmd_diagnose
+import diagnose_battery
 import workload_lib
-from cmd_diagnose import (
+from diagnose_battery import (
     DISABLED_CONSEQUENCE_CHECKS,
     collapse_disabled_consequences,
 )
@@ -163,13 +163,13 @@ class BatteryIntegrationTests(unittest.TestCase):
         # Every systemctl/loginctl probe answers "no": not enabled, not active,
         # no linger. That is the disabled workload's real shape.
         self.enterContext(mock.patch.object(
-            cmd_diagnose.subprocess, "run",
+            diagnose_battery.subprocess, "run",
             return_value=mock.Mock(returncode=1, stdout="", stderr="")))
         self.enterContext(mock.patch.object(
-            cmd_diagnose, "service_active", return_value=(False, "inactive")))
+            diagnose_battery, "service_active", return_value=(False, "inactive")))
 
     def _collect(self):
-        return cmd_diagnose.collect_diagnose_checks(
+        return diagnose_battery.collect_diagnose_checks(
             WorkloadConfig("app"), self.manager)
 
     def test_disabled_workload_gets_one_line_for_the_whole_story(self):
