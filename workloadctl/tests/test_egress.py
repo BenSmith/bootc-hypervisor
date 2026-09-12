@@ -2537,6 +2537,18 @@ class TestRung2Schema(unittest.TestCase):
                                "internal": [{"host": "git.local"}]})
         self.assertTrue(any("reason" in e for e in errors), errors)
 
+    def test_a_bare_string_internal_entry_is_refused_by_shape(self):
+        """The three reasoned tables share one reader, so one probe covers
+        `internal`, `splice` and `http2`. Asserted on the message naming the
+        shape, because a bare string is also a host on no list, and that
+        error alone would let the shape rule vanish unnoticed."""
+        for key in ("internal", "splice", "http2"):
+            with self.subTest(key=key):
+                errors = self._egress({"hosts": ["git.local"],
+                                       key: ["git.local"]})
+                joined = " ".join(errors)
+                self.assertIn(f"[vm.network].{key} entries are tables", joined)
+
     def test_internal_is_refused_under_open(self):
         errors = self._egress({
             "egress": "open",
@@ -3832,10 +3844,14 @@ class TestRung6CredentialSchema(unittest.TestCase):
         self.assertIn("[[vm.network.credential]]", joined)
 
     def test_a_non_string_credential_is_refused(self):
+        """Asserted on the selector's own message: with the rule gone, the
+        declared block is merely unselected, and that error alone would keep
+        an "it errors" assertion green."""
         for value in (True, 3, ["tok"], "", "   "):
             with self.subTest(value=value):
-                self.assertTrue(self._egress(self._net(policy=[
-                    {"host": "api.example", "credential": value}])), value)
+                joined = " ".join(self._egress(self._net(policy=[
+                    {"host": "api.example", "credential": value}])))
+                self.assertIn("`credential` must be the name", joined)
 
     def test_credential_is_a_known_key_and_placeholder_is_not(self):
         """The inversion this rung performs, asserted in both directions.
