@@ -15,6 +15,7 @@ from unittest.mock import MagicMock, patch
 
 
 import config_parser
+import run_files
 import workload_lib
 import cmd_disable
 import substrate_container
@@ -352,7 +353,7 @@ class TestDisableRemovesRunFiles(unittest.TestCase):
             args = SimpleNamespace(workload='pp', purge=False)
             with patch.object(cmd_disable, 'require_root', lambda: None), \
                  patch.object(substrate_container, 'RUN_SYSTEMD_SYSTEM', run), \
-                 patch.object(workload_lib, 'RUN_SYSTEMD_SYSTEM', run), \
+                 patch.object(run_files, 'RUN_SYSTEMD_SYSTEM', run), \
                  patch.object(cmd_disable.subprocess, 'run', MagicMock()), \
                  patch.object(cmd_disable, 'run_host_setup', MagicMock()), \
                  patch.object(cmd_disable, 'apply_selinux_policy', MagicMock()), \
@@ -398,7 +399,7 @@ class TestDisableRemovesRunFiles(unittest.TestCase):
             exit_code = None
             with patch.object(cmd_disable, 'require_root', lambda: None), \
                  patch.object(substrate_container, 'RUN_SYSTEMD_SYSTEM', run), \
-                 patch.object(workload_lib, 'RUN_SYSTEMD_SYSTEM', run), \
+                 patch.object(run_files, 'RUN_SYSTEMD_SYSTEM', run), \
                  patch.object(cmd_disable.subprocess, 'run', MagicMock()), \
                  patch.object(cmd_disable, 'run_host_setup', MagicMock()), \
                  patch.object(cmd_disable, 'apply_selinux_policy', MagicMock()), \
@@ -445,7 +446,7 @@ class TestDisableRemovesRunFiles(unittest.TestCase):
             args = SimpleNamespace(workload='ff', purge=False)
             with patch.object(cmd_disable, 'require_root', lambda: None), \
                  patch.object(substrate_container, 'RUN_SYSTEMD_SYSTEM', run), \
-                 patch.object(workload_lib, 'RUN_SYSTEMD_SYSTEM', run), \
+                 patch.object(run_files, 'RUN_SYSTEMD_SYSTEM', run), \
                  patch.object(cmd_disable.subprocess, 'run', MagicMock()), \
                  patch.object(cmd_disable, 'run_host_setup', MagicMock()), \
                  patch.object(cmd_disable, 'apply_selinux_policy', MagicMock()), \
@@ -473,7 +474,7 @@ class TestDisableRemovesRunFiles(unittest.TestCase):
         def entries(toml, name):
             with _Env(toml, name) as (config, _env_dir):
                 return {Path(f.path).name: f.emitted
-                        for f in workload_lib.workload_run_files(config)}
+                        for f in run_files.workload_run_files(config)}
 
         plain = entries(SINGLE_TOML, 'pp')
         filtered = entries(FILTERED_TOML, 'ff')
@@ -522,7 +523,7 @@ class PurgeRemovesTheEgressRecordTest(unittest.TestCase):
             args = SimpleNamespace(workload='rr', purge=True)
             with patch.object(cmd_disable, 'require_root', lambda: None), \
                  patch.object(substrate_container, 'RUN_SYSTEMD_SYSTEM', run), \
-                 patch.object(workload_lib, 'RUN_SYSTEMD_SYSTEM', run), \
+                 patch.object(run_files, 'RUN_SYSTEMD_SYSTEM', run), \
                  patch.object(cmd_disable.subprocess, 'run', MagicMock()), \
                  patch.object(cmd_disable, 'run_host_setup', MagicMock()), \
                  patch.object(cmd_disable, 'apply_selinux_policy', MagicMock()), \
@@ -569,7 +570,7 @@ class TestDisableStopsWholeTopology(unittest.TestCase):
             fake_run = MagicMock()
             with patch.object(cmd_disable, 'require_root', lambda: None), \
                  patch.object(substrate_container, 'RUN_SYSTEMD_SYSTEM', run), \
-                 patch.object(workload_lib, 'RUN_SYSTEMD_SYSTEM', run), \
+                 patch.object(run_files, 'RUN_SYSTEMD_SYSTEM', run), \
                  patch.object(cmd_disable.subprocess, 'run', fake_run), \
                  patch.object(cmd_disable, 'run_host_setup', MagicMock()), \
                  patch.object(cmd_disable, 'apply_selinux_policy', MagicMock()), \

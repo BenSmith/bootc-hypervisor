@@ -14,18 +14,12 @@ import re
 
 from config_parser import infer_workload_mode
 from workload_lib import (
-    MAX_CONTAINER_NAME_LENGTH,
-    CONTAINER_NAME_PATTERN,
-    MAX_NAME_LENGTH,
-    NAME_PATTERN,
-    HOST_USERNS_OPT_IN,
-    WORKLOAD_TOKEN_NAMES,
-    WORKLOAD_TOKEN_PATTERN,
-    _LIFTED_CONTAINER_KEYS,
-    infer_workload_kind,
+    MAX_CONTAINER_NAME_LENGTH, CONTAINER_NAME_PATTERN, MAX_NAME_LENGTH,
+    NAME_PATTERN, HOST_USERNS_OPT_IN, WORKLOAD_TOKEN_NAMES,
+    WORKLOAD_TOKEN_PATTERN, _LIFTED_CONTAINER_KEYS, infer_workload_kind,
     normalize_containers,
-    validate_container_network,
 )
+from container_network_config import validate_container_network
 from vm_network_config import validate_vm_config, vm_network_warnings
 
 

@@ -188,7 +188,7 @@ class TestSkeleton(unittest.TestCase):
         `-Q out` kept working, so each workload class had exactly one working
         direction and neither reported an error.
 
-        The range must be the whole of what lib/workload_lib.py allocates, or
+        The range must be the whole of what lib/workload_uid.py allocates, or
         workloads at one end of it are unattributable.
         """
         rule = only(self, [d for d in self.directives if "ct mark set" in d],

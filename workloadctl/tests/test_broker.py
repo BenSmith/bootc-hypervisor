@@ -314,7 +314,7 @@ class TestTheRunFile(unittest.TestCase):
     """Superset semantics, which is what buys `drift` and `remove` coverage."""
 
     def files(self, cfg):
-        from workload_lib import workload_run_files
+        from run_files import workload_run_files
 
         class _Cfg:
             def __init__(self, config):

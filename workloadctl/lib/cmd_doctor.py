@@ -26,12 +26,9 @@ from inspect_figures import (
     read_inspect_status,
     read_resolve_status,
 )
-from workload_lib import (
-    WORKLOADCTL_VERSION,
-    units_from_other_build,
-    units_outdated,
-    workload_config_path,
-    workload_run_files,
+from workload_lib import WORKLOADCTL_VERSION, workload_config_path
+from run_files import (
+    units_from_other_build, units_outdated, workload_run_files,
 )
 from workloadctl_core import WorkloadConfig, WorkloadMasked, require_root
 

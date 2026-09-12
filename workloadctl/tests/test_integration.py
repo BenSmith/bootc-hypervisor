@@ -24,7 +24,7 @@ WRITE_ENV = os.path.join(os.path.dirname(__file__), '..', 'libexec', 'workload-w
 WORKLOADS_DIR = ROOT / "workloads"
 
 import workload_lib  # noqa: E402
-from workload_lib import workload_service_units  # noqa: E402
+from run_files import workload_service_units
 from workloadctl_core import WorkloadConfig  # noqa: E402
 
 

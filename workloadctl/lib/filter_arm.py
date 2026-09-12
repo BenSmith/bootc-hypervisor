@@ -62,10 +62,9 @@ from vm_network_config import (
     vm_resolve_policy,
     vm_resolve_policy_path,
 )
-from workload_lib import (
-    container_allow_resolved,
-    container_filter_commands,
-    load_workload_config,
+from workload_lib import load_workload_config
+from container_network_config import (
+    container_allow_resolved, container_filter_commands,
 )
 
 

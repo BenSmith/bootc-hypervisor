@@ -13,7 +13,7 @@ restating it, which is the only shape that catches the *next* subcommand:
 
   * the command list, from argparse's own choices;
   * the per-command flags, from each subparser's --help;
-  * the helper-unit filter, from `workload_lib.workload_run_files()`.
+  * the helper-unit filter, from `run_files.workload_run_files()`.
 
 Flags are checked one way only — offered-but-unreal fails, unoffered is allowed.
 A completion may reasonably omit a flag as noise; offering one the parser will
@@ -28,6 +28,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+import run_files
 import workload_lib
 from workloadctl_core import WorkloadConfig
 
@@ -250,7 +251,7 @@ class HelperUnitFilterTest(unittest.TestCase):
             (tmp / name / "workload.toml").write_text(toml.format(name=name))
             with patch.object(workload_lib, "WORKLOAD_CONFIG_DIR", tmp):
                 config = WorkloadConfig(name)
-                files = workload_lib.workload_run_files(config)
+                files = run_files.workload_run_files(config)
             containers = {c.get("name") for c in config.config.get("containers", [])}
             found = set()
             for entry in files:

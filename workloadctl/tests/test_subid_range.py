@@ -41,13 +41,11 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 import cmd_diagnose
-import workload_lib
+import workload_uid
+import workload_addr
 from workload_addr import UID_MIN
-from workload_lib import (
-    SUBID_BASE,
-    SUBID_COUNT,
-    derived_subid_range,
-    login_defs_subid_window,
+from workload_uid import (
+    SUBID_BASE, SUBID_COUNT, derived_subid_range, login_defs_subid_window,
 )
 
 from ensure_container import configure_subuid_subgid as _writer
@@ -70,7 +68,7 @@ class DerivationTests(unittest.TestCase):
 
     def test_every_workload_uid_clears_useradds_window(self):
         """The property SUBID_BASE exists for, across the whole UID range."""
-        for uid in (UID_MIN, UID_MIN + 1, 10005, workload_lib.UID_MAX):
+        for uid in (UID_MIN, UID_MIN + 1, 10005, workload_addr.UID_MAX):
             self.assertGreaterEqual(derived_subid_range(uid)[0], FEDORA_WINDOW[1])
 
     def test_uid_below_the_workload_range_is_rejected(self):
@@ -79,7 +77,7 @@ class DerivationTests(unittest.TestCase):
 
     def test_uid_whose_range_would_overflow_uint32_is_rejected(self):
         with self.assertRaises(ValueError):
-            derived_subid_range(workload_lib.UID_MAX + 100000)
+            derived_subid_range(workload_addr.UID_MAX + 100000)
 
     def test_ensure_user_does_not_carry_a_second_copy_of_the_formula(self):
         """The writer and the checks must assert against one formula.
@@ -194,7 +192,7 @@ class SupplementaryEntryRegressionTests(unittest.TestCase):
     def _entries(self, lines):
         path = self.dir / "subgid"
         path.write_text("".join(f"{line}\n" for line in lines))
-        return [(str(path), workload_lib.read_subid_entry("_wl-media", path))]
+        return [(str(path), workload_uid.read_subid_entry("_wl-media", path))]
 
     def _both_checks(self, lines):
         entries = self._entries(lines)

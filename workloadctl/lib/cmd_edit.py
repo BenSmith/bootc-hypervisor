@@ -16,9 +16,8 @@ import sys
 import tempfile
 
 from cli_log import emit_result
-from workload_lib import (
-    replace_file_atomically, workload_config_path, workload_service_units,
-)
+from workload_lib import replace_file_atomically, workload_config_path
+from run_files import workload_service_units
 from workloadctl_core import WorkloadConfig, WorkloadManager, require_root
 from provisioning import regenerate_units
 from service_runtime import restart_workload_service

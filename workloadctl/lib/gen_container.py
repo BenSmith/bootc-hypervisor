@@ -25,10 +25,13 @@ from config_parser import (
     infer_workload_mode,
 )
 from workload_lib import (
-    GENERATED_BY, workload_state_dir, expand_volume_path,
-    expand_workload_tokens, dq, uq, selinux_type_name,
-    container_ca_delivery, container_ca_mount_path, normalize_containers,
+    workload_state_dir, expand_volume_path, expand_workload_tokens, dq, uq,
+    selinux_type_name, normalize_containers,
 )
+from container_network_config import (
+    container_ca_delivery, container_ca_mount_path,
+)
+from run_files import GENERATED_BY
 from egress_ca import CA_ENV_VARS, CA_BUNDLE_PATH, ca_cert_path
 from broker_config import (
     container_broker_hosts, container_broker_upstream_addresses,

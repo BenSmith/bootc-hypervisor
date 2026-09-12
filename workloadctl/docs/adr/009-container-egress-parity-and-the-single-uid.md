@@ -120,7 +120,7 @@ local change to six rules; it turns arithmetic into a lookup at every one of:
   This is the load-bearing case: with two uids per workload the map is no
   longer injective, so every consumer must first ask which *kind* of uid it
   holds.
-- `derived_subid_range()` in `lib/workload_lib.py` — a 64K subid block per
+- `derived_subid_range()` in `lib/workload_uid.py` — a 64K subid block per
   uid. A second uid per workload either halves the workload ceiling or needs a
   second, non-subid uid range to live in.
 - every uid-derived address in `lib/workload_addr.py` (`management_address`,

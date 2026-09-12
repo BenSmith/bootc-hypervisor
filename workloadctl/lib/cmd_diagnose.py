@@ -24,23 +24,15 @@ from config_parser import (
     workload_root_dir, WORKLOADS_BASE,
 )
 from workload_lib import (
-    container_effective_tls_mode,
-    derived_subid_range,
-    expand_volume_path,
-    HOST_USERNS_OPT_IN,
-    login_defs_subid_window,
-    read_subid_entry,
-    selinux_module_name,
-    selinux_type_name,
-    subgid_file,
-    subid_files_with_entries,
-    subuid_file,
-    units_outdated,
-    units_from_other_build,
-    workload_data_dir,
-    workload_env_dir,
-    workload_state_dir,
+    expand_volume_path, HOST_USERNS_OPT_IN, selinux_module_name,
+    selinux_type_name, workload_data_dir, workload_state_dir,
     WORKLOADCTL_VERSION,
+)
+from container_network_config import container_effective_tls_mode
+from run_files import units_outdated, units_from_other_build, workload_env_dir
+from workload_uid import (
+    derived_subid_range, login_defs_subid_window, read_subid_entry,
+    subgid_file, subid_files_with_entries, subuid_file,
 )
 from provisioning import (
     fcontext_pattern,

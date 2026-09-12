@@ -21,9 +21,10 @@ Installed to /usr/libexec/workloadctl/gen_vm.py.
 
 from config_parser import parse_volume_spec
 from workload_lib import (
-    GENERATED_BY, workload_state_dir, workload_data_dir, expand_volume_path,
-    dq, uq, virtiofs_tags, systemd_escape_path,
+    workload_state_dir, workload_data_dir, expand_volume_path, dq, uq,
+    virtiofs_tags, systemd_escape_path,
 )
+from run_files import GENERATED_BY
 from egress_policy import vm_uses_inspect, uses_resolve
 from broker_config import (
     vm_uses_credentials, vm_broker_hosts, vm_broker_upstream_addresses,

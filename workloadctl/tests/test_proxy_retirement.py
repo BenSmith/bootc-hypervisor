@@ -223,7 +223,7 @@ class TestTheServiceIsNotGenerated(unittest.TestCase):
         self.assertNotIn("workload-vm-proxy", source)
 
     def test_the_removable_view_still_unlinks_a_stale_proxy_unit(self):
-        source = (ROOT / "lib" / "workload_lib.py").read_text()
+        source = (ROOT / "lib" / "run_files.py").read_text()
         self.assertIn('"unit", "proxy", False', source, (
             "the migration entry for the retired proxy unit is gone. A host "
             "upgraded in place keeps the previous version's "

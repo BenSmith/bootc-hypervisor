@@ -191,6 +191,9 @@ class TestASharedModuleIsNotShadowedByItsCaller(unittest.TestCase):
     SHARED_IMPORTS = {
         "lib/gen_run.py": ("gen_common", "gen_vm", "gen_container"),
         "lib/cli_main.py": ("workloadctl_core", "substrate"),
+        "lib/workload_uid.py": ("workload_lib",),
+        "lib/run_files.py": ("workload_lib",),
+        "lib/container_network_config.py": ("config_parser",),
         "lib/gen_vm.py": ("gen_common", "gen_egress"),
         "lib/gen_egress.py": ("gen_common",),
         "lib/gen_container.py": ("gen_common", "gen_egress"),

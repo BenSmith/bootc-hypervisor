@@ -139,7 +139,7 @@ These cover only the two simplest names. Everything **derived** — `-setup`,
 `-build`, `-pod`, `-net`, `-inspect`, `-resolve`, `-broker`, `-proxy`,
 `-virtiofs-<tag>`, `-<cname>`, the `.wants` symlink, the sysusers `.conf`, the
 `user@<uid>` drop-in and the `.env` / `.secrets` env files — comes from
-`workload_run_files(config)` in the same module, which returns one
+`workload_run_files(config)` in `lib/run_files.py`, which returns one
 `WorkloadRunFile(path, kind, role, emitted)` per entry in this table. That is
 the single source of truth; do not re-spell a name at a call site.
 

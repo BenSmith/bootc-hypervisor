@@ -11,7 +11,7 @@ import sys
 import tempfile
 
 from cli_log import emit_result
-from workload_lib import workload_service_units
+from run_files import workload_service_units
 from workloadctl_core import (
     WorkloadConfig,
     WorkloadManager,

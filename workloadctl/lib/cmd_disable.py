@@ -17,7 +17,8 @@ import time
 
 from cli_log import emit_result, error, info, json_enabled
 from config_parser import workload_root_dir
-from workload_lib import workload_enabled_marker, workload_run_files
+from workload_lib import workload_enabled_marker
+from run_files import workload_run_files
 from substrate import get_substrate
 from egress_policy import inspect_record_dir
 from workloadctl_core import (

@@ -23,9 +23,11 @@ from pathlib import Path
 import service_runtime
 from config_parser import workload_root_dir
 from workload_lib import (
-    derived_subid_range, expand_volume_path, normalize_containers,
-    workload_state_dir, subid_lock, append_subid_entries,
-    subgid_file, subuid_file,
+    expand_volume_path, normalize_containers, workload_state_dir,
+)
+from workload_uid import (
+    derived_subid_range, subid_lock, append_subid_entries, subgid_file,
+    subuid_file,
 )
 import ensure_common
 from ensure_common import (
