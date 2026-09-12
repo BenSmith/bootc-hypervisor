@@ -27,10 +27,8 @@ from egress_policy import INSPECT_GUEST_AGENT_KEY
 from config_parser import normalise_hostname
 from egress_policy import container_inspect_policy
 from egress_plane import CLEARTEXT, TLS, plane_for_port
-from egress_policy import (
-    Policy, VmPolicyEntry,
-    hostname_match, load_policy, vm_inspect_policy,
-)
+from egress_policy import VmPolicyEntry, hostname_match, vm_inspect_policy
+from inspect_policy import Policy, load_policy
 from sd_listen import NotSocketActivated
 from workload_addr import INSPECT_LISTENER_BIN
 from tls_hello import HelloUnreadable, TLS_EXT_ECH, read_client_hello

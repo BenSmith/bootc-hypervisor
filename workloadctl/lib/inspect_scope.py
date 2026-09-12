@@ -15,10 +15,10 @@ and a record for a whole connection where there are no requests.
 
 import sys
 
-from egress_policy import Policy
 from egress_record import Record, RequestLog
 from egress_upstream import Upstream
 from inspect_counters import Counters
+from inspect_policy import Policy
 
 
 class Inspection:

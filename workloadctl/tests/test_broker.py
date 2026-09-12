@@ -655,12 +655,11 @@ from egress_record import (
     Where,
 )
 from egress_policy import (
-    Policy,
     VmPolicyEntry,
-    load_policy,
     vm_inspect_policy,
     vm_inspect_policy_text,
 )
+from inspect_policy import Policy, load_policy
 from workload_addr import broker_listen_address
 import egress_relay
 from egress_upstream import Upstream

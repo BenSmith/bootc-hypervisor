@@ -200,6 +200,7 @@ class TestASharedModuleIsNotShadowedByItsCaller(unittest.TestCase):
         "lib/cmd_egress.py": ("egress_record_query",),
         "lib/substrate_vm.py": ("vm_guest_reach",),
         "lib/pcap_vm_tap.py": ("pcap", "pcap_file"),
+        "lib/inspect_policy.py": ("egress_policy",),
         "lib/gen_vm.py": ("gen_common", "gen_egress"),
         "lib/gen_egress.py": ("gen_common",),
         "lib/gen_container.py": ("gen_common", "gen_egress", "container_run_args",

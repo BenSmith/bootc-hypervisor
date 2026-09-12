@@ -42,10 +42,10 @@ from egress_record import (
     RequestLog,
 )
 from egress_plane import CLEARTEXT, TLS, plane_for_port
+from inspect_policy import Policy
 from egress_policy import (
     INSPECT_RECORD_FILE,
     INSPECT_RECORD_ROOT,
-    Policy,
     inspect_logs_directory,
     inspect_record_dir,
     inspect_record_path,

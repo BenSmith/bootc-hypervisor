@@ -38,7 +38,8 @@ from pathlib import Path
 
 from tests import load_script
 from egress_plane import TLS
-from egress_policy import Policy, VmPolicyEntry
+from egress_policy import VmPolicyEntry
+from inspect_policy import Policy
 from egress_ca import (
     ca_cert_path, ca_key_path, ca_openssl_argv, leaf_openssl_argv,
 )

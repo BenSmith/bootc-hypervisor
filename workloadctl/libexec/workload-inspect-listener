@@ -36,8 +36,8 @@ sys.dont_write_bytecode = True
 
 from egress_policy import (
     inspect_policy_path, inspect_record_path, inspect_status_path,
-    load_policy,
 )
+from inspect_policy import load_policy
 from inspect_listener import Listener, build_minter
 from sd_listen import NotSocketActivated
 from sd_listen import (
