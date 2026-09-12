@@ -376,7 +376,7 @@ class TestTheSubtreeIsLabelled(unittest.TestCase):
         """A module filecon is silently ignored under a prefix workloadctl
         registers in file_contexts.local. /var/log is not one of those, which
         is the only reason this rule may live in the module at all."""
-        from provisioning import LOCAL_FCONTEXT_ROOTS
+        from workload_selinux import LOCAL_FCONTEXT_ROOTS
         for root in LOCAL_FCONTEXT_ROOTS:
             self.assertFalse(str(INSPECT_RECORD_ROOT).startswith(root))
 

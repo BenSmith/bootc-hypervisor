@@ -17,7 +17,8 @@ from cli_log import emit_result, error, info
 from workload_lib import workload_config_path
 from workloadctl_core import WorkloadConfig, WorkloadManager, require_root
 from substrate import get_substrate, service_active
-from provisioning import apply_vm_fcontext, regenerate_units, transfer_image
+from provisioning import regenerate_units, transfer_image
+from workload_selinux import apply_vm_fcontext
 
 
 # ---------------------------------------------------------------------------

@@ -731,6 +731,7 @@ import cmd_disable
 import cmd_enable
 import cmd_lifecycle
 import provisioning
+import workload_selinux
 
 
 class TestSubidLockSharedConstant(unittest.TestCase):
@@ -1472,32 +1473,32 @@ class TestSelinuxHelpers(unittest.TestCase):
         fake_dir = MagicMock()
         fake_dir.is_dir.return_value = True
         with patch.object(provisioning.shutil, 'which', return_value="/usr/sbin/semodule"):
-            with patch.object(provisioning, 'UDICA_TEMPLATE_DIR', fake_dir):
-                self.assertTrue(provisioning._selinux_available())
+            with patch.object(workload_selinux, 'UDICA_TEMPLATE_DIR', fake_dir):
+                self.assertTrue(workload_selinux._selinux_available())
 
     def test_selinux_available_false_no_semodule(self):
         with patch.object(provisioning.shutil, 'which', return_value=None):
-            self.assertFalse(provisioning._selinux_available())
+            self.assertFalse(workload_selinux._selinux_available())
 
     def test_selinux_enforcing_true(self):
         with patch.object(provisioning.subprocess, 'run',
                           return_value=MagicMock(returncode=0, stdout="Enforcing\n")):
-            self.assertTrue(provisioning._selinux_enforcing())
+            self.assertTrue(workload_selinux._selinux_enforcing())
 
     def test_selinux_enforcing_false_permissive(self):
         with patch.object(provisioning.subprocess, 'run',
                           return_value=MagicMock(returncode=0, stdout="Permissive\n")):
-            self.assertFalse(provisioning._selinux_enforcing())
+            self.assertFalse(workload_selinux._selinux_enforcing())
 
     def test_selinux_enforcing_getenforce_missing(self):
         with patch.object(provisioning.subprocess, 'run', side_effect=FileNotFoundError):
-            self.assertFalse(provisioning._selinux_enforcing())
+            self.assertFalse(workload_selinux._selinux_enforcing())
 
     def test_available_bundles_empty_when_dir_missing(self):
         fake_dir = MagicMock()
         fake_dir.is_dir.return_value = False
-        with patch.object(provisioning, '_BUNDLES_DIR', fake_dir):
-            self.assertEqual(provisioning._available_bundles(), [])
+        with patch.object(workload_selinux, '_BUNDLES_DIR', fake_dir):
+            self.assertEqual(workload_selinux._available_bundles(), [])
 
     def test_available_bundles_lists_dirs_with_policy(self):
         with tempfile.TemporaryDirectory() as d:
@@ -1505,21 +1506,21 @@ class TestSelinuxHelpers(unittest.TestCase):
             (p / "foo").mkdir()
             (p / "foo" / "policy.cil").write_text("")
             (p / "bar").mkdir()  # no policy.cil -> excluded
-            with patch.object(provisioning, '_BUNDLES_DIR', p):
-                self.assertEqual(provisioning._available_bundles(), ["foo"])
+            with patch.object(workload_selinux, '_BUNDLES_DIR', p):
+                self.assertEqual(workload_selinux._available_bundles(), ["foo"])
 
     def test_print_available_bundles_suggests_close_match(self):
-        with patch.object(provisioning, '_available_bundles', return_value=["forgejo"]):
+        with patch.object(workload_selinux, '_available_bundles', return_value=["forgejo"]):
             buf = io.StringIO()
             with redirect_stderr(buf):
-                provisioning._print_available_bundles("forgeejo")
+                workload_selinux._print_available_bundles("forgeejo")
             self.assertIn("did you mean 'forgejo'", buf.getvalue())
 
     def test_print_available_bundles_noop_when_none_available(self):
-        with patch.object(provisioning, '_available_bundles', return_value=[]):
+        with patch.object(workload_selinux, '_available_bundles', return_value=[]):
             buf = io.StringIO()
             with redirect_stderr(buf):
-                provisioning._print_available_bundles("anything")
+                workload_selinux._print_available_bundles("anything")
             self.assertEqual(buf.getvalue(), "")
 
 
@@ -1547,7 +1548,7 @@ class TestApplyVmFcontext(unittest.TestCase):
             with patch.object(provisioning.shutil, 'which', return_value="/usr/sbin/semanage"):
                 with patch.object(provisioning.subprocess, 'run', side_effect=fake_run):
                     with redirect_stdout(io.StringIO()):
-                        provisioning.apply_vm_fcontext(cfg, action)
+                        workload_selinux.apply_vm_fcontext(cfg, action)
         return calls
 
     def test_container_workload_is_untouched(self):
@@ -1684,7 +1685,7 @@ class TestApplyVmFcontext(unittest.TestCase):
         with _cfg(_VM_TOML, 'test-vm') as cfg:
             with patch.object(provisioning.shutil, 'which', return_value=None):
                 with patch.object(provisioning.subprocess, 'run') as run_mock:
-                    provisioning.apply_vm_fcontext(cfg, "enable")
+                    workload_selinux.apply_vm_fcontext(cfg, "enable")
             run_mock.assert_not_called()
 
 
@@ -1694,48 +1695,48 @@ class TestApplySelinuxPolicy(unittest.TestCase):
     def test_noop_when_not_selinux_policy(self):
         with _cfg(_CONTAINER_TOML, 'test-wl') as cfg:
             with patch.object(provisioning.subprocess, 'run') as run_mock:
-                provisioning.apply_selinux_policy(cfg, "enable")
+                workload_selinux.apply_selinux_policy(cfg, "enable")
             run_mock.assert_not_called()
 
     def test_enable_hard_fails_when_tooling_missing_and_enforcing(self):
         with _cfg(_SELINUX_TOML, 'test-wl') as cfg:
-            with patch.object(provisioning, '_selinux_available', return_value=False):
-                with patch.object(provisioning, '_selinux_enforcing', return_value=True):
-                    with self.assertRaises(provisioning.SelinuxPolicyError):
-                        provisioning.apply_selinux_policy(cfg, "enable")
+            with patch.object(workload_selinux, '_selinux_available', return_value=False):
+                with patch.object(workload_selinux, '_selinux_enforcing', return_value=True):
+                    with self.assertRaises(workload_selinux.SelinuxPolicyError):
+                        workload_selinux.apply_selinux_policy(cfg, "enable")
 
     def test_enable_warns_when_tooling_missing_and_permissive(self):
         with _cfg(_SELINUX_TOML, 'test-wl') as cfg:
-            with patch.object(provisioning, '_selinux_available', return_value=False):
-                with patch.object(provisioning, '_selinux_enforcing', return_value=False):
+            with patch.object(workload_selinux, '_selinux_available', return_value=False):
+                with patch.object(workload_selinux, '_selinux_enforcing', return_value=False):
                     buf = io.StringIO()
                     with redirect_stderr(buf):
-                        provisioning.apply_selinux_policy(cfg, "enable")  # no raise
+                        workload_selinux.apply_selinux_policy(cfg, "enable")  # no raise
                     self.assertIn("WARNING", buf.getvalue())
 
     def test_disable_never_hard_fails_when_tooling_missing(self):
         with _cfg(_SELINUX_TOML, 'test-wl') as cfg:
-            with patch.object(provisioning, '_selinux_available', return_value=False):
-                with patch.object(provisioning, '_selinux_enforcing', return_value=True):
-                    provisioning.apply_selinux_policy(cfg, "disable")  # must not raise
+            with patch.object(workload_selinux, '_selinux_available', return_value=False):
+                with patch.object(workload_selinux, '_selinux_enforcing', return_value=True):
+                    workload_selinux.apply_selinux_policy(cfg, "disable")  # must not raise
 
     def test_disable_removes_loaded_module(self):
         with _cfg(_SELINUX_TOML, 'test-wl') as cfg:
-            module = provisioning.selinux_module_name(cfg.name)
-            with patch.object(provisioning, '_selinux_available', return_value=True):
+            module = workload_lib.selinux_module_name(cfg.name)
+            with patch.object(workload_selinux, '_selinux_available', return_value=True):
                 with patch.object(provisioning.subprocess, 'run') as run_mock:
                     run_mock.return_value = MagicMock(returncode=0, stdout=f"{module}\nother_mod\n")
-                    provisioning.apply_selinux_policy(cfg, "disable")
+                    workload_selinux.apply_selinux_policy(cfg, "disable")
             remove_calls = [c for c in run_mock.call_args_list if c.args[0][0:2] == ["semodule", "-r"]]
             self.assertEqual(len(remove_calls), 1)
             self.assertEqual(remove_calls[0].args[0][2], module)
 
     def test_disable_skips_removal_when_not_loaded(self):
         with _cfg(_SELINUX_TOML, 'test-wl') as cfg:
-            with patch.object(provisioning, '_selinux_available', return_value=True):
+            with patch.object(workload_selinux, '_selinux_available', return_value=True):
                 with patch.object(provisioning.subprocess, 'run') as run_mock:
                     run_mock.return_value = MagicMock(returncode=0, stdout="other_mod\n")
-                    provisioning.apply_selinux_policy(cfg, "disable")
+                    workload_selinux.apply_selinux_policy(cfg, "disable")
             remove_calls = [c for c in run_mock.call_args_list if c.args[0][0:2] == ["semodule", "-r"]]
             self.assertEqual(remove_calls, [])
 
@@ -1744,50 +1745,50 @@ class TestApplySelinuxPolicy(unittest.TestCase):
             'name = "test-wl"', 'name = "test-wl"\nbundle = "bad_name"'
         )
         with _CfgDir(toml, 'test-wl') as cfg:
-            with patch.object(provisioning, '_selinux_available', return_value=True):
+            with patch.object(workload_selinux, '_selinux_available', return_value=True):
                 buf = io.StringIO()
                 with redirect_stderr(buf):
-                    with self.assertRaises(provisioning.SelinuxPolicyError):
-                        provisioning.apply_selinux_policy(cfg, "enable")
+                    with self.assertRaises(workload_selinux.SelinuxPolicyError):
+                        workload_selinux.apply_selinux_policy(cfg, "enable")
                 self.assertIn("invalid", buf.getvalue())
 
     def test_enable_missing_template_exits(self):
         with _cfg(_SELINUX_TOML, 'test-wl') as cfg:
-            with patch.object(provisioning, '_selinux_available', return_value=True):
+            with patch.object(workload_selinux, '_selinux_available', return_value=True):
                 buf = io.StringIO()
                 with redirect_stderr(buf):
-                    with self.assertRaises(provisioning.SelinuxPolicyError):
-                        provisioning.apply_selinux_policy(cfg, "enable")
+                    with self.assertRaises(workload_selinux.SelinuxPolicyError):
+                        workload_selinux.apply_selinux_policy(cfg, "enable")
                 self.assertIn("template not found", buf.getvalue())
 
     def test_enable_installs_module_success(self):
         with _cfg(_SELINUX_TOML, 'test-wl') as cfg:
-            with patch.object(provisioning, '_selinux_available', return_value=True):
+            with patch.object(workload_selinux, '_selinux_available', return_value=True):
                 with patch.object(provisioning.WorkloadConfig, 'resolve_control_file') as resolve:
                     with tempfile.TemporaryDirectory() as td:
                         template = Path(td) / "policy.cil"
                         template.write_text("(blockinherit __WL_MODULE__ base)\n")
                         resolve.return_value = template
-                        with patch.object(provisioning, 'UDICA_TEMPLATE_DIR', Path(td)):
+                        with patch.object(workload_selinux, 'UDICA_TEMPLATE_DIR', Path(td)):
                             with patch.object(provisioning.subprocess, 'run') as run_mock:
                                 run_mock.return_value = MagicMock(returncode=0)
-                                provisioning.apply_selinux_policy(cfg, "enable")
+                                workload_selinux.apply_selinux_policy(cfg, "enable")
                     install_calls = [c for c in run_mock.call_args_list if c.args[0][0:2] == ["semodule", "-i"]]
                     self.assertEqual(len(install_calls), 1)
 
     def test_enable_install_failure_exits(self):
         with _cfg(_SELINUX_TOML, 'test-wl') as cfg:
-            with patch.object(provisioning, '_selinux_available', return_value=True):
+            with patch.object(workload_selinux, '_selinux_available', return_value=True):
                 with patch.object(provisioning.WorkloadConfig, 'resolve_control_file') as resolve:
                     with tempfile.TemporaryDirectory() as td:
                         template = Path(td) / "policy.cil"
                         template.write_text("(blockinherit __WL_MODULE__ base)\n")
                         resolve.return_value = template
-                        with patch.object(provisioning, 'UDICA_TEMPLATE_DIR', Path(td)):
+                        with patch.object(workload_selinux, 'UDICA_TEMPLATE_DIR', Path(td)):
                             with patch.object(provisioning.subprocess, 'run',
                                               side_effect=provisioning.subprocess.CalledProcessError(1, ["semodule"])):
-                                with self.assertRaises(provisioning.SelinuxPolicyError):
-                                    provisioning.apply_selinux_policy(cfg, "enable")
+                                with self.assertRaises(workload_selinux.SelinuxPolicyError):
+                                    workload_selinux.apply_selinux_policy(cfg, "enable")
 
 
 # ── cmd_enable ────────────────────────────────────────────────────────────────

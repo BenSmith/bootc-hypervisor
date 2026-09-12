@@ -25,6 +25,7 @@ import cmd_info
 import cmd_inspect
 import cmd_stats
 import provisioning
+import workload_selinux
 import cmd_secret
 import substrate
 import substrate_container
@@ -925,9 +926,9 @@ class TestSelinuxBundleResolution(unittest.TestCase):
         # plain workload-style name must be rejected before lookup.
         cfg = self._config('\n[security]\nselinux_policy = true\n', bundle='../etc/evil')
         self.assertEqual(cfg.selinux_bundle, '../etc/evil')
-        with patch.object(provisioning, '_selinux_available', return_value=True):
-            with self.assertRaises(provisioning.SelinuxPolicyError):
-                provisioning.apply_selinux_policy(cfg, 'enable')
+        with patch.object(workload_selinux, '_selinux_available', return_value=True):
+            with self.assertRaises(workload_selinux.SelinuxPolicyError):
+                workload_selinux.apply_selinux_policy(cfg, 'enable')
 
     def test_underscore_bundle_suggests_hyphenated_form(self):
         # Footgun: users copy the SELinux *type* name (underscores) into
@@ -935,10 +936,10 @@ class TestSelinuxBundleResolution(unittest.TestCase):
         # invalid-bundle error should suggest the hyphenated form.
         cfg = self._config('\n[security]\nselinux_policy = true\n', bundle='vncdesktop_wayfire')
         err = io.StringIO()
-        with patch.object(provisioning, '_selinux_available', return_value=True):
+        with patch.object(workload_selinux, '_selinux_available', return_value=True):
             with redirect_stderr(err):
-                with self.assertRaises(provisioning.SelinuxPolicyError):
-                    provisioning.apply_selinux_policy(cfg, 'enable')
+                with self.assertRaises(workload_selinux.SelinuxPolicyError):
+                    workload_selinux.apply_selinux_policy(cfg, 'enable')
         self.assertIn('vncdesktop-wayfire', err.getvalue())
 
     def test_missing_bundle_lists_available(self):
@@ -946,12 +947,12 @@ class TestSelinuxBundleResolution(unittest.TestCase):
         # ship a CIL, plus a close-match suggestion.
         cfg = self._config('\n[security]\nselinux_policy = true\n', bundle='vncdesktop-wayfir')
         err = io.StringIO()
-        with patch.object(provisioning, '_selinux_available', return_value=True), \
-                patch.object(provisioning, '_available_bundles',
+        with patch.object(workload_selinux, '_selinux_available', return_value=True), \
+                patch.object(workload_selinux, '_available_bundles',
                              return_value=['vncdesktop-sway', 'vncdesktop-wayfire']):
             with redirect_stderr(err):
-                with self.assertRaises(provisioning.SelinuxPolicyError):
-                    provisioning.apply_selinux_policy(cfg, 'enable')
+                with self.assertRaises(workload_selinux.SelinuxPolicyError):
+                    workload_selinux.apply_selinux_policy(cfg, 'enable')
         out = err.getvalue()
         self.assertIn('available bundles', out)
         self.assertIn('vncdesktop-wayfire', out)
