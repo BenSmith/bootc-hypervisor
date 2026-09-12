@@ -16,12 +16,12 @@ import tomllib
 from pathlib import Path
 
 from egress_policy import (
-    INSPECT_POLICY_FILE, vm_inspect_policy_text, vm_uses_inspect,
+    INSPECT_POLICY_FILE, container_inspect_policy_text, vm_inspect_policy_text,
+    vm_uses_inspect,
 )
 from config_parser import SOCKET_DIR
 from config_parser import container_uses_inspect
 from workload_lib import workload_config_dir, workload_config_path
-from container_network_config import container_inspect_policy_text
 from run_files import GENERATED_BY_RE, RUN_TREE_SCANS
 
 

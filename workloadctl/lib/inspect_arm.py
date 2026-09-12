@@ -105,8 +105,8 @@ from dataclasses import dataclass
 from broker_config import container_uses_credentials, vm_uses_credentials
 from config_parser import container_uses_inspect
 from egress_policy import (
-    inspect_policy_path, inspect_status_path, internal_hosts,
-    vm_inspect_policy_text, vm_uses_inspect,
+    container_inspect_policy_text, inspect_policy_path, inspect_status_path,
+    internal_hosts, vm_inspect_policy_text, vm_uses_inspect,
 )
 from egress_status import clear_status
 from helper_main import log, run
@@ -114,14 +114,12 @@ from nft import (add_listener_addresses, purge_internal_exemptions,
                  remove_listener_addresses)
 from nft_constants import NFT_BIN, NFT_PROXY_SKELETON, NFT_SKELETON
 from nft_elements import (
-    inspect_element_commands, internal_ok_commands, vm_internal_resolve,
+    container_internal_resolve, inspect_element_commands, internal_ok_commands,
+    vm_internal_resolve,
 )
 from workload_addr import broker_listen_address, ensure_advertised_interface
 from workload_lib import load_workload_config
-from container_network_config import (
-    container_inspect_policy_text, container_internal_entries,
-    container_internal_resolve,
-)
+from container_network_config import container_internal_entries
 
 
 @dataclass(frozen=True)

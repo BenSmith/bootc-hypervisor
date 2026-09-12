@@ -55,7 +55,10 @@ from egress_status import clear_status
 from helper_main import log, run
 from nft import purge_uid_elements
 from nft_constants import NFT_BIN, NFT_SKELETON
-from nft_elements import vm_filter_commands, vm_resolve_status_path
+from nft_elements import (
+    container_allow_resolved, container_filter_commands, vm_filter_commands,
+    vm_resolve_status_path,
+)
 from vm_defs import EGRESS_DEFAULT
 from vm_network_config import (
     vm_allow_resolved,
@@ -63,9 +66,6 @@ from vm_network_config import (
     vm_resolve_policy_path,
 )
 from workload_lib import load_workload_config
-from container_network_config import (
-    container_allow_resolved, container_filter_commands,
-)
 
 
 @dataclass(frozen=True)

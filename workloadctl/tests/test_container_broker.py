@@ -34,7 +34,7 @@ from broker_config import (
     broker_credential,
 )
 from workload_addr import UID_MIN, broker_listen_address
-from container_network_config import validate_container_network
+from container_validate import validate_container_network
 
 import tomllib
 

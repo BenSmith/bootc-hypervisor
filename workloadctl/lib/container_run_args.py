@@ -710,7 +710,7 @@ def _container_ca_delivery_args(spec) -> list:
     container counterpart).
 
     "image" needs no action here -- the claim is that the image already
-    trusts this workload's CA (validate_container_network refuses the value
+    trusts this workload's CA (container_validate.validate_container_network refuses the value
     on a bundle with no Containerfile, so the claim was at least plausible
     at validate time; R9 -- this cannot VERIFY it, only the operator's
     assertion is on record).
