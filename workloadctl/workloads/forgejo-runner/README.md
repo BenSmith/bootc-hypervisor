@@ -102,6 +102,10 @@ cache.
   credentials — they are bound to this VM's `/var/lib/systemd/credential.secret`,
   which a rebuild regenerates. Until then builds push unsigned with a warning.
   See `docs/ci-image-signing.md`.
+- **Jobs run as root in the guest.** The `native:host` executor runs steps on
+  the host OS as `root`, which is deliberate — the hypervisor's workflows assume
+  `sudo podman`, `/run/credentials/` and privileged image builds. The VM is the
+  isolation boundary; nothing inside it is unprivileged.
 - **Egress is open.** A build host reaches arbitrary registries and mirrors, so
   there is no allowlist that both works and means anything. See
   `docs/workloads.md` on egress posture.
