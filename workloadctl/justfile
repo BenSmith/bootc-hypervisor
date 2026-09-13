@@ -79,16 +79,32 @@ test-all-runtime-remote host target="local":
 # Run all unit tests.
 # -t . makes the repo root the top-level dir, so modules import as `tests.<name>`
 # and tests/__init__.py runs first -- that is what puts lib/ on sys.path.
+# -v only when stdout is a terminal: piped (CI, redirects) this suite prints
+# ~5,000 lines for 4,947 tests and the failure line drowns in them. The check
+# lives in the recipe body because fd 1 must be the real terminal -- a backtick
+# variable would capture stdout into a pipe and always read as non-TTY.
 test:
-  python3 -B -m unittest discover -t . -s tests -p 'test_*.py' -v
+  #!/usr/bin/env bash
+  set -euo pipefail
+  args=()
+  [ -t 1 ] && args+=(-v)
+  python3 -B -m unittest discover -t . -s tests -p 'test_*.py' "${args[@]}"
 
 # Run unit tests only (no integration)
 test-unit:
-  python3 -B -m unittest tests.test_workload_lib tests.test_generator tests.test_write_env tests.test_metrics tests.test_stdlib_only -v
+  #!/usr/bin/env bash
+  set -euo pipefail
+  args=()
+  [ -t 1 ] && args+=(-v)
+  python3 -B -m unittest tests.test_workload_lib tests.test_generator tests.test_write_env tests.test_metrics tests.test_stdlib_only "${args[@]}"
 
 # Run integration tests
 test-integration:
-  python3 -B -m unittest tests.test_integration -v
+  #!/usr/bin/env bash
+  set -euo pipefail
+  args=()
+  [ -t 1 ] && args+=(-v)
+  python3 -B -m unittest tests.test_integration "${args[@]}"
 
 # Render every shipped bundle's units into DIR, for diffing across a refactor.
 # Nothing is committed: take a baseline before the change, another after, and
