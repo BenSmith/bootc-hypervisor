@@ -66,11 +66,13 @@ write_files:
   - path: /etc/forgejo-runner/registration.env
     permissions: '0600'
     content: |
-      # ${SECRET?forgejo-runner-token} resolves to "" if the credstore entry is
-      # absent. The bootstrap registers only when the token is non-empty, so a
-      # blank value is intentional and not an error. The token is one-shot; the
-      # host setup hook (setup.sh) mints a fresh one on every provision, which is
-      # why this is read from the credstore rather than baked into the seed.
+      # The host setup hook (setup.sh) creates the runner on the Forgejo server
+      # and seals its uuid+token here. Each resolves to "" if the credstore
+      # entry is absent, and the bootstrap declares a connection only when both
+      # are non-empty, so a blank value is intentional and not an error. Read
+      # from the credstore rather than baked into the seed because the pair is
+      # regenerated on every provision.
+      RUNNER_UUID=${SECRET?forgejo-runner-uuid}
       RUNNER_TOKEN=${SECRET?forgejo-runner-token}
       FORGEJO_URL=${FORGEJO_URL}
       RUNNER_VERSION=${RUNNER_VERSION}
@@ -228,35 +230,38 @@ write_files:
         echo "    use-sigstore-attachments: true"
       } > /etc/containers/registries.d/registry-local-sigstore.yaml
 
-      # 5. Register and enable the runner. The token is minted by the host setup
-      # hook (setup.sh) on every provision and read from the credstore, because a
-      # Forgejo registration token is one-shot and cannot be replayed across a
-      # rebuild. Guard on an existing .runner so a re-render with the same disk
-      # does not try to register twice with a consumed token.
+      # 5. Declare the runner's server connection and start it. The host setup
+      # hook (setup.sh) creates the runner on the Forgejo server and seals its
+      # uuid+token into the credstore on every provision, so there is no
+      # registration handshake here: `forgejo-runner register` is deprecated in
+      # v13 ("declare connections in the runner configuration instead"), and the
+      # registration-token endpoint it used is deprecated too.
       . /etc/forgejo-runner/registration.env
-      # $${RUNNER_TOKEN} escapes template substitution so the sourced shell var
-      # is used, keeping the decrypted token off the script text.
-      if [ -s /var/lib/forgejo-runner/.runner ]; then
-        echo "Already registered; enabling the runner."
-        systemctl enable --now forgejo-runner.service
-      elif [ -n "$${RUNNER_TOKEN}" ]; then
-        # Wait for Forgejo's API; a registration failure means re-issuing a token.
-        for _ in $(seq 1 60); do
-          if curl -sf "${FORGEJO_URL}/api/healthz" >/dev/null 2>&1; then
-            break
-          fi
-          sleep 5
-        done
-        cd /var/lib/forgejo-runner
-        /usr/local/bin/forgejo-runner register \
-          --no-interactive \
-          --instance "${FORGEJO_URL}" \
-          --token "$${RUNNER_TOKEN}" \
-          --name "${WORKLOADCTL_WORKLOAD_NAME}-runner" \
-          --labels native:host
+      # $${RUNNER_UUID} / $${RUNNER_TOKEN} escape template substitution so the
+      # sourced shell vars are used, keeping the decrypted values off the script
+      # text. The block is appended with printf rather than a heredoc: every line
+      # stays indented inside cloud-init's block scalar, so an indentation slip
+      # can at worst break this shell command (caught by `bash -n`) rather than
+      # under-run the block scalar and corrupt the whole user-data document —
+      # which a column-0 heredoc terminator would. Guarded so a re-run does not
+      # append it twice.
+      if [ -n "$${RUNNER_UUID}" ] && [ -n "$${RUNNER_TOKEN}" ]; then
+        if ! grep -q '^server:' /etc/forgejo-runner/config.yml; then
+          {
+            printf '%s\n' \
+              'server:' \
+              '  connections:' \
+              '    forge:' \
+              "      url: ${FORGEJO_URL}/" \
+              "      uuid: $${RUNNER_UUID}" \
+              "      token: $${RUNNER_TOKEN}" \
+              '      labels:' \
+              '        - native:host'
+          } >> /etc/forgejo-runner/config.yml
+        fi
         systemctl enable --now forgejo-runner.service
       else
-        echo "No registration token in the credstore; skipping registration."
+        echo "No runner credentials in the credstore; not starting the runner."
       fi
 
       # 6. Snapshot state for post-mortem.

@@ -45,8 +45,9 @@ user_data_file = "/usr/share/workloadctl/workloads/forgejo-runner/cloud-init/use
 
 [vm.cloud_init.template_vars]
 # Pinned for reproducibility — bump after reading the release notes at
-# https://code.forgejo.org/forgejo/runner.
-RUNNER_VERSION = "6.2.2"
+# https://code.forgejo.org/forgejo/runner. v13 is the floor for the modern
+# flow; our previous pin (6.2.2) predates `server.connections`.
+RUNNER_VERSION = "13.1.0"
 # The forge this runner registers against. Reach it by the name the host fronts
 # it with (a Caddy vhost), so the runner verifies TLS against the homelab root.
 FORGEJO_URL = "https://forge.local"

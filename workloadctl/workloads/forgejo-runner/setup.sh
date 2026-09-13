@@ -25,6 +25,7 @@ WORKLOAD_INSTANCE_DIR="${WORKLOAD_INSTANCE_DIR:?not set — run via workloadctl 
 # admin token is unqualified for the same reason, plus it is read by this script
 # rather than by a workload.
 ADMIN_CRED=/etc/credstore.encrypted/forgejo-admin-token
+UUID_CRED=/etc/credstore.encrypted/forgejo-runner-uuid
 TOKEN_CRED=/etc/credstore.encrypted/forgejo-runner-token
 RUNNER_NAME="${WORKLOAD_NAME}-runner"
 
@@ -94,37 +95,41 @@ case "${1:-}" in
 
     prune_stale
 
-    # GET /admin/actions/runners/registration-token. Deprecated in Forgejo 15
-    # ("use the web UI or /admin/actions/runners instead") but still present;
-    # the modern endpoint registers the runner outright and returns its own
-    # token, which forgejo-runner's `register` does not accept. Revisit when the
-    # deprecated endpoint is removed. The response is a bare JSON string, but
-    # accept a {"token": ...} object too so a shape change is not a silent empty
-    # token.
-    token="$(curl -fsS -H "Authorization: token ${ADMIN_TOKEN}" \
-              "${FORGEJO_URL}/api/v1/admin/actions/runners/registration-token" \
-            | python3 -c 'import json,sys
-d = json.load(sys.stdin)
-print(d if isinstance(d, str) else d.get("token", ""))')"
-    if [ -z "$token" ]; then
-      echo "ERROR: Forgejo returned an empty registration token." >&2
+    # Create the runner on the server and take its credentials back. This is
+    # the modern flow: POST /admin/actions/runners {name, ephemeral} ->
+    # {id, uuid, token}. Both predecessors are deprecated — the
+    # GET .../registration-token endpoint, and `forgejo-runner register` itself
+    # (v13: "declare connections in the runner configuration instead") — so
+    # neither is used. The runner's identity is the uuid+token pair; the seed
+    # declares it as a server connection.
+    response="$(curl -fsS -X POST \
+                  -H "Authorization: token ${ADMIN_TOKEN}" \
+                  -H "Content-Type: application/json" \
+                  -d "{\"name\": \"${RUNNER_NAME}\", \"ephemeral\": false}" \
+                  "${FORGEJO_URL}/api/v1/admin/actions/runners")"
+    uuid="$(printf '%s' "$response" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("uuid",""))')"
+    token="$(printf '%s' "$response" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("token",""))')"
+    if [ -z "$uuid" ] || [ -z "$token" ]; then
+      echo "ERROR: Forgejo did not return a runner uuid+token; got:" >&2
+      printf '%s\n' "$response" >&2
       exit 1
     fi
 
-    # Seal it under the name the seed's ${SECRET?forgejo-runner-token} resolves.
-    # systemd-creds binds the plaintext to the name, so the seal name and the
-    # credstore basename must agree. mkdir first: systemd-creds will not create
-    # the credstore directory, and a host that has never run `secret create`
-    # does not have one.
+    # Seal each under the name the seed's ${SECRET?...} resolves. systemd-creds
+    # binds the plaintext to the name, so seal name and credstore basename must
+    # agree. mkdir first: systemd-creds will not create the credstore directory,
+    # and a host that has never run `secret create` does not have one. Both
+    # values are single-line, so they splice into the seed's write_files
+    # safely — a raw multi-line secret would break the block scalar.
     install -d -m 0700 /etc/credstore.encrypted
-    printf '%s' "$token" \
-      | systemd-creds encrypt --name=forgejo-runner-token - "$TOKEN_CRED"
-    chmod 0600 "$TOKEN_CRED"
-    echo "  minted registration token for ${FORGEJO_URL} (runner ${RUNNER_NAME})"
+    printf '%s' "$uuid"  | systemd-creds encrypt --name=forgejo-runner-uuid  - "$UUID_CRED"
+    printf '%s' "$token" | systemd-creds encrypt --name=forgejo-runner-token - "$TOKEN_CRED"
+    chmod 0600 "$UUID_CRED" "$TOKEN_CRED"
+    echo "  registered runner ${RUNNER_NAME} on ${FORGEJO_URL} (connection declared in the seed)"
     ;;
 
   disable)
-    rm -f "$TOKEN_CRED"
+    rm -f "$UUID_CRED" "$TOKEN_CRED"
     ;;
 
   artifacts)
@@ -133,6 +138,9 @@ print(d if isinstance(d, str) else d.get("token", ""))')"
     # the script's exit status and read as "does not implement the action".
     if [ -e "$TOKEN_CRED" ]; then
       echo "file $TOKEN_CRED"
+    fi
+    if [ -e "$UUID_CRED" ]; then
+      echo "file $UUID_CRED"
     fi
     ;;
 

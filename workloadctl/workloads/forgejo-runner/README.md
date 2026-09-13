@@ -22,15 +22,15 @@ run jobs.
 
 Nothing here is precious. Build artifacts go to the registry or the forge, the
 workspace is scratch, and container image layers live in the host `zot` registry.
-The runner's only state is its registration, and a Forgejo registration token is
-**one-shot** — so instead of persisting it, `setup.sh` mints a fresh one on every
-provision and the cloud-init seed reads it from the credstore.
+The runner's only state is its server-side registration, which is cheap to
+recreate: `setup.sh` creates the runner on the Forgejo server on every
+provision, and the seed declares the connection from it.
 
 ## Prerequisites
 
 1. A running Forgejo instance you can reach from the VM.
-2. A **Forgejo admin API token**. The host setup hook uses it to mint a
-   registration token; it never enters the VM.
+2. A **Forgejo admin API token**. The host setup hook uses it to create the
+   runner; it never enters the VM.
 
    ```sh
    sudo workloadctl secret create forgejo-admin-token
@@ -46,25 +46,28 @@ sudo workloadctl edit forgejo-runner     # set [vm.cloud_init.template_vars].FOR
 sudo workloadctl enable forgejo-runner
 ```
 
-`enable` runs the host setup hook first, which mints a registration token and
-seals it at `/etc/credstore.encrypted/forgejo-runner-token`; the seed is built
-afterwards and carries it into the guest, which registers on first boot.
+`enable` runs the host setup hook first, which creates the runner on the server
+and seals its uuid and token at
+`/etc/credstore.encrypted/forgejo-runner-{uuid,token}`; the seed is built
+afterwards and declares them as a `server.connections` entry, so the runner
+starts already registered.
 
 Watch first boot (cloud-init installs packages, fetches the runner binary, and
-registers):
+declares the connection):
 
 ```sh
 sudo workloadctl exec forgejo-runner -- tail -f /var/log/forgejo-runner-bootstrap.log
 ```
 
 If the admin token is absent, `enable` warns and continues — the VM provisions
-but the runner stays unregistered. Create the token and re-run `enable` to mint.
+but the runner stays unregistered. Create the token and re-run `enable` to create
+the runner.
 
 ## Reset to a clean baseline
 
 A total rebuild — the workload user and disks are removed, then re-provisioned
-from the base cloud image, which re-runs the host setup hook and mints a fresh
-token:
+from the base cloud image, which re-runs the host setup hook and creates the
+runner afresh:
 
 ```sh
 sudo workloadctl disable --purge forgejo-runner
@@ -72,7 +75,8 @@ sudo workloadctl enable        forgejo-runner
 ```
 
 `workloadctl update` is **not** the reset verb: it rebuilds only the system disk
-and does not re-run the host setup hook, so the seed would keep a consumed token.
+and does not re-run the host setup hook, so the seed would keep the previous
+runner's credentials.
 
 The previous registration leaves an offline runner row in Forgejo; the hook
 prunes any runner with this name on the next provision.
@@ -87,12 +91,12 @@ cache.
 
 ## Caveats
 
-- **Deprecated registration endpoint.** `setup.sh` uses
-  `GET /admin/actions/runners/registration-token`, which Forgejo 15 marks
-  deprecated in favour of `POST /admin/actions/runners`. The modern endpoint
-  registers the runner outright and returns its own token, which
-  `forgejo-runner register` does not accept; revisit when the deprecated endpoint
-  is removed.
+- **Registration flow.** The runner is created server-side
+  (`POST /api/v1/admin/actions/runners`) and its uuid+token declared as a
+  `server.connections` entry in `config.yml` — the modern flow. Neither the
+  deprecated `GET .../registration-token` endpoint nor the deprecated
+  `forgejo-runner register` command is used. This requires **runner v13+** (pinned
+  in `workload.toml`); older runners have no `server.connections`.
 - **Image-signing key.** Not provisioned here. After (re-)provisioning, run the
   `seal-signing-key` workflow once to seal the key into host-key systemd
   credentials — they are bound to this VM's `/var/lib/systemd/credential.secret`,
