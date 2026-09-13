@@ -19,6 +19,20 @@ import os
 import sys
 from pathlib import Path
 
+# Keep the suite safe however it is launched, `just test` or a bare
+# `python3 -m unittest`. The justfile's test recipe passes -B AND exports
+# PYTHONDONTWRITEBYTECODE, but only the export reaches the subprocesses, which
+# is the half that matters: this suite mutation-tests lib/ deliberately
+# (perturb a file, run, restore it inside the same second), and a child that
+# writes a .pyc during a perturbation window records the original mtime, which
+# a later import then trusts and executes as stale bytecode -- a false failure
+# that reads as a real one (a tar that exits 2 for no reason). -B alone cannot
+# fix it: sys.dont_write_bytecode is per-interpreter and is not inherited. So
+# this package pins both, for the parent (in case it was started without -B)
+# and -- via os.environ -- for every child script_env() launches.
+os.environ.setdefault("PYTHONDONTWRITEBYTECODE", "1")
+sys.dont_write_bytecode = True
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 TESTS_DIR = REPO_ROOT / "tests"
 

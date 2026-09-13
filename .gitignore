@@ -20,6 +20,7 @@ __pycache__/
 htmlcov/
 .mypy_cache/
 .ruff_cache/
+.codegraph/
 bin/cosy
 man/cosy.1
 .reference/
