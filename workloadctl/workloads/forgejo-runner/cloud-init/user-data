@@ -113,6 +113,27 @@ write_files:
         # Separate from the action cache dir to avoid double-nested path resolution.
         workdir_parent: /var/lib/forgejo-runner/workspace
 
+  # The systemd unit. It is written by cloud-init rather than installed from the
+  # workloadctl support tree, because workloadctl is optional in the guest (only
+  # gate-rung jobs need it) — a unit file must not be hostage to an optional
+  # install. The bootstrap daemon-reloads after write_files has run.
+  - path: /etc/systemd/system/forgejo-runner.service
+    permissions: '0644'
+    content: |
+      [Unit]
+      Description=Forgejo Actions runner (native)
+      After=network-online.target
+      Wants=network-online.target
+
+      [Service]
+      WorkingDirectory=/var/lib/forgejo-runner
+      ExecStart=/usr/local/bin/forgejo-runner daemon --config /etc/forgejo-runner/config.yml
+      Restart=on-failure
+      RestartSec=5
+
+      [Install]
+      WantedBy=multi-user.target
+
   - path: /usr/local/bin/forgejo-runner-bootstrap
     permissions: '0755'
     content: |
@@ -215,9 +236,9 @@ write_files:
         mv -f /usr/local/bin/.forgejo-runner.new /usr/local/bin/forgejo-runner
       fi
 
-      install -m 0644 \
-        /usr/share/workloadctl/workloads/forgejo-runner/forgejo-runner.service \
-        /etc/systemd/system/forgejo-runner.service
+      # The unit itself is written by cloud-init (write_files above) — it cannot
+      # come from the workloadctl support tree because workloadctl is optional in
+      # the guest. Just make systemd aware of it.
       systemctl daemon-reload
 
       # 4. containers/image sigstore config. CI signs images at push time
