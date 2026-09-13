@@ -1,6 +1,13 @@
 ARG BASE_IMAGE=ghcr.io/bensmith/fedora-bootc-minimal:latest
+# The rpm-builder's base: the SAME Fedora the target image is built from
+# (fedora-versions.yml), so the `just test` gate in this stage validates
+# against the Python the RPM will actually run on. fedora:latest would drift
+# ahead on every release and gate the code against a different interpreter.
+# Every caller passes it explicitly (justfile + CI workflows); the default
+# tracks current stable.
+ARG FEDORA_VERSION=44
 
-FROM fedora:latest AS rpm-builder
+FROM fedora:${FEDORA_VERSION} AS rpm-builder
 COPY workloadctl/ /workloadctl/
 # openssl is the CLI, not the library: the test suite mints a CA and its leaves
 # by shelling out to it (tests/test_ca.py, test_mint.py and three others),

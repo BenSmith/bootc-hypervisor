@@ -147,6 +147,7 @@ jobs:
             --cap-add=all \
             --ipc=host \
             --build-arg BASE_IMAGE=ghcr.io/${OWNER}/fedora-bootc-minimal:${VERSION} \
+            --build-arg FEDORA_VERSION=${VERSION} \
             -f hypervisor.Containerfile \
             -t localhost/hypervisor-bootc:build \
             .

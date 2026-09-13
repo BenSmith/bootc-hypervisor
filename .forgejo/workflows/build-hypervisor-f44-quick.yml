@@ -96,6 +96,7 @@ jobs:
             --ipc=host \
             --network=host \
             --build-arg BASE_IMAGE=${REGISTRY}/fedora-bootc-minimal:${VERSION} \
+            --build-arg FEDORA_VERSION=${VERSION} \
             -f hypervisor.Containerfile \
             -t "localhost/hypervisor-bootc:build-${VERSION}" \
             .

@@ -164,6 +164,7 @@ build-base: sync-cosy
   podman build \
     --env=http_proxy={{proxy}} --env=https_proxy={{proxy}} \
     --build-arg BASE_IMAGE=ghcr.io/bensmith/fedora-bootc-minimal:{{fedora_version}} \
+    --build-arg FEDORA_VERSION={{fedora_version}} \
     -t localhost/hypervisor-bootc:{{fedora_version}}-{{tag}} \
     -t localhost/hypervisor-bootc:{{fedora_version}} \
     -t localhost/hypervisor-bootc:latest \
@@ -185,6 +186,7 @@ build-base-local: sync-cosy
   podman build \
     --network=host \
     --build-arg BASE_IMAGE=localhost/fedora-bootc-minimal:{{fedora_version}} \
+    --build-arg FEDORA_VERSION={{fedora_version}} \
     --build-arg ENABLE_PASSWORDLESS_SUDO=true \
     --env=http_proxy={{proxy}} --env=https_proxy={{proxy}} \
     -t localhost/hypervisor-bootc:{{fedora_version}} \
@@ -377,6 +379,7 @@ _generate-vm-config:
   #!/usr/bin/env bash
   set -euo pipefail
   if [ -f config.toml ]; then
+    echo "Reusing existing config.toml (stale VM_PASSWORD/ssh key inside? rm it to regenerate)" >&2
     exit 0
   fi
   user="${VM_USER:-$(whoami)}"
@@ -440,8 +443,17 @@ relabel-iso input output label:
   sudo mount -o loop,ro "{{input}}" "$MOUNT_DIR"
   WORK_DIR="$TMPDIR/iso"
   mkdir -p "$WORK_DIR"
-  sudo cp -a "$MOUNT_DIR"/* "$WORK_DIR/" 2>/dev/null || true
-  sudo cp -a "$MOUNT_DIR"/.[!.]* "$WORK_DIR/" 2>/dev/null || true
+  # A non-matching glob is left as a literal '*' and cp fails on it -- the
+  # original `|| true` on both lines swallowed that AND any real copy failure
+  # (disk full, I/O), which then proceeded to xorriso and emitted a broken
+  # installer silently. dotglob+nullglob make one cp copy the whole tree
+  # (hidden files included) and leave no literal '*'. A mounted ISO is never
+  # empty, so the only way cp fails now is a genuine error or an empty mount
+  # -- both of which SHOULD abort under set -e rather than produce a broken
+  # ISO.
+  shopt -s dotglob nullglob
+  sudo cp -a "$MOUNT_DIR"/* "$WORK_DIR/"
+  shopt -u dotglob nullglob
   sudo umount "$MOUNT_DIR"
   ORIG_LABEL=$(isoinfo -d -i "{{input}}" | grep "Volume id:" | sed 's/Volume id: //')
   echo "Original label: $ORIG_LABEL"
