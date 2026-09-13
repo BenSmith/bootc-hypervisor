@@ -336,7 +336,7 @@ build-iso-nvidia-rpmfusion rootfs="xfs":
   @just _build-iso ghcr.io/bensmith/hypervisor-nvidia:rpmfusion nvidia-rpmfusion HV-NV-RPMFUSION hypervisor-nvidia-rpmfusion {{rootfs}}
 
 build-iso-nvidia-rpmfusion-local rootfs="xfs":
-  @just _build-iso {{local_registry}}/hypervisor-nvidia:rpmfusion-latest nvidia-rpmfusion HV-NV-RPMFUSION hypervisor-nvidia-rpmfusion {{rootfs}}
+  @just _build-iso {{local_registry}}/hypervisor-nvidia:rpmfusion nvidia-rpmfusion HV-NV-RPMFUSION hypervisor-nvidia-rpmfusion {{rootfs}}
 
 build-iso-nvidia-negativo17 rootfs="xfs":
   @just _build-iso ghcr.io/bensmith/hypervisor-nvidia:negativo17 nvidia-negativo17 HV-NV-NEG17 hypervisor-nvidia-negativo17 {{rootfs}}
@@ -502,7 +502,7 @@ aio-local vmname="hypervisor-test" memory="4096" vcpus="2" rootfs="xfs" size="20
     --vcpus {{vcpus}} \
     --disk path=/var/lib/libvirt/images/{{vmname}}-{{tag}}.qcow2,format=qcow2 \
     --import \
-    --os-variant fedora41 \
+    --os-variant fedora{{fedora_version}} \
     --network network=default \
     --graphics spice,gl.enable=yes,listen=none \
     --video virtio \
