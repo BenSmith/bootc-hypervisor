@@ -2363,6 +2363,48 @@ class TestValidateContainerNetwork(unittest.TestCase):
     def test_hosts_only_needs_no_ca_delivery(self):
         self.assertEqual(validate_container_network({"hosts": ["*.pypi.org"]}), [])
 
+    # --- [network].ports -- spliced raw into --publish, so alphabet-checked ---
+    def test_absent_ports_is_clean(self):
+        self.assertEqual(validate_container_network({}), [])
+
+    def test_ports_not_a_list_is_an_error(self):
+        errors = validate_container_network({"ports": "8080:80"})
+        self.assertTrue(
+            any("[network].ports must be an array" in e for e in errors), errors)
+
+    def test_every_shape_podman_accepts_validates(self):
+        specs = ["80", "8080:80", "8000-9000:80/tcp", ":8080",
+                 "127.0.0.1:8080:80", "[::1]:8080:80/udp"]
+        for spec in specs:
+            self.assertEqual(
+                validate_container_network({"ports": [spec]}), [], spec)
+
+    def test_a_port_that_would_corrupt_the_unit_is_refused(self):
+        # A space splits the ExecStart token in two; a double quote ends the
+        # systemd argument early; % and $ are expanded by systemd at unit
+        # load. None can appear in a real publish spec, so all are refused.
+        for spec in ['8080:80 " && touch /pwned', "8080:80%n", "8080:80$x",
+                     "8080:80\\"]:
+            errors = validate_container_network({"ports": [spec]})
+            self.assertTrue(errors, spec)
+            self.assertIn("[network].ports[0]", errors[0])
+
+    def test_per_container_bridge_ports_get_the_same_check(self):
+        """Bridge mode publishes per container; those specs reach the same
+        raw --publish splice, so validate_workload_config routes them through
+        the same alphabet check."""
+        config = {
+            "workload": {"name": "web", "mode": "bridge"},
+            "containers": [{
+                "name": "proxy",
+                "container": {"image": "docker.io/x/y:latest"},
+                "network": {"ports": ["8888:80 bad"]},
+            }],
+        }
+        errors = validate_workload_config(config)
+        self.assertTrue(
+            any("containers[proxy].network.ports" in e for e in errors), errors)
+
     # --- the mode = "host" delta (build spec §6 delta 2), settled by P0-1 ---
     #
     # Measured on hardware: under the default `userns = "keep-id"` only ONE

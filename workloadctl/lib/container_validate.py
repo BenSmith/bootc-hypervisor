@@ -30,6 +30,61 @@ from egress_ca import RESERVED_GUEST_ENV
 from egress_policy import POLICY_METHODS, POLICY_METHODS_REFUSED, hostname_match
 
 
+# The alphabet a podman publish spec may contain:
+# `[[ip:]hostPort:]containerPort[/proto]` -- numeric ports and ranges, IPv4
+# dots, IPv6 in brackets, the colons and a slash for the protocol. Nothing
+# else: podman accepts no character outside this set (the publish host is an
+# IP, not a name), so there is nothing it accepts that this rejects.
+#
+# WHY CHECK AT ALL. A publish spec is spliced raw into the generated unit's
+# ExecStart -- the builders do not dq() it, because a valid spec needs no
+# quoting and configs are trusted. But that rawness is exactly why an
+# *invalid* one matters: a space would split the ExecStart token in two, a
+# double quote would end the systemd argument early, and `%`/`$` would be
+# expanded by systemd at unit load. The control-char walker already blocks
+# the only injection vector (a newline); this closes the "silently corrupts
+# the unit" class for the one raw-interpolated field that had no check of
+# its own.
+PUBLISH_SPEC_ALPHABET = frozenset(
+    "0123456789"
+    "abcdefghijklmnopqrstuvwxyz"
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    ":.[]-/"
+)
+
+
+def validate_publish_ports(ports, where: str) -> list[str]:
+    """Validate one list of podman publish specs. Returns error strings.
+
+    `where` names the config path for the message (e.g. "[network].ports" or
+    "containers[proxy].network.ports"). Both call sites -- the workload-level
+    [network] table and a bridge-mode container's own [containers.network] --
+    feed their ports through here, because both are spliced raw into the
+    generated unit by the same `--publish {port}` builder. Absent (None) is
+    clean; a non-list or a spec carrying a character outside podman's alphabet
+    is an error.
+    """
+    errors = []
+    if ports is None:
+        return []
+    if not isinstance(ports, list):
+        return [f"{where} must be an array of publish specs, "
+                f"got {type(ports).__name__}"]
+    for i, spec in enumerate(ports):
+        if not isinstance(spec, str) or not spec.strip():
+            errors.append(f"{where}[{i}] must be a non-empty string")
+            continue
+        bad = {c for c in spec if c not in PUBLISH_SPEC_ALPHABET}
+        if bad:
+            shown = ", ".join(repr(c) for c in sorted(bad))
+            errors.append(
+                f"{where}[{i}] {spec!r} contains {shown}, which cannot "
+                f"appear in a podman publish spec "
+                f"(`[[ip:]hostPort:]containerPort[/proto]`); a value with "
+                f"these would corrupt the generated unit's ExecStart")
+    return errors
+
+
 def validate_container_network(net: dict, config: dict | None = None) -> list[str]:
     """Validate [network] on a container workload. Returns a list of error
     strings. Implements every numbered rule in the container egress-parity
@@ -47,6 +102,13 @@ def validate_container_network(net: dict, config: dict | None = None) -> list[st
     errors: list[str] = []
     if not isinstance(net, dict):
         return ["[network] must be a table"]
+
+    # --- [network].ports -- the one raw-interpolated field with no check ---
+    # (The egress rules below are validated to the letter; publish specs are
+    # spliced into --publish without dq(), so they get their own alphabet
+    # check. Runs before the host-mode branch: a malformed port is a typo in
+    # any mode, even one that ignores ports.)
+    errors.extend(validate_publish_ports(net.get("ports"), "[network].ports"))
 
     # --- The mode = "host" delta (build spec §6 delta 2) ---
     # First, and on its own: every other rule below describes how to spell an

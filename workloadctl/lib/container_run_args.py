@@ -772,6 +772,15 @@ def podman_run_args(spec, service_type, wl_lifecycle, systemd_mode,
     `volume_flags` is passed in because the caller expands the volumes ahead
     of the [Unit] section, where their out-of-tree host paths become
     RequiresMountsFor= -- see volume_args.
+
+    Quoting boundary: free-form values (image, command, env values, volume
+    specs, the container name) go through dq(), because systemd would
+    otherwise expand or re-split them. Ports, capabilities, devices and
+    resource limits are spliced raw on purpose -- they are format-constrained
+    (podman's own grammars) and configs are trusted. The raw ones are still
+    guarded: the control-char walker blocks newlines (the only systemd
+    injection vector), and validate_publish_ports holds a publish spec to
+    podman's alphabet. If you add a free-form field, put it on the dq() side.
     """
     container, uid, name, mode = spec.container, spec.uid, spec.name, spec.mode
 

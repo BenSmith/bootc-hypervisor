@@ -19,7 +19,9 @@ from workload_lib import (
     WORKLOAD_TOKEN_PATTERN, _LIFTED_CONTAINER_KEYS, infer_workload_kind,
     normalize_containers,
 )
-from container_validate import validate_container_network
+from container_validate import (
+    validate_container_network, validate_publish_ports,
+)
 from vm_validate import validate_vm_config, vm_network_warnings
 
 
@@ -187,6 +189,16 @@ def validate_workload_config(config: dict) -> list[str]:
                 seen.add(c["name"])
                 if "container" not in c or "image" not in c.get("container", {}):
                     errors.append(f"containers[{c['name']}].container.image is required")
+                cnet = c.get("network", {})
+                if not isinstance(cnet, dict):
+                    errors.append(
+                        f"containers[{c['name']}].network must be a table")
+                else:
+                    # Bridge mode publishes per container; the same raw
+                    # --publish splice as [network].ports, so the same check.
+                    errors.extend(validate_publish_ports(
+                        cnet.get("ports"),
+                        f"containers[{c['name']}].network.ports"))
                 # environment/health may live at either nesting depth, but not
                 # both — normalize_containers lifts the sibling form, and
                 # ambiguity would make precedence implementation-defined.
