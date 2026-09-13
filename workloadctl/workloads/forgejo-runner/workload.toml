@@ -1,0 +1,60 @@
+# forgejo-runner — a Fedora VM that registers with a Forgejo instance as a
+# native Actions runner.
+#
+# Split out of virtual-forgejo: the forge can now be a host *container*
+# workload, and this VM exists only to run jobs natively — so `podman build`
+# works without container-in-container — and to host the nested-KVM gate rung
+# (bootc-image-builder + swtpm + OVMF).
+#
+# No data disk. Nothing here is precious: build artifacts go to the registry or
+# the forge, the workspace is scratch, and container image layers live outside
+# the VM in the host zot registry. The runner's only state is its registration,
+# and a Forgejo registration token is one-shot — so instead of persisting it,
+# `setup.sh` (the [host] setup hook) mints a fresh one on every provision and
+# drops it in the credstore for the seed to read. That is why the reset is
+# `disable --purge` + `enable`: a total rebuild that re-runs the hook.
+#
+# Configure before enabling:
+#   - FORGEJO_URL below: the forge this runner serves
+#   - a Forgejo admin API token, so `setup.sh` can mint registration tokens:
+#       workloadctl secret create forgejo-admin-token
+#   - REGISTRY_CA_URL if CI pushes to a Caddy-fronted registry.local
+#
+# See /usr/share/workloadctl/workloads/forgejo-runner/README.md.
+
+[workload]
+name = "forgejo-runner"
+
+[vm]
+cloud_image_url = "https://download.fedoraproject.org/pub/fedora/linux/releases/44/Cloud/x86_64/images/Fedora-Cloud-Base-Generic-44-1.7.x86_64.qcow2"
+cloud_image_checksum = "sha256:28680fe5b371a5a82ebf43a31926e086a168e59949d03969c5093e7071f90b7f"
+vcpus = 4
+memory = "6G"
+system_disk_size = "40G"
+user = "fedora"
+
+[vm.network]
+# A build host reaches arbitrary registries and mirrors, so no allowlist both
+# works and means anything. Left open deliberately and stated rather than
+# defaulted — `egress` defaults to "filtered" (ADR 006 §5.1) and a VM with no
+# reachable destinations would otherwise be a silent boot-and-hang.
+egress = "open"
+
+[vm.cloud_init]
+user_data_file = "/usr/share/workloadctl/workloads/forgejo-runner/cloud-init/user-data"
+
+[vm.cloud_init.template_vars]
+# Pinned for reproducibility — bump after reading the release notes at
+# https://code.forgejo.org/forgejo/runner.
+RUNNER_VERSION = "6.2.2"
+# The forge this runner registers against. Reach it by the name the host fronts
+# it with (a Caddy vhost), so the runner verifies TLS against the homelab root.
+FORGEJO_URL = "https://forge.local"
+# Plain-HTTP URL serving the registry host's Caddy internal CA cert, needed by
+# CI jobs that push/pull from a Caddy-fronted registry.local. Empty skips it.
+REGISTRY_CA_URL = ""
+
+[host]
+# Mints a fresh registration token per provision and prunes the stale runner
+# row. Runs on `enable` (and `disable` for teardown), before the seed is built.
+setup = "setup.sh"

@@ -1,0 +1,300 @@
+#cloud-config
+# First-boot provisioning for the forgejo-runner VM.
+#
+# Substitutions are performed by workloadctl (workload-ensure-user) when the
+# seed is built — see docs/workloads.md "Bootstrapping a VM with cloud-init" for
+# the placeholder forms. Magic vars available here: WORKLOADCTL_SSH_KEY (the
+# workload's pubkey), WORKLOADCTL_WORKLOAD_NAME, WORKLOADCTL_VM_USER (the
+# [vm].user account the CLI logs in as), and the SSH host key
+# (WORKLOADCTL_VM_HOST_KEY_B64 / WORKLOADCTL_VM_HOST_PUBKEY).
+#
+# This VM is always-on and idle when no build runs. Its idle cost is memory, and
+# that is reclaimed by free-page-reporting (see [vm].balloon); CPU is ~0.
+
+hostname: ${WORKLOADCTL_WORKLOAD_NAME}
+
+# Console fallback for diagnostics (`workloadctl exec` is the normal path).
+chpasswd:
+  list: |
+    root:dev
+  expire: false
+# Console-only password; SSH password auth disabled (key-based access is the norm).
+ssh_pwauth: false
+
+users:
+  - default
+  - name: ${WORKLOADCTL_VM_USER}
+    groups: [wheel]
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    shell: /bin/bash
+    ssh_authorized_keys:
+      - ${WORKLOADCTL_SSH_KEY}
+
+# Keep the host key written below. cc_ssh defaults ssh_deletekeys to true, which
+# wipes /etc/ssh/ssh_host_* and regenerates — and it runs *after* write_files, so
+# without this the pinned key is installed and then immediately thrown away.
+ssh_deletekeys: false
+
+write_files:
+  # The paravirtual clock (ptp_kvm). A vCPU pause — a crash-consistent backup, a
+  # host suspend — is lost by the guest permanently, and a stock chrony only
+  # steps during its first three updates, so it never walks the jump off. These
+  # two files plus the runcmd block below let the guest read the host's clock
+  # over a KVM hypercall, with no network and nothing needed host-side.
+  - path: /etc/modules-load.d/ptp-kvm.conf
+    permissions: '0644'
+    content: |
+      ptp_kvm
+  - path: /etc/udev/rules.d/70-ptp-kvm.rules
+    permissions: '0644'
+    content: |
+      SUBSYSTEM=="ptp", ATTR{clock_name}=="KVM virtual PTP", SYMLINK+="ptp_kvm"
+
+  # SSH host key. The CLI pins the guest host key (StrictHostKeyChecking=yes), so
+  # this seed MUST install it or provisioning fails. base64 keeps the multi-line
+  # PEM on one line; sshd picks it up on first boot.
+  - path: /etc/ssh/ssh_host_ed25519_key
+    permissions: '0600'
+    owner: root:root
+    encoding: b64
+    content: ${WORKLOADCTL_VM_HOST_KEY_B64}
+  - path: /etc/ssh/ssh_host_ed25519_key.pub
+    permissions: '0644'
+    owner: root:root
+    content: ${WORKLOADCTL_VM_HOST_PUBKEY}
+
+  - path: /etc/forgejo-runner/registration.env
+    permissions: '0600'
+    content: |
+      # ${SECRET?forgejo-runner-token} resolves to "" if the credstore entry is
+      # absent. The bootstrap registers only when the token is non-empty, so a
+      # blank value is intentional and not an error. The token is one-shot; the
+      # host setup hook (setup.sh) mints a fresh one on every provision, which is
+      # why this is read from the credstore rather than baked into the seed.
+      RUNNER_TOKEN=${SECRET?forgejo-runner-token}
+      FORGEJO_URL=${FORGEJO_URL}
+      RUNNER_VERSION=${RUNNER_VERSION}
+
+  - path: /etc/forgejo-runner/config.yml
+    content: |
+      log:
+        level: info
+        job_level: info
+      runner:
+        file: /var/lib/forgejo-runner/.runner
+        capacity: 1
+        envs: {}
+        timeout: 3h
+        shutdown_timeout: 3h
+        insecure: false
+        fetch_timeout: 5s
+        fetch_interval: 2s
+        report_interval: 1s
+        labels: []
+      cache:
+        enabled: true
+        dir: ""
+        host: ""
+        port: 0
+        external_server: ""
+      container:
+        network: ""
+        enable_ipv6: false
+        privileged: false
+        options:
+        workdir_parent:
+        valid_volumes: []
+        docker_host: "-"
+        force_pull: false
+        force_rebuild: false
+      host:
+        # Separate from the action cache dir to avoid double-nested path resolution.
+        workdir_parent: /var/lib/forgejo-runner/workspace
+
+  - path: /usr/local/bin/forgejo-runner-bootstrap
+    permissions: '0755'
+    content: |
+      #!/usr/bin/env bash
+      set -euxo pipefail
+      exec >>/var/log/forgejo-runner-bootstrap.log 2>&1
+
+      # 1. Packages. dnf5 fails the whole transaction on any unknown OR
+      # already-installed package; --skip-* tolerates both.
+      # qemu-kvm/qemu-img/swtpm/edk2-ovmf back the runtime-test gate (B1b): this
+      # native runner boots a real bootc image under nested KVM with a
+      # swtpm-backed vTPM and OVMF firmware.
+      dnf install -y --skip-broken --skip-unavailable \
+        podman skopeo curl jq yq just git rpm-build \
+        python3 policycoreutils-python-utils checkpolicy \
+        qemu-guest-agent nodejs fuse3 \
+        qemu-kvm qemu-img swtpm swtpm-tools edk2-ovmf \
+        dnf-utils
+
+      # 1a. Pull in updates published since the cloud image was cut — primarily
+      # CVE coverage on a long-lived always-on VM. If a new kernel lands we
+      # reboot at the end so the runner comes up on the patched kernel.
+      dnf upgrade --refresh -y
+
+      # qemu-guest-agent binds to the org.qemu.guest_agent.0 virtio-serial port,
+      # which the generator wires into every VM's qemu cmdline. That is what lets
+      # `workloadctl exec/shell` find this VM's address on a LAN bridge, where
+      # there is no workloadctl-managed dnsmasq to lease from. Start it only once
+      # the port is present: on a re-render against a VM whose unit predates the
+      # channel, --now would block waiting for a device that arrives on the next
+      # full restart, so enable unconditionally and let that restart pick it up.
+      systemctl enable qemu-guest-agent || true
+      if [ -e /dev/virtio-ports/org.qemu.guest_agent.0 ]; then
+        systemctl start qemu-guest-agent || true
+      fi
+      systemctl enable --now systemd-timesyncd || true
+
+      # mDNS via systemd-resolved alone — it both publishes this VM's hostname
+      # (<hostname>.local) and resolves remote .local names (registry.local, the
+      # forge) for CI. One name is needed, which resolved does natively, so there
+      # is no separate avahi responder to fight over UDP/5353.
+      mkdir -p /etc/systemd/resolved.conf.d
+      cat > /etc/systemd/resolved.conf.d/10-mdns.conf <<'RESOLVED'
+      [Resolve]
+      MulticastDNS=yes
+      RESOLVED
+      sed -i 's/^hosts:.*/hosts:      files myhostname resolve [!UNAVAIL=return] dns/' /etc/nsswitch.conf
+      systemctl mask avahi-daemon.service avahi-daemon.socket || true
+      systemctl enable --now systemd-resolved
+      systemctl restart systemd-resolved
+
+      # 1b. Trust the registry host's Caddy internal CA so CI jobs can push/pull
+      # from registry.local over HTTPS. Fetched over plain HTTP (no prior trust
+      # needed). Skip silently if REGISTRY_CA_URL is empty or unreachable.
+      if [ -n "${REGISTRY_CA_URL}" ]; then
+        for _ in $(seq 1 10); do
+          if curl -fsSL --max-time 5 "${REGISTRY_CA_URL}" \
+              -o /etc/pki/ca-trust/source/anchors/registry-caddy-root.crt 2>/dev/null; then
+            update-ca-trust
+            echo "Registry CA trusted from ${REGISTRY_CA_URL}."
+            break
+          fi
+          sleep 5
+        done
+        if [ ! -f /etc/pki/ca-trust/source/anchors/registry-caddy-root.crt ]; then
+          echo "WARNING: could not fetch registry CA from ${REGISTRY_CA_URL}; registry pushes may fail."
+        fi
+      fi
+
+      # 2. Install workloadctl from the RPM bundled in the cloud-init ISO. The
+      # ISO is labelled CIDATA; mount it, install, unmount.
+      CIDATA_DEV=$(blkid -L CIDATA 2>/dev/null || echo /dev/sr0)
+      CIDATA_MNT=$(mktemp -d)
+      mount -r "$CIDATA_DEV" "$CIDATA_MNT"
+      dnf install -y "$CIDATA_MNT/workloadctl.rpm"
+      umount "$CIDATA_MNT" && rmdir "$CIDATA_MNT"
+
+      # 3. Install the native forgejo-runner binary + unit. Idempotent and
+      # re-bootstrap safe: skip the download when the pinned version is already
+      # installed, else stage a temp file and atomically rename it into place —
+      # writing in place with `curl -o` fails on a re-bootstrap because the
+      # running runner holds the file busy (ETXTBSY → curl: (23), fatal under
+      # set -e). rename(2) swaps the dentry without touching the held inode.
+      mkdir -p /var/lib/forgejo-runner
+      if ! /usr/local/bin/forgejo-runner --version 2>/dev/null | grep -qF "${RUNNER_VERSION}"; then
+        curl -fsSL -o /usr/local/bin/.forgejo-runner.new \
+          "https://code.forgejo.org/forgejo/runner/releases/download/v${RUNNER_VERSION}/forgejo-runner-${RUNNER_VERSION}-linux-amd64"
+        chmod 0755 /usr/local/bin/.forgejo-runner.new
+        mv -f /usr/local/bin/.forgejo-runner.new /usr/local/bin/forgejo-runner
+      fi
+
+      install -m 0644 \
+        /usr/share/workloadctl/workloads/forgejo-runner/forgejo-runner.service \
+        /etc/systemd/system/forgejo-runner.service
+      systemctl daemon-reload
+
+      # 4. containers/image sigstore config. CI signs images at push time
+      # (podman push --sign-by-sigstore-private-key; cosign is no longer used in
+      # CI — its *.local scheme race broke signing, see
+      # docs/cosign-local-redirect-loop.md and docs/ci-image-signing.md). Pushing
+      # those signatures as OCI artifacts into the registry (sha256-<digest>.sig
+      # tags, the cosign-compatible layout) needs use-sigstore-attachments;
+      # without it containers/image tries a lookaside server and the push fails.
+      #
+      # The signing key is NOT provisioned here: after (re-)provisioning this VM,
+      # run the seal-signing-key workflow once to seal it into host-key systemd
+      # credentials (they are bound to this VM's /var/lib/systemd/credential.secret,
+      # which a rebuild regenerates). Until then builds push unsigned with a warning.
+      mkdir -p /etc/containers/registries.d
+      {
+        echo "docker:"
+        echo "  registry.local:"
+        echo "    use-sigstore-attachments: true"
+        echo "  zot.local:"
+        echo "    use-sigstore-attachments: true"
+      } > /etc/containers/registries.d/registry-local-sigstore.yaml
+
+      # 5. Register and enable the runner. The token is minted by the host setup
+      # hook (setup.sh) on every provision and read from the credstore, because a
+      # Forgejo registration token is one-shot and cannot be replayed across a
+      # rebuild. Guard on an existing .runner so a re-render with the same disk
+      # does not try to register twice with a consumed token.
+      . /etc/forgejo-runner/registration.env
+      # $${RUNNER_TOKEN} escapes template substitution so the sourced shell var
+      # is used, keeping the decrypted token off the script text.
+      if [ -s /var/lib/forgejo-runner/.runner ]; then
+        echo "Already registered; enabling the runner."
+        systemctl enable --now forgejo-runner.service
+      elif [ -n "$${RUNNER_TOKEN}" ]; then
+        # Wait for Forgejo's API; a registration failure means re-issuing a token.
+        for _ in $(seq 1 60); do
+          if curl -sf "${FORGEJO_URL}/api/healthz" >/dev/null 2>&1; then
+            break
+          fi
+          sleep 5
+        done
+        cd /var/lib/forgejo-runner
+        /usr/local/bin/forgejo-runner register \
+          --no-interactive \
+          --instance "${FORGEJO_URL}" \
+          --token "$${RUNNER_TOKEN}" \
+          --name "${WORKLOADCTL_WORKLOAD_NAME}-runner" \
+          --labels native:host
+        systemctl enable --now forgejo-runner.service
+      else
+        echo "No registration token in the credstore; skipping registration."
+      fi
+
+      # 6. Snapshot state for post-mortem.
+      sleep 5
+      workloadctl status > /var/log/forgejo-runner-status.log 2>&1 || true
+      systemctl list-units 'workload-*' --no-pager > /var/log/forgejo-runner-units.log 2>&1 || true
+
+      # 7. If the upgrade in step 1a brought in a new kernel (or other services
+      # flagged as needing restart), reboot so the runner runs on patched bits.
+      if command -v needs-restarting >/dev/null && ! needs-restarting -r >/dev/null 2>&1; then
+        systemctl reboot
+      fi
+
+runcmd:
+  # Wire up the paravirtual clock written above. Conditional because chronyd
+  # treats a refclock it cannot open as fatal: a host without ptp_kvm would end
+  # up with no time service at all.
+  - |
+    udevadm control --reload-rules || true
+    if modprobe ptp_kvm 2>/dev/null; then
+      for _ in 1 2 3 4 5; do [ -e /dev/ptp_kvm ] && break; sleep 1; done
+    fi
+    if [ -e /dev/ptp_kvm ] && [ -f /etc/chrony.conf ] && ! grep -qF '# workloadctl: paravirtual clock' /etc/chrony.conf; then
+      printf '%s\n' '# workloadctl: paravirtual clock' 'refclock PHC /dev/ptp_kvm poll 2 dpoll -2 offset 0' 'makestep 1 -1' >> /etc/chrony.conf
+      systemctl restart chronyd || true
+    fi
+  # Launch the bootstrap as its own transient systemd unit instead of running it
+  # directly under runcmd. cloud-init 25.3 (Fedora 44 cloud image) runs runcmd
+  # inside the single-process cloud-init-main.service (Type=notify,
+  # KillMode=process); the bootstrap's heavy `dnf install` provokes an
+  # RPM-scriptlet `systemctl daemon-reload` + systemd re-exec that topples that
+  # service (main PID exits status=1), orphaning dnf and killing the half-run
+  # transaction. A transient systemd-run unit runs in its own cgroup, decoupled
+  # from cloud-init's lifecycle, so it survives the reload and completes.
+  - [systemd-run, --unit=forgejo-runner-bootstrap, --collect,
+     --property=Type=oneshot, --property=TimeoutStartSec=infinity,
+     /usr/local/bin/forgejo-runner-bootstrap]
+
+package_update: false
+package_upgrade: false
+final_message: "forgejo-runner cloud-init complete after $$UPTIME seconds"
