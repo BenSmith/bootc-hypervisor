@@ -1888,6 +1888,22 @@ class TestGeneratorVmWorkload(unittest.TestCase):
         self.assertIn("-m 2048", svc)
         self.assertNotIn("-m 2048M", svc)
 
+    def test_balloon_reclaims_idle_memory_by_default(self):
+        # The balloon device on its own reclaims nothing (nothing inflates
+        # it), so free-page-reporting is what makes `balloon = true` mean
+        # what it says. Without it, an idle guest holds every page it has
+        # ever touched for the life of the VM.
+        self._write_vm_config()
+        self._run()
+        svc = self._read("workload-fedora-vm.service")
+        self.assertIn("-device virtio-balloon-pci,free-page-reporting=on", svc)
+
+    def test_balloon_disabled_omits_the_device(self):
+        self._write_vm_config(extra="balloon = false")
+        self._run()
+        svc = self._read("workload-fedora-vm.service")
+        self.assertNotIn("virtio-balloon", svc)
+
     def test_guest_agent_channel_is_wired(self):
         # qemu-guest-agent only attaches to a virtserialport named exactly
         # org.qemu.guest_agent.0. It is the one address source that asks the

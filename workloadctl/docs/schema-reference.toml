@@ -250,9 +250,13 @@ name = "schema-reference"
 # restart = "always"
 #
 # Optional: Attach a virtio-balloon device so the host can reclaim idle guest
-# memory at runtime. Has no effect if the guest kernel lacks virtio_balloon
-# (Fedora Cloud includes it). Set to false only if the balloon driver causes
-# problems (e.g., real-time workloads sensitive to balloon-induced pauses).
+# memory at runtime. The device carries free-page-reporting: the guest reports
+# pages it has freed and the host releases them, so an idle guest settles near
+# its working set instead of holding everything it has ever touched. Only pages
+# the guest has actually freed are reported (clean page cache is not), and it
+# has no effect if the guest kernel lacks virtio_balloon (Fedora Cloud includes
+# it). Set to false only if host memory reclaim causes problems (e.g., real-time
+# workloads sensitive to it).
 # Type: boolean
 # Default: true
 # balloon = true

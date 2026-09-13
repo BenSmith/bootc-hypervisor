@@ -694,9 +694,15 @@ def generate_vm_service(config, user_name: str, uid: int, vfs_tags=None) -> str:
             f"-device vhost-user-fs-pci,chardev=chr-vfs-{tag},tag={tag}",
         ]
 
-    # Memory balloon — allows host to reclaim idle guest memory
+    # Memory balloon — reclaim idle guest memory. The device on its own
+    # reclaims nothing (nothing ever inflates it), so free-page-reporting is
+    # the part that actually works: the guest reports pages it has freed and
+    # qemu MADV_DONTNEEDs them, dropping its RSS back to the working set.
+    # Measured on a Fedora Cloud guest (1 GiB touched, then freed: host RSS
+    # returns within seconds, on both the anonymous and the memfd backend).
+    # Only *freed* pages are reported — clean page cache is not.
     if vm_cfg.get("balloon", True):
-        qemu_args.append("-device virtio-balloon-pci")
+        qemu_args.append("-device virtio-balloon-pci,free-page-reporting=on")
 
     # qemu-guest-agent channel. The guest agent is the only *authoritative*
     # source for a guest's addresses: it asks the guest's own kernel, so it works

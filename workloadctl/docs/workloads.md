@@ -1195,7 +1195,7 @@ This is a **supported configuration, not a lapse** — but such a VM is **unfilt
 
 ### Memory Balloon
 
-By default the VM includes a `virtio-balloon-pci` device so the host can reclaim idle guest memory at runtime. The guest kernel handles this automatically (`virtio_balloon` module, included in Fedora Cloud).
+By default the VM includes a `virtio-balloon-pci` device with free-page-reporting enabled, so the host can reclaim idle guest memory at runtime. The device on its own reclaims nothing — nothing inflates it — so free-page-reporting is the part that works: the guest reports pages it has freed and qemu releases them, dropping the VM's resident memory back toward its working set. The guest kernel handles this automatically (`virtio_balloon` module, included in Fedora Cloud). Only pages the guest has actually freed are reclaimed; clean page cache is not.
 
 To disable it (e.g., for latency-sensitive workloads):
 
