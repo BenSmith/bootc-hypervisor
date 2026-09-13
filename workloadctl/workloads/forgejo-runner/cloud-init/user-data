@@ -182,12 +182,23 @@ write_files:
         fi
       fi
 
-      # 2. Install workloadctl from the RPM bundled in the cloud-init ISO. The
-      # ISO is labelled CIDATA; mount it, install, unmount.
+      # 2. Install workloadctl from the RPM bundled in the cloud-init ISO (the
+      # ISO is labelled CIDATA). The RPM is embedded only when the operator has
+      # cached it at /usr/share/workloadctl/workloadctl.rpm (see ensure_vm), so
+      # this is best-effort: the runner's core function (daemon + jobs) does not
+      # need workloadctl in the guest — only gate-rung jobs that boot a nested
+      # BIB VM do. Without it, warn and continue rather than abort the whole
+      # bootstrap.
       CIDATA_DEV=$(blkid -L CIDATA 2>/dev/null || echo /dev/sr0)
       CIDATA_MNT=$(mktemp -d)
       mount -r "$CIDATA_DEV" "$CIDATA_MNT"
-      dnf install -y "$CIDATA_MNT/workloadctl.rpm"
+      if [ -s "$CIDATA_MNT/workloadctl.rpm" ]; then
+        dnf install -y "$CIDATA_MNT/workloadctl.rpm"
+      else
+        echo "WARNING: no workloadctl RPM on the seed ISO; skipping guest install"
+        echo "  (gate-rung jobs that boot a nested VM will need it — embed it at"
+        echo "  /usr/share/workloadctl/workloadctl.rpm and re-provision)."
+      fi
       umount "$CIDATA_MNT" && rmdir "$CIDATA_MNT"
 
       # 3. Install the native forgejo-runner binary + unit. Idempotent and
