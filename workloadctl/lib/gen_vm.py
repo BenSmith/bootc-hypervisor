@@ -868,6 +868,21 @@ def generate_vm_service(config, user_name: str, uid: int, vfs_tags=None) -> str:
         svc.add("ExecStopPost",
                 f"-+/usr/libexec/workloadctl/workload-vm-filter down {dq(name)}")
 
+        # This VM's own derived address on the shared dummy link, so a host
+        # service can publish on it and this guest can reach it (the one door
+        # a passt guest has onto its own host — see lib/svcaddr_arm.py).
+        # Filtered VMs already get the address from their inspect service;
+        # arming it here too is idempotent and needs no predicate, which is
+        # what makes it work for the open VMs the inspect service never visits.
+        # Up fails loudly (a VM that needs a host service and cannot reach it
+        # is worse than one that did not start); down is tolerant and runs on
+        # kill and failure alike, so a crashed VM does not leave its /32 on
+        # the link.
+        svc.add("ExecStartPre",
+                f"+/usr/libexec/workloadctl/workload-vm-svcaddr up {dq(name)}")
+        svc.add("ExecStopPost",
+                f"-+/usr/libexec/workloadctl/workload-vm-svcaddr down {dq(name)}")
+
     svc.add("ExecStart",
             f"/usr/libexec/workloadctl/workload-vm-notify {dq(name)} \\\n"
             f"    {qemu_cmd}")

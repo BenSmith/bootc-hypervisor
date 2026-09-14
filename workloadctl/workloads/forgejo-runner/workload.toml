@@ -15,10 +15,15 @@
 # `disable --purge` + `enable`: a total rebuild that re-runs the hook.
 #
 # Configure before enabling:
-#   - FORGEJO_URL below: the forge this runner serves
+#   - FORGEJO_ADMIN_URL below: where this host reaches the forge's admin API
 #   - a Forgejo admin API token, so `setup.sh` can mint registration tokens:
 #       workloadctl secret create forgejo-admin-token
 #   - REGISTRY_CA_URL if CI pushes to a Caddy-fronted registry.local
+#
+# How the runner reaches the forge: the VM's own derived address
+# (198.18.x.y from its uid, WORKLOADCTL_VM_INSPECT_ADDR — the only door a
+# passt guest has onto its own host) at FORGEJO_PORT. Nothing here names it;
+# it is derived, and the seed composes the URL in one substitution pass.
 #
 # See /usr/share/workloadctl/workloads/forgejo-runner/README.md.
 
@@ -48,9 +53,18 @@ user_data_file = "/usr/share/workloadctl/workloads/forgejo-runner/cloud-init/use
 # https://code.forgejo.org/forgejo/runner. v13 is the floor for the modern
 # flow; our previous pin (6.2.2) predates `server.connections`.
 RUNNER_VERSION = "13.1.0"
-# The forge this runner registers against. Reach it by the name the host fronts
-# it with (a Caddy vhost), so the runner verifies TLS against the homelab root.
-FORGEJO_URL = "https://forge.local"
+# Where the HOST reaches the forge's admin API, to mint registration tokens
+# (setup.sh). Host-side, so a host-reachable URL — localhost, or the forge's
+# published LAN port — not the derived address the guest uses. The forge must
+# be on this host: that is the whole shape, a runner VM whose only door onto
+# its host is its own derived address.
+FORGEJO_ADMIN_URL = "http://localhost:3000"
+# The forge's published HTTP port. The runner's guest reaches the forge on
+# its own derived address (198.18.x.y, WORKLOADCTL_VM_INSPECT_ADDR — see
+# ensure_vm.py) at this port; the URL is composed in the seed, not here,
+# because the address is derived and the seed render substitutes both halves
+# in one pass.
+FORGEJO_PORT = "3000"
 # Plain-HTTP URL serving the registry host's Caddy internal CA cert, needed by
 # CI jobs that push/pull from a Caddy-fronted registry.local. Empty skips it.
 REGISTRY_CA_URL = ""

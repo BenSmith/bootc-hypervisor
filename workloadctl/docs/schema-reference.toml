@@ -278,6 +278,25 @@ name = "schema-reference"
 #     routable and never configurable. `workloadctl diagnose <name>` prints the
 #     derived value.
 #
+# A third consequence, the one that costs a provision-and-debug cycle if it is
+# not known up front: **a guest cannot reach a service on its own host.** The
+# address it holds is unreachable (traffic to it never leaves the guest's own
+# stack), and map-host-loopback=none isolates the guest's loopback, so no host
+# 127.x address is reachable either — including the management address above,
+# which works for inbound `exec` because the host initiates it. Containers on
+# the same host differ: the default [network].mode = "pasta" gives a container
+# its own network namespace that pasta connects to the host (host loopback
+# mapped in, outbound re-originated), so host services are reachable from it;
+# [network].mode = "host" shares the host netns outright.
+#
+# The one door a VM has onto its own host is its own derived address — the same
+# 198.18.x.y that a filtered workload's egress inspector would arm is put on
+# the shared dummy link for every VM at start and removed on stop (the
+# workload-vm-svcaddr helper, ExecStartPre/ExecStopPost of the VM unit), so a
+# host service can publish on it and only that workload's guest can reach it.
+# The seed names it via the WORKLOADCTL_VM_INSPECT_ADDR magic variable
+# (lib/ensure_vm.py); the forgejo-runner bundle is the worked example.
+#
 # Optional: Host bridge to attach to instead of using passt.
 # Type: string, valid Linux interface name (letters/digits/_/-, max 15 chars)
 # Default: unset — use passt.

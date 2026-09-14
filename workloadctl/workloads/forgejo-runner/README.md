@@ -28,7 +28,11 @@ provision, and the seed declares the connection from it.
 
 ## Prerequisites
 
-1. A running Forgejo instance you can reach from the VM.
+1. A running Forgejo instance **on this host**, reachable from both the host
+   and the VM. The runner reaches it on its own derived address
+   (`198.18.x.y` from its uid — the only door a passt guest has onto its own
+   host) at the forge's published HTTP port; the forge need only publish that
+   port (wildcard is fine). See "Reaching the forge from the VM" below.
 2. A **Forgejo admin API token**. The host setup hook uses it to create the
    runner; it never enters the VM.
 
@@ -36,13 +40,14 @@ provision, and the seed declares the connection from it.
    sudo workloadctl secret create forgejo-admin-token
    ```
 
-3. `FORGEJO_URL` in the instance TOML set to that forge.
+3. `FORGEJO_ADMIN_URL` in the instance TOML set to where this host reaches
+   that forge's admin API (localhost, or the forge's LAN port).
 
 ## Provisioning
 
 ```sh
 sudo workloadctl init forgejo-runner
-sudo workloadctl edit forgejo-runner     # set [vm.cloud_init.template_vars].FORGEJO_URL
+sudo workloadctl edit forgejo-runner     # set [vm.cloud_init.template_vars].FORGEJO_ADMIN_URL
 sudo workloadctl enable forgejo-runner
 ```
 
@@ -109,3 +114,14 @@ cache.
 - **Egress is open.** A build host reaches arbitrary registries and mirrors, so
   there is no allowlist that both works and means anything. See
   `docs/workloads.md` on egress posture.
+- **Reaching the forge from the VM.** A passt guest cannot reach a service on
+  its own host: the address it holds is the host's, and host loopback is
+  deliberately unmapped. So the forge — a container on this same host — is
+  published on this VM's own **derived address** (`198.18.x.y` from its uid,
+  the same address a filtered workload's egress inspector would arm), which
+  is put on the shared dummy link at VM start and removed on stop. The guest
+  names it via the `WORKLOADCTL_VM_INSPECT_ADDR` seed variable, so nothing is
+  invented or configured: `FORGEJO_ADMIN_URL` is the *host's* URL to the
+  forge's admin API, `FORGEJO_PORT` is the forge's published HTTP port, and
+  the guest URL is composed from the derived address + port in the seed. The
+  forge itself needs no change: a wildcard publish already answers there.

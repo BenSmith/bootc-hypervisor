@@ -134,6 +134,8 @@ install -Dpm 0755 %{_sourcedir}/libexec/workload-vm-netdev \
     %{buildroot}%{_libexecdir}/workloadctl/workload-vm-netdev
 install -Dpm 0755 %{_sourcedir}/libexec/workload-vm-inspect \
     %{buildroot}%{_libexecdir}/workloadctl/workload-vm-inspect
+install -Dpm 0755 %{_sourcedir}/libexec/workload-vm-svcaddr \
+    %{buildroot}%{_libexecdir}/workloadctl/workload-vm-svcaddr
 install -Dpm 0755 %{_sourcedir}/libexec/workload-inspect-listener \
     %{buildroot}%{_libexecdir}/workloadctl/workload-inspect-listener
 install -Dpm 0755 %{_sourcedir}/libexec/workload-vm-resolve \
@@ -519,6 +521,7 @@ fi
 %{_libexecdir}/workloadctl/workload-vm-netdev
 %{_libexecdir}/workloadctl/workload-vm-notify
 %{_libexecdir}/workloadctl/workload-vm-inspect
+%{_libexecdir}/workloadctl/workload-vm-svcaddr
 %{_libexecdir}/workloadctl/workload-inspect-listener
 %{_libexecdir}/workloadctl/workload-vm-resolve
 %{_libexecdir}/workloadctl/workload-broker-config

@@ -31,6 +31,7 @@ from workload_lib import (
     workload_state_dir,
 )
 from egress_policy import vm_uses_inspect
+from workload_addr import UID_MAX, UID_MIN, inspect_address
 from egress_ca import (
     VM_CA_BUNDLE_AVAILABLE, CA_BUNDLE_PATH, CA_ENV_VARS, vm_ca_env,
     ca_cert_path,
@@ -362,6 +363,18 @@ def build_cloud_init_iso(pw, config: dict, name: str, config_path: Path | None =
         template_vars.setdefault(
             "WORKLOADCTL_VM_EGRESS_CA_B64",
             base64.b64encode(egress_ca.encode()).decode() if egress_ca else "")
+        # This VM's own derived address on the shared dummy link (198.18.x.y
+        # from the uid — the same address its inspect service would arm when
+        # filtered). A passt guest cannot reach a service on its own host, so
+        # a host service the VM must use (e.g. the forge's API, for a build
+        # runner) is published on this address; the seed names it here —
+        # derived, not invented, so it cannot drift from the allocation and
+        # survives a re-provision that re-allocates the uid. Guarded on the
+        # workload range: a real _wl-<name> is always inside it, and a seed
+        # that references the var without getting it fails loudly at render.
+        if UID_MIN <= pw.pw_uid <= UID_MAX:
+            template_vars.setdefault(
+                "WORKLOADCTL_VM_INSPECT_ADDR", inspect_address(pw.pw_uid).v4)
         try:
             user_data_text = substitute_template(
                 raw,

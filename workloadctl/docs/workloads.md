@@ -1110,6 +1110,10 @@ VM workloads use **passt**, a userspace network backend, and have no bridge at a
 
 The consequence worth understanding first: **the guest is assigned the host's own address.** A VM under passt has no LAN identity of its own, so nothing on the network can address it directly. Traffic *from* the guest leaves as though the host sent it.
 
+The mirror-image consequence: **a guest cannot reach a service on its own host.** Dialling the host's default-route address never leaves the guest's stack (it is the address the guest itself holds), and `map-host-loopback=none` closes the host-loopback door as well, so no host `127.x` address is reachable either — the management address in the table below works for *inbound* `exec` because the host initiates it, not the guest. Containers on the same host are different: `[network].mode = "pasta"` (the default) gives a container its own network namespace, but pasta connects it to the host (host loopback mapped in, outbound re-originated), so a container already reaches host services and a passt VM cannot. `[network].mode = "host"` shares the host netns outright.
+
+That one door is deliberate, and it is the workload's **own derived address**: the same `198.18.x.y` that a filtered workload's egress inspector would arm on the shared dummy link is put there for *every* VM at start and removed on stop, so a host service can publish on it and only that workload's guest can reach it. The seed names it via the `WORKLOADCTL_VM_INSPECT_ADDR` magic variable — derived, not invented, so nothing is configured and it survives a re-provision. (The forgejo-runner bundle is the worked example: the runner reaches a host container's forge on its own address at the forge's published port.)
+
 That is also what makes per-VM policy possible. Because guest traffic arrives on the host as sockets with a known owner, **the workload uid is the VM's network identity** — the guest cannot forge it, it is unique per workload with no allocation step, and nftables can match it as `meta skuid`. Three values derive from the uid with no registry:
 
 | Derived value | Formula | Used for |

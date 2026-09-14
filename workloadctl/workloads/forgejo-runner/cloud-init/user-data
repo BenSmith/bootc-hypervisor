@@ -74,7 +74,12 @@ write_files:
       # regenerated on every provision.
       RUNNER_UUID=${SECRET?forgejo-runner-uuid}
       RUNNER_TOKEN=${SECRET?forgejo-runner-token}
-      FORGEJO_URL=${FORGEJO_URL}
+      # The forge as this VM sees it: its own derived address on the host
+      # (WORKLOADCTL_VM_INSPECT_ADDR, 198.18.x.y from the uid — the only door a
+      # passt guest has onto its own host) at the forge's published HTTP port.
+      # Composed here, not in the TOML, because the address is derived and the
+      # seed render substitutes both halves in one pass.
+      FORGEJO_URL=http://${WORKLOADCTL_VM_INSPECT_ADDR}:${FORGEJO_PORT}
       RUNNER_VERSION=${RUNNER_VERSION}
 
   - path: /etc/forgejo-runner/config.yml
@@ -284,7 +289,7 @@ write_files:
               'server:' \
               '  connections:' \
               '    forge:' \
-              "      url: ${FORGEJO_URL}/" \
+              "      url: $${FORGEJO_URL}/" \
               "      uuid: $${RUNNER_UUID}" \
               "      token: $${RUNNER_TOKEN}" \
               '      labels:' \

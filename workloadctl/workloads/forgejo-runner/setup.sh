@@ -29,14 +29,14 @@ UUID_CRED=/etc/credstore.encrypted/forgejo-runner-uuid
 TOKEN_CRED=/etc/credstore.encrypted/forgejo-runner-token
 RUNNER_NAME="${WORKLOAD_NAME}-runner"
 
-forgejo_url() {
+forgejo_admin_url() {
   # The instance TOML, not the bundle: `init --as` renames the instance and the
   # operator edits its copy. Same read Sunshine's setup.sh does.
   python3 - "$WORKLOAD_INSTANCE_DIR/workload.toml" <<'PY'
 import sys, tomllib
 d = tomllib.load(open(sys.argv[1], "rb"))
 tv = d.get("vm", {}).get("cloud_init", {}).get("template_vars", {})
-print(tv.get("FORGEJO_URL", ""))
+print(tv.get("FORGEJO_ADMIN_URL", ""))
 PY
 }
 
@@ -44,7 +44,7 @@ PY
 # offline row behind per reset. Best-effort: a list/delete failure is a
 # housekeeping miss, not a reason to fail the provision.
 prune_stale() {
-  python3 - "$FORGEJO_URL" "$ADMIN_TOKEN" "$RUNNER_NAME" <<'PY' || echo "  (could not prune stale runners)"
+  python3 - "$FORGEJO_ADMIN_URL" "$ADMIN_TOKEN" "$RUNNER_NAME" <<'PY' || echo "  (could not prune stale runners)"
 import json, sys, urllib.request
 url, token, name = sys.argv[1], sys.argv[2], sys.argv[3]
 auth = {"Authorization": "token " + token}
@@ -85,9 +85,9 @@ case "${1:-}" in
       exit 0
     fi
 
-    FORGEJO_URL="$(forgejo_url)"
-    if [ -z "$FORGEJO_URL" ]; then
-      echo "ERROR: [vm.cloud_init.template_vars].FORGEJO_URL is empty in" >&2
+    FORGEJO_ADMIN_URL="$(forgejo_admin_url)"
+    if [ -z "$FORGEJO_ADMIN_URL" ]; then
+      echo "ERROR: [vm.cloud_init.template_vars].FORGEJO_ADMIN_URL is empty in" >&2
       echo "  $WORKLOAD_INSTANCE_DIR/workload.toml — nothing to register against." >&2
       exit 1
     fi
@@ -95,8 +95,7 @@ case "${1:-}" in
 
     prune_stale
 
-    # Create the runner on the server and take its credentials back. This is
-    # the modern flow: POST /admin/actions/runners {name, ephemeral} ->
+    # Create the runner on the server and take its credentials back. This is    # the modern flow: POST /admin/actions/runners {name, ephemeral} ->
     # {id, uuid, token}. Both predecessors are deprecated — the
     # GET .../registration-token endpoint, and `forgejo-runner register` itself
     # (v13: "declare connections in the runner configuration instead") — so
@@ -106,7 +105,7 @@ case "${1:-}" in
                   -H "Authorization: token ${ADMIN_TOKEN}" \
                   -H "Content-Type: application/json" \
                   -d "{\"name\": \"${RUNNER_NAME}\", \"ephemeral\": false}" \
-                  "${FORGEJO_URL}/api/v1/admin/actions/runners")"
+                  "${FORGEJO_ADMIN_URL}/api/v1/admin/actions/runners")"
     uuid="$(printf '%s' "$response" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("uuid",""))')"
     token="$(printf '%s' "$response" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("token",""))')"
     if [ -z "$uuid" ] || [ -z "$token" ]; then
@@ -125,7 +124,7 @@ case "${1:-}" in
     printf '%s' "$uuid"  | systemd-creds encrypt --name=forgejo-runner-uuid  - "$UUID_CRED"
     printf '%s' "$token" | systemd-creds encrypt --name=forgejo-runner-token - "$TOKEN_CRED"
     chmod 0600 "$UUID_CRED" "$TOKEN_CRED"
-    echo "  registered runner ${RUNNER_NAME} on ${FORGEJO_URL} (connection declared in the seed)"
+    echo "  registered runner ${RUNNER_NAME} on ${FORGEJO_ADMIN_URL} (connection declared in the seed)"
     ;;
 
   disable)

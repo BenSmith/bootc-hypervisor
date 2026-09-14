@@ -1,0 +1,28 @@
+#!/usr/bin/python3
+"""
+workload-vm-svcaddr: arm or retire one VM's own derived address.
+
+Usage: workload-vm-svcaddr <up|down> <name>
+
+`up` runs as the VM unit's ExecStartPre, `down` as its ExecStopPost. The
+program is lib/svcaddr_arm.py; this file is main(), bound to its VM substrate
+— the address exists to give a passt guest a door onto its own host, which is
+a VM concern; a container already reaches host services through pasta, so
+there is no container twin.
+"""
+import sys
+
+sys.dont_write_bytecode = True
+
+from helper_main import run_helper, up_down_main
+from svcaddr_arm import down, up
+
+
+def main(argv):
+    return up_down_main(argv, lambda name: up(name), down)
+
+
+if __name__ == "__main__":
+    # `up` fails loudly, `down` does not block a stop — see
+    # helper_main.run_helper, which holds that asymmetry for all the helpers.
+    sys.exit(run_helper(main, sys.argv))

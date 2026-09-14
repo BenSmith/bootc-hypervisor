@@ -11,12 +11,13 @@ import fcntl
 import os
 import shutil
 import tempfile
+import tomllib
 import types
 import unittest
 from pathlib import Path
 from unittest import mock
 
-from tests import load_script
+from tests import REPO_ROOT, load_script
 
 # `lib/` reaches sys.path via tests/__init__, so this import follows it.
 import ensure_common
@@ -27,6 +28,7 @@ import vm_default_seed
 import vm_ssh_keys
 from vm_provision import (PROVISION_FAILED, PROVISION_UNVERIFIED,
                           read_provision_marker, write_provision_marker)
+from workload_addr import inspect_address
 
 
 def _patch_path_helpers(root, *mods):
@@ -371,6 +373,57 @@ class TestBuildCloudInitIsoTemplateMode(unittest.TestCase):
                       "cloud_init": {"user_data_file": "user-data"}}}
         self._run_build(cfg)
         self.assertIn("user: builder", self._read_user_data())
+
+    def test_template_injects_magic_inspect_addr(self):
+        """WORKLOADCTL_VM_INSPECT_ADDR is the workload's own derived address.
+
+        The one door a passt guest has onto its own host. Derived from the
+        uid, so it cannot drift from the allocation; a uid >= UID_MIN is
+        required, which is why the fake pw here overrides the default.
+        """
+        ud = self.config_dir / "user-data"
+        ud.write_text("#cloud-config\naddr: ${WORKLOADCTL_VM_INSPECT_ADDR}\n")
+        cfg = {"vm": {"cloud_init": {"user_data_file": "user-data"}}}
+        old_pw = self.pw
+        self.pw = _fake_pw(self.home, uid=10042)
+        try:
+            self._run_build(cfg)
+        finally:
+            self.pw = old_pw
+        text = self._read_user_data()
+        self.assertIn(f"addr: {inspect_address(10042).v4}", text)
+
+    def test_runner_bundle_composes_guest_url_from_derived_address(self):
+        """The forgejo-runner seed reaches its forge on the VM's OWN derived
+        address (WORKLOADCTL_VM_INSPECT_ADDR) at FORGEJO_PORT — not on any
+        configured URL — because a passt guest cannot reach its host any other
+        way. Composed in the seed, not configured: nothing here invents the
+        address, and the host-side admin URL never reaches the guest.
+        """
+        bundle = REPO_ROOT / "workloads" / "forgejo-runner"
+        ud_src = bundle / "cloud-init" / "user-data"
+        self.assertTrue(ud_src.exists(), "bundle seed must exist")
+        shutil.copy2(ud_src, self.config_dir / "user-data")
+        toml = tomllib.loads((bundle / "workload.toml").read_text())
+        tv = toml["vm"]["cloud_init"]["template_vars"]
+        cfg = {"vm": {"cloud_init": {
+            "user_data_file": "user-data",
+            "template_vars": dict(tv),
+        }}}
+        old_pw = self.pw
+        self.pw = _fake_pw(self.home, uid=10042)
+        try:
+            self._run_build(cfg, name="forgejo-runner")
+        finally:
+            self.pw = old_pw
+        text = self._read_user_data("forgejo-runner")
+        addr = inspect_address(10042).v4
+        self.assertIn(f"FORGEJO_URL=http://{addr}:{tv['FORGEJO_PORT']}", text)
+        # The config.yml url comes from the sourced env var ($${...} survives
+        # the single render pass as ${...}), so the composed URL is in exactly
+        # one place and the printf never learns the address.
+        self.assertIn("url: ${FORGEJO_URL}/", text)
+        self.assertNotIn("FORGEJO_ADMIN_URL", text)
 
     def test_template_magic_vm_user_falls_back_to_default(self):
         ud = self.config_dir / "user-data"
