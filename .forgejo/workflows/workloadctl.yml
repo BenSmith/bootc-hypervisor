@@ -26,13 +26,23 @@ jobs:
           python3 --version
           just --version
 
+      # The unit suite runs as a non-root user, exactly as it does on the gate
+      # host (tp). Run as root on this runner, the suite writes real
+      # /var/lib/workloads/<name> trees that the selinux_labels checks then
+      # read as mislabeled (var_lib_t). As a normal user it cannot create them,
+      # and the checks read "unknown" and pass. `fedora` is the VM's [vm].user,
+      # created by the seed; the workspace is chowned to it first so the suite
+      # can write where it runs.
+      - name: Make the workspace writable by the test user
+        run: chown -R fedora:fedora "$GITHUB_WORKSPACE"
+
       - name: Lint (py_compile)
         working-directory: workloadctl
-        run: just lint
+        run: runuser -u fedora -- just lint
 
       - name: Unit tests
         working-directory: workloadctl
-        run: just test
+        run: runuser -u fedora -- just test
 
       - name: Build RPM
         working-directory: workloadctl
