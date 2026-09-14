@@ -153,7 +153,7 @@ write_files:
       # swtpm-backed vTPM and OVMF firmware.
       dnf install -y --skip-broken --skip-unavailable \
         podman skopeo curl jq yq just git rpm-build \
-        python3 policycoreutils-python-utils checkpolicy \
+        python3 policycoreutils-python-utils checkpolicy udica \
         qemu-guest-agent nodejs fuse3 \
         qemu-kvm qemu-img swtpm swtpm-tools edk2-ovmf \
         dnf-utils
@@ -226,6 +226,18 @@ write_files:
         echo "  /usr/share/workloadctl/workloadctl.rpm and re-provision)."
       fi
       umount "$CIDATA_MNT" && rmdir "$CIDATA_MNT"
+
+      # 2a. Make the guest a proper workloadctl SELinux host for the gate. The
+      # workloadctl unit suite (just test — this runner is its CI host) reads
+      # real host state: `workloadctl diagnose` demands the /var/lib/workloads
+      # fcontext rule, and the suite runs as root here, so it creates real
+      # trees that must carry container_file_t. On a real host the workloadctl
+      # RPM's %post registers this rule (and Recommends udica, installed
+      # above); the guest has no RPM, so register it here. Idempotent and
+      # non-fatal: a host without semanage, or with SELinux disabled, needs
+      # none of it.
+      semanage fcontext -a -t container_file_t '/var/lib/workloads(/.*)?' 2>/dev/null || true
+      restorecon -RF /var/lib/workloads 2>/dev/null || true
 
       # 3. Install the native forgejo-runner binary + unit. Idempotent and
       # re-bootstrap safe: skip the download when the pinned version is already
