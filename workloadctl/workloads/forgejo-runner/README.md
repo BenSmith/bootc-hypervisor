@@ -143,4 +143,8 @@ cache.
   CA cert — the bootstrap fetches it and installs it into the guest trust
   store so `podman push` trusts the registry's TLS. The URL must be reachable
   from the guest, so for a same-host registry it must also be a mapped name,
-  never the host's primary address.
+  never the host's primary address. A registry on **another** host whose name
+  resolves only over mDNS goes in `EXTRA_HOSTS` instead (`"<ip> <name>"`):
+  mDNS is unreliable through passt — the AAAA lookup times out, so curl and
+  podman fail while the A record resolves — and a pinned `/etc/hosts` entry
+  removes the resolver from the path.

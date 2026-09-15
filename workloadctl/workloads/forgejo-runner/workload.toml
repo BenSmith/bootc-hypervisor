@@ -78,6 +78,12 @@ FORGEJO_URL = ""
 # Leave empty when those services are remote — the guest then resolves them
 # normally. There is no universal default name.
 SAME_HOST_HOSTNAMES = ""
+# Extra /etc/hosts entries for CI dependencies on OTHER hosts that resolve
+# only over mDNS. mDNS through passt is unreliable — the AAAA lookup for a
+# .local name times out, so A+AAAA tools (curl, podman) fail even though the
+# A record resolves — and a pinned entry takes the resolver out of the path.
+# ';'-separated "<ip> <name>" entries. Homelab: "192.168.0.100 registry.local".
+EXTRA_HOSTS = ""
 # Plain-HTTP URL serving the registry's CA cert (e.g. a Caddy internal root),
 # fetched by the bootstrap and installed into the guest's trust store so CI
 # jobs can push/pull over HTTPS. Must be reachable from the guest — in the
