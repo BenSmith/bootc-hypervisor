@@ -424,6 +424,10 @@ class TestBuildCloudInitIsoTemplateMode(unittest.TestCase):
         # one place and the printf never learns the address.
         self.assertIn("url: ${FORGEJO_URL}/", text)
         self.assertNotIn("FORGEJO_ADMIN_URL", text)
+        # Forgejo's ROOT_URL-derived action URLs (cache, artifact uploads) are
+        # reachable from the guest because /etc/hosts maps the ROOT_URL host to
+        # the derived address — a passt guest cannot reach the host primary.
+        self.assertIn(f"{addr} {tv['FORGEJO_HOSTNAME']}", text)
 
     def test_template_magic_vm_user_falls_back_to_default(self):
         ud = self.config_dir / "user-data"

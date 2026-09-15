@@ -65,6 +65,15 @@ FORGEJO_ADMIN_URL = "http://localhost:3000"
 # because the address is derived and the seed render substitutes both halves
 # in one pass.
 FORGEJO_PORT = "3000"
+# The forge's ROOT_URL hostname, as the guest sees it. The forge must be
+# configured with ROOT_URL = "http://<this name>:<FORGEJO_PORT>/" — a NAME,
+# not the host's primary address, which a passt guest cannot reach. The
+# guest's /etc/hosts maps this name to its own derived address (see
+# cloud-init/user-data), so Forgejo's action URLs (cache, artifact uploads),
+# which are ROOT_URL-derived, resolve to somewhere the guest can reach; LAN
+# clients resolve the same name to the host primary, so the web UI is
+# unaffected.
+FORGEJO_HOSTNAME = "forge.local"
 # Plain-HTTP URL serving the registry host's Caddy internal CA cert, needed by
 # CI jobs that push/pull from a Caddy-fronted registry.local. Empty skips it.
 REGISTRY_CA_URL = ""

@@ -125,3 +125,13 @@ cache.
   forge's admin API, `FORGEJO_PORT` is the forge's published HTTP port, and
   the guest URL is composed from the derived address + port in the seed. The
   forge itself needs no change: a wildcard publish already answers there.
+
+  One forge-side requirement: set the forge's **`ROOT_URL` to a hostname**
+  (`http://${FORGEJO_HOSTNAME}:${FORGEJO_PORT}/`, default `forge.local`) —
+  not the host's primary address. Forgejo derives its action URLs (the
+  actions cache, artifact uploads) from `ROOT_URL`, and the guest cannot
+  reach the primary, so a primary-based `ROOT_URL` makes those URLs fail with
+  `ECONNREFUSED`. The guest's `/etc/hosts` (seeded via cloud-init) maps
+  `${FORGEJO_HOSTNAME}` to the derived address, so the runner reaches them;
+  LAN clients resolve the same name to the host primary, so the web UI is
+  unaffected.

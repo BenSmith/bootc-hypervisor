@@ -82,6 +82,18 @@ write_files:
       FORGEJO_URL=http://${WORKLOADCTL_VM_INSPECT_ADDR}:${FORGEJO_PORT}
       RUNNER_VERSION=${RUNNER_VERSION}
 
+  - path: /etc/hosts
+    append: true
+    content: |
+      # The forge's ROOT_URL host (FORGEJO_HOSTNAME). A passt guest cannot reach
+      # its own host's primary address, so this name is mapped to the guest's
+      # own derived address (WORKLOADCTL_VM_INSPECT_ADDR) — where the forge
+      # answers — while LAN clients resolve it to the host primary. Forgejo's
+      # action URLs (cache, artifact uploads) are ROOT_URL-derived, so without
+      # this mapping those URLs resolve to the host primary and the guest gets
+      # ECONNREFUSED.
+      ${WORKLOADCTL_VM_INSPECT_ADDR} ${FORGEJO_HOSTNAME}
+
   - path: /etc/forgejo-runner/config.yml
     content: |
       log:
