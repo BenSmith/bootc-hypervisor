@@ -201,21 +201,30 @@ write_files:
       systemctl enable --now systemd-resolved
       systemctl restart systemd-resolved
 
-      # 1b. Trust the registry host's Caddy internal CA so CI jobs can push/pull
-      # from registry.local over HTTPS. Fetched over plain HTTP (no prior trust
-      # needed). Skip silently if REGISTRY_CA_URL is empty or unreachable.
+      # 1b. Trust the registry's CA (e.g. a Caddy internal root) so CI jobs can
+      # push/pull over HTTPS. Fetched over plain HTTP — no prior trust exists,
+      # so the fetch itself cannot be verified with TLS. REGISTRY_CA_URL must be
+      # reachable from the guest: in the same-host case that means a name in
+      # SAME_HOST_HOSTNAMES (mapped to this VM's derived address), never the
+      # host's primary address. Staged to a temp file and verified as a real
+      # certificate before it is installed, so a partial or bogus fetch cannot
+      # poison the trust store. Empty REGISTRY_CA_URL skips the step.
       if [ -n "${REGISTRY_CA_URL}" ]; then
         for _ in $(seq 1 10); do
           if curl -fsSL --max-time 5 "${REGISTRY_CA_URL}" \
-              -o /etc/pki/ca-trust/source/anchors/registry-caddy-root.crt 2>/dev/null; then
+              -o /tmp/registry-caddy-root.crt 2>/dev/null \
+              && openssl x509 -in /tmp/registry-caddy-root.crt -noout >/dev/null 2>&1; then
+            install -m 0644 /tmp/registry-caddy-root.crt \
+              /etc/pki/ca-trust/source/anchors/registry-caddy-root.crt
             update-ca-trust
+            rm -f /tmp/registry-caddy-root.crt
             echo "Registry CA trusted from ${REGISTRY_CA_URL}."
             break
           fi
           sleep 5
         done
         if [ ! -f /etc/pki/ca-trust/source/anchors/registry-caddy-root.crt ]; then
-          echo "WARNING: could not fetch registry CA from ${REGISTRY_CA_URL}; registry pushes may fail."
+          echo "WARNING: could not fetch a valid registry CA from ${REGISTRY_CA_URL}; registry pushes may fail."
         fi
       fi
 

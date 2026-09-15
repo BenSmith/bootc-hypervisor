@@ -434,6 +434,35 @@ class TestBuildCloudInitIsoTemplateMode(unittest.TestCase):
         self.assertNotIn("FORGEJO_ADMIN_URL", text)
         self.assertIn(f"{addr} {tv['SAME_HOST_HOSTNAMES']}", text)
 
+    def test_registry_ca_url_is_fetched_and_installed(self):
+        """REGISTRY_CA_URL is fetched by the bootstrap and installed into the
+        guest's trust store, so CI jobs can push/pull over HTTPS. The rendered
+        seed carries the operator's URL into the curl call.
+        """
+        bundle = REPO_ROOT / "workloads" / "forgejo-runner"
+        ud_src = bundle / "cloud-init" / "user-data"
+        self.assertTrue(ud_src.exists(), "bundle seed must exist")
+        shutil.copy2(ud_src, self.config_dir / "user-data")
+        toml = tomllib.loads((bundle / "workload.toml").read_text())
+        tv = dict(toml["vm"]["cloud_init"]["template_vars"])
+        tv["REGISTRY_CA_URL"] = "http://registry.local/ca.crt"
+        cfg = {"vm": {"cloud_init": {
+            "user_data_file": "user-data",
+            "template_vars": tv,
+        }}}
+        old_pw = self.pw
+        self.pw = _fake_pw(self.home, uid=10042)
+        try:
+            self._run_build(cfg, name="forgejo-runner")
+        finally:
+            self.pw = old_pw
+        text = self._read_user_data("forgejo-runner")
+        self.assertIn('curl -fsSL --max-time 5 "http://registry.local/ca.crt"', text)
+        self.assertIn("openssl x509 -in /tmp/registry-caddy-root.crt", text)
+        self.assertIn("update-ca-trust", text)
+        self.assertIn(
+            "/etc/pki/ca-trust/source/anchors/registry-caddy-root.crt", text)
+
     def test_template_magic_vm_user_falls_back_to_default(self):
         ud = self.config_dir / "user-data"
         ud.write_text("#cloud-config\nuser: ${WORKLOADCTL_VM_USER}\n")

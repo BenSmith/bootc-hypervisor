@@ -136,3 +136,11 @@ cache.
   fine), no `/etc/hosts` mapping, and `ROOT_URL` is whatever that forge uses.
   Leave `SAME_HOST_HOSTNAMES` empty unless other same-host services need the
   mapping.
+
+  The same rules cover pushing to a registry: list the registry's hostname in
+  `SAME_HOST_HOSTNAMES` when it is on this host (the guest maps it to its
+  derived address), and set `REGISTRY_CA_URL` to a plain-HTTP URL serving its
+  CA cert — the bootstrap fetches it and installs it into the guest trust
+  store so `podman push` trusts the registry's TLS. The URL must be reachable
+  from the guest, so for a same-host registry it must also be a mapped name,
+  never the host's primary address.
