@@ -190,19 +190,25 @@ write_files:
       fi
       systemctl enable --now systemd-timesyncd || true
 
-      # mDNS via systemd-resolved alone — it both publishes this VM's hostname
-      # (<hostname>.local) and resolves remote .local names (registry.local, the
-      # forge) for CI. One name is needed, which resolved does natively, so there
-      # is no separate avahi responder to fight over UDP/5353.
-      mkdir -p /etc/systemd/resolved.conf.d
-      cat > /etc/systemd/resolved.conf.d/10-mdns.conf <<'RESOLVED'
-      [Resolve]
-      MulticastDNS=yes
-      RESOLVED
-      sed -i 's/^hosts:.*/hosts:      files myhostname resolve [!UNAVAIL=return] dns/' /etc/nsswitch.conf
+      # DNS: resolve through the passt-provided address, not systemd-resolved.
+      #
+      # The guest's DNS server is the address passt hands out over DHCP (the
+      # host's default-route gateway), and passt forwards those queries to the
+      # host's own resolver — which is where mDNS actually works, because the
+      # host is on the LAN and the guest is not.
+      #
+      # systemd-resolved has to go for that to happen. It special-cases .local
+      # for mDNS (RFC 6762) and will not forward it upstream, and multicast
+      # cannot traverse passt — so with resolved in the path every homelab
+      # .local name (registry.local, for CI pushes; anything else the operator
+      # needs) fails to resolve while the host answers the same query fine.
+      # Dropping the stub lets glibc use the DHCP resolver directly.
+      systemctl disable --now systemd-resolved || true
+      rm -f /etc/systemd/resolved.conf.d/10-mdns.conf
+      rm -f /etc/resolv.conf
+      sed -i 's/^hosts:.*/hosts:      files myhostname dns/' /etc/nsswitch.conf
       systemctl mask avahi-daemon.service avahi-daemon.socket || true
-      systemctl enable --now systemd-resolved
-      systemctl restart systemd-resolved
+      systemctl restart NetworkManager || true
 
       # 1b. Trust the registry's CA (e.g. a Caddy internal root) so CI jobs can
       # push/pull over HTTPS. Fetched over plain HTTP — no prior trust exists,
