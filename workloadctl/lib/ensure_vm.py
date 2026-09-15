@@ -369,10 +369,14 @@ def build_cloud_init_iso(pw, config: dict, name: str, config_path: Path | None =
         # a host service the VM must use (e.g. the forge's API, for a build
         # runner) is published on this address; the seed names it here —
         # derived, not invented, so it cannot drift from the allocation and
-        # survives a re-provision that re-allocates the uid. Guarded on the
-        # workload range: a real _wl-<name> is always inside it, and a seed
-        # that references the var without getting it fails loudly at render.
-        if UID_MIN <= pw.pw_uid <= UID_MAX:
+        # survives a re-provision that re-allocates the uid. Injected only for
+        # passt VMs (no [vm.network].bridge): the address is armed at start by
+        # workload-vm-svcaddr, which a bridged VM never does — it has its own
+        # LAN identity and no need of the door. Guarded on the workload
+        # range: a real _wl-<name> is always inside it, and a seed that
+        # references the var without getting it fails loudly at render.
+        net = config.get("vm", {}).get("network", {}) or {}
+        if not net.get("bridge") and UID_MIN <= pw.pw_uid <= UID_MAX:
             template_vars.setdefault(
                 "WORKLOADCTL_VM_INSPECT_ADDR", inspect_address(pw.pw_uid).v4)
         try:

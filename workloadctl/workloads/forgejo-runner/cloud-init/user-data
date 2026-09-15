@@ -94,6 +94,7 @@ write_files:
       ${WORKLOADCTL_VM_INSPECT_ADDR} ${SAME_HOST_HOSTNAMES}
 
   - path: /etc/forgejo-runner/config.yml
+    permissions: '0600'
     content: |
       log:
         level: info
@@ -155,7 +156,9 @@ write_files:
     content: |
       #!/usr/bin/env bash
       set -euxo pipefail
+      umask 077
       exec >>/var/log/forgejo-runner-bootstrap.log 2>&1
+      umask 022
 
       # 1. Packages. dnf5 fails the whole transaction on any unknown OR
       # already-installed package; --skip-* tolerates both.
@@ -305,6 +308,11 @@ write_files:
       # registration handshake here: `forgejo-runner register` is deprecated in
       # v13 ("declare connections in the runner configuration instead"), and the
       # registration-token endpoint it used is deprecated too.
+      # `set -x` is on for the whole bootstrap (a debugging aid), but it traces
+      # assignments, so the sourced uuid/token and their use below would be
+      # echoed into the bootstrap log. The log is now 0600 (umask above), and
+      # this block additionally runs with tracing off as defense in depth.
+      set +x
       . /etc/forgejo-runner/registration.env
       # Same-host default: the forge answers on this guest's own derived
       # address (rendered below); a configured FORGEJO_URL (a forge on another
@@ -338,6 +346,7 @@ write_files:
       else
         echo "No runner credentials in the credstore; not starting the runner."
       fi
+      set -x
 
       # 6. Snapshot state for post-mortem.
       sleep 5

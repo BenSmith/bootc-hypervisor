@@ -55,9 +55,12 @@ PY
 # offline row behind per reset. Best-effort: a list/delete failure is a
 # housekeeping miss, not a reason to fail the provision.
 prune_stale() {
-  python3 - "$FORGEJO_ADMIN_URL" "$ADMIN_TOKEN" "$RUNNER_NAME" <<'PY' || echo "  (could not prune stale runners)"
-import json, sys, urllib.request
-url, token, name = sys.argv[1], sys.argv[2], sys.argv[3]
+  # The admin token travels via the environment, never argv: argv is visible
+  # in `ps` to every user on the host, /proc/<pid>/environ is root-only.
+  ADMIN_TOKEN="$ADMIN_TOKEN" python3 - "$FORGEJO_ADMIN_URL" "$RUNNER_NAME" <<'PY' || echo "  (could not prune stale runners)"
+import json, os, sys, urllib.request
+url, name = sys.argv[1], sys.argv[2]
+token = os.environ["ADMIN_TOKEN"]
 auth = {"Authorization": "token " + token}
 
 def call(req):
@@ -119,14 +122,17 @@ case "${1:-}" in
 
     prune_stale
 
-    # Create the runner on the server and take its credentials back. This is    # the modern flow: POST /admin/actions/runners {name, ephemeral} ->
+    # Create the runner on the server and take its credentials back. This is
+    # the modern flow: POST /admin/actions/runners {name, ephemeral} ->
     # {id, uuid, token}. Both predecessors are deprecated — the
     # GET .../registration-token endpoint, and `forgejo-runner register` itself
     # (v13: "declare connections in the runner configuration instead") — so
     # neither is used. The runner's identity is the uuid+token pair; the seed
     # declares it as a server connection.
-    response="$(curl -fsS -X POST \
-                  -H "Authorization: token ${ADMIN_TOKEN}" \
+    # The token goes to curl via stdin (`-H @-`), never argv: argv is visible
+    # in `ps` to every user on the host.
+    response="$(printf 'Authorization: token %s\n' "$ADMIN_TOKEN" | \
+                curl -fsS -X POST -H @- \
                   -H "Content-Type: application/json" \
                   -d "{\"name\": \"${RUNNER_NAME}\", \"ephemeral\": false}" \
                   "${FORGEJO_ADMIN_URL}/api/v1/admin/actions/runners")"
