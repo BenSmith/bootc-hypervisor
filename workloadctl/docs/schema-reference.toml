@@ -293,7 +293,11 @@ name = "schema-reference"
 # 198.18.x.y that a filtered workload's egress inspector would arm is put on
 # the shared dummy link for every VM at start and removed on stop (the
 # workload-vm-svcaddr helper, ExecStartPre/ExecStopPost of the VM unit), so a
-# host service can publish on it and only that workload's guest can reach it.
+# host service can publish on it, reachable from the host and from *open*
+# workloads' guests (the forgejo-runner bundle is the worked example). A
+# *filtered* workload cannot reach its own non-served ports (the wrong-port
+# self-guard drops them) nor any other workload's address (the cross-workload
+# guard drops it), so the host-service door is an open-workload capability.
 # The seed names it via the WORKLOADCTL_VM_INSPECT_ADDR magic variable
 # (lib/ensure_vm.py); the forgejo-runner bundle is the worked example.
 #

@@ -9,10 +9,14 @@ guest has onto its own host should be the one we make.
 The design already derives one non-loopback, guest-reachable address per
 workload: the 198.18.x.y inspector address, put on the workload-proxy dummy
 link when the workload is *filtered*. This helper puts the SAME address on the
-link for every VM, filtered or open, so a host service can publish on it and
-that workload's guest can reach it — e.g. a forge container's API, for a build
-runner. The inspector still owns 8080/8443 on the address when the workload is
-filtered; the rest of the port space carries host services.
+link for every VM, so a host service can publish on it and an *open*
+workload's guest can reach it — e.g. a forge container's API, for a build
+runner. A *filtered* workload is different: its own wrong-port guard
+(`wl_inspect_self`) drops every dial to its own address outside the
+inspector's served ports (8080/8443), and the cross-workload guard
+(`wl_inspect_live`) drops other workloads' addresses entirely — so the
+host-service door is an open-workload capability, which is exactly what a
+build runner is.
 
 The address is derived from the uid, so nothing is invented, registered or
 configured: the guest names it through the WORKLOADCTL_VM_INSPECT_ADDR seed
