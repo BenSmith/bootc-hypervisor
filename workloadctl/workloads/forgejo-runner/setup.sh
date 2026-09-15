@@ -40,6 +40,17 @@ print(tv.get("FORGEJO_ADMIN_URL", ""))
 PY
 }
 
+network_shape() {
+  # FORGEJO_URL (empty = same-host forge) and SAME_HOST_HOSTNAMES. Same read as
+  # forgejo_admin_url, both values on one line space-separated.
+  python3 - "$WORKLOAD_INSTANCE_DIR/workload.toml" <<'PY'
+import sys, tomllib
+d = tomllib.load(open(sys.argv[1], "rb"))
+tv = d.get("vm", {}).get("cloud_init", {}).get("template_vars", {})
+print(tv.get("FORGEJO_URL", ""), tv.get("SAME_HOST_HOSTNAMES", ""))
+PY
+}
+
 # Delete any existing runner with our name so re-provisioning does not leave an
 # offline row behind per reset. Best-effort: a list/delete failure is a
 # housekeeping miss, not a reason to fail the provision.
@@ -89,6 +100,19 @@ case "${1:-}" in
     if [ -z "$FORGEJO_ADMIN_URL" ]; then
       echo "ERROR: [vm.cloud_init.template_vars].FORGEJO_ADMIN_URL is empty in" >&2
       echo "  $WORKLOAD_INSTANCE_DIR/workload.toml — nothing to register against." >&2
+      exit 1
+    fi
+
+    # Same-host shape: the forge's ROOT_URL host must be mapped in the guest's
+    # /etc/hosts, or Forgejo's ROOT_URL-derived action URLs (cache, artifact
+    # uploads) are unreachable from the guest. A configured FORGEJO_URL means
+    # the forge is remote and no mapping is needed.
+    read -r FORGEJO_URL SAME_HOST_HOSTNAMES <<< "$(network_shape)"
+    if [ -z "$FORGEJO_URL" ] && [ -z "$SAME_HOST_HOSTNAMES" ]; then
+      echo "ERROR: FORGEJO_URL is empty (same-host forge) but SAME_HOST_HOSTNAMES" >&2
+      echo "  is empty in $WORKLOAD_INSTANCE_DIR/workload.toml — list the forge's" >&2
+      echo "  ROOT_URL host there (e.g. forge.local) or the guest cannot reach" >&2
+      echo "  Forgejo's action URLs." >&2
       exit 1
     fi
     ADMIN_TOKEN="$(systemd-creds decrypt "$ADMIN_CRED" -)"

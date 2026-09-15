@@ -405,10 +405,14 @@ class TestBuildCloudInitIsoTemplateMode(unittest.TestCase):
         self.assertTrue(ud_src.exists(), "bundle seed must exist")
         shutil.copy2(ud_src, self.config_dir / "user-data")
         toml = tomllib.loads((bundle / "workload.toml").read_text())
-        tv = toml["vm"]["cloud_init"]["template_vars"]
+        tv = dict(toml["vm"]["cloud_init"]["template_vars"])
+        # The same-host shape: empty FORGEJO_URL, and the forge's ROOT_URL host
+        # named so the guest maps it to its derived address.
+        self.assertEqual(tv["FORGEJO_URL"], "")
+        tv["SAME_HOST_HOSTNAMES"] = "forge.local"
         cfg = {"vm": {"cloud_init": {
             "user_data_file": "user-data",
-            "template_vars": dict(tv),
+            "template_vars": tv,
         }}}
         old_pw = self.pw
         self.pw = _fake_pw(self.home, uid=10042)
@@ -418,16 +422,17 @@ class TestBuildCloudInitIsoTemplateMode(unittest.TestCase):
             self.pw = old_pw
         text = self._read_user_data("forgejo-runner")
         addr = inspect_address(10042).v4
-        self.assertIn(f"FORGEJO_URL=http://{addr}:{tv['FORGEJO_PORT']}", text)
-        # The config.yml url comes from the sourced env var ($${...} survives
-        # the single render pass as ${...}), so the composed URL is in exactly
-        # one place and the printf never learns the address.
+        # Same-host: the bootstrap applies a shell default for the connection
+        # URL ($${...} survives as a shell ${...} with the derived address and
+        # port baked in), and the forge's ROOT_URL host is mapped to the
+        # derived address in /etc/hosts. The config.yml url comes from the
+        # sourced env var, so it picks up the post-default value.
+        self.assertIn(
+            f"FORGEJO_URL=\"${{FORGEJO_URL:-http://{addr}:{tv['FORGEJO_PORT']}}}\"",
+            text)
         self.assertIn("url: ${FORGEJO_URL}/", text)
         self.assertNotIn("FORGEJO_ADMIN_URL", text)
-        # Forgejo's ROOT_URL-derived action URLs (cache, artifact uploads) are
-        # reachable from the guest because /etc/hosts maps the ROOT_URL host to
-        # the derived address — a passt guest cannot reach the host primary.
-        self.assertIn(f"{addr} {tv['FORGEJO_HOSTNAME']}", text)
+        self.assertIn(f"{addr} {tv['SAME_HOST_HOSTNAMES']}", text)
 
     def test_template_magic_vm_user_falls_back_to_default(self):
         ud = self.config_dir / "user-data"

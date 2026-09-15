@@ -59,21 +59,25 @@ RUNNER_VERSION = "13.1.0"
 # be on this host: that is the whole shape, a runner VM whose only door onto
 # its host is its own derived address.
 FORGEJO_ADMIN_URL = "http://localhost:3000"
-# The forge's published HTTP port. The runner's guest reaches the forge on
-# its own derived address (198.18.x.y, WORKLOADCTL_VM_INSPECT_ADDR — see
-# ensure_vm.py) at this port; the URL is composed in the seed, not here,
-# because the address is derived and the seed render substitutes both halves
-# in one pass.
+# The forge's published HTTP port — the guest's SAME-HOST connection (when
+# FORGEJO_URL below is empty) is composed from this and the guest's own
+# derived address (WORKLOADCTL_VM_INSPECT_ADDR).
 FORGEJO_PORT = "3000"
-# The forge's ROOT_URL hostname, as the guest sees it. The forge must be
-# configured with ROOT_URL = "http://<this name>:<FORGEJO_PORT>/" — a NAME,
-# not the host's primary address, which a passt guest cannot reach. The
-# guest's /etc/hosts maps this name to its own derived address (see
-# cloud-init/user-data), so Forgejo's action URLs (cache, artifact uploads),
-# which are ROOT_URL-derived, resolve to somewhere the guest can reach; LAN
-# clients resolve the same name to the host primary, so the web UI is
-# unaffected.
-FORGEJO_HOSTNAME = "forge.local"
+# The URL the runner's guest dials for the forge. EMPTY (default) = the forge
+# is on this same host (the homelab shape): the seed composes the URL from the
+# guest's own derived address + FORGEJO_PORT, and the forge's ROOT_URL must be
+# a name listed in SAME_HOST_HOSTNAMES. Set a full URL when the forge is on
+# another host: the guest dials it directly, needs no mapping, and ROOT_URL is
+# whatever that forge uses.
+FORGEJO_URL = ""
+# Hostnames of services on THIS host that the guest must reach via its own
+# derived address — a passt guest cannot reach the host's primary. For the
+# same-host shape this MUST include the forge's ROOT_URL host (Forgejo's
+# action URLs are ROOT_URL-derived, so an unmapped name means ECONNREFUSED);
+# add any other same-host services (e.g. a registry) too. Space-separated.
+# Leave empty when those services are remote — the guest then resolves them
+# normally. There is no universal default name.
+SAME_HOST_HOSTNAMES = ""
 # Plain-HTTP URL serving the registry host's Caddy internal CA cert, needed by
 # CI jobs that push/pull from a Caddy-fronted registry.local. Empty skips it.
 REGISTRY_CA_URL = ""

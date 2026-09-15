@@ -74,25 +74,24 @@ write_files:
       # regenerated on every provision.
       RUNNER_UUID=${SECRET?forgejo-runner-uuid}
       RUNNER_TOKEN=${SECRET?forgejo-runner-token}
-      # The forge as this VM sees it: its own derived address on the host
-      # (WORKLOADCTL_VM_INSPECT_ADDR, 198.18.x.y from the uid — the only door a
-      # passt guest has onto its own host) at the forge's published HTTP port.
-      # Composed here, not in the TOML, because the address is derived and the
-      # seed render substitutes both halves in one pass.
-      FORGEJO_URL=http://${WORKLOADCTL_VM_INSPECT_ADDR}:${FORGEJO_PORT}
+      # The forge as this VM sees it. Empty = same-host (the homelab shape):
+      # the bootstrap below defaults it to the guest's own derived address
+      # (WORKLOADCTL_VM_INSPECT_ADDR) at FORGEJO_PORT. Set FORGEJO_URL to a
+      # full URL for a forge on another host.
+      FORGEJO_URL=${FORGEJO_URL}
       RUNNER_VERSION=${RUNNER_VERSION}
 
   - path: /etc/hosts
     append: true
     content: |
-      # The forge's ROOT_URL host (FORGEJO_HOSTNAME). A passt guest cannot reach
-      # its own host's primary address, so this name is mapped to the guest's
-      # own derived address (WORKLOADCTL_VM_INSPECT_ADDR) — where the forge
-      # answers — while LAN clients resolve it to the host primary. Forgejo's
-      # action URLs (cache, artifact uploads) are ROOT_URL-derived, so without
-      # this mapping those URLs resolve to the host primary and the guest gets
-      # ECONNREFUSED.
-      ${WORKLOADCTL_VM_INSPECT_ADDR} ${FORGEJO_HOSTNAME}
+      # Same-host services (SAME_HOST_HOSTNAMES), mapped to the guest's own
+      # derived address (WORKLOADCTL_VM_INSPECT_ADDR). A passt guest cannot
+      # reach its own host's primary address, so a same-host forge's ROOT_URL
+      # host must be listed here — Forgejo's action URLs (cache, artifact
+      # uploads) are ROOT_URL-derived, and an unmapped name resolves to the
+      # host primary, so the guest gets ECONNREFUSED. LAN clients resolve the
+      # same names to the host primary, so the web UI is unaffected.
+      ${WORKLOADCTL_VM_INSPECT_ADDR} ${SAME_HOST_HOSTNAMES}
 
   - path: /etc/forgejo-runner/config.yml
     content: |
@@ -298,6 +297,12 @@ write_files:
       # v13 ("declare connections in the runner configuration instead"), and the
       # registration-token endpoint it used is deprecated too.
       . /etc/forgejo-runner/registration.env
+      # Same-host default: the forge answers on this guest's own derived
+      # address (rendered below); a configured FORGEJO_URL (a forge on another
+      # host) wins. $${FORGEJO_URL:-...} escapes template substitution so the
+      # shell applies the default, while the address and port are baked in at
+      # seed build.
+      FORGEJO_URL="$${FORGEJO_URL:-http://${WORKLOADCTL_VM_INSPECT_ADDR}:${FORGEJO_PORT}}"
       # $${RUNNER_UUID} / $${RUNNER_TOKEN} escape template substitution so the
       # sourced shell vars are used, keeping the decrypted values off the script
       # text. The block is appended with printf rather than a heredoc: every line

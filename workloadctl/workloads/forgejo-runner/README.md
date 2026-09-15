@@ -114,24 +114,25 @@ cache.
 - **Egress is open.** A build host reaches arbitrary registries and mirrors, so
   there is no allowlist that both works and means anything. See
   `docs/workloads.md` on egress posture.
-- **Reaching the forge from the VM.** A passt guest cannot reach a service on
-  its own host: the address it holds is the host's, and host loopback is
-  deliberately unmapped. So the forge — a container on this same host — is
-  published on this VM's own **derived address** (`198.18.x.y` from its uid,
-  the same address a filtered workload's egress inspector would arm), which
-  is put on the shared dummy link at VM start and removed on stop. The guest
-  names it via the `WORKLOADCTL_VM_INSPECT_ADDR` seed variable, so nothing is
-  invented or configured: `FORGEJO_ADMIN_URL` is the *host's* URL to the
-  forge's admin API, `FORGEJO_PORT` is the forge's published HTTP port, and
-  the guest URL is composed from the derived address + port in the seed. The
-  forge itself needs no change: a wildcard publish already answers there.
+- **Reaching the forge from the VM — two shapes.**
 
-  One forge-side requirement: set the forge's **`ROOT_URL` to a hostname**
-  (`http://${FORGEJO_HOSTNAME}:${FORGEJO_PORT}/`, default `forge.local`) —
-  not the host's primary address. Forgejo derives its action URLs (the
-  actions cache, artifact uploads) from `ROOT_URL`, and the guest cannot
-  reach the primary, so a primary-based `ROOT_URL` makes those URLs fail with
-  `ECONNREFUSED`. The guest's `/etc/hosts` (seeded via cloud-init) maps
-  `${FORGEJO_HOSTNAME}` to the derived address, so the runner reaches them;
-  LAN clients resolve the same name to the host primary, so the web UI is
-  unaffected.
+  *Same-host (the homelab shape):* `FORGEJO_URL` empty. A passt guest cannot
+  reach a service on its own host (the address it holds is the host's, and
+  host loopback is deliberately unmapped), so the forge — a container on this
+  same host — answers on this VM's own **derived address** (`198.18.x.y` from
+  its uid, put on the shared dummy link at VM start and removed on stop).
+  The seed composes the connection URL from `WORKLOADCTL_VM_INSPECT_ADDR` +
+  `FORGEJO_PORT`, and `SAME_HOST_HOSTNAMES` lists the forge's `ROOT_URL` host
+  (plus any other same-host service, e.g. a registry) — the guest's
+  `/etc/hosts` maps each to the derived address. Set the forge's **`ROOT_URL`
+  to that hostname** (not the host's primary address): Forgejo derives its
+  action URLs (cache, artifact uploads) from `ROOT_URL`, and the guest
+  cannot reach the primary, so a primary-based `ROOT_URL` makes those URLs
+  fail with `ECONNREFUSED`. LAN clients resolve the same name to the host
+  primary, so the web UI is unaffected.
+
+  *Remote:* `FORGEJO_URL` set to a full URL. The forge is on another host;
+  the guest dials that URL directly (a passt guest reaches other LAN hosts
+  fine), no `/etc/hosts` mapping, and `ROOT_URL` is whatever that forge uses.
+  Leave `SAME_HOST_HOSTNAMES` empty unless other same-host services need the
+  mapping.
