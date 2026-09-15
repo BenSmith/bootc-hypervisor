@@ -608,7 +608,7 @@ name = "schema-reference"
 # the broken file this note warns about.
 #
 # [[vm.network.allow]]
-# address = "192.168.0.10:22"
+# address = "192.0.2.10:22"
 # reason  = "backup target; SSH, so hostname policy cannot carry it"
 #
 # [[vm.network.allow]]
@@ -1110,7 +1110,7 @@ name = "schema-reference"
 #                                   # [vm.network] section (see above).
 #
 # [[vm.network.allow]]              # addresses or names, on any port but
-# address = "192.168.0.10:22"       # 80 and 443, which are redirected
+# address = "192.0.2.10:22"         # 80 and 443, which are redirected
 # reason  = "backup target; SSH, so hostname policy cannot carry it"
 #
 # [vm.cloud_init]
@@ -2233,7 +2233,7 @@ ports = ["8080:80", "8443:443"]
 # reason = "git-over-SSH to the homelab forge; not a port any redirect touches"
 #
 # [[network.allow]]
-# address = "192.168.0.10"
+# address = "192.0.2.10"
 # port    = 22
 # reason  = "backup target; SSH, so hostname policy cannot carry it"
 #

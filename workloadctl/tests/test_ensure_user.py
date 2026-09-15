@@ -447,7 +447,7 @@ class TestBuildCloudInitIsoTemplateMode(unittest.TestCase):
         tv = dict(toml["vm"]["cloud_init"]["template_vars"])
         tv["REGISTRY_CA_URL"] = "http://registry.local/ca.crt"
         # A registry on another host, named the way the guest must reach it.
-        tv["EXTRA_HOSTS"] = "192.168.0.100 registry.local"
+        tv["EXTRA_HOSTS"] = "192.0.2.10 registry.local"
         cfg = {"vm": {"cloud_init": {
             "user_data_file": "user-data",
             "template_vars": tv,
@@ -466,7 +466,7 @@ class TestBuildCloudInitIsoTemplateMode(unittest.TestCase):
             "/etc/pki/ca-trust/source/anchors/registry-caddy-root.crt", text)
         # The name is pinned in /etc/hosts, so the CA fetch (and podman) never
         # depend on the flaky mDNS AAAA lookup.
-        self.assertIn("printf '%s\\n' \"192.168.0.100 registry.local\"", text)
+        self.assertIn("printf '%s\\n' \"192.0.2.10 registry.local\"", text)
         self.assertIn("tr ';' '\\n' >> /etc/hosts", text)
 
     def test_template_magic_vm_user_falls_back_to_default(self):

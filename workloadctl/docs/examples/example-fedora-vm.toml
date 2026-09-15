@@ -45,7 +45,7 @@ user = "fedora"
 #   egress = "filtered"
 #
 #   [[vm.network.allow]]
-#   address = "192.168.0.10:22"
+#   address = "192.0.2.10:22"
 #   reason  = "backup target; SSH, not proxyable"
 #
 egress = "open"

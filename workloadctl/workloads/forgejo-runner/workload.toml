@@ -82,7 +82,7 @@ SAME_HOST_HOSTNAMES = ""
 # only over mDNS. mDNS through passt is unreliable — the AAAA lookup for a
 # .local name times out, so A+AAAA tools (curl, podman) fail even though the
 # A record resolves — and a pinned entry takes the resolver out of the path.
-# ';'-separated "<ip> <name>" entries. Homelab: "192.168.0.100 registry.local".
+# ';'-separated "<ip> <name>" entries, e.g. "192.0.2.10 registry.local".
 EXTRA_HOSTS = ""
 # Plain-HTTP URL serving the registry's CA cert (e.g. a Caddy internal root),
 # fetched by the bootstrap and installed into the guest's trust store so CI

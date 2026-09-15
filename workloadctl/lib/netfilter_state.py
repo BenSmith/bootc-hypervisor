@@ -25,7 +25,7 @@ def owned_elements(uid: int, elems) -> list[str]:
     hold concatenations:
 
         wl_filtered -> [10001, 10002]
-        wl_allow4   -> [{"concat": [10001, "192.168.0.10", 22]}]
+        wl_allow4   -> [{"concat": [10001, "192.0.2.10", 22]}]
 
     Matching on the first component is what makes a purge possible at all:
     nft has no "delete every element whose first field is N", so the caller

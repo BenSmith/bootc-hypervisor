@@ -36,7 +36,7 @@ user = "fedora"
 #   hosts  = ["example.com", "*.fedoraproject.org"]     # HTTP/HTTPS, by name
 #
 #   [[vm.network.allow]]                                # the rest, by address
-#   address = "192.168.0.10:22"                         # or by name, with a
+#   address = "192.0.2.10:22"                           # or by name, with a
 #   reason  = "backup target; SSH, not proxyable"       # port that is not
 #                                                       # 80 or 443
 #

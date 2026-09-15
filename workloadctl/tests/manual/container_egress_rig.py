@@ -85,7 +85,7 @@ The [[network.internal]] section needs a host on the LAN that answers on port
 section SKIPS rather than passing, because a probe against an unreachable
 target fails identically to a working internal-destination drop.
 
-    sudo CEG_LAN_HOST=192.168.0.10 python3 tests/manual/container_egress_rig.py
+    sudo CEG_LAN_HOST=<lan-host-ip> python3 tests/manual/container_egress_rig.py
 
 Last green 2026-09-06, 78/78 on a bare-metal Fedora 44 host under enforcing.
 Getting there took seven product fixes and eight rig fixes, and the split is

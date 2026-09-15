@@ -1170,13 +1170,13 @@ Because passt re-originates guest traffic as host sockets owned by `_wl-<name>`,
 egress = "filtered"
 
 [[vm.network.allow]]
-address = "192.168.0.10:22"
+address = "192.0.2.10:22"
 reason  = "backup target; SSH, so hostname policy cannot carry it"
 ```
 
 Two things about this are easy to get wrong:
 
-- **`allow` is a table, and every entry carries a `reason`.** The bare-string form (`allow = ["192.168.0.10:22"]`) is refused, with an error naming the shape to write instead. The entries become elements of a set keyed on `ip daddr` / `ip6 daddr`, so an entry written as a **name** is resolved on the host once at start — legal now that the guest's resolver is a static map served host-side, where before a moved record left the element silently wrong for the life of the VM. A name that does not resolve at start is an error, not an unarmed element: `allow` is the only path to a named service on an unredirected port, so a failure to arm presents as a hang rather than a refusal.
+- **`allow` is a table, and every entry carries a `reason`.** The bare-string form (`allow = ["192.0.2.10:22"]`) is refused, with an error naming the shape to write instead. The entries become elements of a set keyed on `ip daddr` / `ip6 daddr`, so an entry written as a **name** is resolved on the host once at start — legal now that the guest's resolver is a static map served host-side, where before a moved record left the element silently wrong for the life of the VM. A name that does not resolve at start is an error, not an unarmed element: `allow` is the only path to a named service on an unredirected port, so a failure to arm presents as a hang rather than a refusal.
 - **Ports 80 and 443 are refused in `allow`.** They are redirected into the workload's egress inspector before the filter chain consults the list, so the element would be armed and never matched while the config read as if the destination were exempt. The redirect keys on the workload uid and the port alone, so this holds for a name exactly as for an address. Name those hosts in `.hosts`. See [Hostname Egress Policy](#hostname-egress-policy).
 - **`egress` has to be stated.** It defaults to `"filtered"`, and a filtered VM needs somewhere to go: either `.allow` (addresses and unredirected ports) or `.hosts` (names over HTTP/HTTPS, through its own egress inspector). `"filtered"` with neither is a validation error rather than a VM that boots and can reach nothing. Say `egress = "open"` for a VM that should not be filtered; the shipped bundles do, with their reasons inline. Hostname policy was twice expected to retire this rule by giving `"filtered"` an implicit allow, and has not: a workload gets an inspector only when `hosts` is non-empty, so a bare `[vm.network]` still describes a VM that can reach nothing.
 
@@ -1451,7 +1451,7 @@ egress = "filtered"
 hosts  = ["example.com", "*.fedoraproject.org"]
 
 [[vm.network.allow]]              # non-HTTP exceptions only; not 80 or 443
-address = "192.168.0.10:22"
+address = "192.0.2.10:22"
 reason  = "backup target; SSH, so hostname policy cannot carry it"
 ```
 

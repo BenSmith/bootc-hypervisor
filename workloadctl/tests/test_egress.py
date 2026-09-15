@@ -794,15 +794,15 @@ class TestElementModel(unittest.TestCase):
 
     def test_entries_are_split_by_family(self):
         cmds = vm_filter_commands(
-            10001, [allow_entry("192.168.0.10:22"),
+            10001, [allow_entry("192.0.2.10:22"),
                     allow_entry("[2001:db8::1]:8443")], "add")
         by_set = {c[5]: c[-1] for c in cmds}
-        self.assertIn("192.168.0.10", by_set[NFT_SET_ALLOW4])
-        self.assertNotIn("192.168.0.10", by_set[NFT_SET_ALLOW6])
+        self.assertIn("192.0.2.10", by_set[NFT_SET_ALLOW4])
+        self.assertNotIn("192.0.2.10", by_set[NFT_SET_ALLOW6])
         self.assertIn("2001:db8::1", by_set[NFT_SET_ALLOW6])
 
     def test_empty_family_produces_no_command(self):
-        cmds = vm_filter_commands(10001, [allow_entry("192.168.0.10:22")], "add")
+        cmds = vm_filter_commands(10001, [allow_entry("192.0.2.10:22")], "add")
         self.assertNotIn(NFT_SET_ALLOW6, [c[5] for c in cmds])
 
     def test_all_entries_for_a_set_go_in_one_transaction(self):
@@ -841,10 +841,10 @@ class TestOwnedElements(unittest.TestCase):
         self.assertEqual(owned_elements(10001, [10001, 10002]), ["10001"])
 
     def test_allow_set_holds_concatenations(self):
-        elems = [{"concat": [10001, "192.168.0.10", 22]},
+        elems = [{"concat": [10001, "192.0.2.10", 22]},
                  {"concat": [10002, "192.168.0.11", 22]}]
         self.assertEqual(owned_elements(10001, elems),
-                         ["10001 . 192.168.0.10 . 22"])
+                         ["10001 . 192.0.2.10 . 22"])
 
     def test_a_sibling_workloads_elements_are_never_touched(self):
         """The failure this guards is a purge taking another VM offline."""
@@ -2070,7 +2070,7 @@ class TestAllowMayNotNameTheListenerRange(unittest.TestCase):
         self.assertIn("inspector", message)
 
     def test_ordinary_addresses_still_parse(self):
-        for spec in ("192.168.0.10:22", "10.0.0.1:5432", "[2001:db8::1]:8443"):
+        for spec in ("192.0.2.10:22", "10.0.0.1:5432", "[2001:db8::1]:8443"):
             with self.subTest(spec=spec):
                 parse_vm_allow(allow_entry(spec))
 
@@ -3105,18 +3105,18 @@ class TestRung2Schema(unittest.TestCase):
         type, because this is the one error reachable by having written a
         correct config for the previous release.
         """
-        errors = self._egress({"allow": ["192.168.0.10:22"]})
+        errors = self._egress({"allow": ["192.0.2.10:22"]})
         self.assertTrue(errors)
         message = " ".join(errors)
         self.assertIn("[[vm.network.allow]]", message)
         self.assertIn("reason", message)
 
     def test_allow_requires_a_reason(self):
-        errors = self._egress({"allow": [{"address": "192.168.0.10:22"}]})
+        errors = self._egress({"allow": [{"address": "192.0.2.10:22"}]})
         self.assertTrue(any("reason" in e for e in errors), errors)
 
     def test_allow_refuses_a_key_it_does_not_know(self):
-        errors = self._egress({"allow": [{"address": "192.168.0.10:22",
+        errors = self._egress({"allow": [{"address": "192.0.2.10:22",
                                           "reason": "r", "host": "x"}]})
         self.assertTrue(any("unknown key" in e for e in errors), errors)
 
@@ -3130,7 +3130,7 @@ class TestRung2Schema(unittest.TestCase):
         looks entirely reasonable. "unknown key" alone sends the reader
         hunting for a typo that is not there.
         """
-        errors = self._egress({"allow": [{"address": "192.168.0.10:22",
+        errors = self._egress({"allow": [{"address": "192.0.2.10:22",
                                           "reason": "r",
                                           "hosts": ["example.com"]}]})
         message = " ".join(errors)
@@ -3144,7 +3144,7 @@ class TestRung2Schema(unittest.TestCase):
     def test_a_genuine_typo_gets_no_misordering_hint(self):
         """The hint is for a key that exists somewhere else, not for any
         unknown key -- otherwise it is noise on every real typo."""
-        errors = self._egress({"allow": [{"address": "192.168.0.10:22",
+        errors = self._egress({"allow": [{"address": "192.0.2.10:22",
                                           "reason": "r", "adress": "x"}]})
         message = " ".join(errors)
         self.assertIn("unknown key", message)
@@ -3162,7 +3162,7 @@ class TestRung2Schema(unittest.TestCase):
             with self.subTest(port=port):
                 errors = self._egress({
                     "hosts": ["github.com"],
-                    "allow": [allow_entry(f"192.168.0.10:{port}")]})
+                    "allow": [allow_entry(f"192.0.2.10:{port}")]})
                 self.assertTrue(any("redirected" in e for e in errors), errors)
 
     def test_the_80_443_refusal_reaches_the_name_form_too(self):
@@ -3175,7 +3175,7 @@ class TestRung2Schema(unittest.TestCase):
         # simply an address and a port.
         self.assertEqual(self._egress({
             "egress": "open",
-            "allow": [allow_entry("192.168.0.10:443")]}), [])
+            "allow": [allow_entry("192.0.2.10:443")]}), [])
 
     def test_a_name_is_legal_and_is_not_resolved_by_validation(self):
         """Validation runs where the name may not resolve at all.
@@ -3221,7 +3221,7 @@ class TestRung2Schema(unittest.TestCase):
         """
         self.assertEqual(self._egress({
             "resolver": "none",
-            "allow": [allow_entry("192.168.0.10:22")]}), [])
+            "allow": [allow_entry("192.0.2.10:22")]}), [])
 
 
 class TestRung2Warnings(unittest.TestCase):
@@ -3257,7 +3257,7 @@ class TestRung2Warnings(unittest.TestCase):
 
     def test_resolver_none_warns_on_the_configuration_that_is_valid(self):
         warnings = self._warn({"resolver": "none",
-                               "allow": [allow_entry("192.168.0.10:22")]})
+                               "allow": [allow_entry("192.0.2.10:22")]})
         self.assertTrue(any("only .allow entries written by address" in w
                             for w in warnings), warnings)
 
@@ -3300,11 +3300,11 @@ class TestAllowNameResolution(unittest.TestCase):
         works-until-it-doesn't failure the both-families-or-neither rule exists
         to stop -- and the half that survives is the one clients try first.
         """
-        with self._resolve(["192.168.0.10", "2001:db8::10"]):
+        with self._resolve(["192.0.2.10", "2001:db8::10"]):
             cmds = vm_filter_commands(
                 10001, [allow_entry("git.local:2222")], "add")
         by_set = {c[5]: c[-1] for c in cmds}
-        self.assertIn("192.168.0.10 . 2222", by_set[NFT_SET_ALLOW4])
+        self.assertIn("192.0.2.10 . 2222", by_set[NFT_SET_ALLOW4])
         self.assertIn("2001:db8::10 . 2222", by_set[NFT_SET_ALLOW6])
 
     def test_a_name_that_does_not_resolve_is_an_error_not_an_empty_arm(self):
@@ -3595,20 +3595,20 @@ class TestInternalOkElements(unittest.TestCase):
         from nft_elements import internal_ok_elements
         from nft_constants import NFT_SET_INTERNAL_OK4, NFT_SET_INTERNAL_OK6
         elements = internal_ok_elements(
-            10001, self._addrs("192.168.0.10", "fd00::10"))
-        self.assertEqual(elements[NFT_SET_INTERNAL_OK4], ["10001 . 192.168.0.10"])
+            10001, self._addrs("192.0.2.10", "fd00::10"))
+        self.assertEqual(elements[NFT_SET_INTERNAL_OK4], ["10001 . 192.0.2.10"])
         self.assertEqual(elements[NFT_SET_INTERNAL_OK6], ["10001 . fd00::10"])
 
     def test_an_empty_family_produces_no_command(self):
         from nft_elements import internal_ok_commands
         from nft_constants import NFT_SET_INTERNAL_OK6
-        cmds = internal_ok_commands(10001, self._addrs("192.168.0.10"), "add")
+        cmds = internal_ok_commands(10001, self._addrs("192.0.2.10"), "add")
         self.assertEqual(len(cmds), 1)
         self.assertNotIn(NFT_SET_INTERNAL_OK6, cmds[0])
 
     def test_delete_mirrors_add(self):
         from nft_elements import internal_ok_commands
-        addrs = self._addrs("192.168.0.10", "fd00::10")
+        addrs = self._addrs("192.0.2.10", "fd00::10")
         add = internal_ok_commands(10001, addrs, "add")
         delete = internal_ok_commands(10001, addrs, "delete")
         self.assertEqual([c[-1] for c in add], [c[-1] for c in delete])
@@ -3630,7 +3630,7 @@ class TestInternalOkElements(unittest.TestCase):
 
     def test_every_private_family_is_accepted(self):
         from nft_elements import internal_ok_elements
-        for spec in ("10.0.0.5", "192.168.0.10", "172.16.0.1", "169.254.169.254",
+        for spec in ("10.0.0.5", "192.168.254.1", "172.16.0.1", "169.254.169.254",
                      "fd00::10", "fe80::1"):
             with self.subTest(spec=spec):
                 self.assertTrue(internal_ok_elements(10001, self._addrs(spec)))
@@ -3652,10 +3652,10 @@ class TestInternalOkElements(unittest.TestCase):
         the key that cannot rotate, so it is the handle the teardown uses."""
         from nft_elements import internal_ok_uid_elements
         entries = internal_ok_uid_elements(
-            10001, self._dump((10001, "192.168.0.10"), (10001, "10.0.0.5"),
+            10001, self._dump((10001, "192.0.2.10"), (10001, "10.0.0.5"),
                               (10002, "192.168.0.11")))
         self.assertEqual(entries,
-                         ["10001 . 192.168.0.10", "10001 . 10.0.0.5"])
+                         ["10001 . 192.0.2.10", "10001 . 10.0.0.5"])
 
     def test_the_purge_matches_a_uid_nft_rendered_as_a_username(self):
         """nft names the uid half of the key when it can resolve it, which on a
@@ -3663,10 +3663,10 @@ class TestInternalOkElements(unittest.TestCase):
         that matched only the number would silently no-op exactly there."""
         from nft_elements import internal_ok_uid_elements
         entries = internal_ok_uid_elements(
-            10001, self._dump(("_wl-web", "192.168.0.10"),
+            10001, self._dump(("_wl-web", "192.0.2.10"),
                               ("_wl-other", "192.168.0.11")),
             "_wl-web")
-        self.assertEqual(entries, ["_wl-web . 192.168.0.10"])
+        self.assertEqual(entries, ["_wl-web . 192.0.2.10"])
 
     def test_the_purge_reads_an_empty_or_malformed_dump_as_nothing_to_do(self):
         from nft_elements import internal_ok_uid_elements
@@ -3680,11 +3680,11 @@ class TestInternalOkElements(unittest.TestCase):
         from nft_elements import internal_ok_delete_commands
         from nft_constants import NFT_SET_INTERNAL_OK4
         cmds = internal_ok_delete_commands(
-            NFT_SET_INTERNAL_OK4, ["10001 . 192.168.0.10"])
+            NFT_SET_INTERNAL_OK4, ["10001 . 192.0.2.10"])
         self.assertEqual(len(cmds), 1)
         self.assertEqual(cmds[0][1], "delete")
         self.assertIn(NFT_SET_INTERNAL_OK4, cmds[0])
-        self.assertEqual(cmds[0][-1], "{ 10001 . 192.168.0.10 }")
+        self.assertEqual(cmds[0][-1], "{ 10001 . 192.0.2.10 }")
         self.assertEqual(
             internal_ok_delete_commands(NFT_SET_INTERNAL_OK4, []), [])
 

@@ -148,7 +148,7 @@ class TestNetworkValidation(unittest.TestCase):
     def test_an_explicit_decision_either_way_is_valid(self):
         self.assertEqual(validate_vm_network({"egress": "open"}), [])
         self.assertEqual(
-            validate_vm_network({"allow": [{"address": "192.168.0.10:22",
+            validate_vm_network({"allow": [{"address": "192.0.2.10:22",
                                             "reason": "backup target"}]}), [])
 
     def test_ports_may_not_bind_the_management_range(self):

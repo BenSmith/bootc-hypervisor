@@ -20,7 +20,7 @@ hosts  = ["*.fedoraproject.org", "api.example.com"]    # HTTP/HTTPS, by name;
                                                        # the bare apex — see below
 
 [[vm.network.allow]]                                   # everything else, by
-address = "192.168.0.10:22"                            # address or by name,
+address = "192.0.2.10:22"                              # address or by name,
 reason  = "backup target; SSH, not HTTP"               # on a port that is
                                                        # not 80 or 443
 ```
@@ -104,7 +104,7 @@ nothing, or one that dials into itself.
 **`workload-vm-filter up web`** — the VM unit's `ExecStartPre`:
 
 7. Purges every element owned by uid 10004 from the filter sets, *then* adds the
-   configured ones: `10004` to `wl_filtered` and `10004 . 192.168.0.10 . 22` to
+   configured ones: `10004` to `wl_filtered` and `10004 . 192.0.2.10 . 22` to
    `wl_allow4`.
 
 That purge is the entire reason this is a script rather than three
@@ -296,7 +296,7 @@ Widening by port instead — "let this uid reach 443 anywhere" — was the obvio
 alternative to rule 17 and is fatal: it is precisely the bypass rule 19 exists to
 close.
 
-Meanwhile `ssh 192.168.0.10` matches rule 3 directly and never involves the
+Meanwhile `ssh 192.0.2.10` matches rule 3 directly and never involves the
 inspector at all. That is what `allow` is for: the exceptions on ports no
 redirect touches.
 
