@@ -210,6 +210,21 @@ write_files:
       systemctl mask avahi-daemon.service avahi-daemon.socket || true
       systemctl restart NetworkManager || true
 
+      # NetworkManager writes the replacement /etc/resolv.conf, but on Fedora it
+      # is configured to hand DNS to systemd-resolved and only writes the file
+      # itself by falling back when resolved is unreachable. This guest depends
+      # on that fallback, so check for the file rather than assume it. Fail here:
+      # every later DNS consumer fails soft (the CA fetch below only warns), so
+      # an unchecked miss leaves the bootstrap exiting 0 with no resolver at all.
+      # Retried because NM writes the file after the restart returns.
+      for _ in 1 2 3 4 5; do [ -s /etc/resolv.conf ] && break; sleep 1; done
+      if [ ! -s /etc/resolv.conf ]; then
+        echo "ERROR: no /etc/resolv.conf after disabling systemd-resolved and" >&2
+        echo "  restarting NetworkManager — the guest has no DNS. Check" >&2
+        echo "  NetworkManager's dns= backend in the guest." >&2
+        exit 1
+      fi
+
       # Pin the operator's extra hosts (EXTRA_HOSTS, ';'-separated "<ip> <name>").
       # These are names on OTHER hosts that resolve only over mDNS, which is
       # unreliable through passt: the AAAA lookup times out, so A+AAAA tools
