@@ -230,15 +230,30 @@ write_files:
 
       # NetworkManager writes the replacement /etc/resolv.conf, but on Fedora it
       # is configured to hand DNS to systemd-resolved and only writes the file
-      # itself by falling back when resolved is unreachable. This guest depends
-      # on that fallback, so check for the file rather than assume it. Fail here:
-      # every later DNS consumer fails soft (the CA fetch below only warns), so
-      # an unchecked miss leaves the bootstrap exiting 0 with no resolver at all.
-      # Retried because NM writes the file after the restart returns.
-      for _ in 1 2 3 4 5; do [ -s /etc/resolv.conf ] && break; sleep 1; done
-      if [ ! -s /etc/resolv.conf ]; then
-        echo "ERROR: no /etc/resolv.conf after disabling systemd-resolved and" >&2
-        echo "  restarting NetworkManager — the guest has no DNS. Check" >&2
+      # itself by falling back when resolved is unreachable — and it does that
+      # asynchronously. Measured: the restart above returns in ~0.2s and the
+      # file lands ~1-2s later on an idle host; `nmcli device reapply` does not
+      # trigger it at all. So do not wait on NM's timing with a budget a loaded
+      # host can exhaust: wait for the connection to carry a DNS server (DHCP
+      # has to complete first) and write the file from that — the same content
+      # NM writes, minus its comment header.
+      #
+      # Failing here rather than assuming: every later DNS consumer fails soft
+      # (the CA fetch below only warns), so a silent miss leaves the bootstrap
+      # exiting 0 with no resolver at all. 30 tries is a DHCP wait, not a race
+      # budget — through passt the first iteration normally succeeds.
+      for _ in $(seq 1 30); do
+        _dev=$(nmcli -g DEVICE device status 2>/dev/null | grep -v '^lo$' | head -1)
+        _dns=$(nmcli -g IP4.DNS device show "$_dev" 2>/dev/null | head -1)
+        [ -n "$_dns" ] && break
+        sleep 1
+      done
+      if [ -n "$_dns" ]; then
+        printf 'nameserver %s\n' "$_dns" > /etc/resolv.conf
+      else
+        echo "ERROR: the guest has no resolver: no /etc/resolv.conf after" >&2
+        echo "  disabling systemd-resolved and restarting NetworkManager, and" >&2
+        echo "  no DNS on the connection to write one from. Check" >&2
         echo "  NetworkManager's dns= backend in the guest." >&2
         exit 1
       fi

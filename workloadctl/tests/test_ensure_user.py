@@ -465,9 +465,37 @@ class TestBuildCloudInitIsoTemplateMode(unittest.TestCase):
         self.assertIn(
             "/etc/pki/ca-trust/source/anchors/registry-caddy-root.crt", text)
         # The name is pinned in /etc/hosts, so the CA fetch (and podman) never
-        # depend on the flaky mDNS AAAA lookup.
+        # depend on the mDNS AAAA lookup, which never returns.
         self.assertIn("printf '%s\\n' \"192.0.2.10 registry.local\"", text)
         self.assertIn("tr ';' '\\n' >> /etc/hosts", text)
+
+    def test_bootstrap_writes_resolv_conf_from_the_connection_dns(self):
+        """The guest's /etc/resolv.conf is written by the bootstrap, from the
+        DNS the connection carries — not by waiting on NetworkManager's own
+        asynchronous write, which lands ~1-2s after its restart returns on an
+        idle host and not at all after `nmcli device reapply`.
+        """
+        bundle = REPO_ROOT / "workloads" / "forgejo-runner"
+        ud_src = bundle / "cloud-init" / "user-data"
+        self.assertTrue(ud_src.exists(), "bundle seed must exist")
+        shutil.copy2(ud_src, self.config_dir / "user-data")
+        toml = tomllib.loads((bundle / "workload.toml").read_text())
+        cfg = {"vm": {"cloud_init": {
+            "user_data_file": "user-data",
+            "template_vars": dict(toml["vm"]["cloud_init"]["template_vars"]),
+        }}}
+        old_pw = self.pw
+        self.pw = _fake_pw(self.home, uid=10042)
+        try:
+            self._run_build(cfg, name="forgejo-runner")
+        finally:
+            self.pw = old_pw
+        text = self._read_user_data("forgejo-runner")
+        self.assertIn("nmcli -g IP4.DNS device show", text)
+        self.assertIn("printf 'nameserver %s\\n' \"$_dns\" > /etc/resolv.conf",
+                      text)
+        # And it still fails loudly when there is no DNS to write.
+        self.assertIn("the guest has no resolver", text)
 
     def test_template_magic_vm_user_falls_back_to_default(self):
         ud = self.config_dir / "user-data"
