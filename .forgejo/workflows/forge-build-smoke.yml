@@ -1,0 +1,72 @@
+# Build-only smoke test for the forgejo host-container + VM-runner layout.
+#
+# The same steps build-hypervisor-f44-quick.yml runs up to and including
+# `podman build`, and nothing after it: no rechunk, no tag, no push. What is
+# under test is whether a runner in a passt VM can reach the registry, check
+# out the repo and drive a full image build -- not whether the result is
+# publishable, which needs signing credentials this instance does not have.
+name: Forge Build Smoke
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [forge-build-smoke]
+
+concurrency:
+  group: forge-build-smoke-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  REGISTRY: registry.local
+  VERSION: '44'
+
+jobs:
+  build:
+    runs-on: native
+    timeout-minutes: 120
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Render policy.json
+        env:
+          OWNER: bensmith
+        run: |
+          sed -e "s|__REGISTRY_NAMESPACE__|${OWNER}|g" \
+              policy-hypervisor.json.template > policy.json
+
+      - name: Fetch cosy
+        run: |
+          mkdir -p bin man
+          curl -fsSL https://raw.githubusercontent.com/BenSmith/cosy/main/cosy -o bin/cosy
+          curl -fsSL https://raw.githubusercontent.com/BenSmith/cosy/main/cosy.1 -o man/cosy.1
+          sha256sum -c cosy.sha256
+
+      - name: Registry reachable from this guest
+        run: |
+          # The runner is a passt VM: registry.local resolves only through the
+          # /etc/hosts pin at the guest's own derived address. Probing it here
+          # separates "the pin is wrong" from "the build failed".
+          getent hosts registry.local
+          skopeo inspect "docker://${REGISTRY}/fedora-bootc-minimal:${VERSION}" >/dev/null
+          echo "registry reachable"
+
+      - name: Build base hypervisor
+        run: |
+          sudo podman build \
+            --pull=newer \
+            --security-opt=label=disable \
+            --security-opt=seccomp=unconfined \
+            --cap-add=all \
+            --ipc=host \
+            --network=host \
+            --build-arg BASE_IMAGE=${REGISTRY}/fedora-bootc-minimal:${VERSION} \
+            --build-arg FEDORA_VERSION=${VERSION} \
+            -f hypervisor.Containerfile \
+            -t "localhost/hypervisor-bootc:smoke-${VERSION}" \
+            .
+
+      - name: Report what was built
+        run: |
+          sudo podman images "localhost/hypervisor-bootc" --format \
+            "{{.Repository}}:{{.Tag}} {{.Size}}"
