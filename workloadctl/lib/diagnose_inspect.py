@@ -37,7 +37,10 @@ from egress_record import (
 )
 from egress_status import OTHER_KEY
 from inspect_figures import read_inspect_status
-from netfilter_state import nft_element_counter, nft_set_elements, owned_elements
+from netfilter_state import (
+    nft_element_counter, nft_set_elements, owned_elements,
+    unwrap_counted_elements,
+)
 from nft import nft_json
 from nft_constants import (
     NFT_TABLE, NFT_PROXY_TABLE,
@@ -733,10 +736,16 @@ def _inspect_filter_sets(uid: int) -> dict:
     """
     payload = nft_json("list", "table", *NFT_TABLE.split())
     out = {}
+    # Unwrapped first: the self sets carry `counter`, so nft renders their
+    # elements wrapped and owned_elements -- which matches the bare shape, the
+    # shape a delete value takes -- finds nothing in them. Reading them raw
+    # reports both self sets missing on every filtered workload, which both
+    # hides a genuinely unarmed element and contradicts the counter the next
+    # paragraph prints from those same elements.
     for set_name in INSPECT_ACCEPT_SETS + INSPECT_SELF_SETS:
         found, elements = _named_set_elements(payload, set_name)
-        out[set_name] = (bool(owned_elements(uid, elements))
-                         if found else None)
+        out[set_name] = (bool(owned_elements(
+            uid, unwrap_counted_elements(elements))) if found else None)
     # The guard sets by address. owned_elements asks "does any element name
     # this uid", and these elements name no uid at all -- run over them it
     # returns empty for a correctly armed workload, i.e. it would report the

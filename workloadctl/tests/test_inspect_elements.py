@@ -192,21 +192,50 @@ class TestTheReadCostsOneExec(unittest.TestCase):
     """
 
     def _table(self, *, names, uid=UID):
-        # Two element shapes, because the sets have two shapes. The accept and
-        # self sets are keyed on a uid concatenation; the guard sets hold a
-        # bare inspector address and no uid at all, which is the whole reason
-        # _inspect_filter_sets reads them on a second branch. A fixture that
-        # gave them all the uid shape would let a reader that used
-        # owned_elements on the guard sets pass here and report every real
-        # host's guard as missing.
+        # THREE element shapes, because the sets have three. The accept sets
+        # are a bare uid concatenation; the guard sets hold a bare inspector
+        # address and no uid at all, which is why _inspect_filter_sets reads
+        # them on a second branch; and the self sets carry `counter`, so nft
+        # wraps their elements in {"elem": {"val": ..., "counter": ...}}.
+        #
+        # All three are modelled here because a fixture that gave every set the
+        # bare uid shape passes against a reader that only matches bare -- and
+        # that reader reports both self sets missing on every real filtered
+        # workload, in the same sentence that prints those elements' counter.
         addr = inspect_address(uid)
         by_family = {NFT_SET_INSPECT_LIVE: str(addr.v4),
                      NFT_SET_INSPECT_LIVE6: str(addr.v6)}
-        sets = [{"set": {"name": name,
-                         "elem": ([by_family[name]] if name in by_family
-                                  else [{"concat": [uid, 80]}])}}
-                for name in names]
+
+        def elem(name):
+            if name in by_family:
+                return by_family[name]
+            bare = {"concat": [uid, 80]}
+            if name in INSPECT_SELF_SETS:
+                return {"elem": {"val": bare,
+                                 "counter": {"packets": 12, "bytes": 720}}}
+            return bare
+
+        sets = [{"set": {"name": name, "elem": [elem(name)]}} for name in names]
         return {"nftables": [{"metainfo": {}}] + sets}
+
+    def test_a_counted_self_set_reads_armed_not_missing(self):
+        """The self sets carry `counter` and so render wrapped. Read with a
+        bare-shape matcher they report missing on every filtered workload,
+        which both hides a genuinely unarmed element -- the one state this
+        check exists to find -- and contradicts the self-dial counter diagnose
+        prints from those very elements two sentences later."""
+        result, _calls = self._read(self._table(names=ALL_SETS))
+        for name in INSPECT_SELF_SETS:
+            self.assertIs(result[name], True, name)
+
+    def test_a_counted_self_set_for_another_uid_is_still_the_failure(self):
+        """Unwrapping must not turn the membership test into "something is in
+        here": an element wrapped around a DIFFERENT uid is the failure the
+        check reports, not an arm."""
+        result, _calls = self._read(
+            self._table(names=INSPECT_SELF_SETS, uid=UID + 7))
+        for name in INSPECT_SELF_SETS:
+            self.assertIs(result[name], False, name)
 
     def _read(self, payload):
         calls = []
