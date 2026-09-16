@@ -190,19 +190,37 @@ write_files:
       fi
       systemctl enable --now systemd-timesyncd || true
 
-      # DNS: resolve through the passt-provided address, not systemd-resolved.
+      # DNS: drop systemd-resolved, so the guest's lookups reach the host's
+      # resolver through passt instead of stopping at the stub's in-guest mDNS.
       #
-      # The guest's DNS server is the address passt hands out over DHCP (the
-      # host's default-route gateway), and passt forwards those queries to the
-      # host's own resolver — which is where mDNS actually works, because the
-      # host is on the LAN and the guest is not.
+      # What the guest is actually told: passt advertises the host's
+      # default-route gateway (dns-forward/dns), intercepts queries sent to that
+      # address, and forwards them to the host's own resolver (dns-host — the
+      # stub at 127.0.0.53 on a Fedora host). Verified, not assumed: the host's
+      # resolver logs the guest's queries. A name therefore resolves here only
+      # if the HOST's resolver can answer it, and what a host's resolver can
+      # answer is not this deployment's to assume.
       #
-      # systemd-resolved has to go for that to happen. It special-cases .local
-      # for mDNS (RFC 6762) and will not forward it upstream, and multicast
-      # cannot traverse passt — so with resolved in the path every homelab
-      # .local name (registry.local, for CI pushes; anything else the operator
-      # needs) fails to resolve while the host answers the same query fine.
-      # Dropping the stub lets glibc use the DHCP resolver directly.
+      # systemd-resolved has to go for any of that to be reached. It
+      # special-cases .local for mDNS (RFC 6762) and will not forward it
+      # upstream, and multicast cannot traverse passt — so with resolved in the
+      # path every homelab .local name fails in the guest while the host answers
+      # the same query fine. Dropping the stub lets glibc use the advertised
+      # resolver directly.
+      #
+      # Even then, mDNS is not a substitute for a pinned entry — which is why
+      # both hostname lists below are LOAD-BEARING, not a hedge. mDNS answers
+      # the A query and never answers AAAA (there is nothing to answer with and
+      # no negative response either), so an A+AAAA client — curl, podman —
+      # hangs on the AAAA lookup and fails on a name `getent ahostsv4` resolves
+      # instantly. Measured: the A resolves, the AAAA never returns. A
+      # deployment that needs a name and pins nothing gets exactly that, with no
+      # hint as to why.
+      #
+      # Do not read passt's own start-up lines ("Couldn't get any nameserver
+      # address", "No IPv6 nameserver available for NDP/DHCPv6") as this guest
+      # having no resolver: they are its auto-detect path rejecting the host's
+      # loopback stub, and workloadctl passes all three options explicitly.
       systemctl disable --now systemd-resolved || true
       rm -f /etc/systemd/resolved.conf.d/10-mdns.conf
       rm -f /etc/resolv.conf
@@ -226,11 +244,10 @@ write_files:
       fi
 
       # Pin the operator's extra hosts (EXTRA_HOSTS, ';'-separated "<ip> <name>").
-      # These are names on OTHER hosts that resolve only over mDNS, which is
-      # unreliable through passt: the AAAA lookup times out, so A+AAAA tools
-      # (curl, podman) fail while the A record resolves. An /etc/hosts entry
-      # takes the resolver out of the path entirely. Placed before the CA
-      # fetch below, which is one such caller.
+      # Names on OTHER hosts that only mDNS knows: reachable through passt, but
+      # answered A-only, so an A+AAAA client hangs on the AAAA lookup (see the
+      # DNS note above). An /etc/hosts entry takes the resolver out of the path
+      # entirely. Placed before the CA fetch below, which is one such caller.
       if [ -n "${EXTRA_HOSTS}" ]; then
         printf '%s\n' "${EXTRA_HOSTS}" | tr ';' '\n' >> /etc/hosts
       fi

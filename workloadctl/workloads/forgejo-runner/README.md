@@ -143,8 +143,15 @@ cache.
   CA cert — the bootstrap fetches it and installs it into the guest trust
   store so `podman push` trusts the registry's TLS. The URL must be reachable
   from the guest, so for a same-host registry it must also be a mapped name,
-  never the host's primary address. A registry on **another** host whose name
-  resolves only over mDNS goes in `EXTRA_HOSTS` instead (`"<ip> <name>"`):
-  mDNS is unreliable through passt — the AAAA lookup times out, so curl and
-  podman fail while the A record resolves — and a pinned `/etc/hosts` entry
-  removes the resolver from the path.
+  never the host's primary address. A registry on **another** host that is
+  known only over mDNS goes in `EXTRA_HOSTS` instead (`"<ip> <name>"`).
+
+  Both hostname lists are `/etc/hosts` pins, and both are **load-bearing**.
+  A guest's lookups do reach the host's resolver through passt — the guest is
+  told the host's gateway address, which passt intercepts and forwards to the
+  host's own resolver — but a name that only mDNS knows comes back A-only:
+  mDNS answers the A query and never answers AAAA (there is nothing to answer
+  with, and no negative response either), so `curl` and `podman` hang on the
+  AAAA lookup and fail on a name that `getent ahostsv4` resolves instantly.
+  Leave both lists empty and that is exactly what a deployment gets, with no
+  hint as to why. Pin every name the CI touches.

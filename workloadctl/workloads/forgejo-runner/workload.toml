@@ -77,12 +77,20 @@ FORGEJO_URL = ""
 # add any other same-host services (e.g. a registry) too. Space-separated.
 # Leave empty when those services are remote — the guest then resolves them
 # normally. There is no universal default name.
+#
+# LOAD-BEARING, not a convenience: these entries are /etc/hosts pins, and they
+# are the only thing that makes the names usable. A guest's lookups do reach
+# the host's resolver through passt (the guest is told the gateway, passt
+# intercepts and forwards to the host's dns-host), but mDNS — which is what
+# answers .local on the host — answers A only and never AAAA, so curl/podman
+# hang on the AAAA lookup. Pin every name the CI touches.
 SAME_HOST_HOSTNAMES = ""
-# Extra /etc/hosts entries for CI dependencies on OTHER hosts that resolve
-# only over mDNS. mDNS through passt is unreliable — the AAAA lookup for a
-# .local name times out, so A+AAAA tools (curl, podman) fail even though the
-# A record resolves — and a pinned entry takes the resolver out of the path.
-# ';'-separated "<ip> <name>" entries, e.g. "192.0.2.10 registry.local".
+# Extra /etc/hosts entries for CI dependencies on OTHER hosts that only mDNS
+# knows (see the note above — reachable through passt, but A-only, so A+AAAA
+# clients hang on the AAAA lookup). ';'-separated "<ip> <name>" entries, e.g.
+# "192.0.2.10 registry.local". A deployment that needs such a name and pins
+# nothing gets a name that resolves for `getent ahostsv4` and fails in curl,
+# with no hint as to why.
 EXTRA_HOSTS = ""
 # Plain-HTTP URL serving the registry's CA cert (e.g. a Caddy internal root),
 # fetched by the bootstrap and installed into the guest's trust store so CI
