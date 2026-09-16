@@ -121,6 +121,37 @@ def nft_element_counter(payload, uid: int) -> tuple[int, int] | None:
     return None
 
 
+def unwrap_counted_elements(elems) -> list:
+    """One set's elements with a counted set's wrapper removed.
+
+    A set carrying `counter` renders each element wrapped, where an uncounted
+    set renders it bare:
+
+        {"elem": {"val": {"concat": [10000, "198.18.1.0"]},
+                  "counter": {"packets": 12, "bytes": 720}}}
+        {"concat": [10000, "198.18.1.0", 8080]}
+
+    `owned_elements` matches the bare shape only, and deliberately: what it
+    returns is fed back to nft as a delete value, where the counter is not part
+    of the element. So a caller asking about membership in a counted set runs
+    the elements through here first rather than teaching the matcher a second
+    shape it would then have to strip again.
+
+    Applied to bare elements this is the identity, which is what makes it safe
+    to run over a mixed group of sets: the caller does not have to know which
+    of them carry the flag, and a set that gains one later does not quietly
+    start reading as empty.
+    """
+    out = []
+    for elem in elems or []:
+        inner = elem.get("elem") if isinstance(elem, dict) else None
+        if isinstance(inner, dict) and "val" in inner:
+            out.append(inner["val"])
+        else:
+            out.append(elem)
+    return out
+
+
 CONNTRACK_COUNT_PATH = "/proc/sys/net/netfilter/nf_conntrack_count"
 CONNTRACK_MAX_PATH = "/proc/sys/net/netfilter/nf_conntrack_max"
 
