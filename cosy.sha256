@@ -7,6 +7,6 @@
 # main moves, the build fails loudly instead of quietly baking new code into an
 # image that everything else in this chain is cosign-verified.
 #
-# Corresponds to cosy: local ../cosy (b4370f6)
-038fd92715035449689f041dbc62979b88ac6602b5091db7e3e2d6c2a5cdaef4  bin/cosy
+# Corresponds to cosy: local ../cosy (20b23f4)
+0509f7475a130a7c9c3ebb8b104d1d7b1eb3b828777ffbb0d2571f15a43183c6  bin/cosy
 22ba09625364aa21f0d5056c74ce6450cdbb3763165d374411374479d2a259a7  man/cosy.1
