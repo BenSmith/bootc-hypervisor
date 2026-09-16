@@ -2378,7 +2378,7 @@ user = "workload"
     def test_a_private_answer_is_quiet(self):
         result = self._result(
             "clitest-vmint-ok",
-            resolve=lambda host: [ipaddress.ip_address("192.168.0.157")])
+            resolve=lambda host: [ipaddress.ip_address("192.0.2.157")])
 
         self.assertFalse(self._checks(result))
 

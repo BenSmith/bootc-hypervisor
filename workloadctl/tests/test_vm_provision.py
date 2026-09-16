@@ -268,11 +268,11 @@ class TestGuestProvisionResult(unittest.TestCase):
         self.toml.write_text('[vm]\nuser = "git"\n'
                              '[vm.network]\nbridge = "br0"\n')
         with mock.patch.dict(sys.modules, {"vm_guest_reach": types.SimpleNamespace(
-                vm_guest_addresses=lambda name, bridge: ["192.168.0.157"])}):
+                vm_guest_addresses=lambda name, bridge: ["192.0.2.157"])}):
             answer = self._run(_probe_output("myvm-a", {"status": "done",
                                                         "errors": []}))
         self.assertEqual(answer[0], PROVISION_DONE)
-        self.assertIn("git@192.168.0.157", self.argv)
+        self.assertIn("git@192.0.2.157", self.argv)
         self.assertEqual(self.argv[self.argv.index("-p") + 1], "22")
 
     def test_bridge_vm_with_no_resolvable_address_is_not_probed(self):

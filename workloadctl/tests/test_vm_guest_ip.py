@@ -44,7 +44,7 @@ class TestVmGuestIpArp(unittest.TestCase):
     def setUp(self):
         self.name = "git"
         self.mac = mac_address(self.name)
-        self.ip = "192.168.0.157"
+        self.ip = "192.0.2.157"
         # No managed-bridge marker -> skip lease, go straight to ARP.
         marker = mock.MagicMock()
         marker.exists.return_value = False
@@ -148,13 +148,13 @@ class TestVmGuestAgent(unittest.TestCase):
     def test_ipv4_before_ipv6(self):
         interfaces = [
             _iface("enp1s0", self.mac,
-                   ("ipv6", "fd00::157"), ("ipv4", "192.168.0.157")),
+                   ("ipv6", "fd00::157"), ("ipv4", "192.0.2.157")),
         ]
         p_sock, p_client, _ = self._agent(interfaces)
         with p_sock, p_client:
             self.assertEqual(
                 reach.vm_guest_addresses(self.name, "br0"),
-                ["192.168.0.157", "fd00::157"],
+                ["192.0.2.157", "fd00::157"],
             )
 
     def test_only_our_nic_is_trusted(self):
@@ -167,20 +167,20 @@ class TestVmGuestAgent(unittest.TestCase):
             _iface("podman0", "9a:11:22:33:44:55", ("ipv4", "10.88.0.1")),
             _iface("tun0", "", ("ipv4", "10.9.0.2")),
         ]
-        arp = f"192.168.0.157 lladdr {self.mac} STALE\n"
+        arp = f"192.0.2.157 lladdr {self.mac} STALE\n"
         p_sock, p_client, _ = self._agent(interfaces)
         with p_sock, p_client, \
              mock.patch.object(reach.subprocess, "run",
                                return_value=_completed(arp)):
             # Falls through to ARP rather than handing back 10.88.0.1.
             self.assertEqual(
-                reach.vm_guest_ip(self.name, "br0"), "192.168.0.157")
+                reach.vm_guest_ip(self.name, "br0"), "192.0.2.157")
 
     def test_stale_reply_is_discarded_by_the_sync_nonce(self):
         """A previous lookup that timed out mid-command leaves its reply queued
         in the port. Without the nonce it would be read as the answer to a
         question this call never asked."""
-        interfaces = [_iface("enp1s0", self.mac, ("ipv4", "192.168.0.157"))]
+        interfaces = [_iface("enp1s0", self.mac, ("ipv4", "192.0.2.157"))]
         stale = {"return": [_iface("enp1s0", self.mac, ("ipv4", "10.0.0.99"))]}
         sock = mock.MagicMock()
         sock.exists.return_value = True
@@ -203,7 +203,7 @@ class TestVmGuestAgent(unittest.TestCase):
              mock.patch.object(reach, "QMPClient", return_value=client):
             self.assertEqual(
                 reach.vm_guest_addresses(self.name, "br0"),
-                ["192.168.0.157"],
+                ["192.0.2.157"],
             )
 
     def test_unanswered_sync_falls_through(self):
@@ -213,23 +213,23 @@ class TestVmGuestAgent(unittest.TestCase):
         client = mock.MagicMock()
         client.execute.return_value = {"return": "not-the-token"}
         client.next_message.return_value = None
-        arp = f"192.168.0.157 lladdr {self.mac} STALE\n"
+        arp = f"192.0.2.157 lladdr {self.mac} STALE\n"
         with mock.patch.object(reach, "vm_guest_agent_socket", return_value=sock), \
              mock.patch.object(reach, "QMPClient", return_value=client), \
              mock.patch.object(reach.subprocess, "run",
                                return_value=_completed(arp)):
             self.assertEqual(
-                reach.vm_guest_ip(self.name, "br0"), "192.168.0.157")
+                reach.vm_guest_ip(self.name, "br0"), "192.0.2.157")
 
     def test_wins_over_stale_arp(self):
         """The whole point: the agent answers even when the neighbour table has
         a *different*, stale idea of where the guest is."""
-        interfaces = [_iface("enp1s0", self.mac, ("ipv4", "192.168.0.157"))]
+        interfaces = [_iface("enp1s0", self.mac, ("ipv4", "192.0.2.157"))]
         p_sock, p_client, _ = self._agent(interfaces)
         with p_sock, p_client, \
              mock.patch.object(reach.subprocess, "run") as run:
             self.assertEqual(
-                reach.vm_guest_ip(self.name, "br0"), "192.168.0.157")
+                reach.vm_guest_ip(self.name, "br0"), "192.0.2.157")
         run.assert_not_called()
 
     def test_no_negotiate_on_the_agent_channel(self):
@@ -270,7 +270,7 @@ class TestVmGuestAgent(unittest.TestCase):
     def test_agent_failure_falls_through_to_arp(self):
         """A guest with no qemu-ga running: QEMU accepts our connection and
         nothing ever replies. That is an ordinary state, not an error."""
-        ip = "192.168.0.157"
+        ip = "192.0.2.157"
         sock = mock.MagicMock()
         sock.exists.return_value = True
         client = mock.MagicMock()
