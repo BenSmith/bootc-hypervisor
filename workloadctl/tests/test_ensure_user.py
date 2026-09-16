@@ -10,6 +10,7 @@ import contextlib
 import fcntl
 import os
 import shutil
+import subprocess
 import tempfile
 import tomllib
 import types
@@ -220,6 +221,39 @@ class TestVirtiofsMountOpts(unittest.TestCase):
         out = self.mod.virtiofs_mount_opts("/home/fedora", "ro",
                                              self.guest_home)
         self.assertEqual(out, "ro")
+
+
+def _bootstrap_script(user_data: str) -> str:
+    """The forgejo-runner bootstrap script out of the rendered seed.
+
+    The seed carries it as a write_files `content: |` block at six-space
+    indent. Extracted rather than restated so a test runs the shipped text.
+    """
+    lines = user_data.splitlines()
+    at = next(i for i, line in enumerate(lines)
+              if line.strip() == "- path: /usr/local/bin/forgejo-runner-bootstrap")
+    at = next(i for i in range(at, len(lines))
+              if lines[i].strip().startswith("content:"))
+    body = []
+    for line in lines[at + 1:]:
+        if line.strip() and not line.startswith("      "):
+            break
+        body.append(line[6:])
+    return "\n".join(body) + "\n"
+
+
+def _resolver_wait_block(script: str) -> str:
+    """The resolver wait: its retry loop through to the failure branch."""
+    lines = script.splitlines()
+    nmcli = next(i for i, line in enumerate(lines)
+                 if "nmcli -g DEVICE device status" in line)
+    start = max(i for i in range(nmcli) if lines[i].strip().startswith("for "))
+    rest = lines[start:]
+    exit_at = next(i for i, line in enumerate(rest)
+                   if line.strip().startswith("exit 1"))
+    fi_at = next(i for i, line in enumerate(rest)
+                 if i > exit_at and line.strip() == "fi")
+    return "\n".join(rest[:fi_at + 1]) + "\n"
 
 
 class TestBuildCloudInitIsoTemplateMode(unittest.TestCase):
@@ -496,6 +530,67 @@ class TestBuildCloudInitIsoTemplateMode(unittest.TestCase):
                       text)
         # And it still fails loudly when there is no DNS to write.
         self.assertIn("the guest has no resolver", text)
+
+    def test_the_resolver_wait_retries_while_nmcli_is_failing(self):
+        """The wait runs under `set -euo pipefail`, so a failing pipeline in a
+        bare assignment ends the bootstrap on the first iteration — the very
+        iterations the loop exists to absorb. Run the shipped block against an
+        nmcli that fails before it answers and require it to retry and write
+        the resolver; then against one that never answers and require the loud
+        failure rather than a bare exit status.
+        """
+        bundle = REPO_ROOT / "workloads" / "forgejo-runner"
+        ud_src = bundle / "cloud-init" / "user-data"
+        self.assertTrue(ud_src.exists(), "bundle seed must exist")
+        shutil.copy2(ud_src, self.config_dir / "user-data")
+        toml = tomllib.loads((bundle / "workload.toml").read_text())
+        cfg = {"vm": {"cloud_init": {
+            "user_data_file": "user-data",
+            "template_vars": dict(toml["vm"]["cloud_init"]["template_vars"]),
+        }}}
+        old_pw = self.pw
+        self.pw = _fake_pw(self.home, uid=10042)
+        try:
+            self._run_build(cfg, name="forgejo-runner")
+        finally:
+            self.pw = old_pw
+        block = _resolver_wait_block(
+            _bootstrap_script(self._read_user_data("forgejo-runner")))
+        self.assertIn("|| true", block)
+
+        for always_fails in (False, True):
+            with tempfile.TemporaryDirectory() as tmp:
+                target = Path(tmp) / "resolv.conf"
+                state = Path(tmp) / "calls"
+                runner = Path(tmp) / "wait.sh"
+                runner.write_text(
+                    "set -euo pipefail\n"
+                    f"state={str(state)!r}\n"
+                    "nmcli() {\n"
+                    # Every call is inside a pipeline, so the stub runs in a
+                    # subshell: the count has to live in the file, not a variable.
+                    "  n=$(cat \"$state\" 2>/dev/null || echo 0)\n"
+                    "  n=$((n + 1)); printf '%s' \"$n\" > \"$state\"\n"
+                    + ("  return 1\n" if always_fails
+                       else "  if [ \"$n\" -le 2 ]; then return 1; fi\n")
+                    + "  case \"$*\" in\n"
+                    "    *DEVICE*) echo enp0s2 ;;\n"
+                    "    *IP4.DNS*) echo 192.0.2.53 ;;\n"
+                    "  esac\n"
+                    "}\n"
+                    "sleep() { :; }\n"
+                    + block.replace("/etc/resolv.conf", str(target)))
+                proc = subprocess.run(["bash", str(runner)],
+                                      capture_output=True, text=True)
+                if always_fails:
+                    self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
+                    self.assertIn("the guest has no resolver", proc.stderr)
+                    self.assertFalse(target.exists())
+                else:
+                    self.assertEqual(proc.returncode, 0, proc.stderr)
+                    self.assertIn("nameserver 192.0.2.53", target.read_text())
+                    # It really retried: the stub only answers from call 3 on.
+                    self.assertGreaterEqual(int(state.read_text()), 3)
 
     def test_template_magic_vm_user_falls_back_to_default(self):
         ud = self.config_dir / "user-data"
