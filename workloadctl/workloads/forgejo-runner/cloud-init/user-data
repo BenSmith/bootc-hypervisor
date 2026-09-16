@@ -242,9 +242,17 @@ write_files:
       # (the CA fetch below only warns), so a silent miss leaves the bootstrap
       # exiting 0 with no resolver at all. 30 tries is a DHCP wait, not a race
       # budget — through passt the first iteration normally succeeds.
+      #
+      # Both substitutions take `|| true`: under `set -e` with `pipefail` a
+      # failing pipeline in a bare assignment ends the script, and both commands
+      # fail legitimately while NM is still coming up -- nmcli exits non-zero
+      # until the daemon answers, and `grep -v` exits 1 while lo is the only
+      # device. Those are the iterations the loop exists to absorb, so without
+      # `|| true` the first one aborts the bootstrap and the error below is
+      # never reached.
       for _ in $(seq 1 30); do
-        _dev=$(nmcli -g DEVICE device status 2>/dev/null | grep -v '^lo$' | head -1)
-        _dns=$(nmcli -g IP4.DNS device show "$_dev" 2>/dev/null | head -1)
+        _dev=$(nmcli -g DEVICE device status 2>/dev/null | grep -v '^lo$' | head -1) || true
+        _dns=$(nmcli -g IP4.DNS device show "$_dev" 2>/dev/null | head -1) || true
         [ -n "$_dns" ] && break
         sleep 1
       done
