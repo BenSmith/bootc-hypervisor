@@ -183,6 +183,7 @@ RUN /usr/libexec/hypervisor-build/selinux-store-copyup && \
     fio \
     firewalld \
     fwupd \
+    git-core \
     grub2 \
     grub2-efi-x64 \
     hdparm \
