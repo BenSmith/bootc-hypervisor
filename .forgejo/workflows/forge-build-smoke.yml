@@ -9,8 +9,6 @@ name: Forge Build Smoke
 
 on:
   workflow_dispatch:
-  push:
-    branches: [forge-build-smoke]
 
 concurrency:
   group: forge-build-smoke-${{ github.ref }}
