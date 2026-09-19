@@ -101,7 +101,9 @@ A matrix workflow fans out only as wide as the capacity the forge can see, so
 with one VM at the default it runs serially. Raising it is the cheap way to
 parallelise: the jobs share one VM -- its vCPUs, memory and podman store --
 so size `[vm].vcpus` / `[vm].memory` for N concurrent builds first (one
-hypervisor image build wants ~4 vCPU / 6G). The alternative that also
+hypervisor image build wants ~4 vCPU / 6G, and its podman store peaks past
+10G; `[vm].system_disk_size` is sparse, so oversize it -- nothing prunes the
+image cache between runs). The alternative that also
 isolates jobs from each other is a second instance (`workloadctl init
 forgejo-runner --as forgejo-runner-2`): own uid, own registration, own
 sealed signing key, at the cost of a second base image and cache.
