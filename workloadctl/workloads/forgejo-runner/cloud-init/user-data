@@ -430,6 +430,11 @@ write_files:
       # report, so the run counts as FAILED and the host heals it by
       # re-running this whole seed on the next start.
 
+      # 8. Success marker, the last thing this script does: runcmd polls for it
+      # (see there). Under `set -e` a failure anywhere above never reaches
+      # this line, so "no marker" is the failure signal.
+      touch /run/forgejo-runner-bootstrap.ok
+
 runcmd:
   # Wire up the paravirtual clock written above. Conditional because chronyd
   # treats a refclock it cannot open as fatal: a host without ptp_kvm would end
@@ -451,9 +456,35 @@ runcmd:
   # service (main PID exits status=1), orphaning dnf and killing the half-run
   # transaction. A transient systemd-run unit runs in its own cgroup, decoupled
   # from cloud-init's lifecycle, so it survives the reload and completes.
-  - [systemd-run, --unit=forgejo-runner-bootstrap, --collect,
-     --property=Type=oneshot, --property=TimeoutStartSec=infinity,
-     /usr/local/bin/forgejo-runner-bootstrap]
+  #
+  # --no-block, and completion is POLLED rather than awaited: a blocking
+  # systemd-run waits for the unit over one D-Bus connection, and the same
+  # re-exec resets it ("Failed to wait for response: Connection reset by
+  # peer"). runcmd then exits non-zero while the unit runs on -- cloud-init
+  # reports the run FAILED, `power_state` below judges its reboot condition
+  # against a half-upgraded system, and the host's provision marker records a
+  # failure it later heals by re-running this whole seed on a healthy guest.
+  # Each `systemctl show` here is its own short-lived connection, so a reload
+  # between two polls costs nothing. The unit is transient and is gone once it
+  # exits, so "inactive" alone is ambiguous (not yet loaded, or finished):
+  # the script's own success marker is what decides, and a bounded wait
+  # keeps a unit that never starts from hanging cloud-init forever.
+  - |
+    rm -f /run/forgejo-runner-bootstrap.ok
+    systemd-run --unit=forgejo-runner-bootstrap --no-block --collect \
+      --property=Type=oneshot --property=TimeoutStartSec=infinity \
+      /usr/local/bin/forgejo-runner-bootstrap
+    seen=0
+    for _ in $(seq 1 1440); do
+      [ -f /run/forgejo-runner-bootstrap.ok ] && break
+      st=$(systemctl show -p ActiveState --value forgejo-runner-bootstrap 2>/dev/null || true)
+      case "$st" in
+        activating|active|deactivating|reloading) seen=1 ;;
+        *) [ "$seen" = 1 ] && break ;;
+      esac
+      sleep 5
+    done
+    test -f /run/forgejo-runner-bootstrap.ok
 
 package_update: false
 package_upgrade: false

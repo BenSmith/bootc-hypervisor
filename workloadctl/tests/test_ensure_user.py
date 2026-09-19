@@ -523,6 +523,40 @@ class TestBuildCloudInitIsoTemplateMode(unittest.TestCase):
         script = script.split("\nruncmd:", 1)[0]
         self.assertNotIn("systemctl reboot", script)
 
+    def test_runner_bootstrap_completion_is_polled_not_awaited(self):
+        """runcmd launches the bootstrap with --no-block and polls for the
+        script's success marker. A blocking systemd-run awaits the unit over
+        one D-Bus connection, which the RPM scriptlets' systemd re-exec resets
+        mid-dnf: runcmd then fails while the bootstrap runs on, cloud-init
+        reports FAILED, and power_state judges its reboot too early.
+        """
+        bundle = REPO_ROOT / "workloads" / "forgejo-runner"
+        shutil.copy2(bundle / "cloud-init" / "user-data",
+                     self.config_dir / "user-data")
+        toml = tomllib.loads((bundle / "workload.toml").read_text())
+        cfg = {"vm": {"cloud_init": {
+            "user_data_file": "user-data",
+            "template_vars": dict(toml["vm"]["cloud_init"]["template_vars"]),
+        }}}
+        old_pw = self.pw
+        self.pw = _fake_pw(self.home, uid=10042)
+        try:
+            self._run_build(cfg, name="forgejo-runner")
+        finally:
+            self.pw = old_pw
+        text = self._read_user_data("forgejo-runner")
+        script, runcmd = text.split("\nruncmd:", 1)
+        script = script.split("/usr/local/bin/forgejo-runner-bootstrap", 1)[1]
+        # The marker is the script's last act, so a failure under set -e
+        # anywhere above it leaves none.
+        self.assertEqual(
+            "touch /run/forgejo-runner-bootstrap.ok",
+            [l.strip() for l in script.splitlines()
+             if l.strip() and not l.strip().startswith("#")][-1])
+        self.assertIn("systemd-run --unit=forgejo-runner-bootstrap --no-block", runcmd)
+        self.assertIn("test -f /run/forgejo-runner-bootstrap.ok", runcmd)
+        self.assertIn("systemctl show -p ActiveState --value forgejo-runner-bootstrap", runcmd)
+
     def test_registry_ca_url_is_fetched_and_installed(self):
         """REGISTRY_CA_URL is fetched by the bootstrap and installed into the
         guest's trust store, so CI jobs can push/pull over HTTPS. The rendered
