@@ -27,7 +27,9 @@ WORKLOAD_INSTANCE_DIR="${WORKLOAD_INSTANCE_DIR:?not set — run via workloadctl 
 ADMIN_CRED=/etc/credstore.encrypted/forgejo-admin-token
 UUID_CRED=/etc/credstore.encrypted/forgejo-runner-uuid
 TOKEN_CRED=/etc/credstore.encrypted/forgejo-runner-token
-RUNNER_NAME="${WORKLOAD_NAME}-runner"
+# The runner is named after the workload, so a forge shows one row per
+# instance and `init --as` renames both together.
+RUNNER_NAME="$WORKLOAD_NAME"
 
 forgejo_admin_url() {
   # The instance TOML, not the bundle: `init --as` renames the instance and the
