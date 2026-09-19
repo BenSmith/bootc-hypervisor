@@ -424,11 +424,11 @@ write_files:
       workloadctl status > /var/log/forgejo-runner-status.log 2>&1 || true
       systemctl list-units 'workload-*' --no-pager > /var/log/forgejo-runner-units.log 2>&1 || true
 
-      # 7. If the upgrade in step 1a brought in a new kernel (or other services
-      # flagged as needing restart), reboot so the runner runs on patched bits.
-      if command -v needs-restarting >/dev/null && ! needs-restarting -r >/dev/null 2>&1; then
-        systemctl reboot
-      fi
+      # 7. The reboot onto whatever step 1a upgraded is cloud-init's
+      # `power_state` below; this script must not reboot. It runs inside
+      # runcmd, and a reboot from inside it kills cloud-init before it can
+      # report, so the run counts as FAILED and the host heals it by
+      # re-running this whole seed on the next start.
 
 runcmd:
   # Wire up the paravirtual clock written above. Conditional because chronyd
@@ -457,4 +457,14 @@ runcmd:
 
 package_update: false
 package_upgrade: false
+
+# Reboot so the runner runs on the kernel and services the bootstrap's upgrade
+# brought in, when it brought any. This module runs after every other module
+# has finished and reported, so `cloud-init status` reads done -- and the
+# host's provision marker records done -- before the guest goes down.
+# `needs-restarting` is from dnf-utils, which the bootstrap installs.
+power_state:
+  mode: reboot
+  delay: now
+  condition: ['sh', '-c', 'command -v needs-restarting >/dev/null && ! needs-restarting -r >/dev/null 2>&1']
 final_message: "forgejo-runner cloud-init complete after $$UPTIME seconds"

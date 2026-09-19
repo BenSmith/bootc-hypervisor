@@ -495,6 +495,34 @@ class TestBuildCloudInitIsoTemplateMode(unittest.TestCase):
         self.assertIn("        capacity: 3\n", text)
         self.assertNotIn("${RUNNER_CAPACITY}", text)
 
+    def test_runner_reboot_is_cloud_inits_not_the_bootstraps(self):
+        """The post-upgrade reboot is a `power_state` module, and the bootstrap
+        script issues no reboot of its own. A `systemctl reboot` inside runcmd
+        kills cloud-init before it reports, the guest's status reads FAILED,
+        and the host's provision marker then heals a healthy VM by re-running
+        the whole seed on its next start.
+        """
+        bundle = REPO_ROOT / "workloads" / "forgejo-runner"
+        ud_src = bundle / "cloud-init" / "user-data"
+        shutil.copy2(ud_src, self.config_dir / "user-data")
+        toml = tomllib.loads((bundle / "workload.toml").read_text())
+        cfg = {"vm": {"cloud_init": {
+            "user_data_file": "user-data",
+            "template_vars": dict(toml["vm"]["cloud_init"]["template_vars"]),
+        }}}
+        old_pw = self.pw
+        self.pw = _fake_pw(self.home, uid=10042)
+        try:
+            self._run_build(cfg, name="forgejo-runner")
+        finally:
+            self.pw = old_pw
+        text = self._read_user_data("forgejo-runner")
+        self.assertIn("power_state:\n  mode: reboot\n", text)
+        self.assertIn("needs-restarting -r", text)
+        script = text.split("/usr/local/bin/forgejo-runner-bootstrap", 1)[1]
+        script = script.split("\nruncmd:", 1)[0]
+        self.assertNotIn("systemctl reboot", script)
+
     def test_registry_ca_url_is_fetched_and_installed(self):
         """REGISTRY_CA_URL is fetched by the bootstrap and installed into the
         guest's trust store, so CI jobs can push/pull over HTTPS. The rendered
