@@ -99,6 +99,13 @@ EXTRA_HOSTS = ""
 # this VM's derived address), never the host's primary address. Fetched over
 # plain HTTP because no prior trust exists. Empty skips the step.
 REGISTRY_CA_URL = ""
+# How many jobs the runner takes at once. A workflow matrix only runs as wide
+# as the capacity available to it, and this is a single VM, so every
+# concurrent job shares [vm].vcpus and [vm].memory and one podman store. One
+# hypervisor image build wants ~4 vCPU / 6G; size the VM up before raising
+# this (e.g. 8 vCPU / 12G for 2). The seed bakes this in at provision time:
+# changing it takes `disable --purge` + `enable`.
+RUNNER_CAPACITY = "1"
 
 [host]
 # Mints a fresh registration token per provision and prunes the stale runner

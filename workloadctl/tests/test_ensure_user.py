@@ -468,6 +468,33 @@ class TestBuildCloudInitIsoTemplateMode(unittest.TestCase):
         self.assertNotIn("FORGEJO_ADMIN_URL", text)
         self.assertIn(f"{addr} {tv['SAME_HOST_HOSTNAMES']}", text)
 
+    def test_runner_capacity_is_baked_into_the_runner_config(self):
+        """RUNNER_CAPACITY is the operator's parallelism knob: it lands as
+        `capacity:` in the guest's config.yml, and the bundle default is 1 so
+        a fresh instance never takes more jobs than its default sizing can
+        run.
+        """
+        bundle = REPO_ROOT / "workloads" / "forgejo-runner"
+        ud_src = bundle / "cloud-init" / "user-data"
+        shutil.copy2(ud_src, self.config_dir / "user-data")
+        toml = tomllib.loads((bundle / "workload.toml").read_text())
+        tv = dict(toml["vm"]["cloud_init"]["template_vars"])
+        self.assertEqual(tv["RUNNER_CAPACITY"], "1")
+        tv["RUNNER_CAPACITY"] = "3"
+        cfg = {"vm": {"cloud_init": {
+            "user_data_file": "user-data",
+            "template_vars": tv,
+        }}}
+        old_pw = self.pw
+        self.pw = _fake_pw(self.home, uid=10042)
+        try:
+            self._run_build(cfg, name="forgejo-runner")
+        finally:
+            self.pw = old_pw
+        text = self._read_user_data("forgejo-runner")
+        self.assertIn("        capacity: 3\n", text)
+        self.assertNotIn("${RUNNER_CAPACITY}", text)
+
     def test_registry_ca_url_is_fetched_and_installed(self):
         """REGISTRY_CA_URL is fetched by the bootstrap and installed into the
         guest's trust store, so CI jobs can push/pull over HTTPS. The rendered

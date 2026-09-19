@@ -94,6 +94,22 @@ idle guest settles near its working set rather than holding everything it has
 ever touched. Only pages the guest has *freed* are reported, not clean page
 cache.
 
+## Parallel jobs
+
+`RUNNER_CAPACITY` (default `1`) is how many jobs this runner accepts at once.
+A matrix workflow fans out only as wide as the capacity the forge can see, so
+with one VM at the default it runs serially. Raising it is the cheap way to
+parallelise: the jobs share one VM -- its vCPUs, memory and podman store --
+so size `[vm].vcpus` / `[vm].memory` for N concurrent builds first (one
+hypervisor image build wants ~4 vCPU / 6G). The alternative that also
+isolates jobs from each other is a second instance (`workloadctl init
+forgejo-runner --as forgejo-runner-2`): own uid, own registration, own
+sealed signing key, at the cost of a second base image and cache.
+
+Both are provision-time: the seed bakes `capacity` into
+`/etc/forgejo-runner/config.yml`, so a change takes `disable --purge` +
+`enable` (and re-running `seal-signing-key`, as any reset does).
+
 ## Caveats
 
 - **Registration flow.** The runner is created server-side

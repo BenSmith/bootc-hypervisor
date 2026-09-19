@@ -101,7 +101,7 @@ write_files:
         job_level: info
       runner:
         file: /var/lib/forgejo-runner/.runner
-        capacity: 1
+        capacity: ${RUNNER_CAPACITY}
         envs: {}
         timeout: 3h
         shutdown_timeout: 3h
