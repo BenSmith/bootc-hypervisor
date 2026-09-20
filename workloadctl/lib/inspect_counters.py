@@ -12,7 +12,7 @@ Installed to /usr/libexec/workloadctl/inspect_counters.py.
 
 import threading
 
-from egress_policy import TLS_DEFAULT
+from inspect_document import TLS_DEFAULT
 from egress_record import (
     DROP_INTERNAL, DROP_REASONS, DROP_UNCLASSIFIED, PER_HOST_REASONS,
 )

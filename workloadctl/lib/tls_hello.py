@@ -28,7 +28,7 @@ what turns that into a refusal instead of a spin.
 import socket
 from typing import NamedTuple
 
-from egress_policy import hostname_control_character
+from inspect_document import hostname_control_character
 
 # The ceiling on how much is read looking for a complete ClientHello, in bytes.
 # A real one is a few hundred bytes; post-quantum key shares push it over a

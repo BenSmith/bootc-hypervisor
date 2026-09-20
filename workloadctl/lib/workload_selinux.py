@@ -22,7 +22,10 @@ from pathlib import Path
 from cli_log import error, info, warn
 from config_parser import workload_root_dir
 from container_network_config import container_uses_inspect
-from egress_ca import pki_fcontext_patterns
+from egress_ca import (
+    CA_DIR_NAME, CA_SELINUX_TYPE, DENIAL_DIR_NAME, LEAF_DIR_NAME,
+    LEAF_SELINUX_TYPE,
+)
 from workload_lib import (
     NAME_PATTERN,
     WORKLOAD_BUNDLES_DIR,
@@ -30,6 +33,30 @@ from workload_lib import (
     selinux_type_name,
 )
 from workloadctl_core import WorkloadConfig
+
+
+def pki_fcontext_patterns(name: str) -> list[tuple[str, str]]:
+    """(pattern, type) for every directory in one workload's PKI subtree.
+
+    Registered in `file_contexts.local` beside the per-workload svirt_image_t
+    rule, and more specific than it, which is the only reason these win: within
+    ONE source most-specific-wins applies, and `.local` outranks the base file
+    wholesale. A CIL `filecon` in the policy module lands in the base file and
+    would be silently shadowed -- see shadowed_filecon_paths().
+
+    Here rather than in egress_ca, whose names these are: egress_ca is on the
+    listener's side of the line and takes a state directory it is handed,
+    while this function is the one that knows where a WORKLOAD's state
+    directory is. The directory names and the types stay in egress_ca so the
+    minter that creates the directories and the pattern that labels them
+    cannot drift; only the composition with the workload root lives here.
+    """
+    root = workload_root_dir(name)
+    return [
+        (f"{root}/state/{CA_DIR_NAME}(/.*)?", CA_SELINUX_TYPE),
+        (f"{root}/state/{LEAF_DIR_NAME}(/.*)?", LEAF_SELINUX_TYPE),
+        (f"{root}/state/{DENIAL_DIR_NAME}(/.*)?", LEAF_SELINUX_TYPE),
+    ]
 
 
 class SelinuxPolicyError(Exception):

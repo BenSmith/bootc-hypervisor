@@ -12,21 +12,17 @@ Installed to /usr/libexec/workloadctl/vm_egress_validate.py.
 """
 
 from broker_config import VmCredential
-from config_parser import (
+from config_parser import patterns_overlap, validate_host_pattern
+from inspect_document import (
+    TLS_DEFAULT,
+    TLS_MODES,
+    hostname_match,
     normalise_hostname,
-    patterns_overlap,
-    validate_host_pattern,
+    VmPolicyEntry,
 )
 from credential_entries import validate_credential_entries
 from egress_ca import RESERVED_GUEST_ENV
-from egress_policy import (
-    POLICY_METHODS,
-    POLICY_METHODS_REFUSED,
-    TLS_DEFAULT,
-    TLS_MODES,
-    VmPolicyEntry,
-    hostname_match,
-)
+from egress_policy import POLICY_METHODS, POLICY_METHODS_REFUSED
 from vm_defs import EGRESS_DEFAULT, EGRESS_MODES, TLS_UNBUILT
 from vm_network_config import VmAllowEntry, parse_vm_allow
 

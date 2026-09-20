@@ -5,9 +5,8 @@ Policy.DOCUMENT_KEYS is the seam the two are tested against each other on.
 """
 import json
 
-from config_parser import normalise_hostname
+from inspect_document import hostname_match, normalise_hostname
 from dns_wire import TYPE_AAAA
-from egress_policy import hostname_match
 from workload_addr import RESOLVE_TTL
 
 

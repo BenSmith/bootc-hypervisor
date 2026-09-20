@@ -1,12 +1,17 @@
 """The inspector's policy document, as the listener holds it.
 
-`load_policy` reads the JSON egress_policy renders and returns a `Policy`:
-one workload's inspection lists, read once at start and never edited after,
-so that an edited document applies on a restart and the running policy is
+`load_policy` reads the JSON document and returns a `Policy`: one
+workload's inspection lists, read once at start and never edited after, so
+that an edited document applies on a restart and the running policy is
 always the file's. The questions the listener asks of it -- does this host
 get through, is it spliced, is it h2, which policy entry governs it -- are
 answered with the same hostname rule and the same entry matcher the render
-side uses, imported from egress_policy so the two cannot diverge.
+side uses, both imported from inspect_document so the two cannot diverge.
+
+The renderer is egress_policy, and this module does not import it: the
+document is the whole interface, and a reader that imported its writer
+would drag the config grammar into the listener's closure. What is shared
+lives one rung below both, in inspect_document.
 
 Installed to /usr/libexec/workloadctl/inspect_policy.py.
 """
@@ -14,14 +19,14 @@ Installed to /usr/libexec/workloadctl/inspect_policy.py.
 import json
 from typing import NamedTuple
 
-from config_parser import normalise_hostname
-from egress_policy import (
+from inspect_document import (
     INSPECT_GUEST_AGENT_KEY,
     TLS_DEFAULT,
-    VmPolicyEntry,
     hostname_match,
     inspect_policy_digest,
+    normalise_hostname,
     policy_governs,
+    VmPolicyEntry,
 )
 
 

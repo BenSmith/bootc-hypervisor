@@ -193,14 +193,15 @@ class TestASharedModuleIsNotShadowedByItsCaller(unittest.TestCase):
         "lib/cli_main.py": ("workloadctl_core", "substrate"),
         "lib/workload_uid.py": ("workload_lib",),
         "lib/run_files.py": ("workload_lib",),
+        "lib/config_parser.py": ("inspect_document",),
         "lib/container_network_config.py": ("config_parser", "credential_entries"),
         "lib/broker_config.py": ("credential_entries", "container_network_config", "broker_profiles"),
         "lib/container_validate.py": ("container_network_config",),
-        "lib/egress_policy.py": ("container_network_config",),
+        "lib/egress_policy.py": ("container_network_config", "inspect_document"),
         "lib/cmd_egress.py": ("egress_record_query",),
         "lib/substrate_vm.py": ("vm_guest_reach",),
         "lib/pcap_vm_tap.py": ("pcap", "pcap_file"),
-        "lib/inspect_policy.py": ("egress_policy",),
+        "lib/inspect_policy.py": ("inspect_document",),
         "lib/cmd_disable.py": ("host_setup", "workload_selinux"),
         "lib/ensure_vm.py": ("ensure_common", "vm_ssh_keys", "vm_default_seed"),
         "lib/diagnose_battery.py": ("diagnose_inspect",),
@@ -358,7 +359,8 @@ class TestANameIsImportedFromTheModuleThatDefinesIt(unittest.TestCase):
                       [p.name for p in sources])
         defines = self._defines()
         self.assertGreater(len(defines), 30, sorted(defines))
-        self.assertIn("normalise_hostname", defines["config_parser"])
+        self.assertIn("normalise_hostname", defines["inspect_document"])
+        self.assertNotIn("normalise_hostname", defines["config_parser"])
         self.assertNotIn("normalise_hostname", defines["egress_policy"])
 
     def test_a_module_level_try_counts_as_a_definition(self):

@@ -33,7 +33,7 @@ from container_network_config import (
 )
 from credential_entries import parse_credential_entries
 from broker_profiles import BrokerConfigError
-from workload_addr import (IP_BIN, ADVERTISED_IFACE,
+from workload_addr import (IP_BIN, ADVERTISED_IFACE, BROKER_INSTANCE_PORT,
                            broker_listen_address, inspect_address)
 from egress_policy import vm_uses_inspect
 from secrets_template import credential_path, CREDSTORE_DIR
@@ -43,12 +43,6 @@ from egress_policy import vm_policy_entries
 # The program the generated unit runs. One instance per workload, generated;
 # there is no host-wide unit for an operator to enable.
 BROKER_BIN = "/usr/libexec/workloadctl/agent-broker"
-
-# The port every instance listens on. One value for all of them is safe here and
-# is not for the address: each instance binds an address of its own
-# (broker_listen_address), so two instances on the same port never collide,
-# and the inspector derives BOTH halves from the workload uid it already holds.
-BROKER_INSTANCE_PORT = 8081
 
 # Where the generated config lives (D2), as the unit's RuntimeDirectory= and as
 # the path the two readers -- the broker and its writer -- resolve.

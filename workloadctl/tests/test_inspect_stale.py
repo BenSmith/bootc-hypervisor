@@ -36,9 +36,12 @@ from unittest import mock
 
 import diagnose_inspect
 import inspect_policy
-from egress_policy import (
-    INSPECT_DIGEST_KEY, INSPECT_DIGEST_SHORT, inspect_digest_short,
-    inspect_policy_digest, vm_inspect_policy_text,
+from egress_policy import vm_inspect_policy_text
+from inspect_document import (
+    INSPECT_DIGEST_KEY,
+    INSPECT_DIGEST_SHORT,
+    inspect_digest_short,
+    inspect_policy_digest,
 )
 from inspect_policy import Policy, load_policy
 from egress_ca import CA_EXPIRY_WARN_DAYS

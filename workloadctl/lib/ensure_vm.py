@@ -32,10 +32,7 @@ from workload_lib import (
 )
 from egress_policy import vm_uses_inspect
 from workload_addr import UID_MAX, UID_MIN, inspect_address
-from egress_ca import (
-    VM_CA_BUNDLE_AVAILABLE, CA_BUNDLE_PATH, CA_ENV_VARS, vm_ca_env,
-    ca_cert_path,
-)
+from egress_ca import CA_BUNDLE_PATH, CA_ENV_VARS, ca_cert_path
 from broker_config import vm_credential_env
 from config_parser import SOCKET_DIR
 from vm_defs import (
@@ -53,10 +50,12 @@ from secrets_template import substitute_template
 import ensure_common
 from ensure_common import _provision_dir_secure
 from vm_default_seed import (
+    VM_CA_BUNDLE_AVAILABLE,
     covers_guest_home,
     render_default_user_data,
     uncommented,
     virtiofs_mount_opts,
+    vm_ca_env,
 )
 from vm_ssh_keys import (
     _read_ssh_pubkey,

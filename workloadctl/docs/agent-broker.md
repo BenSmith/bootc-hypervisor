@@ -312,9 +312,11 @@ entirely on the host side of a connection the guest had already given up
 control of.
 
 **Two constants must agree**: this program's `listen_address`/`listen_port`
-against what the generator renders and what the inspector dials
-(`broker_listen_address` in `lib/workload_addr.py`, `BROKER_INSTANCE_PORT`
-in `lib/broker_config.py`). A
+against what the generator renders and what the inspector is handed
+(`broker_listen_address` and `BROKER_INSTANCE_PORT`, both in
+`lib/workload_addr.py`). The inspector itself derives neither: its launcher,
+`workload-inspect-listener`, computes the pair from its own uid and passes it
+in, so the inspector's closure holds nothing that knows what a uid becomes. A
 mismatch presents exactly as the broker being down — connection refused, no log
 line on either side, nothing pointing at the cause. `tests/test_broker.py`
 asserts they agree, which is most of the reason the broker moved into this

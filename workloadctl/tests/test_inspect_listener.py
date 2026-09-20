@@ -23,11 +23,14 @@ import unittest.mock
 from pathlib import Path
 
 from tests import load_script
-from egress_policy import INSPECT_GUEST_AGENT_KEY
-from config_parser import normalise_hostname
-from egress_policy import container_inspect_policy
+from inspect_document import (
+    INSPECT_GUEST_AGENT_KEY,
+    hostname_match,
+    normalise_hostname,
+    VmPolicyEntry,
+)
 from egress_plane import CLEARTEXT, TLS, plane_for_port
-from egress_policy import VmPolicyEntry, hostname_match, vm_inspect_policy
+from egress_policy import container_inspect_policy, vm_inspect_policy
 from inspect_policy import Policy, load_policy
 from sd_listen import NotSocketActivated
 from workload_addr import INSPECT_LISTENER_BIN
@@ -680,19 +683,22 @@ class TestPolicyLoading(unittest.TestCase):
 
         So this asserts the OUTCOME of the check the Minter was handed --
         None where there is no agent, and a real vm_clock call where there is
-        -- rather than that a flag arrived.
+        -- rather than that a flag arrived. The choice is the LAUNCHER's
+        (clock_check_for in workload-inspect-listener), because the inspector
+        does not know what a guest agent is; build_minter only turns a None
+        into Minter's documented no-op.
         """
         state = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, state)
         for path in (os.path.join(state, "ca.crt"),
                      os.path.join(state, "ca.key")):
-            open(path, "w").close()
+            with open(path, "w"):
+                pass
+        launcher = _mod()
         built = {}
         with unittest.mock.patch.object(
-                inspect_listener, "workload_state_dir", lambda name: state), \
-                unittest.mock.patch.object(
-                    inspect_listener, "ca_cert_path",
-                    lambda d: os.path.join(d, "ca.crt")), \
+                inspect_listener, "ca_cert_path",
+                lambda d: os.path.join(d, "ca.crt")), \
                 unittest.mock.patch.object(
                     inspect_listener, "ca_key_path",
                     lambda d: os.path.join(d, "ca.key")), \
@@ -700,16 +706,46 @@ class TestPolicyLoading(unittest.TestCase):
                     inspect_listener, "Minter",
                     lambda *a, **kw: built.update(kw)), \
                 unittest.mock.patch.object(
-                    inspect_listener, "resync_guest_clock_if_skewed",
+                    launcher, "resync_guest_clock_if_skewed",
                     lambda name: "RESYNCED-SENTINEL"):
-            build_minter("w", Policy(tls="inspect", hosts=(),
-                                             guest_agent=False))
+            no_agent = Policy(tls="inspect", hosts=(), guest_agent=False)
+            build_minter("w", state, no_agent,
+                         clock_check=launcher.clock_check_for("w", no_agent))
             self.assertIsNone(built["clock_check"]())
 
             built.clear()
-            build_minter("w", Policy(tls="inspect", hosts=(),
-                                             guest_agent=True))
+            agent = Policy(tls="inspect", hosts=(), guest_agent=True)
+            build_minter("w", state, agent,
+                         clock_check=launcher.clock_check_for("w", agent))
             self.assertEqual(built["clock_check"](), "RESYNCED-SENTINEL")
+
+    def test_the_minter_is_built_on_the_state_dir_it_was_handed(self):
+        """build_minter derives nothing from the name. The state directory
+        is an argument, so a launcher that keeps its CA somewhere workloadctl
+        would not is a launcher, not a patch."""
+        state = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, state)
+        for path in (os.path.join(state, "ca.crt"),
+                     os.path.join(state, "ca.key")):
+            with open(path, "w"):
+                pass
+        built = {}
+        with unittest.mock.patch.object(
+                inspect_listener, "ca_cert_path",
+                lambda d: os.path.join(d, "ca.crt")), \
+                unittest.mock.patch.object(
+                    inspect_listener, "ca_key_path",
+                    lambda d: os.path.join(d, "ca.key")), \
+                unittest.mock.patch.object(
+                    inspect_listener, "Minter",
+                    lambda name, state_dir, **kw: built.update(
+                        name=name, state_dir=state_dir, **kw)):
+            build_minter("w", state, Policy(tls="inspect", hosts=()))
+        self.assertEqual(built["state_dir"], state)
+        self.assertEqual(built["name"], "w")
+        # No clock check handed in reads as "decided against", which is the
+        # no-op Minter documents, not an error and not a dial.
+        self.assertIsNone(built["clock_check"]())
 
     def test_the_key_name_is_pinned_to_its_spelling(self):
         """The constant may be renamed; the STRING may not.

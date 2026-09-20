@@ -25,7 +25,7 @@ class Inspection:
     """One workload's policy, counters, record, upstream pool and minter."""
 
     def __init__(self, policy=None, *, out=None, minter=None,
-                 record_path=None, broker_address=None):
+                 record_path=None, broker_endpoint=None):
         self.out = out if out is not None else sys.stdout
         # An empty policy is a legal configuration and NOT a default: the
         # entrypoint will not construct a Listener without one. The fallback
@@ -56,7 +56,7 @@ class Inspection:
         # terminated with no minter would have no leaf to present and would
         # fail every guest handshake while reporting itself healthy.
         self.minter = minter
-        self.upstream = Upstream(broker_address)
+        self.upstream = Upstream(broker_endpoint)
 
     def log(self, line):
         print(line, file=self.out, flush=True)

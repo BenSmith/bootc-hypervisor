@@ -28,12 +28,12 @@ from tests.test_generator import run_generator, write_config
 import inspect_arm
 from nft_elements import internal_ok_elements
 from broker_config import (
-    BROKER_INSTANCE_PORT, container_broker_hosts,
+    container_broker_hosts,
     container_broker_upstream_addresses, container_uses_credentials,
     render_container_broker_config, render_vm_broker_config,
     broker_credential,
 )
-from workload_addr import UID_MIN, broker_listen_address
+from workload_addr import BROKER_INSTANCE_PORT, UID_MIN, broker_listen_address
 from container_validate import validate_container_network
 
 import tomllib

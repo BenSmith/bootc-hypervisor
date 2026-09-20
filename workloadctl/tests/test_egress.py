@@ -2411,7 +2411,7 @@ class TestRung2Schema(unittest.TestCase):
         anything, and the property it gives -- one name checked per connection
         -- is weaker rather than wrong.
         """
-        from egress_policy import TLS_DEFAULT, TLS_MODES
+        from inspect_document import TLS_DEFAULT, TLS_MODES
         self.assertEqual(TLS_DEFAULT, "inspect")
         self.assertIn(TLS_DEFAULT, TLS_MODES)
         self.assertIn("splice", TLS_MODES)
@@ -4049,8 +4049,8 @@ class TestRung6PolicyDocument(unittest.TestCase):
     def test_the_digest_moves_for_a_credential_and_not_for_its_absence(self):
         """Asserted in BOTH directions, because only the second half fails if
         the key is emitted unconditionally."""
-        from egress_policy import (inspect_policy_digest,
-                                   vm_inspect_policy_text)
+        from egress_policy import vm_inspect_policy_text
+        from inspect_document import inspect_policy_digest
         bare = inspect_policy_digest(vm_inspect_policy_text(self._net(None)))
         with_cred = inspect_policy_digest(
             vm_inspect_policy_text(self._net("tok")))

@@ -43,7 +43,8 @@ import json
 from dataclasses import dataclass
 from typing import Callable
 
-from egress_policy import INSPECT_DIGEST_KEY, inspect_status_path
+from egress_policy import inspect_status_path
+from inspect_document import INSPECT_DIGEST_KEY
 from nft_elements import vm_resolve_status_path
 
 # Group keys. A group is present or absent as a whole, because what makes it

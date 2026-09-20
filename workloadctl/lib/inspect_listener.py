@@ -49,7 +49,7 @@ import threading
 import time
 
 from egress_plane import TLS, plane_for_port
-from egress_policy import INSPECT_DIGEST_KEY
+from inspect_document import INSPECT_DIGEST_KEY
 from egress_ca import ca_cert_path, ca_key_path
 from http_framing import RequestUnreadable
 from egress_mint import Minter
@@ -62,8 +62,6 @@ import inspect_http
 import inspect_tls
 from inspect_scope import Inspection
 from peer_identity import local_endpoints, peer_uid
-from vm_clock import resync_guest_clock_if_skewed
-from workload_lib import workload_state_dir
 
 
 
@@ -147,7 +145,7 @@ class Listener:
 
     def __init__(self, sockets, out=None, limit=MAX_CONNECTIONS, policy=None,
                  status_path=None, minter=None, record_path=None,
-                 broker_address=None):
+                 broker_endpoint=None):
         self._sockets = list(sockets)
         self._ceiling = Ceiling(limit)
         self._stop = threading.Event()
@@ -156,7 +154,7 @@ class Listener:
         self._status_path = status_path
         self.inspection = Inspection(
             policy, out=out, minter=minter, record_path=record_path,
-            broker_address=broker_address)
+            broker_endpoint=broker_endpoint)
 
     def stop(self):
         """Ask the accept loop to end; called from the SIGTERM handler."""
@@ -398,18 +396,35 @@ class Listener:
         self.inspection.log(f"stopped: {self.rejected} connection(s) rejected")
 
 
-def build_minter(name, policy):
+def build_minter(name, state_dir, policy, *, clock_check=None):
     """A Minter for a terminating workload, or None. Raises if it cannot.
+
+    `state_dir` is where this workload's CA and leaf caches live, and it is
+    HANDED IN rather than derived from `name`: where a workload keeps its
+    state is a fact about how workloadctl lays out a host, and this module
+    is the inspector, which is started by workloadctl but is not it. `name`
+    is still taken because the CA subject and the log lines carry it -- a
+    label, not a lookup key.
 
     The CA is checked HERE rather than at the first mint. It is made by
     `workload-vm-inspect up` before the listener is ever socket-activated, so
     its absence is a provisioning failure, and a provisioning failure that
     surfaces as one refused connection an hour after boot is a provisioning
     failure nobody attributes.
+
+    `clock_check` is the guest-clock remedy, run on a mint MISS only, so a
+    guest cannot make it run more often than it can make us mint. It is the
+    launcher's to supply, because it is the launcher that knows whether there
+    is a guest agent to ask and how to reach it: a VM's launcher passes one
+    that talks QMP, a container's passes nothing. None here becomes Minter's
+    own documented `lambda: None`, which is a caller deciding against the
+    remedy rather than forgetting it -- and it is the right reading on a
+    substrate with no agent, where a check that dialled a socket that has
+    never existed would count every attempt into `clock_unavailable`, a
+    figure whose published meaning is that the remedy is INERT in this guest.
     """
     if policy.tls != "inspect":
         return None
-    state_dir = workload_state_dir(name)
     cert = ca_cert_path(state_dir)
     key = ca_key_path(state_dir)
     for path in (cert, key):
@@ -417,23 +432,6 @@ def build_minter(name, policy):
             raise FileNotFoundError(
                 f"tls = 'inspect' terminates, which needs this workload's "
                 f"egress CA, and {path} is not there")
-    # The clock check is the guest-clock remedy, and it is passed explicitly
-    # because Minter refuses to be built without one. It runs on a mint MISS only, so a
-    # guest cannot make the guest agent be dialled more often than it can make
-    # us mint.
-    #
-    # `lambda: None` WHERE THERE IS NO AGENT TO ASK, which is Minter's own
-    # documented way of saying a caller decided against the remedy rather than
-    # forgot it. A container has no QEMU guest agent, so the check could only
-    # ever fail: it dialled a socket that has never existed on that substrate,
-    # once per mint miss, and counted every attempt into `clock_unavailable` --
-    # a figure whose published meaning is that the remedy is INERT IN THIS
-    # GUEST. Structurally guaranteed on a container, so it reported a broken
-    # remedy where there is simply no such remedy, and nothing went red.
-    #
-    # The substrate is read off the policy document rather than branched on
-    # here, because this binary does not differ between substrates (ADR 009).
-    # The document differs; the binary reads the same keys from either.
-    clock_check = ((lambda: resync_guest_clock_if_skewed(name))
-                   if policy.guest_agent else (lambda: None))
+    if clock_check is None:
+        clock_check = lambda: None  # noqa: E731 -- Minter's documented "no remedy"
     return Minter(name, state_dir, clock_check=clock_check)

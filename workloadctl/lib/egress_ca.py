@@ -5,18 +5,22 @@ One CA per workload rather than one per host, and the directory names, the
 validity windows, the SELinux types of the subtree and the two openssl
 invocations are all here together because they are one decision each spelled
 in several places: the minter creates the directories, the SELinux patterns
-label them, `diagnose` reads the certificate back, and the seed writes the
-anchor into the guest. A drift between any two of those is a mislabelled
+label them (workload_selinux.pki_fcontext_patterns composes the names here
+with the workload's root), `diagnose` reads the certificate back, and the
+seed writes the anchor into the guest (vm_default_seed.vm_ca_env decides
+which guest gets one). A drift between any two of those is a mislabelled
 directory or an untrusted anchor, and both present as a network fault rather
 than as a naming mistake.
 
 Both substrates, despite the `vm_`/`VM_` prefixes -- the container half mints
 against the same CA through the same minter.
 
-Below workload_lib and below the substrate facade: this module imports
-config_parser and egress_policy and nothing above them. Nothing here runs
-openssl or touches the filesystem; it builds paths and argv, and lib/egress_mint.py
-is what executes them.
+On the listener's side of the line: this module takes a STATE DIRECTORY and
+knows nothing about which workload it belongs to or how workloadctl found it.
+It imports inspect_document and nothing above it, so the inspector's closure
+stays free of the config grammar. Nothing here runs openssl or touches the
+filesystem; it builds paths and argv, and lib/egress_mint.py is what executes
+them.
 
 Installed to /usr/libexec/workloadctl/egress_ca.py.
 """
@@ -25,8 +29,7 @@ import ipaddress
 import time
 from pathlib import Path
 
-from config_parser import normalise_hostname, workload_root_dir
-from egress_policy import vm_uses_inspect
+from inspect_document import normalise_hostname
 
 
 # Where the guest finds the CA whose certificates the inspector's spliced
@@ -166,23 +169,6 @@ def denial_dir(state_dir) -> Path:
     return Path(state_dir) / DENIAL_DIR_NAME
 
 
-def pki_fcontext_patterns(name: str) -> list[tuple[str, str]]:
-    """(pattern, type) for every directory in one workload's PKI subtree.
-
-    Registered in `file_contexts.local` beside the per-workload svirt_image_t
-    rule, and more specific than it, which is the only reason these win: within
-    ONE source most-specific-wins applies, and `.local` outranks the base file
-    wholesale. A CIL `filecon` in the policy module lands in the base file and
-    would be silently shadowed -- see shadowed_filecon_paths().
-    """
-    root = workload_root_dir(name)
-    return [
-        (f"{root}/state/{CA_DIR_NAME}(/.*)?", CA_SELINUX_TYPE),
-        (f"{root}/state/{LEAF_DIR_NAME}(/.*)?", LEAF_SELINUX_TYPE),
-        (f"{root}/state/{DENIAL_DIR_NAME}(/.*)?", LEAF_SELINUX_TYPE),
-    ]
-
-
 def ca_subject(name: str) -> str:
     """The CA's subject. Names the workload, because an operator reading a
     certificate error inside a guest needs to know which CA it came from."""
@@ -225,54 +211,6 @@ def ca_openssl_argv(name: str, key_path, cert_path, *, now: float) -> list[str]:
         "-addext", "keyUsage=critical,keyCertSign,cRLSign",
         "-addext", "subjectKeyIdentifier=hash",
     ]
-
-
-# Whether there is a bundle at CA_BUNDLE_PATH for those variables to name.
-#
-# THIS IS NOT CAUTION, IT IS THE DIFFERENCE BETWEEN WORKING AND BROKEN. Every
-# one of those five variables REPLACES the runtime's default trust store rather
-# than adding to it, and every one of them fails closed when the file it names
-# does not exist: OpenSSL's SSL_CERT_FILE pointing at a missing path makes
-# loading the default verify paths fail outright, and requests, git and pip
-# raise on the open. So the block must never be written for a certificate
-# nothing is presenting yet: that is a total outage inside every filtered
-# guest, not a degraded mode.
-#
-# THREE THINGS MOVE TOGETHER OR NONE OF THEM DO: this flag, the write_files
-# entry in render_default_user_data that puts the PEM at CA_BUNDLE_PATH,
-# and the seed contract in build_cloud_init_iso. Flipping this alone points
-# five variables at a file nothing writes, which is the total outage described
-# above -- so it is not a "safe" partial step, it is the worst of the three.
-VM_CA_BUNDLE_AVAILABLE = True
-
-
-def vm_ca_env(config: dict) -> dict[str, str]:
-    """The CA environment a filtered guest is given, or {} if it has none.
-
-    NO PROXY VARIABLES. The redirect is transparent, so nothing a guest sets
-    can turn the filtering off or on, and http_proxy/https_proxy/no_proxy are
-    not written: a guest that still sets https_proxy to some literal of its own
-    reaches a host address where nothing listens.
-
-    This workload's own CA is minted into
-    its state directory, written into the seed at CA_BUNDLE_PATH, and named
-    by these five variables -- and under the default `tls = "inspect"` the guest
-    NEEDS it, because the leaf the inspector presents is signed by nothing else.
-
-    ONCE PER INSTANCE ID, the same caveat the proxy block carried. cloud-init
-    replays a seed only when the instance id changes, so editing this block on a
-    running guest changes nothing until the VM is re-seeded — and an operator
-    who switches egress mode on a live workload gets a guest whose environment
-    still describes the previous mode.
-    """
-    # VM-only by construction: this is a cloud-init guest-env block. The
-    # container equivalent would be env injection directly into the unit, and
-    # it must not ship before a container CA exists -- these five variables
-    # REPLACE the trust store (RESERVED_GUEST_ENV), so an empty shape is
-    # not inert, it is every TLS verification in the workload failing.
-    if not vm_uses_inspect(config) or not VM_CA_BUNDLE_AVAILABLE:
-        return {}
-    return {var: CA_BUNDLE_PATH for var in CA_ENV_VARS}
 
 
 # --- Leaves ---

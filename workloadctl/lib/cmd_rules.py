@@ -52,9 +52,17 @@ import cli_log
 from cmd_validate import load_config_or_exit
 from container_network_config import container_uses_inspect
 from egress_policy import (
-    TLS_DEFAULT, TLS_MODES, VmPolicyEntry, container_inspect_policy, hostname_match,
-    vm_inspect_policy, inspect_policy_path, policy_governs,
+    container_inspect_policy,
+    vm_inspect_policy,
+    inspect_policy_path,
     vm_uses_inspect,
+)
+from inspect_document import (
+    TLS_DEFAULT,
+    TLS_MODES,
+    VmPolicyEntry,
+    hostname_match,
+    policy_governs,
 )
 
 # The fnmatch metacharacters. A name carrying any of them names no host, so it

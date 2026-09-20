@@ -16,9 +16,12 @@ from unittest import mock
 
 from egress_plane import CLEARTEXT, PLANES, TLS
 from egress_policy import (
-    vm_inspect_policy, inspect_policy_path,
-    TLS_DEFAULT, http2_hosts, vm_policy_entries, policy_governs,
+    vm_inspect_policy,
+    inspect_policy_path,
+    http2_hosts,
+    vm_policy_entries,
 )
+from inspect_document import TLS_DEFAULT, policy_governs, policy_permits
 from nft_elements import (
     inspect_cgroup, inspect_cgroup_command,
     inspect_cgroup_filter_command, inspect_dst_elements,
@@ -36,7 +39,6 @@ from nft_constants import (
 )
 from config_parser import runtime_dir
 from vm_defs import vm_allowed_hosts
-from egress_policy import policy_permits
 from workload_addr import IP_BIN, ADVERTISED_IFACE
 import inspect_arm
 from tests import load_script

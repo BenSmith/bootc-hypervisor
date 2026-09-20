@@ -37,7 +37,7 @@ place a reason can reach a guest inside a TLS session is a response body.
 import socket
 import ssl
 
-from config_parser import normalise_hostname
+from inspect_document import normalise_hostname
 from egress_ca import LeafRefused
 from egress_mint import MintFailed, MintThrottled
 from egress_plane import TLS

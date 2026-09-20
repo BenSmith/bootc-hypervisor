@@ -2,10 +2,11 @@
 Where a workload's config lives, and how it parses into validated records.
 
 The bottom of the layering, next to credential_entries and egress_plane.
-Both substrates read the same TOML grammar, so the parse loops and the
-hostname normalisation live below the shared plane rather than in either
-substrate's module -- a second copy is how two spellings of the same rule
-come to disagree. The credential block has its own module, credential_entries,
+Both substrates read the same TOML grammar, so the parse loops live below
+the shared plane rather than in either substrate's module -- a second copy is
+how two spellings of the same rule come to disagree. The hostname
+normalisation is one rung lower still, in inspect_document, because the
+listener normalises too and must not import this grammar to do it. The credential block has its own module, credential_entries,
 for the same reason. Each substrate's own record types and readers sit above,
 in vm_network_config and container_network_config.
 
@@ -16,6 +17,7 @@ import fnmatch
 import re
 from pathlib import Path
 from egress_plane import CLEARTEXT, TLS
+from inspect_document import normalise_hostname
 
 
 # Persistent workload data directory
@@ -148,18 +150,6 @@ def parse_policy_entries(net: dict, entry_cls) -> list:
 # with the listener about what a name is. It lives at the bottom of the
 # layering because everything above matches against it and nothing here
 # needs anything above.
-
-
-def normalise_hostname(host: str) -> str:
-    """A hostname in the one form every match in this design is made against.
-
-    Lowercased and stripped of a single trailing root dot. Both halves matter:
-    DNS names are case-insensitive, and `example.com.` and `example.com` are the
-    same name -- a workload that writes either spelling must get the same
-    decision, or the spelling becomes the bypass.
-    """
-    host = host.strip().lower()
-    return host[:-1] if host.endswith(".") and host != "." else host
 
 
 def patterns_overlap(a: str, b: str) -> bool:

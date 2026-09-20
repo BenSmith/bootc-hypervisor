@@ -19,14 +19,13 @@ from diagnose_probe import PROBE
 from egress_ca import CA_EXPIRY_WARN_DAYS, ca_cert_path
 from egress_mint import pem_fingerprint
 from egress_plane import CLEARTEXT, TLS
-from egress_policy import (
+from egress_policy import inspect_policy_path, vm_uses_inspect
+from inspect_document import (
     INSPECT_DIGEST_KEY,
     inspect_policy_digest,
-    inspect_policy_path,
     inspect_digest_short,
     INSPECT_DIGEST_SHORT,
     TLS_DEFAULT,
-    vm_uses_inspect,
 )
 from egress_record import (
     DROP_BROKER_UNREACHABLE,

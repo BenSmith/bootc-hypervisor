@@ -346,6 +346,21 @@ def broker_listen_address(uid: int) -> str:
     negatives explicitly rather than only asserting the positive.
     """
     return str(ipaddress.IPv4Address(_uid_derived_value(UID_BROKER, uid)))
+
+
+# The port every instance listens on. One value for all of them is safe here and
+# is not for the address: each instance binds an address of its own
+# (broker_listen_address), so two instances on the same port never collide.
+#
+# Beside the address rather than in broker_config, where it started, because
+# the two are the endpoint and have the same three readers: the render that
+# writes them into broker.toml, the arming that exempts them in nft, and the
+# launcher that hands them to the inspector. The inspector itself is given the
+# pair and derives neither -- it is on the far side of the line that keeps
+# the config grammar out of its closure, and broker_config is that grammar.
+BROKER_INSTANCE_PORT = 8081
+
+
 # --- §9: the synthesising responder ---
 #
 # The guest's only nameserver. Every A/AAAA, for any name, is answered with this

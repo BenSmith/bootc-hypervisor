@@ -21,7 +21,7 @@ the other.
 
 from typing import NamedTuple
 
-from config_parser import normalise_hostname
+from inspect_document import normalise_hostname
 from egress_plane import CLEARTEXT, TLS
 from http_framing import RequestUnreadable
 

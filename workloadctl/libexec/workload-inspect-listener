@@ -5,6 +5,18 @@ egress inspector. The inspector itself is lib/inspect_listener.py; this
 process reads the policy, builds the minter, recovers the inherited sockets
 and runs the accept loop until SIGTERM.
 
+WHAT THIS FILE IS, AND WHAT THE INSPECTOR IS NOT
+
+This is workloadctl's LAUNCHER for the inspector, and it is the only place
+the two meet. The inspector (inspect_listener and everything it imports)
+takes a policy document, a state directory, a broker endpoint and an
+optional clock hook, and knows nothing about workloads: not the config
+grammar, not where a workload keeps its state, not how a uid becomes a
+loopback address. Every one of those is derived HERE, from the workload
+name, and handed across as a value. tests/test_inspector_closure.py holds
+that line, so the inspector stays startable by something that is not
+workloadctl, on a host not laid out the way workloadctl lays one out.
+
 WHERE THE POLICY COMES FROM
 
 /run/workload-vm/<name>/inspect.json, written by `workload-vm-inspect up` (the
@@ -29,6 +41,7 @@ listener a guest is redirected into. So a missing environment is a loud
 failure, never a second path.
 """
 
+import os
 import signal
 import sys
 
@@ -42,6 +55,9 @@ from inspect_listener import Listener, build_minter
 from sd_listen import NotSocketActivated
 from sd_listen import (
     inherited_listening_sockets as sd_inherited_listening_sockets)
+from vm_clock import resync_guest_clock_if_skewed
+from workload_addr import BROKER_INSTANCE_PORT, broker_listen_address
+from workload_lib import workload_state_dir
 
 
 def inherited_listening_sockets():
@@ -57,12 +73,47 @@ def inherited_listening_sockets():
                  "inherited fd and back into the workload SELinux domain"))
 
 
+def broker_endpoint():
+    """(address, port) of this workload's broker instance, or None.
+
+    Derived from this process's own uid, which is the workload's: the
+    inspector and the broker's unit reach the same address from the same uid,
+    so the two halves cannot drift -- no registry, no allocation step. A uid
+    outside the workload range (a listener started by hand, outside its
+    unit) yields None rather than an error, and the inspector turns None into
+    a legible refusal on the first brokered request instead of failing a
+    start that may have no brokered host at all.
+    """
+    try:
+        return (broker_listen_address(os.getuid()), BROKER_INSTANCE_PORT)
+    except ValueError:
+        return None
+
+
+def clock_check_for(name, policy):
+    """The guest-clock remedy for this workload, or None where there is no
+    agent to ask.
+
+    The substrate is read off the policy document rather than branched on
+    here, because this binary does not differ between substrates (ADR 009):
+    the document differs, and a container's renderer states `guest_agent`
+    false. A VM gets a check that asks its QEMU guest agent over QMP; a
+    container gets None, which build_minter reads as "decided against", so
+    the minter never dials a socket that has never existed on that substrate
+    and never counts the attempt into `clock_unavailable`.
+    """
+    if not policy.guest_agent:
+        return None
+    return lambda: resync_guest_clock_if_skewed(name)
+
+
 def main(argv=None):
     argv = sys.argv if argv is None else argv
     if len(argv) != 2:
         print(f"usage: {argv[0]} <workload-name>", file=sys.stderr)
         return 2
-    policy_path = inspect_policy_path(argv[1])
+    name = argv[1]
+    policy_path = inspect_policy_path(name)
     try:
         policy = load_policy(policy_path)
     except (OSError, ValueError) as exc:
@@ -72,7 +123,8 @@ def main(argv=None):
         print(f"error: could not read {policy_path}: {exc}", file=sys.stderr)
         return 1
     try:
-        minter = build_minter(argv[1], policy)
+        minter = build_minter(name, workload_state_dir(name), policy,
+                              clock_check=clock_check_for(name, policy))
     except FileNotFoundError as exc:
         # Before the sockets, like the policy read, and for the same reason: a
         # listener that accepted connections it could mint no leaf for would
@@ -86,8 +138,9 @@ def main(argv=None):
         print(f"error: {exc}", file=sys.stderr)
         return 1
     listener = Listener(sockets, policy=policy, minter=minter,
-                        status_path=inspect_status_path(argv[1]),
-                        record_path=inspect_record_path(argv[1]))
+                        status_path=inspect_status_path(name),
+                        record_path=inspect_record_path(name),
+                        broker_endpoint=broker_endpoint())
     print(f"policy loaded from {policy_path}: {policy.summary}", flush=True)
     signal.signal(signal.SIGTERM, lambda *_args: listener.stop())
     # Rotation is logrotate's (see /etc/logrotate.d/workloadctl-inspect), and

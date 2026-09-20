@@ -13,9 +13,61 @@ Installed to /usr/libexec/workloadctl/vm_default_seed.py.
 
 from pathlib import PurePosixPath
 
-from egress_ca import CA_BUNDLE_PATH
+from egress_ca import CA_BUNDLE_PATH, CA_ENV_VARS
+from egress_policy import vm_uses_inspect
 from vm_defs import VM_GUEST_UID, VM_HOME_SELINUX_CONTEXT
 from vm_ptp import vm_ptp_kvm_runcmd_lines, vm_ptp_kvm_seed_files
+
+
+# Whether there is a bundle at CA_BUNDLE_PATH for those variables to name.
+#
+# THIS IS NOT CAUTION, IT IS THE DIFFERENCE BETWEEN WORKING AND BROKEN. Every
+# one of those five variables REPLACES the runtime's default trust store rather
+# than adding to it, and every one of them fails closed when the file it names
+# does not exist: OpenSSL's SSL_CERT_FILE pointing at a missing path makes
+# loading the default verify paths fail outright, and requests, git and pip
+# raise on the open. So the block must never be written for a certificate
+# nothing is presenting yet: that is a total outage inside every filtered
+# guest, not a degraded mode.
+#
+# THREE THINGS MOVE TOGETHER OR NONE OF THEM DO: this flag, the write_files
+# entry in render_default_user_data below that puts the PEM at CA_BUNDLE_PATH,
+# and the seed contract in build_cloud_init_iso. Two of the three live in this
+# file, which is why the flag and the env block moved here from egress_ca:
+# egress_ca is on the listener's side of the line and does not know which
+# workload is a filtered VM. Flipping this alone points
+# five variables at a file nothing writes, which is the total outage described
+# above -- so it is not a "safe" partial step, it is the worst of the three.
+VM_CA_BUNDLE_AVAILABLE = True
+
+
+def vm_ca_env(config: dict) -> dict[str, str]:
+    """The CA environment a filtered guest is given, or {} if it has none.
+
+    NO PROXY VARIABLES. The redirect is transparent, so nothing a guest sets
+    can turn the filtering off or on, and http_proxy/https_proxy/no_proxy are
+    not written: a guest that still sets https_proxy to some literal of its own
+    reaches a host address where nothing listens.
+
+    This workload's own CA is minted into
+    its state directory, written into the seed at CA_BUNDLE_PATH, and named
+    by these five variables -- and under the default `tls = "inspect"` the guest
+    NEEDS it, because the leaf the inspector presents is signed by nothing else.
+
+    ONCE PER INSTANCE ID, the same caveat the proxy block carried. cloud-init
+    replays a seed only when the instance id changes, so editing this block on a
+    running guest changes nothing until the VM is re-seeded — and an operator
+    who switches egress mode on a live workload gets a guest whose environment
+    still describes the previous mode.
+    """
+    # VM-only by construction: this is a cloud-init guest-env block. The
+    # container equivalent would be env injection directly into the unit, and
+    # it must not ship before a container CA exists -- these five variables
+    # REPLACE the trust store (RESERVED_GUEST_ENV), so an empty shape is
+    # not inert, it is every TLS verification in the workload failing.
+    if not vm_uses_inspect(config) or not VM_CA_BUNDLE_AVAILABLE:
+        return {}
+    return {var: CA_BUNDLE_PATH for var in CA_ENV_VARS}
 
 
 def uncommented(text: str) -> str:

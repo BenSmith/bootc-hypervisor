@@ -17,18 +17,15 @@ Installed to /usr/libexec/workloadctl/egress_upstream.py.
 """
 
 import ipaddress
-import os
 import socket
 import ssl
 
-from broker_config import BROKER_INSTANCE_PORT
 from egress_plane import CLEARTEXT, TLS
 from egress_record import (
     DROP_CLIENT_CERT, DROP_INTERNAL, DROP_UNREACHABLE, DROP_UNVERIFIED,
 )
 import egress_relay
 from http_framing import RELAY_CHUNK, _Stream
-from workload_addr import broker_listen_address
 
 
 # How many upstream connections one client connection may hold open at once.
@@ -78,7 +75,7 @@ ALPN_H2 = ("h2",)
 class Upstream:
     """How this inspector reaches an authorised name, on either plane."""
 
-    def __init__(self, broker_address=None):
+    def __init__(self, broker_endpoint=None):
         # One context for every upstream leg, built once. FULL verification
         # against the host's own trust store, with no configuration key of ours
         # -- a knob that turned this off would be a knob that turns the
@@ -94,12 +91,16 @@ class Upstream:
         # gives a host the offer another host asked for.
         self._ctx_h2 = ssl.create_default_context()
         self._ctx_h2.set_alpn_protocols(list(ALPN_H2))
-        # None means "derive it from this process's uid on first use", which is
-        # what the unit does. Injectable because the derivation refuses a uid
-        # outside the workload range -- the suite does not run as _wl-<name> --
-        # and because a test that had to fake getuid() to reach the broker
-        # branch would be testing the fake.
-        self._broker_address = broker_address
+        # The (address, port) of THIS workload's credential broker instance,
+        # handed in by whoever started the listener, or None for a listener
+        # started without one. Handed in rather than derived: the derivation
+        # is "this uid's loopback address plus the instance port", which is a
+        # fact about how workloadctl lays out a host, and the inspector has no
+        # business knowing it -- the launcher (workload-inspect-listener) does
+        # the derivation from its own uid and passes the pair. A None here
+        # makes a brokered dial a legible refusal rather than a guess.
+        self._broker_endpoint = (
+            None if broker_endpoint is None else tuple(broker_endpoint))
 
     def dial_cleartext(self, host):
         """A plain connection to an authorised name, as a _Stream."""
@@ -140,34 +141,30 @@ class Upstream:
 
         Cleartext, and on loopback, which is not a downgrade: the leg the guest
         cares about is the broker's own, which is TLS to the provider and
-        verified there. This hop never leaves the host, and the address it goes
-        to is derived from this process's uid -- so a second workload's
-        inspector, deriving from its own uid, reaches its own broker and finds
-        nothing here. That derivation is the whole of ADR 007 decision 6: a
-        single broker on 127.0.0.1 would be reachable by every workload on the
-        box.
+        verified there. This hop never leaves the host, and the endpoint it
+        goes to was handed to this process by its launcher, derived from the
+        workload's uid -- so a second workload's inspector, handed its own,
+        reaches its own broker and finds nothing here. That derivation is the
+        whole of ADR 007 decision 6: a single broker on 127.0.0.1 would be
+        reachable by every workload on the box.
 
         `host` is unused for ADDRESSING and is deliberately still the argument,
         because `connection_for` calls every dial the same way. It is not
         discarded either -- it rides the request head as `Host`, which is half
         the broker's dispatch key.
 
-        A uid outside the workload range raises ValueError from
-        broker_listen_address, and it is converted to OSError so it lands in
-        the caller's broker arm as a legible refusal. That is not a theoretical
-        case: it is what a listener started by hand, outside its unit, would
-        hit, and a bare ValueError there kills the connection thread with a
-        traceback instead of telling the operator what is wrong.
+        A listener started with no endpoint raises OSError here, so it lands
+        in the caller's broker arm as a legible refusal. That is not a
+        theoretical case: it is what a listener started by hand, outside its
+        unit, would hit, and a bare exception there kills the connection
+        thread with a traceback instead of telling the operator what is wrong.
         """
-        addr = self._broker_address
-        if addr is None:
-            try:
-                addr = broker_listen_address(os.getuid())
-            except ValueError as exc:
-                raise OSError(str(exc)) from exc
-            self._broker_address = addr
+        if self._broker_endpoint is None:
+            raise OSError("this inspector was started without a broker "
+                          "endpoint, and the policy names a credential for "
+                          f"{host}")
         sock = socket.create_connection(
-            (addr, BROKER_INSTANCE_PORT),
+            self._broker_endpoint,
             timeout=egress_relay.CONNECTION_TIMEOUT)
         sock.settimeout(egress_relay.RELAY_IDLE_TIMEOUT)
         return _Stream(sock)

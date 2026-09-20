@@ -27,7 +27,8 @@ from container_network_config import (
 )
 from credential_entries import validate_credential_entries
 from egress_ca import RESERVED_GUEST_ENV
-from egress_policy import POLICY_METHODS, POLICY_METHODS_REFUSED, hostname_match
+from egress_policy import POLICY_METHODS, POLICY_METHODS_REFUSED
+from inspect_document import hostname_match
 
 
 # The alphabet a podman publish spec may contain:

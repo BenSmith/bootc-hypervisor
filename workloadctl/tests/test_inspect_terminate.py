@@ -38,7 +38,7 @@ from pathlib import Path
 
 from tests import load_script
 from egress_plane import TLS
-from egress_policy import VmPolicyEntry
+from inspect_document import VmPolicyEntry
 from inspect_policy import Policy
 from egress_ca import (
     ca_cert_path, ca_key_path, ca_openssl_argv, leaf_openssl_argv,
@@ -1116,17 +1116,14 @@ class TestTheStartRefusesWhatItCannotDo(unittest.TestCase):
         provisioning failure nobody attributes.
         """
         with tempfile.TemporaryDirectory() as tmp:
-            with unittest.mock.patch.object(
-                    inspect_listener, "workload_state_dir",
-                    lambda n: Path(tmp)):
-                with self.assertRaises(FileNotFoundError) as caught:
-                    build_minter("demo", Policy(tls="inspect",
-                                                        hosts=("a.example",)))
+            with self.assertRaises(FileNotFoundError) as caught:
+                build_minter("demo", Path(tmp),
+                             Policy(tls="inspect", hosts=("a.example",)))
         self.assertIn("egress CA", str(caught.exception))
 
     def test_splice_needs_no_minter(self):
         self.assertIsNone(
-            build_minter("demo", Policy(tls="splice", hosts=())))
+            build_minter("demo", "/nonexistent", Policy(tls="splice", hosts=())))
 
     def test_a_terminating_listener_with_no_minter_drops_loudly(self):
         """Unreachable through main(), and it still must not be silent.

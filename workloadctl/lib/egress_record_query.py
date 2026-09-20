@@ -46,7 +46,7 @@ import json
 import re
 from pathlib import Path
 
-from egress_policy import hostname_match
+from inspect_document import hostname_match
 from egress_record import DROP_REASONS, LOG_ID_FIELD, LOG_REQ_FIELD
 
 # `id=<hex>` as a journal line spells it, or the bare hex on its own. Built
