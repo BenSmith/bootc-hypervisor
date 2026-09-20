@@ -410,6 +410,14 @@ def await_listener(label, port, proc, logfile):
     Matching the pid is the whole point. A check that only asks whether
     SOMETHING is listening is satisfied by a leftover from an earlier run, and
     every downstream result then describes that stranger instead.
+
+    A listener with NO pid attached is not a stranger, it is a race: `ss -p`
+    reads /proc/*/fd into a map before it dumps sockets, so a socket bound in
+    between the two is printed with no `users:` column at all. That is our own
+    stub, one poll early. It was read as a foreign holder once (2026-09-20,
+    right after a preflight that had just found :443 free), which ended a run
+    with an accusation against a process that did not exist. Only a socket
+    that names a DIFFERENT pid is somebody else's.
     """
     for _ in range(100):
         if proc.poll() is not None:
@@ -420,7 +428,7 @@ def await_listener(label, port, proc, logfile):
         if f"pid={proc.pid}," in held:
             say(f"  {label} listening on :{port} (pid {proc.pid})")
             return
-        if held.strip():
+        if "pid=" in held:
             sys.exit(f":{port} is held by something that is not our {label} "
                      f"(pid {proc.pid}):\n{held}")
         time.sleep(0.2)

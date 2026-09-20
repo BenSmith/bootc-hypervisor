@@ -134,8 +134,10 @@ made the way it always is, and the rig leaves no trust anchor behind on a
 machine it borrowed. Nothing about the path under test is weakened — the drop-in
 adds one environment variable and changes no directive.
 
-**Last green 2026-09-02, all rows, on a KVM host under enforcing, against the
-installed RPM.** It has now found five defects, none of which any unit test
+**Last green 2026-09-20, all rows, on a KVM host under enforcing, against the
+installed RPM** (the inspector-decouple branch: the inspector's broker endpoint
+is now a value the launcher hands in, and this is the rig that dials it).
+It has now found five defects, none of which any unit test
 could see. The first two made the brokered path inert for a real guest:
 
 - `_serve_terminated` seeds the upstream pool with the ORIGIN connection it
@@ -533,8 +535,9 @@ It writes `/run/workload-vm/wlspl/inspect.json` and refuses to start if that
 path already exists, since it would be a real workload's policy. Teardown
 removes the namespace and the directory.
 
-Last green 2026-08-25, all rows, on a bare-metal Fedora 44 host against
-the installed RPM.
+Last green 2026-09-20, all rows, on a bare-metal Fedora 44 host against
+the installed RPM (inspector-decouple: the launcher's module set changed,
+which item 5 is the check for).
 
 Verified by breaking the splice on purpose — replaying the buffer without its
 record header — which fails the four handshake assertions and leaves the other
@@ -612,8 +615,9 @@ binds over `/etc/hosts` inside the namespace alone — editing the host's own
 would leave six entries pointing at a listener that is gone. Teardown removes
 all of it.
 
-Last green 2026-08-27, all rows, four consecutive runs on a bare-metal
-Fedora 44 host under enforcing, against the installed RPM.
+Last green 2026-09-20, all rows, on a bare-metal Fedora 44 host under
+enforcing, against the installed RPM (inspector-decouple). Four consecutive
+runs were green on 2026-08-27.
 
 Verified by emptying each rung-4 list in the policy document in turn, on a
 throwaway copy so the product is never touched. Emptying `splice` fails 2 of
@@ -662,8 +666,10 @@ somewhere inside the `workloadctl exec` round-trip, so the reading is bracketed
 by two host reads and the interval's *width* is that latency. The upper bound is
 the stable one; the lower tracks the round-trip.
 
-**Last green 2026-09-02, all rows, on a TSC-clocksource KVM host under
-enforcing, against the installed RPM.** The same rows were green on
+**Last green 2026-09-20, all rows, on a TSC-clocksource KVM host under
+enforcing, against the installed RPM** (inspector-decouple: the guest-clock
+remedy is now a `clock_check` the launcher builds, and measurement 7 is the
+proof it still fires). Green on 2026-09-02 and
 2026-08-27; the re-run was against a later build, on a host also carrying live
 production workloads, with clean teardown and nothing else disturbed. Rungs since then
 deliberately deferred this rig — they touch nothing it covers — so the re-run
@@ -794,8 +800,9 @@ the egress path was proven on a guest; this asks the same questions of a
 container, where the traffic is re-originated by pasta as the workload's own
 uid rather than by passt on a guest's behalf. Needs root, podman and the
 installed RPM. Throwaway container workloads, all prefixed `ceg-`. **Last green all rows on a
-bare-metal Fedora 44 host under enforcing, 2026-09-06**, against an RPM built
-from the branch under review, with the `rules`/`drift`/`pcap` reporting rows
+bare-metal Fedora 44 host under enforcing, 2026-09-20** (inspector-decouple;
+one row skipped for want of `CEG_LAN_HOST`), and before that 2026-09-06
+against an RPM built from the branch under review, with the `rules`/`drift`/`pcap` reporting rows
 re-run after they were converted from measured gaps to assertions.
 
 It has grown in four waves: two PR-shaped reviews added the pod, ordering and
