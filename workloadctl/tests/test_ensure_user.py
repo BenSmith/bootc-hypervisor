@@ -557,6 +557,34 @@ class TestBuildCloudInitIsoTemplateMode(unittest.TestCase):
         self.assertIn("test -f /run/forgejo-runner-bootstrap.ok", runcmd)
         self.assertIn("systemctl show -p ActiveState --value forgejo-runner-bootstrap", runcmd)
 
+    def test_runner_build_store_disables_overlay_metacopy(self):
+        """The seed writes a storage.conf whose overlay mountopt has no
+        metacopy. With Fedora's default `metacopy=on`, containers/storage
+        falls back to the naive differ and every layer commit walks the full
+        rootfs: ~20 s per step on the hypervisor base, ~7 min of a 16 min build.
+        """
+        bundle = REPO_ROOT / "workloads" / "forgejo-runner"
+        shutil.copy2(bundle / "cloud-init" / "user-data",
+                     self.config_dir / "user-data")
+        toml = tomllib.loads((bundle / "workload.toml").read_text())
+        cfg = {"vm": {"cloud_init": {
+            "user_data_file": "user-data",
+            "template_vars": dict(toml["vm"]["cloud_init"]["template_vars"]),
+        }}}
+        old_pw = self.pw
+        self.pw = _fake_pw(self.home, uid=10042)
+        try:
+            self._run_build(cfg, name="forgejo-runner")
+        finally:
+            self.pw = old_pw
+        text = self._read_user_data("forgejo-runner")
+        self.assertIn("- path: /etc/containers/storage.conf\n", text)
+        conf = text.split("- path: /etc/containers/storage.conf", 1)[1]
+        conf = conf.split("\n  - path:", 1)[0]
+        self.assertIn('mountopt = "nodev"', conf)
+        self.assertNotIn("metacopy=on", conf.replace(
+            "# `nodev,metacopy=on`", ""))
+
     def test_registry_ca_url_is_fetched_and_installed(self):
         """REGISTRY_CA_URL is fetched by the bootstrap and installed into the
         guest's trust store, so CI jobs can push/pull over HTTPS. The rendered

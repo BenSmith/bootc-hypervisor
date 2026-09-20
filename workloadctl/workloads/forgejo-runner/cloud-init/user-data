@@ -93,6 +93,21 @@ write_files:
       # same names to the host primary, so the web UI is unaffected.
       ${WORKLOADCTL_VM_INSPECT_ADDR} ${SAME_HOST_HOSTNAMES}
 
+  # Overlay without metacopy for the build store. Fedora's shipped default is
+  # `nodev,metacopy=on`, and with metacopy on containers/storage cannot use
+  # overlay's own diff, so every layer commit walks the whole rootfs. On the
+  # 2.7 GB / 65-layer hypervisor base that is ~20 s per Containerfile step --
+  # measured 89.5 s vs 1.8 s for four trivial steps -- and the image builds are
+  # 35 + 11 steps. Root and rootless both read this file.
+  - path: /etc/containers/storage.conf
+    permissions: '0644'
+    content: |
+      [storage]
+      driver = "overlay"
+
+      [storage.options.overlay]
+      mountopt = "nodev"
+
   - path: /etc/forgejo-runner/config.yml
     permissions: '0600'
     content: |
