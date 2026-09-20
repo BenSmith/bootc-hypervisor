@@ -351,10 +351,10 @@ def container_inspect_policy(net: dict) -> dict:
     `guest_agent` IS THE ONE KEY THIS RENDERER EMITS AND THE VM'S DOES NOT,
     and it states a fact about the substrate rather than an instruction. A
     container has no QEMU guest agent, so a remedy that works by asking one --
-    the mint-time clock check -- cannot run here. Left unsaid, the listener
+    the pre-mint clock resync -- cannot run here. Left unsaid, the listener
     wired that check for containers too, dialled a socket that has never
     existed on this substrate once per mint miss, and counted each attempt
-    into `clock_unavailable`, whose exported meaning is "the mint-time clock
+    into `remedy_unavailable`, whose exported meaning is "the pre-mint
     remedy is INERT in this guest". On a container that reading was
     guaranteed and told an operator a remedy was broken rather than absent.
 

@@ -62,7 +62,7 @@ on the critical path OF. A guest pushed two hours behind -- past the leaf's
 1-hour notBefore backdate, so a stale clock CANNOT validate a fresh leaf by
 accident -- still reaches a name it has never reached, because the mint path
 repairs it on the cache miss before signing. The corroborating half matters as
-much as the pass: the guest's offset comes back and `clock_resyncs` moves.
+much as the pass: the guest's offset comes back and `remedy_acted` moves.
 Without those two, the same green is produced by a backdate quietly widened to
 cover two hours.
 
@@ -723,17 +723,17 @@ def measure():
                if before_counts is None else
                "no status tick arrived within 90s of the request")
     else:
-        moved = (after_counts.get("clock_resyncs", 0)
-                 - before_counts.get("clock_resyncs", 0))
+        moved = (after_counts.get("remedy_acted", 0)
+                 - before_counts.get("remedy_acted", 0))
         record("the resync is counted where diagnose can see it", moved >= 1,
-               f"clock_resyncs +{moved}, "
+               f"remedy_acted +{moved}, "
                f"mints +{after_counts.get('mints', 0) - before_counts.get('mints', 0)}")
         # The figure that says the remedy is present at all. A guest with no
         # agent counts here instead, and every other line on this rig still
         # passes -- which is exactly the state T8 added it to make visible.
         record("this guest's clock remedy is not inert",
-               after_counts.get("clock_unavailable", 0) == 0,
-               f"clock_unavailable={after_counts.get('clock_unavailable')}")
+               after_counts.get("remedy_unavailable", 0) == 0,
+               f"remedy_unavailable={after_counts.get('remedy_unavailable')}")
 
 
 def main():

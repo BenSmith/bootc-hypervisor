@@ -202,7 +202,7 @@ class TestTheLauncherIsTheOnlyPlaceTheTwoMeet(unittest.TestCase):
         re-derived for itself. Read the source rather than run it: main()
         needs inherited sockets."""
         text = LAUNCHER.read_text()
-        for handed in ("workload_state_dir(name)", "clock_check=",
+        for handed in ("workload_state_dir(name)", "remedy=",
                        "broker_endpoint=", "status_path=", "record_path="):
             self.assertIn(handed, text, handed)
 

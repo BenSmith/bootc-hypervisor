@@ -10,10 +10,10 @@ WHAT THIS FILE IS, AND WHAT THE INSPECTOR IS NOT
 This is workloadctl's LAUNCHER for the inspector, and it is the only place
 the two meet. The inspector (inspect_listener and everything it imports)
 takes a policy document, a state directory, a broker endpoint and an
-optional clock hook, and knows nothing about workloads: not the config
+optional pre-mint remedy, and knows nothing about workloads: not the config
 grammar, not where a workload keeps its state, not how a uid becomes a
-loopback address. Every one of those is derived HERE, from the workload
-name, and handed across as a value. tests/test_inspector_closure.py holds
+loopback address, not that the remedy is about a guest's clock. Every one of
+those is derived HERE, from the workload name, and handed across as a value. tests/test_inspector_closure.py holds
 that line, so the inspector stays startable by something that is not
 workloadctl, on a host not laid out the way workloadctl lays one out.
 
@@ -47,6 +47,9 @@ import sys
 
 sys.dont_write_bytecode = True
 
+from egress_mint import (
+    REMEDY_ACTED, REMEDY_FAILED, REMEDY_OK, REMEDY_UNAVAILABLE,
+)
 from egress_policy import (
     inspect_policy_path, inspect_record_path, inspect_status_path,
 )
@@ -55,9 +58,23 @@ from inspect_listener import Listener, build_minter
 from sd_listen import NotSocketActivated
 from sd_listen import (
     inherited_listening_sockets as sd_inherited_listening_sockets)
-from vm_clock import resync_guest_clock_if_skewed
+from vm_clock import (
+    CLOCK_FAILED, CLOCK_OK, CLOCK_RESYNCED, CLOCK_UNAVAILABLE,
+    resync_guest_clock_if_skewed,
+)
 from workload_addr import BROKER_INSTANCE_PORT, broker_listen_address
 from workload_lib import workload_state_dir
+
+# The clock's vocabulary into the minter's, exhaustively. This table is the
+# whole of what the inspector learns about the remedy: four words, none of
+# them "clock". A fifth outcome on either side is a KeyError here, at the
+# seam, rather than a silently uncounted figure in the status document.
+_CLOCK_TO_REMEDY = {
+    CLOCK_OK: REMEDY_OK,
+    CLOCK_RESYNCED: REMEDY_ACTED,
+    CLOCK_UNAVAILABLE: REMEDY_UNAVAILABLE,
+    CLOCK_FAILED: REMEDY_FAILED,
+}
 
 
 def inherited_listening_sockets():
@@ -90,21 +107,23 @@ def broker_endpoint():
         return None
 
 
-def clock_check_for(name, policy):
-    """The guest-clock remedy for this workload, or None where there is no
+def remedy_for(name, policy):
+    """The pre-mint remedy for this workload, or None where there is no
     agent to ask.
 
-    The substrate is read off the policy document rather than branched on
-    here, because this binary does not differ between substrates (ADR 009):
-    the document differs, and a container's renderer states `guest_agent`
-    false. A VM gets a check that asks its QEMU guest agent over QMP; a
-    container gets None, which build_minter reads as "decided against", so
-    the minter never dials a socket that has never existed on that substrate
-    and never counts the attempt into `clock_unavailable`.
+    What the remedy IS -- the guest-clock resync -- is decided here and
+    nowhere the inspector can see. The substrate is read off the policy
+    document rather than branched on, because this binary does not differ
+    between substrates (ADR 009): the document differs, and a container's
+    renderer states `guest_agent` false. A VM gets a remedy that asks its
+    QEMU guest agent over QMP; a container gets None, which build_minter
+    reads as "decided against", so the minter never dials a socket that has
+    never existed on that substrate and never counts the attempt into
+    `remedy_unavailable`.
     """
     if not policy.guest_agent:
         return None
-    return lambda: resync_guest_clock_if_skewed(name)
+    return lambda: _CLOCK_TO_REMEDY[resync_guest_clock_if_skewed(name)]
 
 
 def main(argv=None):
@@ -124,7 +143,7 @@ def main(argv=None):
         return 1
     try:
         minter = build_minter(name, workload_state_dir(name), policy,
-                              clock_check=clock_check_for(name, policy))
+                              remedy=remedy_for(name, policy))
     except FileNotFoundError as exc:
         # Before the sockets, like the policy read, and for the same reason: a
         # listener that accepted connections it could mint no leaf for would

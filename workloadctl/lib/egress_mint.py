@@ -53,27 +53,40 @@ from egress_ca import (
     DENIAL_DIR_NAME, LEAF_DIR_NAME, LEAF_RENEW_WITHIN_SECONDS, LeafRefused,
     ca_cert_path, ca_key_path, leaf_openssl_argv,
 )
-# What a clock check concluded. Strings rather than booleans because three
-# outcomes matter separately to a caller and to the status document: the
-# clock was fine, it was wrong and is now right, and there is no agent to ask
+# What the pre-mint remedy concluded. Strings rather than booleans because
+# three outcomes matter separately to a caller and to the status document: the
+# guest was fine, it was wrong and is now right, and there was nobody to ask
 # (which is the state that silently keeps the old broken behaviour). The
-# vocabulary is the minter's: `clock_check` returns one of these (or None for
-# a substrate with no clock remedy at all), and the figures below are keyed
-# on them. vm_clock is one producer of them, not their owner.
-CLOCK_OK = "ok"
-CLOCK_RESYNCED = "resynced"
-CLOCK_UNAVAILABLE = "unavailable"
-CLOCK_FAILED = "failed"
+# vocabulary is the minter's: `remedy` returns one of these (or None for a
+# caller that decided against a remedy at all), and the figures below are
+# keyed on them.
+#
+# WHAT A REMEDY IS, AND WHY THE MINTER DOES NOT SAY
+#
+# A leaf is only useful if the guest can verify it, and one thing that stops
+# a guest verifying a perfectly good leaf is a fact about the GUEST -- on a
+# VM, a clock rewound past the leaf's notBefore by a vCPU pause it never saw.
+# The minter does not know what that fact is; it knows that a caller may want
+# a chance to put the guest right before a fresh leaf is signed, and that the
+# chance is worth taking on a cache miss only. So the remedy is a callable
+# the launcher supplies, run on a miss, and what it does is the launcher's:
+# workloadctl's VM launcher passes one that asks the QEMU guest agent for the
+# guest's time and resyncs it (lib/vm_clock.py), and a container launcher
+# passes nothing. The four words here are the whole of what crosses back.
+REMEDY_OK = "ok"
+REMEDY_ACTED = "acted"
+REMEDY_UNAVAILABLE = "unavailable"
+REMEDY_FAILED = "failed"
 
-# Which clock_check outcomes get a counter, and which counter each lands in.
-# CLOCK_OK deliberately has none: it is what every healthy mint returns, so a
+# Which remedy outcomes get a counter, and which counter each lands in.
+# REMEDY_OK deliberately has none: it is what every healthy mint returns, so a
 # figure tracking it would track the mint count and say nothing further. The
 # other three each describe a different thing being wrong, and one of them --
-# CLOCK_UNAVAILABLE -- describes the remedy itself not being present.
-_CLOCK_STATS = {
-    CLOCK_RESYNCED: "clock_resyncs",
-    CLOCK_UNAVAILABLE: "clock_unavailable",
-    CLOCK_FAILED: "clock_failed",
+# REMEDY_UNAVAILABLE -- describes the remedy itself not being present.
+_REMEDY_STATS = {
+    REMEDY_ACTED: "remedy_acted",
+    REMEDY_UNAVAILABLE: "remedy_unavailable",
+    REMEDY_FAILED: "remedy_failed",
 }
 
 # --- sizes ---
@@ -407,21 +420,21 @@ def pem_not_after(path: Path) -> float | None:
 
 
 class Minter:
-    """Leaves for one workload, cached, rationed, and clock-checked.
+    """Leaves for one workload, cached, rationed, and remedied before a miss.
 
-    `clock_check` HAS NO DEFAULT ON PURPOSE. It is the seam the mint-time clock
-    remedy hangs on, and a remedy that covers every pause path by being
-    demand-driven is worth nothing if a caller can construct a Minter without
-    one. Passing `lambda: None` is a decision a reader can see; an omitted
-    keyword argument is not.
+    `remedy` HAS NO DEFAULT ON PURPOSE. It is the seam the pre-mint remedy
+    hangs on, and a remedy that covers every path by being demand-driven is
+    worth nothing if a caller can construct a Minter without one. Passing
+    `lambda: None` is a decision a reader can see; an omitted keyword
+    argument is not.
     """
 
-    def __init__(self, name: str, state_dir, *, clock_check,
+    def __init__(self, name: str, state_dir, *, remedy,
                  clock=time.time, runner=subprocess.run,
                  bucket: TokenBucket | None = None):
         self.name = name
         self.state_dir = Path(state_dir)
-        self._clock_check = clock_check
+        self._remedy = remedy
         self._clock = clock
         self._runner = runner
         self.bucket = bucket if bucket is not None else TokenBucket()
@@ -443,16 +456,17 @@ class Minter:
             "mints": 0, "denied_mints": 0,
             "hits": 0, "denied_hits": 0,
             "throttled": 0, "refused": 0, "failed": 0,
-            # Four outcomes, not one. `clock_unavailable` is the one that
-            # matters: it means this guest has no agent to ask, so the
-            # mint-time clock remedy is INERT here -- the failure it exists to
-            # prevent is still possible and nothing else says so. It is read
-            # from the inspector's status document (`mint.clock_unavailable`),
-            # which is where every figure in here surfaces. Rung 5 gave that
-            # document its readers: `inspect_figures` parses it once, and
-            # `doctor` and `workload-exporter` render what it returns --
-            # `workload_vm_inspect_clock_unavailable_total` is this counter.
-            "clock_resyncs": 0, "clock_unavailable": 0, "clock_failed": 0,
+            # Four outcomes, not one. `remedy_unavailable` is the one that
+            # matters: it means the remedy had nobody to ask (on a VM, no
+            # guest agent), so the pre-mint remedy is INERT here -- the
+            # failure it exists to prevent is still possible and nothing else
+            # says so. It is read from the inspector's status document
+            # (`mint.remedy_unavailable`), which is where every figure in here
+            # surfaces. Rung 5 gave that document its readers:
+            # `inspect_figures` parses it once, and `doctor` and
+            # `workload-exporter` render what it returns --
+            # `workload_vm_inspect_remedy_unavailable_total` is this counter.
+            "remedy_acted": 0, "remedy_unavailable": 0, "remedy_failed": 0,
         }
         self._lock = threading.Lock()
         self._ca_identity = None
@@ -512,9 +526,9 @@ class Minter:
 
         # On a miss only, and after the bucket: a guest cannot make this run
         # more often than it can make us mint.
-        outcome = self._clock_check()
-        if outcome in _CLOCK_STATS:
-            self._bump(_CLOCK_STATS[outcome])
+        outcome = self._remedy()
+        if outcome in _REMEDY_STATS:
+            self._bump(_REMEDY_STATS[outcome])
 
         try:
             leaf = self._mint(name, cache, denied=denied)

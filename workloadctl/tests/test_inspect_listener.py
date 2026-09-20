@@ -41,12 +41,14 @@ from http_framing import (
     DRAIN_MAX, MAX_TRAILER_LINES, RELAY_CHUNK, RequestUnreadable, _Stream,
     copy_body,
 )
+import egress_mint
 import egress_record
 import egress_relay
 import egress_upstream
 import inspect_http
 import inspect_listener
 import inspect_tls
+import vm_clock
 from inspect_tls import serve_tls, serve_terminated
 from inspect_http import INTERIM_MAX, serve_cleartext
 from inspect_listener import Ceiling, Listener, build_minter
@@ -681,10 +683,10 @@ class TestPolicyLoading(unittest.TestCase):
         test above still passes while the container goes on dialling a socket
         it does not have.
 
-        So this asserts the OUTCOME of the check the Minter was handed --
+        So this asserts the OUTCOME of the remedy the Minter was handed --
         None where there is no agent, and a real vm_clock call where there is
         -- rather than that a flag arrived. The choice is the LAUNCHER's
-        (clock_check_for in workload-inspect-listener), because the inspector
+        (remedy_for in workload-inspect-listener), because the inspector
         does not know what a guest agent is; build_minter only turns a None
         into Minter's documented no-op.
         """
@@ -707,17 +709,32 @@ class TestPolicyLoading(unittest.TestCase):
                     lambda *a, **kw: built.update(kw)), \
                 unittest.mock.patch.object(
                     launcher, "resync_guest_clock_if_skewed",
-                    lambda name: "RESYNCED-SENTINEL"):
+                    lambda name: vm_clock.CLOCK_RESYNCED):
             no_agent = Policy(tls="inspect", hosts=(), guest_agent=False)
             build_minter("w", state, no_agent,
-                         clock_check=launcher.clock_check_for("w", no_agent))
-            self.assertIsNone(built["clock_check"]())
+                         remedy=launcher.remedy_for("w", no_agent))
+            self.assertIsNone(built["remedy"]())
 
             built.clear()
             agent = Policy(tls="inspect", hosts=(), guest_agent=True)
             build_minter("w", state, agent,
-                         clock_check=launcher.clock_check_for("w", agent))
-            self.assertEqual(built["clock_check"](), "RESYNCED-SENTINEL")
+                         remedy=launcher.remedy_for("w", agent))
+            # The clock's word went in and the minter's came out: the
+            # translation is the launcher's, and it is the only thing about
+            # the remedy the inspector ever sees.
+            self.assertEqual(built["remedy"](), egress_mint.REMEDY_ACTED)
+
+    def test_the_launcher_translates_every_clock_outcome(self):
+        """Exhaustive both ways. A clock outcome the table does not know is a
+        KeyError at the seam rather than an uncounted figure; a minter word
+        no clock outcome maps to would be a figure nothing can ever move."""
+        launcher = _mod()
+        clock_words = {getattr(vm_clock, n) for n in dir(vm_clock)
+                       if n.startswith("CLOCK_") and n != "CLOCK_SKEW_THRESHOLD_SECONDS"}
+        remedy_words = {getattr(egress_mint, n) for n in dir(egress_mint)
+                        if n.startswith("REMEDY_")}
+        self.assertEqual(set(launcher._CLOCK_TO_REMEDY), clock_words)
+        self.assertEqual(set(launcher._CLOCK_TO_REMEDY.values()), remedy_words)
 
     def test_the_minter_is_built_on_the_state_dir_it_was_handed(self):
         """build_minter derives nothing from the name. The state directory
@@ -743,9 +760,9 @@ class TestPolicyLoading(unittest.TestCase):
             build_minter("w", state, Policy(tls="inspect", hosts=()))
         self.assertEqual(built["state_dir"], state)
         self.assertEqual(built["name"], "w")
-        # No clock check handed in reads as "decided against", which is the
+        # No remedy handed in reads as "decided against", which is the
         # no-op Minter documents, not an error and not a dial.
-        self.assertIsNone(built["clock_check"]())
+        self.assertIsNone(built["remedy"]())
 
     def test_the_key_name_is_pinned_to_its_spelling(self):
         """The constant may be renamed; the STRING may not.

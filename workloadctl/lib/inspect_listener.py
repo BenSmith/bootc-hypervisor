@@ -359,8 +359,8 @@ class Listener:
             # job; the `denied_*` subsets say which half of the traffic is
             # driving it; `throttled` is the only thing that names why a
             # workload under sustained abuse stopped getting readable 403s;
-            # and `clock_unavailable` is the only thing that says the
-            # mint-time clock remedy is inert in this guest.
+            # and `remedy_unavailable` is the only thing that says the
+            # pre-mint remedy is inert in this guest.
             snap["mint"] = self.inspection.minter.snapshot()
         return snap
 
@@ -396,7 +396,7 @@ class Listener:
         self.inspection.log(f"stopped: {self.rejected} connection(s) rejected")
 
 
-def build_minter(name, state_dir, policy, *, clock_check=None):
+def build_minter(name, state_dir, policy, *, remedy=None):
     """A Minter for a terminating workload, or None. Raises if it cannot.
 
     `state_dir` is where this workload's CA and leaf caches live, and it is
@@ -412,16 +412,18 @@ def build_minter(name, state_dir, policy, *, clock_check=None):
     surfaces as one refused connection an hour after boot is a provisioning
     failure nobody attributes.
 
-    `clock_check` is the guest-clock remedy, run on a mint MISS only, so a
-    guest cannot make it run more often than it can make us mint. It is the
-    launcher's to supply, because it is the launcher that knows whether there
-    is a guest agent to ask and how to reach it: a VM's launcher passes one
-    that talks QMP, a container's passes nothing. None here becomes Minter's
-    own documented `lambda: None`, which is a caller deciding against the
-    remedy rather than forgetting it -- and it is the right reading on a
-    substrate with no agent, where a check that dialled a socket that has
-    never existed would count every attempt into `clock_unavailable`, a
-    figure whose published meaning is that the remedy is INERT in this guest.
+    `remedy` is the pre-mint remedy, run on a mint MISS only, so a guest
+    cannot make it run more often than it can make us mint. It is the
+    launcher's to supply, because only the launcher knows what could stop
+    this guest verifying a fresh leaf and how to put it right: workloadctl's
+    VM launcher passes one that resyncs the guest's clock over the QEMU guest
+    agent, a container's passes nothing. The inspector never learns which.
+    None here becomes Minter's own documented `lambda: None`, which is a
+    caller deciding against a remedy rather than forgetting it -- and it is
+    the right reading on a substrate with nothing to ask, where a remedy that
+    dialled a socket that has never existed would count every attempt into
+    `remedy_unavailable`, a figure whose published meaning is that the remedy
+    is INERT in this guest.
     """
     if policy.tls != "inspect":
         return None
@@ -432,6 +434,6 @@ def build_minter(name, state_dir, policy, *, clock_check=None):
             raise FileNotFoundError(
                 f"tls = 'inspect' terminates, which needs this workload's "
                 f"egress CA, and {path} is not there")
-    if clock_check is None:
-        clock_check = lambda: None  # noqa: E731 -- Minter's documented "no remedy"
-    return Minter(name, state_dir, clock_check=clock_check)
+    if remedy is None:
+        remedy = lambda: None  # noqa: E731 -- Minter's documented "no remedy"
+    return Minter(name, state_dir, remedy=remedy)

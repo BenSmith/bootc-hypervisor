@@ -564,7 +564,7 @@ series is labelled `workload="<name>"`, and only filtered VMs get any:
 | `workload_vm_inspect_mints_total` / `_mint_hits_total` | Leaves signed, and lookups served from cache |
 | `workload_vm_inspect_denied_mints_total` / `_denied_mint_hits_total` | The denial-only **subsets** of those two, not a second dimension |
 | `workload_vm_inspect_mint_throttled_total` | Mints refused by the rate limit — the only figure that says why a guest under sustained abuse stopped getting readable refusals |
-| `workload_vm_inspect_clock_unavailable_total` | Mint-time clock checks with no guest agent to ask. Non-zero means the clock remedy is **inert** in this guest |
+| `workload_vm_inspect_remedy_unavailable_total` | Pre-mint remedies (on a VM: the guest-clock resync) with no guest agent to ask. Non-zero means the remedy is **inert** in this guest |
 | `workload_vm_inspect_record_failures_total` | Records the sink could not take. Non-zero means the `egress` record above is **incomplete** |
 | `workload_vm_inspect_h2_unrecorded_total` | Spliced h2 sessions recorded as one connection with no per-request detail |
 | `workload_vm_inspect_ech_seen_total` / `_ech_alarm_total` | ClientHellos offering encrypted client hello, and those where the name was not readable |

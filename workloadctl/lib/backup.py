@@ -22,8 +22,7 @@ from secrets_template import auto_detect_credentials, CREDSTORE_DIR
 from service_runtime import restart_workload_service
 from substrate import BackupError
 from config_parser import SOCKET_DIR
-from egress_mint import CLOCK_RESYNCED
-from vm_clock import resync_guest_clock_if_skewed
+from vm_clock import CLOCK_RESYNCED, resync_guest_clock_if_skewed
 from workload_lib import mount_points, workload_config_path
 
 
@@ -163,7 +162,7 @@ def backup_vm_crash(config, output: Path, *, quiet: bool) -> int:
             # a worse outcome than a slow clock. It is also entirely normal
             # for this to do nothing -- a guest whose image has no
             # qemu-guest-agent has no channel to ask. That is counted where
-            # the mint path counts it (`mint.clock_unavailable` in the
+            # the mint path counts it (`mint.remedy_unavailable` in the
             # inspector's status document) and not here; this call is silent
             # about it on purpose, since a backup is not the place to learn
             # about a guest's agent.

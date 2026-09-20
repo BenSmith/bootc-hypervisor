@@ -10,15 +10,16 @@ construction (chronyd stays `active` while `chronyc tracking` reports
 `Stratum 0` and a 1970 reference time), because this design closed the UDP path
 it needs.
 
-That matters here and nowhere else because of what the egress inspector mints.
-A leaf carries `notBefore = mint_time - 1h`; a guest rewound by more than an
-hour asks whether its own clock is past that and gets `no`. The failure is
-narrower than "TLS stops working" and much worse to diagnose for it: leaves
+A skewed guest breaks TLS, and it breaks it worst where the egress inspector
+mints. A leaf carries `notBefore = mint_time - 1h`; a guest rewound by more
+than an hour asks whether its own clock is past that and gets `no`. The failure
+is narrower than "TLS stops working" and much worse to diagnose for it: leaves
 already in the working-set cache keep validating, so the guest reaches its usual
 hosts and fails only on names it has not visited yet, while every host-side
-figure reads healthy.
+figure reads healthy. A guest with no inspector at all has the same problem
+against real certificates, just with a wider margin and nothing to count it.
 
-THE REMEDY IS DEMAND-DRIVEN, NOT EVENT-DRIVEN, AND THAT IS THE DESIGN
+THE REMEDY IS NOT A HOOK ON THE PATHS THAT PAUSE, AND THAT IS THE DESIGN
 
 The obvious shape is a hook on each path that pauses vCPUs. It was drafted and
 rejected: `backup --consistency crash` is one such path, a host that suspends or
@@ -27,9 +28,22 @@ none exists), `workloadctl incant <vm> stop` is a third,
 and the fourth arrives in five years with no hook and the same silent failure.
 Enumerating callers is a remedy that decays.
 
-So the check lives at the mint, on a cache miss only: compare the guest's clock
-to the host's, and past a threshold resync before signing. It covers every path
-that can ever pause a vCPU without knowing what any of them are.
+So the remedy runs on the guest's behalf without knowing why it is needed, in
+two places that between them cover every path that can ever pause a vCPU:
+
+  * The clock keeper (libexec/workload-vm-clock, on workload-<name>-clock.timer)
+    asks once a minute and repairs past the threshold. It runs whether or not
+    the workload has an inspector, so the plain-egress case above is covered,
+    and it needs nothing from any pause path -- a timer catches up on resume.
+  * The inspector's pre-mint remedy asks on a mint cache miss, which is the
+    one moment the skew is about to matter, and closes the window the timer's
+    period leaves. The inspector does not know this is about clocks: it takes
+    a callable from its launcher and counts what the callable said (see
+    egress_mint's REMEDY_* and the translation in
+    libexec/workload-inspect-listener).
+
+`backup` additionally resyncs right after its own unpause, at a threshold of a
+second: it is the one pause path that knows it is one.
 
 THE GUEST HAS A HALF OF THIS TOO, AND IT IS NOT A SUBSTITUTE
 
@@ -37,9 +51,10 @@ Every seed workloadctl renders wires the guest to `ptp_kvm`: it reads the host's
 realtime clock over a KVM hypercall, needs nothing on the host side and sends no
 packets, so unlike NTP it survives the egress filter. The two halves fail in
 opposite directions, which is why both ship. This one repairs a guest that was
-never configured for anything and does not know it was paused -- but only on a
-mint cache miss, and only if the guest runs qemu-guest-agent. That one repairs
-the guest on its own four-second poll with no agent and no host involvement --
+never configured for anything and does not know it was paused -- but only once
+a minute or on a mint cache miss, and only if the guest runs qemu-guest-agent.
+That one repairs the guest on its own four-second poll with no agent and no
+host involvement --
 but only if the guest was seeded with it, which a custom
 [vm.cloud_init].user_data_file may not have been. See vm_ptp.py for
 what the seed carries and tests/test_vm_ptp_kvm.py for what each piece is for.
@@ -64,11 +79,20 @@ from __future__ import annotations
 import random
 import time
 
-from egress_mint import (
-    CLOCK_FAILED, CLOCK_OK, CLOCK_RESYNCED, CLOCK_UNAVAILABLE,
-)
 from qmp import QMPClient
 from vm_defs import vm_guest_agent_socket
+
+# What a clock check concluded. Three outcomes matter separately to every
+# caller: the clock was fine, it was wrong and is now right, and there was no
+# agent to ask -- which is the state that silently keeps the old broken
+# behaviour, and the one a caller most needs to be able to see. This is the
+# clock's own vocabulary; the inspector's launcher translates it into the
+# minter's (egress_mint.REMEDY_*) at the seam, so the inspector never learns
+# the word "clock" and this module never learns the word "mint".
+CLOCK_OK = "ok"
+CLOCK_RESYNCED = "resynced"
+CLOCK_UNAVAILABLE = "unavailable"
+CLOCK_FAILED = "failed"
 
 # How long to wait for qemu-guest-agent to answer. Every VM is wired with the
 # agent channel, but a guest that hasn't installed or started qemu-ga never
@@ -78,12 +102,12 @@ from vm_defs import vm_guest_agent_socket
 # local unix-socket round trip, agent absent costs this once.
 GUEST_AGENT_TIMEOUT = 1.5
 
-# How far the guest's clock may be from the host's before the mint path repairs
-# it. Five minutes: well inside the one-hour backdate, so it fires long before
-# anything breaks, and far outside ordinary drift, which was measured at ~10 ppm
-# and would need about a year to reach it. A pause -- the case this exists for --
-# clears it immediately, since a pause short enough to stay under five minutes is
-# also short enough to be harmless.
+# How far the guest's clock may be from the host's before the keeper or the
+# mint path repairs it. Five minutes: well inside the one-hour backdate, so it
+# fires long before anything breaks, and far outside ordinary drift, which was
+# measured at ~10 ppm and would need about a year to reach it. A pause -- the
+# case this exists for -- clears it immediately, since a pause short enough to
+# stay under five minutes is also short enough to be harmless.
 CLOCK_SKEW_THRESHOLD_SECONDS = 300.0
 
 
@@ -121,13 +145,12 @@ def _connect(name: str) -> QMPClient | None:
     supported configuration that simply cannot be repaired this way.
 
     THAT IT IS UNREPAIRABLE IS REPORTED, and reported is what makes never
-    failing a mint the right call -- but be precise about where, because the
-    obvious answer is wrong today. The minter counts it as
-    `clock_unavailable` and the inspector writes that into its status document
-    (`mint.clock_unavailable` in /run/workload-vm/<name>/inspect-status.json).
-    `workloadctl diagnose` does not read that document yet; it gains a reader
-    at rung 5, and until then the figure is there to be read and nothing
-    prints it for you.
+    failing a mint the right call -- but be precise about where. The minter
+    counts it as `remedy_unavailable` and the inspector writes that into its
+    status document (`mint.remedy_unavailable` in
+    /run/workload-vm/<name>/inspect-status.json), which `doctor` and the
+    exporter read. The keeper says nothing about it on its own: a guest with
+    no agent would make it say so once a minute, forever.
     """
     sock_path = vm_guest_agent_socket(name)
     if not sock_path.exists():
@@ -199,9 +222,10 @@ def resync_guest_clock_if_skewed(
         threshold: float = CLOCK_SKEW_THRESHOLD_SECONDS) -> str:
     """Repair the guest's clock if it has drifted past `threshold`.
 
-    The mint path's clock check. Costs one local round trip and returns CLOCK_OK
-    without a second one in the overwhelmingly common case, which is what makes
-    it affordable on every cache miss.
+    The keeper's tick and the mint path's remedy, one function. Costs one
+    local round trip and returns CLOCK_OK without a second one in the
+    overwhelmingly common case, which is what makes it affordable once a
+    minute and on every cache miss.
 
     Never raises. A mint that fails because its clock check failed would convert
     a guest with no agent -- a supported configuration -- into a guest with no

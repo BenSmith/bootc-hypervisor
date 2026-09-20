@@ -16,7 +16,6 @@ import unittest
 from unittest import mock
 
 import backup as backup_mod
-import egress_mint
 import vm_clock
 
 
@@ -137,14 +136,15 @@ class TestSettingTheTime(_ClockCase):
 
 
 class TestTheSkewCheck(_ClockCase):
-    """What the mint path calls. Three outcomes, not two -- see CLOCK_*."""
+    """What the keeper and the mint path call. Three outcomes, not two --
+    see CLOCK_*, which is vm_clock's own vocabulary and not the minter's."""
 
     def test_a_healthy_clock_costs_one_round_trip_and_no_repair(self):
         agent = self.use(_FakeAgent(
             {"guest-get-time": {"return": int(time.time() * 1e9)},
              "guest-set-time": {"return": {}}}))
         self.assertEqual(vm_clock.resync_guest_clock_if_skewed("wl"),
-                         egress_mint.CLOCK_OK)
+                         vm_clock.CLOCK_OK)
         self.assertNotIn("guest-set-time", [c for c, _ in agent.sent])
 
     def test_ordinary_drift_stays_under_the_threshold(self):
@@ -153,14 +153,14 @@ class TestTheSkewCheck(_ClockCase):
         self.use(_FakeAgent(
             {"guest-get-time": {"return": int((time.time() + 30) * 1e9)}}))
         self.assertEqual(vm_clock.resync_guest_clock_if_skewed("wl"),
-                         egress_mint.CLOCK_OK)
+                         vm_clock.CLOCK_OK)
 
     def test_a_paused_guest_is_repaired(self):
         agent = self.use(_FakeAgent(
             {"guest-get-time": {"return": int((time.time() - 7200) * 1e9)},
              "guest-set-time": {"return": {}}}))
         self.assertEqual(vm_clock.resync_guest_clock_if_skewed("wl"),
-                         egress_mint.CLOCK_RESYNCED)
+                         vm_clock.CLOCK_RESYNCED)
         self.assertIn("guest-set-time", [c for c, _ in agent.sent])
 
     def test_a_guest_with_no_agent_reports_unavailable_rather_than_ok(self):
@@ -174,14 +174,14 @@ class TestTheSkewCheck(_ClockCase):
         """
         self.use(_FakeAgent(), socket_exists=False)
         self.assertEqual(vm_clock.resync_guest_clock_if_skewed("wl"),
-                         egress_mint.CLOCK_UNAVAILABLE)
+                         vm_clock.CLOCK_UNAVAILABLE)
 
     def test_a_repair_that_fails_is_distinguishable_from_one_not_attempted(self):
         self.use(_FakeAgent(
             {"guest-get-time": {"return": int((time.time() - 7200) * 1e9)},
              "guest-set-time": {"error": {"desc": "no"}}}))
         self.assertEqual(vm_clock.resync_guest_clock_if_skewed("wl"),
-                         egress_mint.CLOCK_FAILED)
+                         vm_clock.CLOCK_FAILED)
 
     def test_the_threshold_is_inside_the_backdate(self):
         # If it were not, the guard could pass on a guest whose next leaf is
@@ -202,7 +202,7 @@ class TestBackupResyncsAfterResuming(unittest.TestCase):
 
     def test_the_helper_resyncs(self):
         with mock.patch.object(backup_mod, "resync_guest_clock_if_skewed",
-                               return_value=egress_mint.CLOCK_RESYNCED) as resync:
+                               return_value=vm_clock.CLOCK_RESYNCED) as resync:
             backup_mod._resync_after_pause(mock.Mock(name_="x"), quiet=True)
         self.assertEqual(resync.call_count, 1)
 
@@ -218,7 +218,7 @@ class TestBackupResyncsAfterResuming(unittest.TestCase):
         comment claimed the window had been narrowed to a round trip.
         """
         with mock.patch.object(backup_mod, "resync_guest_clock_if_skewed",
-                               return_value=egress_mint.CLOCK_OK) as resync:
+                               return_value=vm_clock.CLOCK_OK) as resync:
             backup_mod._resync_after_pause(mock.Mock(name_="x"), quiet=True)
         threshold = resync.call_args.kwargs["threshold"]
         self.assertLess(threshold, vm_clock.CLOCK_SKEW_THRESHOLD_SECONDS)
@@ -233,7 +233,7 @@ class TestBackupResyncsAfterResuming(unittest.TestCase):
                                return_value=True) as setter:
             outcome = vm_clock.resync_guest_clock_if_skewed(
                 "wl", threshold=backup_mod.BACKUP_RESYNC_THRESHOLD_SECONDS)
-        self.assertEqual(outcome, egress_mint.CLOCK_RESYNCED)
+        self.assertEqual(outcome, vm_clock.CLOCK_RESYNCED)
         self.assertEqual(setter.call_count, 1)
 
     def test_it_runs_after_cont_and_not_before(self):
