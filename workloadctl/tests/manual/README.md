@@ -667,8 +667,16 @@ somewhere inside the `workloadctl exec` round-trip, so the reading is bracketed
 by two host reads and the interval's *width* is that latency. The upper bound is
 the stable one; the lower tracks the round-trip.
 
-**Last green 2026-09-20, all rows, on a TSC-clocksource KVM host under
-enforcing, against the installed RPM** (inspector-decouple: the guest-clock
+**Last green 2026-09-20, 27/27 on a TSC-clocksource KVM host and 24/24 on
+an hpet one (3b skipped, as designed), both under enforcing, against the
+installed RPM** (clock-keeper: measurement 8 is new -- the keeper's tick
+caught live in `wlclock_t`, a 7200 s skew repaired with nothing minting,
+`remedy_acted` unmoved -- and measurement 7 now runs with the timer held
+off; the status-document keys are `remedy_acted`/`remedy_unavailable`. The
+first run of the new row failed a working domain by reading the journal's
+`_SELINUX_CONTEXT`, above. A `semodule -DB` harvest on both hosts showed
+exactly the three denials `security/workload-clock.cil` declines to grant.)
+Previous: 2026-09-20, all rows, TSC host under enforcing (inspector-decouple: the guest-clock
 remedy is now a `clock_check` the launcher builds, and measurement 7 is the
 proof it still fires). Green on 2026-09-02 and
 2026-08-27; the re-run was against a later build, on a host also carrying live
@@ -731,11 +739,20 @@ running it would repair measurement 7's skew inside its period and hand that
 measurement a pass it is not making, so the rig stops the timer before 7 and
 records that it did. Then: the same two-hour push-back, **nothing dialling**,
 `systemctl start` on the timer, and a poll on the offset for the keeper's period
-plus its accuracy. Three corroborations: the keeper's journal line appears
-exactly once, that line's `_SELINUX_CONTEXT` names `wlclock_t` (a oneshot
-leaves no process to ask, so the journal is the only record of the domain it
-ran in), and `remedy_acted` does **not** move across a later status tick —
-which is what says the keeper did it and not a mint.
+plus its accuracy. Three corroborations: the tick is caught running with
+`wlclock_t` in its label, the keeper's journal line appears exactly once, and
+`remedy_acted` does **not** move across a later status tick — which is what
+says the keeper did it and not a mint.
+
+**The domain is read off the live process, not the journal, and the first
+run of this row failed a working domain by doing the latter.** A oneshot
+leaves no `MainPID` to ask, so the rig scans `/proc` at 20 Hz for the tick and
+reads its `attr/current` before it exits. The obvious shortcut — journald's
+`_SELINUX_CONTEXT` on the keeper's stdout line — reads `init_t` on every
+service that transitions on exec, because for `_TRANSPORT=stdout` that field is
+the stream socket's peer label, captured when systemd's pre-exec child
+connected it; `_COMM` and `_EXE` on the same line are post-exec, which is what
+makes it convincing. Measured 2026-09-20.
 
 ---
 

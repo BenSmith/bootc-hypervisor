@@ -73,8 +73,14 @@ mints, in its own SELinux domain -- so the rig stops the timer before 7, or
 the keeper repairs the skew inside its period and 7 passes for a reason it is
 not measuring; then pushes the guest back again with nothing dialling, starts
 the timer, and waits. The corroboration is the same shape as 7's: the offset
-comes back, the inspector's `remedy_acted` does NOT move, and the journal line
-the keeper wrote carries `wlclock_t` in its `_SELINUX_CONTEXT`.
+comes back, the inspector's `remedy_acted` does NOT move, and the tick is
+caught running -- a oneshot that lives about a second, read out of /proc at
+20 Hz -- with `wlclock_t` in its label. Not from the journal: measured
+2026-09-20, the `_SELINUX_CONTEXT` on a `_TRANSPORT=stdout` line is the
+STREAM SOCKET's peer label, taken when systemd's pre-exec child connected it,
+and reads init_t for every service that transitions on exec while `_COMM`
+and `_EXE` on the same line are post-exec. A rig row that read the journal
+failed a working domain.
 
 WHAT ONLY A REAL BOOT CAN SHOW
 
@@ -343,11 +349,11 @@ def mint_counts():
 def keeper_journal(since):
     """The keeper's journal entries since `since` (epoch seconds), as dicts.
 
-    `-o json` rather than `cat`, because the field measurement 8 wants is
-    not the message: `_SELINUX_CONTEXT` is the label of the process that
-    wrote the line, which is the only record a oneshot leaves of the domain
-    it ran in. Never raises; a rig that died reading a diagnostic would
-    lose the measurement the diagnostic was describing.
+    `-o json` so a later reader can pick fields; measurement 8 counts the
+    acted lines. NOT `_SELINUX_CONTEXT` -- on a stdout stream that field is
+    the socket's, not the process's (header). Never raises; a rig that died
+    reading a diagnostic would lose the measurement the diagnostic was
+    describing.
     """
     p = subprocess.run(
         ["journalctl", "-u", CLOCK_SERVICE, "--since", f"@{int(since)}",
@@ -360,6 +366,34 @@ def keeper_journal(since):
         except ValueError:
             continue
     return entries
+
+
+def catch_keeper(deadline):
+    """The keeper's process label, caught live, or None if never seen.
+
+    A oneshot leaves no MainPID to ask once it has run, and the journal's
+    `_SELINUX_CONTEXT` on its stdout lines is the stream socket's, not the
+    process's (see the header). So the tick is caught in the act: /proc is
+    scanned at 20 Hz for a cmdline naming the keeper, and its
+    /proc/<pid>/attr/current is read before it exits. The tick lives long
+    enough -- interpreter start, guest-sync, guest-get-time and on a skewed
+    guest a guest-set-time that runs hwclock inside it -- that 50 ms is
+    ample, and the scan costs nothing that would move the measurement.
+    """
+    proc = Path("/proc")
+    while time.time() < deadline:
+        for entry in proc.iterdir():
+            if not entry.name.isdigit():
+                continue
+            try:
+                cmdline = (entry / "cmdline").read_bytes()
+                if b"workload-vm-clock" not in cmdline:
+                    continue
+                return (entry / "attr" / "current").read_text().strip("\x00\n")
+            except OSError:
+                continue
+        time.sleep(0.05)
+    return None
 
 
 def mint_counts_after(before):
@@ -787,9 +821,9 @@ def measure():
     #    guest dials nobody, so the pre-mint remedy never runs, and the timer
     #    -- started now, so its first tick is OnActiveSec= away -- is the only
     #    thing that can put the clock back. `remedy_acted` must NOT move,
-    #    which is what says the keeper did it and not a mint; and the line the
-    #    keeper writes is read back with its process label, because a oneshot
-    #    leaves no process to ask.
+    #    which is what says the keeper did it and not a mint; and the tick is
+    #    caught running, because a oneshot leaves no process to ask afterwards
+    #    and the journal does not carry its label (header).
     say(f"== 8. the keeper repairs a guest {SKEW_SECONDS}s behind with "
         "nothing minting ==")
     before_keeper = mint_counts()
@@ -812,10 +846,23 @@ def measure():
     p = run(["systemctl", "start", CLOCK_TIMER], check=False)
     record("the clock keeper's timer starts", p.returncode == 0,
            p.stderr.strip() or "started")
+    # The tick lands at OnActiveSec= from now or OnUnitActiveSec= from the
+    # keeper's LAST run, whichever is sooner -- the timer was only stopped
+    # for measurement 7, so this is anywhere inside one period.
+    label = catch_keeper(mark + KEEPER_DEADLINE)
+    caught_at = time.time() - mark
+    record("the keeper's tick is caught running", label is not None,
+           f"after {caught_at:.0f}s" if label else
+           f"not seen in {KEEPER_DEADLINE}s")
+    enforcing = run(["getenforce"], check=False).stdout.strip()
+    record("and it runs in its own domain",
+           label is not None and ":wlclock_t:" in label,
+           f"{label} under {enforcing or '?'}")
+
     healed = None
-    deadline = mark + KEEPER_DEADLINE
+    deadline = max(time.time() + 30, mark + KEEPER_DEADLINE)
     while time.time() < deadline:
-        time.sleep(5)
+        time.sleep(3)
         now = offset("waiting for the keeper", samples=1)
         if now is not None and abs(now) < 60.0:
             healed = now
@@ -831,11 +878,6 @@ def measure():
              if "set it from the host" in str(e.get("MESSAGE", ""))]
     record("the keeper says so, once", len(acted) == 1,
            f"{len(acted)} acted line(s) of {len(entries)} entries")
-    contexts = {e.get("_SELINUX_CONTEXT", "?") for e in acted}
-    enforcing = run(["getenforce"], check=False).stdout.strip()
-    record("and it ran in its own domain",
-           bool(acted) and all("wlclock_t" in c for c in contexts),
-           f"{sorted(contexts)} under {enforcing or '?'}")
 
     # The half that says WHICH remedy: with nothing minting, the inspector's
     # counter stays where 7 left it. A later tick, for mint_counts_after's
