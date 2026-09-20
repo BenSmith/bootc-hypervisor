@@ -358,9 +358,7 @@ class Listener:
             # `hits` against `mints` says whether the working set is doing its
             # job; the `denied_*` subsets say which half of the traffic is
             # driving it; `throttled` is the only thing that names why a
-            # workload under sustained abuse stopped getting readable 403s;
-            # and `remedy_unavailable` is the only thing that says the
-            # pre-mint remedy is inert in this guest.
+            # workload under sustained abuse stopped getting readable 403s.
             snap["mint"] = self.inspection.minter.snapshot()
         return snap
 
@@ -396,7 +394,7 @@ class Listener:
         self.inspection.log(f"stopped: {self.rejected} connection(s) rejected")
 
 
-def build_minter(name, state_dir, policy, *, remedy=None):
+def build_minter(name, state_dir, policy):
     """A Minter for a terminating workload, or None. Raises if it cannot.
 
     `state_dir` is where this workload's CA and leaf caches live, and it is
@@ -411,19 +409,6 @@ def build_minter(name, state_dir, policy, *, remedy=None):
     its absence is a provisioning failure, and a provisioning failure that
     surfaces as one refused connection an hour after boot is a provisioning
     failure nobody attributes.
-
-    `remedy` is the pre-mint remedy, run on a mint MISS only, so a guest
-    cannot make it run more often than it can make us mint. It is the
-    launcher's to supply, because only the launcher knows what could stop
-    this guest verifying a fresh leaf and how to put it right: workloadctl's
-    VM launcher passes one that resyncs the guest's clock over the QEMU guest
-    agent, a container's passes nothing. The inspector never learns which.
-    None here becomes Minter's own documented `lambda: None`, which is a
-    caller deciding against a remedy rather than forgetting it -- and it is
-    the right reading on a substrate with nothing to ask, where a remedy that
-    dialled a socket that has never existed would count every attempt into
-    `remedy_unavailable`, a figure whose published meaning is that the remedy
-    is INERT in this guest.
     """
     if policy.tls != "inspect":
         return None
@@ -434,6 +419,4 @@ def build_minter(name, state_dir, policy, *, remedy=None):
             raise FileNotFoundError(
                 f"tls = 'inspect' terminates, which needs this workload's "
                 f"egress CA, and {path} is not there")
-    if remedy is None:
-        remedy = lambda: None  # noqa: E731 -- Minter's documented "no remedy"
-    return Minter(name, state_dir, remedy=remedy)
+    return Minter(name, state_dir)

@@ -143,29 +143,28 @@ def backup_vm_crash(config, output: Path, *, quiet: bool) -> int:
             #
             # NOT THE REMEDY, and the distinction matters: a host that suspends
             # rewinds the same guest with no hook available, so what actually
-            # covers a skewed guest is the check on the certificate mint path.
-            # This narrows the window on the one path we own from "until the
-            # next mint" to "one guest-agent round trip", and that is all.
+            # covers a skewed guest is the clock keeper's timer. This narrows
+            # the window on the one path we own from "until the keeper's next
+            # tick" to "one guest-agent round trip", and that is all.
             #
-            # ITS OWN THRESHOLD, not the mint path's five minutes. That number
-            # answers "is this guest far enough out to be worth a round trip
-            # on a connection someone is waiting for", asked of a guest whose
-            # history is unknown. Here the history is known -- WE stopped the
-            # vCPUs a moment ago -- and a crash-consistent backup of an
-            # ordinary disk finishes well inside five minutes, so the mint
-            # path's threshold would skip exactly the pause this call exists
-            # for and leave the guest a minute or two behind for nothing.
+            # ITS OWN THRESHOLD, not the keeper's five minutes. That number
+            # answers "is this guest far enough out to be worth setting",
+            # asked once a minute of a guest whose history is unknown. Here
+            # the history is known -- WE stopped the vCPUs a moment ago --
+            # and a crash-consistent backup of an ordinary disk finishes well
+            # inside five minutes, so the keeper's threshold would skip
+            # exactly the pause this call exists for and leave the guest a
+            # minute or two behind for nothing.
             #
             # After `cont`, inside the same finally, so a copy that raised
             # still resumes and still resyncs. Never fatal: the archive is
             # already written, and failing a completed backup over a clock is
             # a worse outcome than a slow clock. It is also entirely normal
             # for this to do nothing -- a guest whose image has no
-            # qemu-guest-agent has no channel to ask. That is counted where
-            # the mint path counts it (`mint.remedy_unavailable` in the
-            # inspector's status document) and not here; this call is silent
-            # about it on purpose, since a backup is not the place to learn
-            # about a guest's agent.
+            # qemu-guest-agent has no channel to ask. `diagnose` reports that
+            # (lib/diagnose_vm_clock.py) and this call is silent about it on
+            # purpose, since a backup is not the place to learn about a
+            # guest's agent.
             try:
                 _resync_after_pause(config, quiet=quiet)
             except Exception as exc:  # never fail a completed backup

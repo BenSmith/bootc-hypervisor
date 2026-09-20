@@ -41,7 +41,7 @@ from container_network_config import (
     container_policy_entries,
     container_splice_entries,
 )
-from inspect_document import INSPECT_GUEST_AGENT_KEY, TLS_DEFAULT, VmPolicyEntry
+from inspect_document import TLS_DEFAULT, VmPolicyEntry
 from vm_defs import EGRESS_DEFAULT, vm_allowed_hosts
 
 
@@ -348,25 +348,16 @@ def container_inspect_policy(net: dict) -> dict:
     not the literal key, since the container schema computes it per the
     three-rung ladder rather than defaulting it the way the VM schema does.
 
-    `guest_agent` IS THE ONE KEY THIS RENDERER EMITS AND THE VM'S DOES NOT,
-    and it states a fact about the substrate rather than an instruction. A
-    container has no QEMU guest agent, so a remedy that works by asking one --
-    the pre-mint clock resync -- cannot run here. Left unsaid, the listener
-    wired that check for containers too, dialled a socket that has never
-    existed on this substrate once per mint miss, and counted each attempt
-    into `remedy_unavailable`, whose exported meaning is "the pre-mint
-    remedy is INERT in this guest". On a container that reading was
-    guaranteed and told an operator a remedy was broken rather than absent.
-
-    A FACT, not `clock_remedy: false`, so the next thing that turns on "there
-    is no agent to ask" reads this key instead of adding a second one. Emitted
-    only here, so a VM's document is byte-identical to what it was and the
-    drift comparison does not fire for every VM; a container's document DOES
-    change once, and reports drift until it is re-armed.
+    NOTHING HERE SAYS WHAT SUBSTRATE THIS IS, and for one release something
+    did: a `guest_agent: false` the listener read to keep its per-mint clock
+    resync from dialling a QEMU socket a container has never had. The resync
+    left the inspector for the clock keeper (workload-<name>-clock.timer, a
+    VM's own unit), so the listener has nothing left to branch on and the key
+    went with it -- a container's document changes once more, and reports
+    drift until it is re-armed, the same as when the key arrived.
     """
     return {
         "tls": container_effective_tls_mode(net),
-        INSPECT_GUEST_AGENT_KEY: False,
         "hosts": container_allowed_hosts(net),
         "internal": [e.host for e in container_internal_entries(net)],
         "splice": [e.host for e in container_splice_entries(net)],

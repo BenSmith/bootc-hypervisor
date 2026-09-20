@@ -136,8 +136,7 @@ class TestSettingTheTime(_ClockCase):
 
 
 class TestTheSkewCheck(_ClockCase):
-    """What the keeper and the mint path call. Three outcomes, not two --
-    see CLOCK_*, which is vm_clock's own vocabulary and not the minter's."""
+    """What the keeper's tick calls. Four outcomes, not two -- see CLOCK_*."""
 
     def test_a_healthy_clock_costs_one_round_trip_and_no_repair(self):
         agent = self.use(_FakeAgent(
@@ -170,7 +169,8 @@ class TestTheSkewCheck(_ClockCase):
         behaviour: the pause lands, nothing resyncs, and past an hour every
         minted leaf has a notBefore in the guest's future while every host-side
         figure reads healthy. Collapsing this into CLOCK_OK would erase the one
-        signal `diagnose` has to report it from.
+        signal `diagnose` reports it from (diagnose_vm_clock reads the same
+        None off guest_clock_offset).
         """
         self.use(_FakeAgent(), socket_exists=False)
         self.assertEqual(vm_clock.resync_guest_clock_if_skewed("wl"),
@@ -196,8 +196,8 @@ class TestBackupResyncsAfterResuming(unittest.TestCase):
 
     NOT THE REMEDY, and the tests say so: a host that suspends rewinds the same
     guest with no hook available. This narrows the window on the path we own
-    from "until the next mint" to "one guest-agent round trip", which is worth
-    doing at the source and worth nothing on its own.
+    from "until the keeper's next tick" to "one guest-agent round trip", which
+    is worth doing at the source and worth nothing on its own.
     """
 
     def test_the_helper_resyncs(self):
@@ -206,12 +206,12 @@ class TestBackupResyncsAfterResuming(unittest.TestCase):
             backup_mod._resync_after_pause(mock.Mock(name_="x"), quiet=True)
         self.assertEqual(resync.call_count, 1)
 
-    def test_it_uses_its_own_threshold_and_not_the_mint_paths(self):
-        """The mint path's five minutes would skip the pause this exists for.
+    def test_it_uses_its_own_threshold_and_not_the_keepers(self):
+        """The keeper's five minutes would skip the pause this exists for.
 
         CLOCK_SKEW_THRESHOLD_SECONDS answers a different question -- is an
-        arbitrary guest far enough out to be worth a round trip on a
-        connection someone is waiting for. Here the pause is ours and its
+        arbitrary guest, asked once a minute, far enough out to be worth
+        setting. Here the pause is ours and its
         length is whatever the copy took, which for an ordinary disk is well
         under five minutes. Left on the default, this call did nothing on the
         overwhelming majority of the backups it was written for, while its

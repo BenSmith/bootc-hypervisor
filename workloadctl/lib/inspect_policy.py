@@ -20,7 +20,6 @@ import json
 from typing import NamedTuple
 
 from inspect_document import (
-    INSPECT_GUEST_AGENT_KEY,
     TLS_DEFAULT,
     hostname_match,
     inspect_policy_digest,
@@ -58,13 +57,6 @@ class Policy(NamedTuple):
     # reads downstream as "this listener does not report a digest", which is a
     # state the check is required to pass over in silence anyway.
     digest: str = ""
-    # Whether this workload has a QEMU guest agent to ask. DEFAULTS TRUE, and
-    # the default is the load-bearing half: a document written before the key
-    # existed is a VM's, and reading absence as "no agent" would silently
-    # switch off a working clock remedy on every VM until each was re-armed.
-    # A container's renderer states the false explicitly. See
-    # container_inspect_policy.
-    guest_agent: bool = True
 
     @property
     def summary(self) -> str:
@@ -251,13 +243,7 @@ def load_policy(path):
             paths=None if paths is None else tuple(
                 p for p in paths if isinstance(p, str)),
             credential=credential))
-    # `is not False` rather than `.get(..., True)`: the only value that turns
-    # the remedy off is a literal false written by the container renderer, so
-    # a document carrying a malformed value keeps the VM behaviour instead of
-    # disabling a remedy on the strength of a typo.
-    guest_agent = doc.get(INSPECT_GUEST_AGENT_KEY) is not False
     return Policy(tls=doc.get("tls") or TLS_DEFAULT, hosts=tuple(hosts),
                   internal=tuple(normalise_hostname(h) for h in internal),
                   splice=tuple(splice), http2=tuple(http2),
-                  policy=tuple(policy), digest=digest,
-                  guest_agent=guest_agent)
+                  policy=tuple(policy), digest=digest)

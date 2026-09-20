@@ -490,20 +490,16 @@
 ; boundary before adding any second subprocess here.
 (allow wlinspect_t bin_t (file (execute_no_trans)))
 
-; THE GUEST AGENT SOCKET, which is the mint-time clock check and NOT the
-; inspection path. A leaf is backdated an hour; a guest whose clock is further
-; out than that rejects every certificate this domain mints, so the minter asks
-; qemu-guest-agent for the guest's time before signing and resyncs it if it has
-; drifted. That makes /run/workload-vm/<name>/ga.sock -- a socket QEMU created,
-; so svirt_t owns the other end -- part of the terminating path.
-;
-; `sock_file` is a class of its own: the file line above covers inspect.json
-; and the leaf PEMs and grants nothing on a socket node. `connectto` is on the
-; peer's domain rather than on the file, which is the half that is missed by
-; reading the denial for the file and stopping there.
-(allow wlinspect_t qemu_var_run_t (sock_file (getattr write)))
-(allow wlinspect_t svirt_t (unix_stream_socket (connectto)))
-(allow wlinspect_t self (unix_stream_socket (connect create getattr read shutdown write)))
+; NO GUEST AGENT SOCKET, and there was one. For one rung the minter asked
+; qemu-guest-agent for the guest's time before signing and resynced it if
+; it had drifted, which put /run/workload-vm/<name>/ga.sock -- a socket QEMU
+; created, so svirt_t owned the other end -- on the terminating path: a
+; `sock_file` grant, `svirt_t:unix_stream_socket connectto`, and a `self`
+; unix_stream_socket line. All three went to workload-clock.cil with the
+; check itself: the domain that parses what the internet sends should not be
+; the domain that can speak to QEMU's agent channel, and once the keeper
+; ticks on every VM the mint-time check closed a one-minute window for one
+; retryable handshake. Nothing in this domain opens a unix socket now.
 
 ; SYSTEMD MOUNTS THE CACHES BEFORE THE PROCESS EXISTS. ReadWritePaths= under
 ; ProtectSystem=strict is implemented as a bind mount that init_t performs

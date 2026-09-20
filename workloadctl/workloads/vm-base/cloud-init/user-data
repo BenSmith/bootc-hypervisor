@@ -220,9 +220,9 @@ write_files:
 # line that actually fixes the bug, by letting chrony step at any time rather
 # than only at startup.
 #
-# The host repairs a skewed guest too, on the egress inspector's mint path, but
-# only if the guest runs qemu-guest-agent and only when a certificate is minted.
-# Keep both: they cover each other's blind spot.
+# The host repairs a skewed guest too, once a minute from workload-<name>-
+# clock.timer, but only if the guest runs qemu-guest-agent. Keep both: they
+# cover each other's blind spot.
 runcmd:
   - |
     udevadm control --reload-rules || true

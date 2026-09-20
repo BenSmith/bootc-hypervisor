@@ -24,7 +24,6 @@ from pathlib import Path
 
 from tests import load_script
 from inspect_document import (
-    INSPECT_GUEST_AGENT_KEY,
     hostname_match,
     normalise_hostname,
     VmPolicyEntry,
@@ -48,7 +47,6 @@ import egress_upstream
 import inspect_http
 import inspect_listener
 import inspect_tls
-import vm_clock
 from inspect_tls import serve_tls, serve_terminated
 from inspect_http import INTERIM_MAX, serve_cleartext
 from inspect_listener import Ceiling, Listener, build_minter
@@ -640,12 +638,10 @@ class TestPolicyLoading(unittest.TestCase):
         checked one, so a key the CONTAINER writer emitted and the listener
         ignored would have loaded clean and authorised nothing, which is the
         same silence this test exists to break. It is their UNION that has to
-        equal the reader's fields, because `guest_agent` is deliberately
-        written by one and not the other: a container states that it has no
-        QEMU guest agent, and a VM says nothing so that its document stays
-        byte-identical for the drift comparison. Neither renderer alone
-        covers the reader, and requiring both to would force the key onto a
-        document that has no business carrying it.
+        equal the reader's fields, so that a key one substrate has reason to
+        write and the other does not (one did, for a rung: `guest_agent`,
+        written by the container renderer alone) is neither forced onto the
+        other's document nor lost from the reader.
 
         NON_DOCUMENT_FIELDS is the one exemption and it is enumerated rather
         than tolerated, so a field added later without thought still fails
@@ -677,67 +673,6 @@ class TestPolicyLoading(unittest.TestCase):
             self.assertNotIn(field, doc)
             self.assertNotIn(field, container_doc)
 
-    def test_the_key_actually_reaches_the_minter(self):
-        """The seam, not the field. A policy key that loads correctly and
-        changes nothing is the shape a unit gate is worst at: every reader
-        test above still passes while the container goes on dialling a socket
-        it does not have.
-
-        So this asserts the OUTCOME of the remedy the Minter was handed --
-        None where there is no agent, and a real vm_clock call where there is
-        -- rather than that a flag arrived. The choice is the LAUNCHER's
-        (remedy_for in workload-inspect-listener), because the inspector
-        does not know what a guest agent is; build_minter only turns a None
-        into Minter's documented no-op.
-        """
-        state = tempfile.mkdtemp()
-        self.addCleanup(shutil.rmtree, state)
-        for path in (os.path.join(state, "ca.crt"),
-                     os.path.join(state, "ca.key")):
-            with open(path, "w"):
-                pass
-        launcher = _mod()
-        built = {}
-        with unittest.mock.patch.object(
-                inspect_listener, "ca_cert_path",
-                lambda d: os.path.join(d, "ca.crt")), \
-                unittest.mock.patch.object(
-                    inspect_listener, "ca_key_path",
-                    lambda d: os.path.join(d, "ca.key")), \
-                unittest.mock.patch.object(
-                    inspect_listener, "Minter",
-                    lambda *a, **kw: built.update(kw)), \
-                unittest.mock.patch.object(
-                    launcher, "resync_guest_clock_if_skewed",
-                    lambda name: vm_clock.CLOCK_RESYNCED):
-            no_agent = Policy(tls="inspect", hosts=(), guest_agent=False)
-            build_minter("w", state, no_agent,
-                         remedy=launcher.remedy_for("w", no_agent))
-            self.assertIsNone(built["remedy"]())
-
-            built.clear()
-            agent = Policy(tls="inspect", hosts=(), guest_agent=True)
-            build_minter("w", state, agent,
-                         remedy=launcher.remedy_for("w", agent))
-            # The clock's word went in and the minter's came out: the
-            # translation is the launcher's, and it is the only thing about
-            # the remedy the inspector ever sees.
-            self.assertEqual(built["remedy"](), egress_mint.REMEDY_ACTED)
-
-    def test_the_launcher_translates_every_clock_outcome(self):
-        """Exhaustive both ways. A clock outcome the table does not know is a
-        KeyError at the seam rather than an uncounted figure; a minter word
-        no clock outcome maps to would be a figure nothing can ever move."""
-        launcher = _mod()
-        # The outcome words are the CLOCK_* strings; the module's other
-        # CLOCK_* names are numbers (a threshold, the keeper's period).
-        clock_words = {v for n, v in vars(vm_clock).items()
-                       if n.startswith("CLOCK_") and isinstance(v, str)}
-        remedy_words = {getattr(egress_mint, n) for n in dir(egress_mint)
-                        if n.startswith("REMEDY_")}
-        self.assertEqual(set(launcher._CLOCK_TO_REMEDY), clock_words)
-        self.assertEqual(set(launcher._CLOCK_TO_REMEDY.values()), remedy_words)
-
     def test_the_minter_is_built_on_the_state_dir_it_was_handed(self):
         """build_minter derives nothing from the name. The state directory
         is an argument, so a launcher that keeps its CA somewhere workloadctl
@@ -762,53 +697,10 @@ class TestPolicyLoading(unittest.TestCase):
             build_minter("w", state, Policy(tls="inspect", hosts=()))
         self.assertEqual(built["state_dir"], state)
         self.assertEqual(built["name"], "w")
-        # No remedy handed in reads as "decided against", which is the
-        # no-op Minter documents, not an error and not a dial.
-        self.assertIsNone(built["remedy"]())
-
-    def test_the_key_name_is_pinned_to_its_spelling(self):
-        """The constant may be renamed; the STRING may not.
-
-        Documents are already on disk on every filtered host, and this reader
-        treats an unrecognised spelling as absence -- which means "there IS an
-        agent". So changing the string turns every container's document back
-        into one that reads as a VM's, restoring the exact behaviour this key
-        was added to stop, with no error and no counter to say so. Asserted
-        against a literal on purpose: comparing the constant to itself would
-        pass through any rename.
-        """
-        self.assertEqual(INSPECT_GUEST_AGENT_KEY, "guest_agent")
-
-    def test_a_document_without_the_key_keeps_the_clock_remedy(self):
-        """Absence means a VM, and a VM must not lose its remedy silently.
-
-        Every policy document written before this key existed is a VM's, and
-        reading absence as "no agent" would switch off a working mint-time
-        clock repair on every one of them until it was re-armed -- with no
-        error, and no counter that moves to say so.
-        """
-        path = self._write(json.dumps(vm_inspect_policy(
-            {"hosts": ["example.com"]})))
-        self.assertIs(load_policy(path).guest_agent, True)
-
-    def test_a_container_document_turns_the_clock_remedy_off(self):
-        path = self._write(json.dumps(container_inspect_policy(
-            {"hosts": ["example.com"]})))
-        self.assertIs(load_policy(path).guest_agent, False)
-
-    def test_only_a_literal_false_turns_it_off(self):
-        """A malformed value keeps the remedy rather than dropping it.
-
-        The failure modes are not symmetric: a VM that wrongly keeps the check
-        pays one guest-agent round trip per mint miss, while a VM that wrongly
-        loses it goes on serving leaves from a skewed clock -- which is the
-        condition the remedy exists for and the one nothing else detects.
-        """
-        for value in ("false", 0, None, "no"):
-            with self.subTest(value=value):
-                path = self._write(json.dumps(
-                    {"hosts": [], "guest_agent": value}))
-                self.assertIs(load_policy(path).guest_agent, True)
+        # Name and state directory, and nothing about the guest: no hook,
+        # no substrate flag. What the guest on the other end can or cannot
+        # verify is the keeper's business (workload-<name>-clock.timer).
+        self.assertEqual(set(built), {"name", "state_dir"}, built)
 
     def test_the_document_carries_the_internal_list_through(self):
         """The listener's copy of [[vm.network.internal]] authorises nothing --

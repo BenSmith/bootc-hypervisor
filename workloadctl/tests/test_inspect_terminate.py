@@ -255,7 +255,6 @@ class TerminationCase(unittest.TestCase):
 
     def _minter(self, mod, **kwargs):
         from egress_mint import Minter
-        kwargs.setdefault("remedy", lambda: "ok")
         return Minter("demo", self.state, **kwargs)
 
     def _listener(self, mod, origin, *, hosts=("localhost",), trust=True,

@@ -21,12 +21,15 @@
 ; unix socket connect. Read workload-inspect.cil's header for the surprises
 ; about the entrypoint and the interpreter; they hold unchanged.
 ;
-; THE GUEST AGENT SOCKET is the same grant workload-inspect.cil makes for its
-; pre-mint remedy, and it is the whole of what this domain does:
-; /run/workload-vm/<name>/ga.sock is a socket QEMU created, so svirt_t owns the
-; other end, and `sock_file` is a class of its own -- a file grant on the
-; directory covers nothing on the socket node, and `connectto` is checked on
-; the peer's domain rather than on the file.
+; THE GUEST AGENT SOCKET is the whole of what this domain does, and this is
+; the only host-side domain that reaches it: workload-inspect.cil carried the
+; same three lines for its mint-time clock check until the check moved here,
+; which is the point -- the domain that parses what the internet sends and
+; the domain that can speak to QEMU's agent channel are now different
+; domains. /run/workload-vm/<name>/ga.sock is a socket QEMU created, so
+; svirt_t owns the other end, and `sock_file` is a class of its own -- a file
+; grant on the directory covers nothing on the socket node, and `connectto`
+; is checked on the peer's domain rather than on the file.
 
 (type wlclock_t)
 (typeattributeset domain (wlclock_t))

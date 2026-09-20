@@ -1315,14 +1315,18 @@ finding.
 | `ptp_kvm` in the guest | repairs that pause **by itself in 24 s**; chrony selects `PHC0` at ~874 ns |
 | `guest-set-time`, explicit ns | works — 119.3 s behind → +0.7 s |
 | `guest-set-time`, no argument | **fails**: `hwclock: select() to /dev/rtc0 to wait for clock tick timed out` |
-| a guest 7200 s behind | still validates a freshly minted leaf; the mint path resyncs it before signing |
+| a guest 7200 s behind, keeper held off | **fails** every fresh leaf (`certificate is not yet valid`) while the inspector mints and reports healthy; `diagnose` names the offset |
+| the same guest, keeper released | put back within a minute, in `wlclock_t`, and the same leaf validates |
 
 Three of those are worth stating as conclusions rather than rows. The pause is
 **exactly** as bad as the model predicts and is permanent without a remedy. The
 guest-side remedy genuinely works unaided, on a host that can offer it. And a
-guest rewound two hours — well past the one-hour backdate — still gets working
-egress, because the mint path repairs the clock before it signs, which is the
-property the whole arrangement exists to guarantee.
+guest rewound two hours — well past the one-hour backdate — fails TLS in
+precisely the way the model predicts while every host-side figure reads
+healthy, and the clock keeper is what puts it back: within a minute, for every
+VM, whether or not anything is minting. That is the property the whole
+arrangement exists to guarantee, and the rig measures the failure before the
+repair so a widened backdate cannot produce the same green.
 
 The no-argument form of `guest-set-time` is a known-bad, stable across both
 runs. It reads the guest's RTC, which is what fails; the explicit-nanoseconds

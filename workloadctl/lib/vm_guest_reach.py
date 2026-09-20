@@ -106,7 +106,7 @@ def vm_ssh_command(
 
 # The guest-agent timeout and the nonce handshake live in vm_clock, which owns
 # the agent channel for the whole tree -- it grew a second caller at rung 3 (the
-# mint-time clock check) and a duplicated client was the alternative.
+# clock check, now the keeper's) and a duplicated client was the alternative.
 
 def vm_guest_agent_addresses(name: str, mac: str) -> list[str]:
     """Addresses reported by qemu-guest-agent, best first; [] if unavailable.

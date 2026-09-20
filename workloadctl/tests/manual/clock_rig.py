@@ -56,29 +56,29 @@ explicit-nanoseconds form is untested. Those two are measurements 5 and 6
 below, and they are the whole reason this rig is not just a re-run of the
 pause.
 
-Measurement 7 is the one that closes the loop, and it arrived after T5 wired the
-remedy in: everything above measures a clock, and 6 measures what the clock was
-on the critical path OF. A guest pushed two hours behind -- past the leaf's
-1-hour notBefore backdate, so a stale clock CANNOT validate a fresh leaf by
-accident -- still reaches a name it has never reached, because the mint path
-repairs it on the cache miss before signing. The corroborating half matters as
-much as the pass: the guest's offset comes back and `remedy_acted` moves.
-Without those two, the same green is produced by a backdate quietly widened to
-cover two hours.
+Measurement 7 is the one that closes the loop, and it measures the FAILURE:
+everything above measures a clock, and 7 measures what the clock is on the
+critical path OF. With the clock keeper held off, a guest pushed two hours
+behind -- past the leaf's 1-hour notBefore backdate, so a stale clock CANNOT
+validate a fresh leaf by accident -- dials a name it has never dialled, and
+the handshake fails with `certificate is not yet valid` while the inspector
+mints the leaf and reports itself healthy. The corroboration is that the mint
+happened (`mints` moves), that the clock is still out afterwards (nothing on
+the mint path touched it -- it used to, for one rung, and this is the row
+that says it no longer does), and that `workloadctl diagnose` names the
+offset on its `vm_guest_clock` line. Without the failure measured first, the
+same green in 8 is produced by a backdate quietly widened to cover two hours.
 
-Measurement 8 is the third remedy, and it is measured with the second one held
-off. The clock keeper (workload-<name>-clock.timer, libexec/workload-vm-clock)
-repairs the same skew once a minute for every VM whether or not anything
-mints, in its own SELinux domain -- so the rig stops the timer before 7, or
-the keeper repairs the skew inside its period and 7 passes for a reason it is
-not measuring; then pushes the guest back again with nothing dialling, starts
-the timer, and waits. The corroboration is the same shape as 7's: the offset
-comes back, the inspector's `remedy_acted` does NOT move, and the tick is
-caught running -- a oneshot that lives about a second, read out of /proc at
-20 Hz -- with `wlclock_t` in its label. Not from the journal: measured
-2026-09-20, the `_SELINUX_CONTEXT` on a `_TRANSPORT=stdout` line is the
-STREAM SOCKET's peer label, taken when systemd's pre-exec child connected it,
-and reads init_t for every service that transitions on exec while `_COMM`
+Measurement 8 is the remedy. The clock keeper (workload-<name>-clock.timer,
+libexec/workload-vm-clock) repairs the same skew once a minute for every VM
+whether or not anything mints, in its own SELinux domain -- so the rig starts
+the timer on the guest 7 left skewed and waits. The offset comes back, the
+tick is caught running -- a oneshot that lives about a second, read out of
+/proc at 20 Hz -- with `wlclock_t` in its label, the leaf that failed in 7 now
+validates on a cache hit, and `diagnose` goes green. Not from the journal:
+measured 2026-09-20, the `_SELINUX_CONTEXT` on a `_TRANSPORT=stdout` line is
+the STREAM SOCKET's peer label, taken when systemd's pre-exec child connected
+it, and reads init_t for every service that transitions on exec while `_COMM`
 and `_EXE` on the same line are post-exec. A rig row that read the journal
 failed a working domain.
 
@@ -105,9 +105,9 @@ DNS_ALLOW = "1.1.1.1:53"
 NAME = "wlrc-clock"
 
 # What the guest is allowed to reach over HTTPS, and therefore what measurement
-# 7 dials. Two names, because that measurement needs a name it has NEVER minted
-# for -- a cache HIT does not run the clock check, so re-dialling the first one
-# would prove nothing and look like a pass.
+# 7 dials. Two names: the first is dialled before the skew to prove the path
+# works, and the second is a name the guest has NEVER dialled -- so the leaf
+# it is handed is minted now, with a notBefore the skewed guest cannot reach.
 REACHABLE_HOSTS = ["example.com", "example.org"]
 
 # How far back measurement 7 pushes the guest's clock. Past the leaf's 1-hour
@@ -417,6 +417,25 @@ def mint_counts_after(before):
     return None
 
 
+def diagnose_clock_line():
+    """The `vm_guest_clock` check out of `workloadctl diagnose --json`, or None.
+
+    The operator's view of the same fact the agent reports to this rig
+    directly: the line is what a person sees, so it is the line that is
+    measured, not the function behind it.
+    """
+    p = run(["workloadctl", "diagnose", "--json", NAME], check=False,
+            timeout=300)
+    try:
+        doc = json.loads(p.stdout)
+    except ValueError:
+        return None
+    for check in doc.get("checks", []):
+        if check.get("check") == "vm_guest_clock":
+            return check
+    return None
+
+
 def toml_for():
     return "\n".join([
         f"# {NAME} — generated by clock_rig.py. Throwaway; safe to purge.",
@@ -601,7 +620,7 @@ def measure():
                guest("systemctl is-active chronyd").stdout.strip() == "active",
                "chronyd active")
         say("  -- skipping 3b (self-repair): this host cannot offer the clock. "
-            "Measurements 4 to 7, the host-side remedy, run as normal.")
+            "Measurements 4 to 8, the host-side remedy, run as normal.")
 
     if ptp_possible:
         say(f"== 3b. the same pause, with the guest-side remedy ON ==")
@@ -730,26 +749,24 @@ def measure():
     record("the explicit form re-anchors the guest", abs(fixed) < 2.0,
            f"offset {fixed:+.3f}s (was {after:+.3f}s)")
 
-    # 7. THE ONE THAT CLOSES THE LOOP. Everything above measures a clock; this
-    #    measures what the clock was on the critical path OF. Rung 3 T5 wired
-    #    the mint-time check in, so a guest whose clock is behind is repaired
-    #    ON A CACHE MISS, before the leaf it is about to be handed is signed.
+    # 7. THE ONE THAT CLOSES THE LOOP, by measuring the failure. Everything
+    #    above measures a clock; this measures what the clock is on the
+    #    critical path OF. A leaf's notBefore is an hour back, so a guest
+    #    more than an hour behind rejects every fresh leaf as not yet valid
+    #    -- while the inspector mints it and every host-side figure reads
+    #    healthy. The keeper is held off so the skew survives long enough to
+    #    be measured; 8 releases it.
     #
     #    The skew is SET rather than paused for, and it has to exceed the
-    #    1-hour notBefore backdate or the assertion cannot fail for the right
-    #    reason: inside the backdate a stale guest validates a fresh leaf
-    #    anyway. Two hours, using the explicit-nanoseconds form measurement 6
-    #    just proved works.
-    #
-    #    And it dials a name this guest has NEVER dialled. A cache hit does not
-    #    run the clock check -- re-dialling the first name would pass while
-    #    proving nothing.
-    say(f"== 7. a guest {SKEW_SECONDS}s behind still gets a usable leaf ==")
+    #    1-hour backdate or the failure cannot happen for the right reason.
+    #    Two hours, using the explicit-nanoseconds form measurement 6 just
+    #    proved works. And it dials a name this guest has NEVER dialled: a
+    #    cached leaf from before the skew validates fine, which is exactly the
+    #    "reaches its usual hosts, fails on new ones" shape the header names.
+    say(f"== 7. a guest {SKEW_SECONDS}s behind, keeper held off, fails a "
+        "fresh leaf ==")
     first, second = REACHABLE_HOSTS[0], REACHABLE_HOSTS[1]
 
-    # The keeper would repair the skew below inside its one-minute period,
-    # and a leaf validated by a guest the KEEPER put right is a pass this
-    # measurement is not making. Held off here, measured on its own in 8.
     p = run(["systemctl", "stop", CLOCK_TIMER], check=False)
     active = run(["systemctl", "is-active", CLOCK_TIMER], check=False)
     record("the clock keeper can be held off for measurement 7",
@@ -782,65 +799,62 @@ def measure():
 
     r = guest(f"curl -sS -o /dev/null -w '%{{http_code}}' "
               f"--max-time 60 https://{second}/", timeout=120)
-    ok = r.returncode == 0 and r.stdout.strip().startswith(("2", "3"))
-    record("a skewed guest still validates a freshly minted leaf", ok,
+    not_yet_valid = "not yet valid" in r.stderr
+    record("a skewed guest rejects a freshly minted leaf as not yet valid",
+           r.returncode != 0 and not_yet_valid,
            f"rc={r.returncode} {r.stdout.strip()!r} "
            f"{r.stderr.strip()[:160]!r}")
 
-    # WHY the request worked, not just that it did. Without this the same pass
-    # is produced by a backdate quietly widened to cover two hours, which is
-    # the change this measurement most needs to catch.
-    healed = offset("after the mint-time check")
-    if healed is not None:
-        record("the mint path is what put the clock back",
-               abs(healed) < 60.0,
-               f"offset {healed:+.1f}s (was {skewed:+.1f}s)")
-
-    # A LATER tick, not the current file -- see mint_counts_after.
+    # The inspector's side of the same handshake: it minted, it counted, and
+    # it has no idea anything went wrong. A LATER tick -- see mint_counts_after.
     say("  waiting for a status tick ...")
     after_counts = mint_counts_after(before_counts)
     if before_counts is None or after_counts is None:
-        record("the resync is counted where diagnose can see it", False,
+        record("the inspector minted the leaf and reports healthy", False,
                "no readable inspect-status.json"
                if before_counts is None else
                "no status tick arrived within 90s of the request")
     else:
-        moved = (after_counts.get("remedy_acted", 0)
-                 - before_counts.get("remedy_acted", 0))
-        record("the resync is counted where diagnose can see it", moved >= 1,
-               f"remedy_acted +{moved}, "
-               f"mints +{after_counts.get('mints', 0) - before_counts.get('mints', 0)}")
-        # The figure that says the remedy is present at all. A guest with no
-        # agent counts here instead, and every other line on this rig still
-        # passes -- which is exactly the state T8 added it to make visible.
-        record("this guest's clock remedy is not inert",
-               after_counts.get("remedy_unavailable", 0) == 0,
-               f"remedy_unavailable={after_counts.get('remedy_unavailable')}")
+        minted = (after_counts.get("mints", 0) - before_counts.get("mints", 0))
+        record("the inspector minted the leaf and reports healthy", minted >= 1,
+               f"mints +{minted}, failed +"
+               f"{after_counts.get('failed', 0) - before_counts.get('failed', 0)}")
+        # No figure about the guest, on purpose: the minter used to count a
+        # per-mint clock resync here, and the counters it kept are gone with
+        # the check. A key reappearing is the seam coming back.
+        stray = sorted(k for k in after_counts if "remedy" in k or "clock" in k)
+        record("the mint block carries no clock or remedy figure",
+               not stray, f"stray keys: {stray}" if stray else "none")
 
-    # 8. THE KEEPER, on its own. The same skew, with nothing minting: the
-    #    guest dials nobody, so the pre-mint remedy never runs, and the timer
-    #    -- started now, so its first tick is OnActiveSec= away -- is the only
-    #    thing that can put the clock back. `remedy_acted` must NOT move,
-    #    which is what says the keeper did it and not a mint; and the tick is
-    #    caught running, because a oneshot leaves no process to ask afterwards
-    #    and the journal does not carry its label (header).
-    say(f"== 8. the keeper repairs a guest {SKEW_SECONDS}s behind with "
-        "nothing minting ==")
+    # Nothing on the mint path put the clock back. This is the row that says
+    # the pre-mint resync is gone, measured rather than asserted from source.
+    still = offset("after the failed handshake")
+    record("and nothing on the mint path put the clock back",
+           still is not None and still < -(SKEW_SECONDS / 2),
+           f"offset {still:+.1f}s" if still is not None else "no reading")
+
+    # The operator's view. `diagnose` asks the agent once and names the
+    # number, which is the one place a guest the keeper cannot see is red.
+    line = diagnose_clock_line()
+    record("diagnose names the offset on its vm_guest_clock line",
+           line is not None and not line.get("passed")
+           and "from the host's" in line.get("message", ""),
+           line.get("message") if line else "no vm_guest_clock line")
+
+    # 8. THE KEEPER. The guest 7 left two hours behind, with nothing dialling
+    #    it, and the timer -- started now, so its first tick is at most
+    #    OnActiveSec= away -- is the only thing that can put the clock back.
+    #    The tick is caught running, because a oneshot leaves no process to
+    #    ask afterwards and the journal does not carry its label (header);
+    #    then the leaf 7 rejected is dialled again and validates, on a cache
+    #    hit, because the clock is what changed and not the certificate.
+    say(f"== 8. the keeper repairs the guest {SKEW_SECONDS}s behind ==")
     before_keeper = mint_counts()
-    reply, err = ga("guest-set-time",
-                    {"time": int((time.time() - SKEW_SECONDS) * 1_000_000_000)})
-    if err or "error" in reply:
-        record("the guest can be pushed back a second time", False,
-               err or str(reply.get("error")))
+    if still is None or still > -(SKEW_SECONDS / 2):
+        record("the guest is still skewed going into 8", False,
+               "no reading" if still is None else f"offset {still:+.1f}s")
         return
-    time.sleep(2)
-    skewed = offset("after being pushed back again")
-    if skewed is None or skewed > -(SKEW_SECONDS / 2):
-        record("the guest can be pushed back a second time", False,
-               "no reading" if skewed is None else f"offset {skewed:+.1f}s")
-        return
-    record("the guest can be pushed back a second time", True,
-           f"offset {skewed:+.1f}s")
+    skewed = still
 
     mark = time.time()
     p = run(["systemctl", "start", CLOCK_TIMER], check=False)
@@ -879,19 +893,31 @@ def measure():
     record("the keeper says so, once", len(acted) == 1,
            f"{len(acted)} acted line(s) of {len(entries)} entries")
 
-    # The half that says WHICH remedy: with nothing minting, the inspector's
-    # counter stays where 7 left it. A later tick, for mint_counts_after's
-    # reason.
+    # The leaf 7 rejected, dialled again. Same name, same cached leaf, and
+    # the only thing that changed is the guest's clock -- so this is a cache
+    # HIT that validates, and `mints` must not move. If it did, the pass
+    # would be a fresh leaf and would say nothing about the repair.
+    r = guest(f"curl -sS -o /dev/null -w '%{{http_code}}' "
+              f"--max-time 60 https://{second}/", timeout=120)
+    record("the leaf the skewed guest rejected now validates",
+           r.returncode == 0 and r.stdout.strip().startswith(("2", "3")),
+           f"rc={r.returncode} {r.stdout.strip()!r} "
+           f"{r.stderr.strip()[:160]!r}")
     say("  waiting for a status tick ...")
     after_keeper = mint_counts_after(before_keeper)
     if before_keeper is None or after_keeper is None:
-        record("the mint path did not do it", False, "no readable status tick")
+        record("on a cache hit, not a fresh mint", False,
+               "no readable status tick")
     else:
-        moved = (after_keeper.get("remedy_acted", 0)
-                 - before_keeper.get("remedy_acted", 0))
-        record("the mint path did not do it", moved == 0,
-               f"remedy_acted +{moved}, "
-               f"mints +{after_keeper.get('mints', 0) - before_keeper.get('mints', 0)}")
+        minted = after_keeper.get("mints", 0) - before_keeper.get("mints", 0)
+        hit = after_keeper.get("hits", 0) - before_keeper.get("hits", 0)
+        record("on a cache hit, not a fresh mint", minted == 0 and hit >= 1,
+               f"mints +{minted}, hits +{hit}")
+
+    line = diagnose_clock_line()
+    record("and diagnose's vm_guest_clock line is green again",
+           line is not None and bool(line.get("passed")),
+           line.get("message") if line else "no vm_guest_clock line")
 
 
 def main():

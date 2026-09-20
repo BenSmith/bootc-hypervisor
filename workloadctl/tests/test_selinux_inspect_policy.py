@@ -337,6 +337,23 @@ class TestBoundary(unittest.TestCase):
                                                     "write"},
             set())
 
+    def test_the_inspector_cannot_reach_the_guest_agent(self):
+        """The domain that parses what the internet sends does not speak to
+        QEMU's agent channel.
+
+        It did for one rung: the minter's clock check dialled
+        /run/workload-vm/<name>/ga.sock before every fresh mint, which put a
+        `sock_file` grant, `svirt_t:unix_stream_socket connectto` and a
+        `self` unix_stream_socket line in this module. The check moved to
+        the clock keeper's own domain (workload-clock.cil, tested beside
+        this), and these three are the lines that prove it left rather than
+        being copied.
+        """
+        self.assertEqual(self._perms("qemu_var_run_t", "sock_file"), set())
+        self.assertEqual(self._perms("svirt_t", "unix_stream_socket"), set())
+        self.assertEqual(self._perms("self", "unix_stream_socket"), set())
+        self.assertNotRegex(_body(), r"connectto")
+
     def test_a_container_may_read_but_not_write_its_own_ca(self):
         """[network].ca_delivery = "env"/"mount" bind-mounts this same
         certificate into the container -- confirmed on hardware 2026-09-05 to

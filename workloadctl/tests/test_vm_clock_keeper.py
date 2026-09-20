@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """The clock keeper: workload-<name>-clock.timer, its service, and the tick.
 
-The keeper is the half of the guest-clock remedy that owes nothing to the
-egress inspector. vm_clock.py's header says why there are two halves; this
-file holds what the keeper's half must be:
+The keeper is the whole of the host-side guest-clock remedy, and it owes
+nothing to the egress inspector. vm_clock.py's header says why it is a timer
+and not a hook; this file holds what the keeper must be:
 
   * every VM gets one, behind no predicate -- a bridged VM with open egress
     has the same rewound clock after a pause and no inspector to repair it;
@@ -134,8 +134,9 @@ class TestTheVmPullsItIn(unittest.TestCase):
         self.assertNotIn("clock", " ".join(requires))
 
     def test_a_bridged_vm_has_one_too(self):
-        """No predicate. The inspector's remedy is gated on inspection; the
-        keeper exists precisely for the VMs that gate excludes."""
+        """No predicate. A bridged VM has open egress and no inspector, and
+        the same rewound clock after a pause; the keeper is the only thing
+        that repairs it."""
         bridged = {"workload": {"name": "web"},
                    "vm": {"network": {"bridge": "br0"}}}
         lines = gen_vm.generate_vm_service(bridged, "_wl-web", 10000).splitlines()
@@ -160,8 +161,8 @@ class TestOneTick(unittest.TestCase):
         self.assertEqual(self._tick(vm_clock.CLOCK_OK, 0.02), (0, "", ""))
 
     def test_a_guest_with_no_agent_says_nothing_and_does_not_fail(self):
-        """A supported configuration, reported once by the inspector's
-        `remedy_unavailable` rather than once a minute here."""
+        """A supported configuration, reported by `diagnose` when asked
+        (diagnose_vm_clock) rather than once a minute here."""
         self.assertEqual(self._tick(vm_clock.CLOCK_UNAVAILABLE, None),
                          (0, "", ""))
 

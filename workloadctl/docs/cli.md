@@ -843,6 +843,17 @@ its own runtime directory, so `workload-ensure-user` skips those setup steps for
 identity, home directory, unit files and service state — applies to both
 substrates.
 
+**A running VM gets one more line, `vm_guest_clock`.** The clock keeper
+(`workload-<name>-clock.timer`) puts a paused or suspended guest's clock back
+once a minute, and is deliberately silent about a guest it cannot reach — a
+guest whose image lacks `qemu-guest-agent` is a supported configuration, and a
+timer that said so every minute would be a journal nobody reads. So this is
+where it is said: `diagnose` asks the agent once and fails the line either
+when nothing answers (the fix is in the guest: install the agent) or when the
+offset is past the keeper's five-minute threshold (the fix is on the host: the
+keeper should have acted within a minute of a resume; check its timer). Absent,
+not failed, while the VM is stopped.
+
 **Subid range checks.** Beyond "subuid/subgid configured", two checks assert the
 range is the *right* one. `subid_derived` compares it against the derived range
 for the workload's UID. `subid_overlap` fails if it starts below `SUB_UID_MAX`

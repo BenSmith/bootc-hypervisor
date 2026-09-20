@@ -22,7 +22,6 @@ from unittest import mock
 import shutil
 
 import egress_ca
-import vm_clock
 import egress_mint
 from tests import REPO_ROOT
 
@@ -342,15 +341,9 @@ class _MinterCase(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self.state = Path(self._tmp.name)
         _mint_ca(self.state)
-        self.remedies = []
         self.addCleanup(self._tmp.cleanup)
 
-    def _remedy(self):
-        self.remedies.append(True)
-        return "ok"
-
     def minter(self, **kwargs):
-        kwargs.setdefault("remedy", self._remedy)
         return egress_mint.Minter("wl-test", self.state, **kwargs)
 
 
@@ -385,22 +378,6 @@ class TestMinting(_MinterCase):
         second.leaf("example.com", denied=False)
         self.assertEqual(second.stats["mints"], 0)
         self.assertEqual(second.stats["hits"], 1)
-
-    def test_the_remedy_runs_before_minting_and_not_on_a_hit(self):
-        # The T2 seam. A remedy that covers every pause path by being
-        # demand-driven is worth nothing if the mint path does not consult it --
-        # and consulting it on a cache HIT would put whatever the remedy costs
-        # (on a VM, a guest-agent round trip) on every connection.
-        minter = self.minter()
-        minter.leaf("example.com", denied=False)
-        self.assertEqual(len(self.remedies), 1)
-        minter.leaf("example.com", denied=False)
-        self.assertEqual(len(self.remedies), 1)
-
-    def test_a_remedy_that_acted_is_counted(self):
-        minter = self.minter(remedy=lambda: "acted")
-        minter.leaf("example.com", denied=False)
-        self.assertEqual(minter.stats["remedy_acted"], 1)
 
     def test_a_refused_name_never_reaches_openssl(self):
         ran = []
@@ -438,7 +415,7 @@ class TestMinting(_MinterCase):
 
         Structural, and deliberately crude: it asserts the quoted name occurs
         outside the `self.stats = {...}` literal, which is where a `_bump` call
-        or a mapping like _REMEDY_STATS puts it. Prose in this module spells
+        puts it. Prose in this module spells
         counter names in backticks, so a comment does not satisfy it.
         """
         source = (REPO_ROOT / "lib" / "egress_mint.py").read_text()
@@ -601,20 +578,42 @@ class TestRenewal(_MinterCase):
         self.assertEqual(minter.stats["mints"], 2)
 
 
-class TestTheRemedyIsNotOptional(unittest.TestCase):
+class TestTheMinterKnowsNothingAboutTheGuest(unittest.TestCase):
 
-    def test_a_minter_cannot_be_constructed_without_one(self):
-        """`remedy` has no default ON PURPOSE.
+    def test_a_minter_takes_no_hook(self):
+        """No `remedy`, no `clock_check`, no callable run on a miss.
 
-        The pre-mint remedy is the demand-driven half of the repair for a
-        paused guest, and it covers every pause path precisely because it
-        runs at the mint rather than being hooked per caller. A default would
-        let a future caller construct a Minter with no remedy and lose that
-        silently, on a path where the failure is a guest that reaches its old
-        hosts and no new ones.
+        The minter once ran a launcher-supplied callable before every fresh
+        mint -- on a VM, a guest-agent clock resync -- to close the clock
+        keeper's one-minute window. It closed it only for a mint miss, for
+        one retryable handshake, at the cost of the inspector carrying a
+        seam whose only implementation dialled a QEMU socket. A minter is
+        constructed from a name and a state directory, and a keyword that
+        smuggles a guest fact back in is refused here.
         """
-        with self.assertRaises(TypeError):
-            egress_mint.Minter("wl-test", "/nonexistent")
+        for hook in ("remedy", "clock_check", "before_mint", "pre_mint"):
+            with self.subTest(hook=hook), self.assertRaises(TypeError):
+                egress_mint.Minter("wl-test", "/nonexistent",
+                                   **{hook: lambda: None})
+
+    def test_the_minter_names_no_clock_and_no_remedy(self):
+        """Every remaining "clock" in the module is the injectable time
+        source (`clock=time.monotonic`) or the paragraph that says why the
+        minter does not ask about the guest. No outcome, no counter, no
+        keyword."""
+        source = (REPO_ROOT / "lib" / "egress_mint.py").read_text()
+        for token in ("clock_check", "CLOCK_", "REMEDY_", "_remedy",
+                      "remedy_acted", "remedy_unavailable", "remedy_failed",
+                      "clock_resync", "clock_unavailable", "clock_failed"):
+            self.assertNotIn(token, source, token)
+
+    def test_the_status_document_carries_no_remedy_figures(self):
+        state = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, state, ignore_errors=True)
+        _mint_ca(state)
+        snap = egress_mint.Minter("wl-test", state).snapshot()
+        self.assertFalse([k for k in snap if "remedy" in k or "clock" in k],
+                         sorted(snap))
 
 
 class TestWhatTheMinterReports(_MinterCase):
@@ -642,49 +641,6 @@ class TestWhatTheMinterReports(_MinterCase):
         minter.leaf("bad.example", denied=True)
         snap = minter.snapshot()
         self.assertEqual((snap["working_set"], snap["denials"]), (1, 1))
-
-    def test_a_remedy_with_nobody_to_ask_is_counted_as_such(self):
-        """The figure `diagnose` needs. A guest with no qemu-guest-agent is a
-        SUPPORTED configuration in which the pre-mint remedy is inert -- the
-        failure it exists to prevent is still possible, and nothing else
-        says so."""
-        minter = self.minter(remedy=lambda: "unavailable")
-        minter.leaf("example.com", denied=False)
-        snap = minter.snapshot()
-        self.assertEqual(snap["remedy_unavailable"], 1)
-        self.assertEqual(snap["remedy_acted"], 0)
-        self.assertEqual(snap["remedy_failed"], 0)
-
-    def test_each_remedy_outcome_lands_in_its_own_figure(self):
-        for outcome, key in (("acted", "remedy_acted"),
-                             ("failed", "remedy_failed"),
-                             ("unavailable", "remedy_unavailable")):
-            with self.subTest(outcome=outcome):
-                minter = self.minter(remedy=lambda o=outcome: o)
-                minter.leaf(f"{outcome}.example", denied=False)
-                self.assertEqual(minter.snapshot()[key], 1)
-
-    def test_a_remedy_that_found_nothing_wrong_gets_no_figure_of_its_own(self):
-        """It would track the mint count and say nothing further."""
-        minter = self.minter()
-        minter.leaf("example.com", denied=False)
-        snap = minter.snapshot()
-        self.assertEqual(
-            [snap[k] for k in ("remedy_acted", "remedy_unavailable",
-                               "remedy_failed")], [0, 0, 0])
-
-    def test_the_minter_names_no_clock(self):
-        """The remedy is the launcher's to define. The minter's own source
-        says "remedy" and never says what one does, so the inspector can be
-        started by something whose guests have no clock to repair -- and so
-        that a second kind of remedy is a new launcher, not a new minter."""
-        source = (REPO_ROOT / "lib" / "egress_mint.py").read_text()
-        # Every remaining "clock" in the module is the injectable time source
-        # (`clock=time.monotonic`) or the comment that says why the remedy
-        # exists; none is an outcome, a counter or a keyword the caller uses.
-        for token in ("clock_check", "CLOCK_", "clock_resync",
-                      "clock_unavailable", "clock_failed"):
-            self.assertNotIn(token, source, token)
 
     def test_the_ca_fingerprint_is_the_one_openssl_prints(self):
         """The value exists to be compared by eye against the anchor installed
@@ -748,7 +704,7 @@ class TestAnUnwritableCacheIsAMintFailure(unittest.TestCase):
     """
 
     def _minter(self, state):
-        return egress_mint.Minter("wl", state, remedy=lambda: egress_mint.REMEDY_OK)
+        return egress_mint.Minter("wl", state)
 
     def _broken_minter(self):
         """A minter whose leaf cache cannot be written by ANY uid."""
@@ -812,7 +768,7 @@ class TestTheCountersAreWrittenUnderTheLockTheyAreReadWith(unittest.TestCase):
         state = Path(tempfile.mkdtemp())
         self.addCleanup(lambda: shutil.rmtree(state, ignore_errors=True))
         _mint_ca(state)
-        return egress_mint.Minter("wl-test", state, remedy=lambda: "ok")
+        return egress_mint.Minter("wl-test", state)
 
     def test_a_bump_waits_for_the_lock(self):
         minter = self._minter()

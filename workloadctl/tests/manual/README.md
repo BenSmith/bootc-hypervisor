@@ -713,36 +713,33 @@ The no-argument form is a *finding*, not a defect in the rig, and is recorded
 as an observation rather than a failure so a future QEMU or image that makes it
 work shows up as a change here. It has been stable across both full runs.
 
-**Measurement 7 closes the loop, and it needed T5 to exist.** Everything above
-measures a clock; 6 measures what the clock was on the critical path *of*. It
-pushes the guest **two hours** back — past the `notBefore` backdate, so a stale
-clock cannot validate a fresh leaf by accident — and then asks it for a name it
-has never asked for, which is the only kind that reaches the minter: a cache hit
-runs no clock check, so re-dialling a warm name would pass while proving
-nothing. The request should succeed, because the mint path repairs the guest
-before signing.
-
-Two corroborating assertions matter as much as that one. The guest's offset must
-come back, and `remedy_acted` in `inspect-status.json` must move — without
-both, the same green is produced by a backdate quietly widened to cover two
-hours. A third reads `remedy_unavailable`: a guest with no `qemu-guest-agent` is
-a supported configuration in which this whole remedy is *inert*, and every other
-line on this rig still passes in that state.
+**Measurement 7 closes the loop by measuring the failure.** Everything above
+measures a clock; 7 measures what the clock is on the critical path *of*. With
+the clock keeper's timer stopped (and recorded as stopped), it pushes the guest
+**two hours** back — past the `notBefore` backdate, so a stale clock cannot
+validate a fresh leaf by accident — and asks it for a name it has never asked
+for, so the leaf it is handed is minted now. The handshake must **fail** with
+`certificate is not yet valid`. Four corroborations say why it failed: the
+inspector's `mints` moved (it signed the leaf and has no idea), the `mint`
+block carries no clock or remedy figure (the minter used to run a per-mint
+resync and count it; the counters left with the check, and a key reappearing
+is the seam coming back), the guest is **still** two hours out afterwards
+(nothing on the mint path touched it), and `workloadctl diagnose --json` fails
+its `vm_guest_clock` line naming the offset — the operator's one view of a
+guest the keeper cannot see or has not yet reached.
 
 This arm needs the host to have real internet, unlike the rest of the rig — it
 dials two names on the workload's allowlist.
 
-**Measurement 8 is the clock keeper, measured with the mint path held out of
-it.** `workload-<name>-clock.timer` runs `libexec/workload-vm-clock` once a
-minute for every VM, inspector or not, in its own `wlclock_t` domain. Left
-running it would repair measurement 7's skew inside its period and hand that
-measurement a pass it is not making, so the rig stops the timer before 7 and
-records that it did. Then: the same two-hour push-back, **nothing dialling**,
-`systemctl start` on the timer, and a poll on the offset for the keeper's period
-plus its accuracy. Three corroborations: the tick is caught running with
-`wlclock_t` in its label, the keeper's journal line appears exactly once, and
-`remedy_acted` does **not** move across a later status tick — which is what
-says the keeper did it and not a mint.
+**Measurement 8 is the remedy.** `workload-<name>-clock.timer` runs
+`libexec/workload-vm-clock` once a minute for every VM, inspector or not, in
+its own `wlclock_t` domain. The rig starts the timer on the guest 7 left
+skewed and polls the offset for the keeper's period plus its accuracy. Then it
+dials the name 7 failed on **again**: the same cached leaf must validate now,
+on a cache **hit** (`hits` moves, `mints` does not), because the clock is what
+changed and not the certificate. The tick is caught running with `wlclock_t`
+in its label, the keeper's journal line appears exactly once, and `diagnose`
+goes green on the same line it was red on.
 
 **The domain is read off the live process, not the journal, and the first
 run of this row failed a working domain by doing the latter.** A oneshot

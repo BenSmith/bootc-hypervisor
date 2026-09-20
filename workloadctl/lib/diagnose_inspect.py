@@ -611,7 +611,7 @@ def inspect_check(config, *, elements4=PROBE, elements6=PROBE,
     # already worked. What the line owes them is the sentence, not a verdict.
     #
     # Only these two figures, and not a general rendering of the document: the
-    # rest of it (minting rate, clock resyncs, the CA fingerprint, the DNS
+    # rest of it (minting rate, the CA fingerprint, the DNS
     # counters in the responder's file beside it) gains its reader with
     # `doctor`'s aggregation and the exporter surface, where one producer and
     # no second definition of any figure is the property being built. These two

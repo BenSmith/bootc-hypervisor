@@ -45,8 +45,7 @@ FULL_STATUS = {
     "ech": {"seen": 0, "alarm": 0},
     "policy_digest": "a" * 64,
     "mint": {"mints": 4, "hits": 11, "denied_mints": 1, "denied_hits": 0,
-             "throttled": 0, "failed": 0, "working_set": 4, "denials": 1,
-             "remedy_acted": 0, "remedy_unavailable": 2, "remedy_failed": 0},
+             "throttled": 0, "failed": 0, "working_set": 4, "denials": 1},
 }
 
 FULL_RESOLVE = {

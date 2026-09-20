@@ -1,7 +1,7 @@
 """The guest's paravirtual clock: what the seed must carry, and why each piece.
 
 A vCPU pause is lost by the guest exactly and permanently (lib/vm_clock.py has
-the measurements). The host repairs that on the egress inspector's mint path;
+the measurements). The host repairs that once a minute from the clock keeper;
 this is the other half, which repairs the guest from inside, on its own poll,
 with no agent and no packets. Neither covers the other's blind spot, so both
 ship.
@@ -237,7 +237,7 @@ class TestTheShippedSeedsCarryIt(unittest.TestCase):
 
     Nothing refuses a seed that omits the clock -- unlike the CA and the volume
     mounts, a guest without it is degraded rather than broken, and the host's
-    mint-path check still repairs it. But the seeds we ship are what operators
+    clock keeper still repairs it. But the seeds we ship are what operators
     copy, so an omission here propagates.
     """
 

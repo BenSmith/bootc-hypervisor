@@ -132,8 +132,10 @@ CA_VALIDITY_DAYS = 3650
 # notBefore is backdated an hour for clock skew. Guest drift is ~10 ppm
 # (about five minutes a year), so this covers roughly 1,200
 # years of it -- and exactly ONE HOUR of a vCPU pause, which a guest loses
-# permanently. The backdate is not what makes pauses survivable; the mint-time
-# clock check is.
+# permanently. The backdate is not what makes pauses survivable; the clock
+# keeper (lib/vm_clock.py, once a minute per VM) is. What the backdate buys
+# is that a pause SHORTER than an hour, and the keeper's own one-minute
+# window after a longer one, cost the guest nothing at all.
 CA_BACKDATE_SECONDS = 3600
 
 
@@ -320,8 +322,8 @@ def leaf_openssl_argv(name: str, ca_key, ca_cert,
     One name asked for, one name signed.
 
     notBefore is backdated by the same hour the CA is, for the same reason and
-    with the same caveat -- see CA_BACKDATE_SECONDS, and the mint-time clock
-    check that is the actual remedy for a paused guest.
+    with the same caveat -- see CA_BACKDATE_SECONDS, and the clock keeper
+    (lib/vm_clock.py) that is the actual remedy for a paused guest.
     """
     not_before = time.strftime(
         "%Y%m%d%H%M%SZ", time.gmtime(now - CA_BACKDATE_SECONDS))

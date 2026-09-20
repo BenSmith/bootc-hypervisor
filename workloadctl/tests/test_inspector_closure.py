@@ -4,10 +4,10 @@
 The egress inspector (lib/inspect_listener.py and everything it imports) is
 started by workloadctl, on a host workloadctl laid out, from a document
 workloadctl rendered -- and none of that is the inspector's to know. It takes
-a policy document, a state directory, a broker endpoint and an optional
-clock hook, all as values, and its closure contains no module that reads a
-workload's config, no module that knows where a workload keeps its state,
-and no module that turns a uid into an address. The entrypoint
+a policy document, a state directory and a broker endpoint, all as values,
+and its closure contains no module that reads a workload's config, no module
+that knows where a workload keeps its state, no module that turns a uid into
+an address, and no module that can speak to a guest. The entrypoint
 (libexec/workload-inspect-listener) is the one place those facts are
 derived, and it is a LAUNCHER: it imports the workloadctl side to compute
 the values and the inspector side to hand them over.
@@ -72,8 +72,12 @@ LAUNCHER_WORKLOAD_IMPORTS = frozenset({
     "egress_policy",   # where the policy, status and record files are
     "workload_lib",    # where the state directory is
     "workload_addr",   # what the uid becomes, and the broker's port
-    "vm_clock",        # the guest-clock remedy, a VM's to offer
 })
+# NOT vm_clock, and it was: the launcher once handed the inspector a
+# guest-clock resync to run before every fresh mint. The clock keeper
+# (workload-<name>-clock.timer) owns that on every VM now, so the launcher
+# derives nothing about the guest and the inspector's closure holds no QMP
+# client. A vm_clock import reappearing in either is the seam coming back.
 
 
 def _lib_modules():
@@ -202,7 +206,7 @@ class TestTheLauncherIsTheOnlyPlaceTheTwoMeet(unittest.TestCase):
         re-derived for itself. Read the source rather than run it: main()
         needs inherited sockets."""
         text = LAUNCHER.read_text()
-        for handed in ("workload_state_dir(name)", "remedy=",
+        for handed in ("workload_state_dir(name)",
                        "broker_endpoint=", "status_path=", "record_path="):
             self.assertIn(handed, text, handed)
 

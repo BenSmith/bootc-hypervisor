@@ -27,6 +27,7 @@ from diagnose_egress import (
 from diagnose_inspect import inspect_check
 from diagnose_resolve import vm_resolve_check
 from diagnose_provisioning import collect_host_artifact_checks, vm_provisioning_check
+from diagnose_vm_clock import vm_guest_clock_check
 from diagnose_selinux import (
     HOST_SELINUX_MODULES, _check_mcs_labels, _fcontext_rule_present,
     _getsebool, _gpu_vendors, _selinux_module_current,
@@ -44,6 +45,7 @@ from workload_selinux import fcontext_pattern
 from run_files import units_outdated, units_from_other_build
 from substrate import service_active
 from validation import uses_host_userns
+from vm_clock import guest_clock_offset
 from vm_provision import (
     PROVISION_DONE, PROVISION_FAILED,
     read_provision_marker, record_guest_provision_result,
@@ -497,6 +499,23 @@ def _vm_provisioning_checks(config, _check):
     _check("vm_provisioning", passed, message, fix=fix)
 
 
+def _vm_clock_check(config, _check):
+    """The guest's clock, and whether the keeper can reach it.
+
+    Only while the VM is up: a stopped guest has no agent to ask and no
+    clock to be wrong, so the line is absent rather than a verdict about
+    nothing. One local socket round trip, bounded by the agent timeout, the
+    same cost _vm_provisioning_checks already pays. Read-only -- the keeper
+    repairs, this reports, and a diagnose that set clocks would be a second
+    writer of the thing it is meant to be checking.
+    """
+    if not service_active(config.service_name)[0]:
+        return
+    passed, message, fix = vm_guest_clock_check(
+        guest_clock_offset(config.name), config.name)
+    _check("vm_guest_clock", passed, message, fix=fix)
+
+
 def _image_checks(config, manager, _check, podman_read):
     """Image(s) exist locally."""
     if config.is_multi:
@@ -831,6 +850,7 @@ def collect_diagnose_checks(config, manager: WorkloadManager):
     if config.is_vm:
         _vm_socket_dir_check(config, _check)
         _vm_provisioning_checks(config, _check)
+        _vm_clock_check(config, _check)
 
     # A VM has no container image to inventory — the disk is provisioned by
     # the substrate, not pulled, and `config.image` is the sentinel "(vm)".

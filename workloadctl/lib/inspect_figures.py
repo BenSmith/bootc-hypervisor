@@ -216,29 +216,6 @@ FIGURES = (
            "Live size of the denied-host leaf cache, which cannot evict the "
            "working set",
            path=("mint", "denials")),
-    # The pre-mint remedy's three figures. The inspector counts a remedy its
-    # launcher handed it without knowing what it does; THIS side knows, and
-    # says so in the help text: on a VM it is the guest-clock resync
-    # (lib/vm_clock.py), the same repair workload-<name>-clock.timer makes
-    # once a minute. The keys are the document's, so they carry the
-    # inspector's word and not this one's.
-    Figure("remedy_acted", CERTIFICATES,
-           "workload_vm_inspect_remedy_acted_total", "counter",
-           "pre-mint remedies that acted (guest clock resynced)",
-           "Times a mint miss ran the pre-mint remedy and it acted -- on a "
-           "VM, the guest clock was skewed and was resynced",
-           path=("mint", "remedy_acted")),
-    Figure("remedy_unavailable", CERTIFICATES,
-           "workload_vm_inspect_remedy_unavailable_total", "counter",
-           "pre-mint remedies with no guest agent to ask",
-           "Pre-mint remedies that found no guest agent. Non-zero means the "
-           "remedy is INERT in this guest",
-           path=("mint", "remedy_unavailable")),
-    Figure("remedy_failed", CERTIFICATES,
-           "workload_vm_inspect_remedy_failed_total", "counter",
-           "pre-mint remedies that errored",
-           "Pre-mint remedies that reached the guest agent and failed",
-           path=("mint", "remedy_failed")),
 
     # --- names (the synthesising resolver beside the inspector) ---------
     Figure("synthesised", NAMES, "workload_vm_resolve_synthesised_total",
