@@ -11,7 +11,7 @@ on:
       manifests_repo:
         description: 'Git URL of the fedora-bootc-base-images repo to clone'
         required: false
-        default: 'https://git.local/ben/fedora-bootc-base-images.git'
+        default: 'https://forge.local/ben/fedora-bootc-base-images.git'
         type: string
 
   # Run manually via workflow_dispatch for now.
@@ -25,7 +25,7 @@ env:
   # HTTPS registry fronted by Caddy (zot backend on :5050).
   # Caddy's internal CA is trusted on the runner VM via cloud-init.
   REGISTRY: registry.local
-  MANIFESTS_REPO: ${{ inputs.manifests_repo || 'https://git.local/ben/fedora-bootc-base-images.git' }}
+  MANIFESTS_REPO: ${{ inputs.manifests_repo || 'https://forge.local/ben/fedora-bootc-base-images.git' }}
 
 jobs:
   setup:
