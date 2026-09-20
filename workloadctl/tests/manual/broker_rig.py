@@ -110,7 +110,7 @@ CLOUD_SHA = "28680fe5b371a5a82ebf43a31926e086a168e59949d03969c5093e7071f90b7f"
 # these five are exactly the values a guest-invisible mechanism is described by.
 UID_MIN = 10000                             # lib/workload_addr.py
 BROKER_ADDR_BASE = "127.129.0.0"            # mirrors workload_addr.BROKER_ADDR_BASE
-BROKER_PORT = 8081                          # BROKER_INSTANCE_PORT
+BROKER_PORT = 8081                          # workload_addr.BROKER_INSTANCE_PORT
 BROKER_RUNDIR = "/run/workloadctl/broker"   # BROKER_RUNTIME_SUBDIR
 BROKER_CONFIG = "broker.toml"               # BROKER_CONFIG_NAME
 
