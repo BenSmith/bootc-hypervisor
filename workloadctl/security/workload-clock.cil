@@ -1,0 +1,77 @@
+; workload-clock — an SELinux domain for the per-VM clock keeper.
+;
+; WHY THIS MODULE EXISTS AT ALL
+;
+; The same finding workload-resolve.cil records, applied before it could be
+; made again: a helper under /usr/libexec/workloadctl with no filecon is bin_t,
+; systemd's own rules run its service as unconfined_service_t, and NOTHING
+; fails. workload-vm-clock is one tick of the guest-clock keeper -- it connects
+; to the VM's qemu-guest-agent socket, sends guest-sync and guest-get-time, and
+; parses what comes back. What comes back is written by a process inside the
+; guest, which is to say by the thing this whole design exists to distrust.
+; A parser of guest-supplied bytes on a one-minute timer, running unconfined
+; as a matter of course, is the shape both sibling modules were written to end.
+;
+; MODELLED ON workload-resolve.cil, MINUS EVERYTHING SOCKET ACTIVATION NEEDS
+;
+; The keeper is a oneshot on a timer, not a socket-activated listener, so none
+; of the init_t -> domain socket rules the two siblings carry apply here: init_t
+; creates nothing in this domain but the process. What remains is the smallest
+; domain in the tree: an entrypoint, the interpreter, the journal, and one
+; unix socket connect. Read workload-inspect.cil's header for the surprises
+; about the entrypoint and the interpreter; they hold unchanged.
+;
+; THE GUEST AGENT SOCKET is the same grant workload-inspect.cil makes for its
+; pre-mint remedy, and it is the whole of what this domain does:
+; /run/workload-vm/<name>/ga.sock is a socket QEMU created, so svirt_t owns the
+; other end, and `sock_file` is a class of its own -- a file grant on the
+; directory covers nothing on the socket node, and `connectto` is checked on
+; the peer's domain rather than on the file.
+
+(type wlclock_t)
+(typeattributeset domain (wlclock_t))
+(roletype system_r wlclock_t)
+
+; roletype before the filecon, or semodule rejects the module with
+; "Type wlclock_exec_t is invalid for role object_r".
+(type wlclock_exec_t)
+(roletype object_r wlclock_exec_t)
+(typeattributeset file_type (wlclock_exec_t))
+(typeattributeset exec_type (wlclock_exec_t))
+(typeattributeset entry_type (wlclock_exec_t))
+(filecon "/usr/libexec/workloadctl/workload-vm-clock" file (system_u object_r wlclock_exec_t ((s0) (s0))))
+
+(typetransition init_t wlclock_exec_t process wlclock_t)
+(allow init_t wlclock_exec_t (file (getattr open read execute map)))
+(allow init_t wlclock_t (process (transition siginh)))
+(allow wlclock_t wlclock_exec_t (file (entrypoint getattr ioctl open read)))
+
+; The interpreter and the stdlib. See the inspect module for why this is on the
+; attribute rather than on bin_t.
+(allow wlclock_t bin_t (file (execute map)))
+
+; stdout/stderr to the journal.
+(allow wlclock_t init_t (unix_stream_socket (read write)))
+
+; DELIBERATELY NOT GRANTED, on the sibling modules' rule: an entry leaves this
+; list only when the domain acquires a real reason for it, never because a
+; harvest shows it being attempted. All three are the interpreter starting up
+; and each fails silently.
+;
+;   getattr, ioctl on init_t:unix_stream_socket   Python asking whether its
+;     stdout is a tty.
+;   search on container_file_t:dir ("workloads")  site.py stat'ing
+;     $HOME/.local/lib/pythonX.Y/site-packages; $HOME is the workload's
+;     home because the unit sets User= to the workload user.
+;   search on cert_t:dir ("pki")                  libcrypto reading its
+;     OPENSSLDIR config, pulled in through hashlib. This domain terminates
+;     no TLS and verifies nothing.
+
+; The guest agent socket: search the VM's runtime directory, write the socket
+; node, connect to QEMU's end of it. `search` only on the directory -- the
+; keeper creates nothing there and reads no document from it, which is the
+; difference from both siblings' `add_name remove_name write`.
+(allow wlclock_t qemu_var_run_t (dir (search)))
+(allow wlclock_t qemu_var_run_t (sock_file (getattr write)))
+(allow wlclock_t svirt_t (unix_stream_socket (connectto)))
+(allow wlclock_t self (unix_stream_socket (connect create getattr read shutdown write)))

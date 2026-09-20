@@ -66,6 +66,16 @@ much as the pass: the guest's offset comes back and `remedy_acted` moves.
 Without those two, the same green is produced by a backdate quietly widened to
 cover two hours.
 
+Measurement 8 is the third remedy, and it is measured with the second one held
+off. The clock keeper (workload-<name>-clock.timer, libexec/workload-vm-clock)
+repairs the same skew once a minute for every VM whether or not anything
+mints, in its own SELinux domain -- so the rig stops the timer before 7, or
+the keeper repairs the skew inside its period and 7 passes for a reason it is
+not measuring; then pushes the guest back again with nothing dialling, starts
+the timer, and waits. The corroboration is the same shape as 7's: the offset
+comes back, the inspector's `remedy_acted` does NOT move, and the journal line
+the keeper wrote carries `wlclock_t` in its `_SELINUX_CONTEXT`.
+
 WHAT ONLY A REAL BOOT CAN SHOW
 
 All of it. A paused vCPU is not a thing a unit test has, the guest agent is a
@@ -108,6 +118,13 @@ HOST_CLOCKSOURCE = Path(
     "/sys/devices/system/clocksource/clocksource0/current_clocksource")
 SOCKET_DIR = Path("/run/workload-vm")
 STATUS_FILE = "inspect-status.json"
+
+# The keeper's period plus its accuracy, plus the settle every other offset
+# read in this rig takes. A tick lands at OnActiveSec= from the timer's
+# start, so a keeper that has not acted by here has not acted.
+CLOCK_TIMER = f"workload-{NAME}-clock.timer"
+CLOCK_SERVICE = f"workload-{NAME}-clock.service"
+KEEPER_DEADLINE = 60 + 5 + 25
 
 # How long the vCPUs are stopped. The point is that the step EQUALS the pause,
 # not that it crosses the 1-hour backdate -- proving equality at 120 s proves
@@ -321,6 +338,28 @@ def mint_counts():
     counts = dict(doc.get("mint") or {})
     counts["_written_at"] = doc.get("written_at")
     return counts
+
+
+def keeper_journal(since):
+    """The keeper's journal entries since `since` (epoch seconds), as dicts.
+
+    `-o json` rather than `cat`, because the field measurement 8 wants is
+    not the message: `_SELINUX_CONTEXT` is the label of the process that
+    wrote the line, which is the only record a oneshot leaves of the domain
+    it ran in. Never raises; a rig that died reading a diagnostic would
+    lose the measurement the diagnostic was describing.
+    """
+    p = subprocess.run(
+        ["journalctl", "-u", CLOCK_SERVICE, "--since", f"@{int(since)}",
+         "-o", "json", "--no-pager"],
+        capture_output=True, text=True, timeout=30)
+    entries = []
+    for line in p.stdout.splitlines():
+        try:
+            entries.append(json.loads(line))
+        except ValueError:
+            continue
+    return entries
 
 
 def mint_counts_after(before):
@@ -674,6 +713,15 @@ def measure():
     say(f"== 7. a guest {SKEW_SECONDS}s behind still gets a usable leaf ==")
     first, second = REACHABLE_HOSTS[0], REACHABLE_HOSTS[1]
 
+    # The keeper would repair the skew below inside its one-minute period,
+    # and a leaf validated by a guest the KEEPER put right is a pass this
+    # measurement is not making. Held off here, measured on its own in 8.
+    p = run(["systemctl", "stop", CLOCK_TIMER], check=False)
+    active = run(["systemctl", "is-active", CLOCK_TIMER], check=False)
+    record("the clock keeper can be held off for measurement 7",
+           p.returncode == 0 and active.stdout.strip() != "active",
+           f"{CLOCK_TIMER} is {active.stdout.strip() or '?'}")
+
     warm = guest(f"curl -sS -o /dev/null -w '%{{http_code}}' "
                  f"--max-time 40 https://{first}/", timeout=90)
     record("https works through the inspector before any skew",
@@ -734,6 +782,74 @@ def measure():
         record("this guest's clock remedy is not inert",
                after_counts.get("remedy_unavailable", 0) == 0,
                f"remedy_unavailable={after_counts.get('remedy_unavailable')}")
+
+    # 8. THE KEEPER, on its own. The same skew, with nothing minting: the
+    #    guest dials nobody, so the pre-mint remedy never runs, and the timer
+    #    -- started now, so its first tick is OnActiveSec= away -- is the only
+    #    thing that can put the clock back. `remedy_acted` must NOT move,
+    #    which is what says the keeper did it and not a mint; and the line the
+    #    keeper writes is read back with its process label, because a oneshot
+    #    leaves no process to ask.
+    say(f"== 8. the keeper repairs a guest {SKEW_SECONDS}s behind with "
+        "nothing minting ==")
+    before_keeper = mint_counts()
+    reply, err = ga("guest-set-time",
+                    {"time": int((time.time() - SKEW_SECONDS) * 1_000_000_000)})
+    if err or "error" in reply:
+        record("the guest can be pushed back a second time", False,
+               err or str(reply.get("error")))
+        return
+    time.sleep(2)
+    skewed = offset("after being pushed back again")
+    if skewed is None or skewed > -(SKEW_SECONDS / 2):
+        record("the guest can be pushed back a second time", False,
+               "no reading" if skewed is None else f"offset {skewed:+.1f}s")
+        return
+    record("the guest can be pushed back a second time", True,
+           f"offset {skewed:+.1f}s")
+
+    mark = time.time()
+    p = run(["systemctl", "start", CLOCK_TIMER], check=False)
+    record("the clock keeper's timer starts", p.returncode == 0,
+           p.stderr.strip() or "started")
+    healed = None
+    deadline = mark + KEEPER_DEADLINE
+    while time.time() < deadline:
+        time.sleep(5)
+        now = offset("waiting for the keeper", samples=1)
+        if now is not None and abs(now) < 60.0:
+            healed = now
+            break
+    took = time.time() - mark
+    record("the keeper puts the clock back within its period",
+           healed is not None,
+           f"offset {healed:+.1f}s after {took:.0f}s" if healed is not None
+           else f"still {skewed:+.1f}s after {took:.0f}s")
+
+    entries = keeper_journal(mark)
+    acted = [e for e in entries
+             if "set it from the host" in str(e.get("MESSAGE", ""))]
+    record("the keeper says so, once", len(acted) == 1,
+           f"{len(acted)} acted line(s) of {len(entries)} entries")
+    contexts = {e.get("_SELINUX_CONTEXT", "?") for e in acted}
+    enforcing = run(["getenforce"], check=False).stdout.strip()
+    record("and it ran in its own domain",
+           bool(acted) and all("wlclock_t" in c for c in contexts),
+           f"{sorted(contexts)} under {enforcing or '?'}")
+
+    # The half that says WHICH remedy: with nothing minting, the inspector's
+    # counter stays where 7 left it. A later tick, for mint_counts_after's
+    # reason.
+    say("  waiting for a status tick ...")
+    after_keeper = mint_counts_after(before_keeper)
+    if before_keeper is None or after_keeper is None:
+        record("the mint path did not do it", False, "no readable status tick")
+    else:
+        moved = (after_keeper.get("remedy_acted", 0)
+                 - before_keeper.get("remedy_acted", 0))
+        record("the mint path did not do it", moved == 0,
+               f"remedy_acted +{moved}, "
+               f"mints +{after_keeper.get('mints', 0) - before_keeper.get('mints', 0)}")
 
 
 def main():

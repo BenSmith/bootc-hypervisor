@@ -54,6 +54,7 @@ lifecycle note under "The set").
 | File | Condition |
 |------|-----------|
 | `/run/systemd/system/workload-<name>-build.service` | **VM workloads only** — the oneshot that creates `system.qcow2`. Unconditional for a VM; no container workload gets one, whatever it declares |
+| `/run/systemd/system/workload-<name>-clock.timer` + `-clock.service` | **VM workloads only**, unconditional — the clock keeper (`workload-vm-clock`, once a minute while the VM runs). About the guest's clock, not its egress, so a bridged VM has one too |
 | `/run/systemd/system/workload-<name>-pod.service` | `pod` mode |
 | `/run/systemd/system/workload-<name>-net.service` | `bridge` mode (the auto-created `workload-<name>-net` network) |
 | `/run/systemd/system/workload-<name>-<cname>.service` | one per container, in `pod`/`bridge`/multi |

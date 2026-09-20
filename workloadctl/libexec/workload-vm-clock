@@ -1,0 +1,57 @@
+#!/usr/bin/python3
+"""
+workload-vm-clock: one tick of a VM's clock keeper.
+
+Usage: workload-vm-clock <name>
+
+Run by workload-<name>-clock.timer once a minute while the VM is up, in its
+own SELinux domain (security/workload-clock.cil) and the sidecar sandbox.
+Asks the guest's clock over qemu-guest-agent and, past the threshold, sets
+it from the host's. The program is lib/vm_clock.py; this file is main().
+
+WHY A KEEPER, WHEN THE INSPECTOR ALREADY REPAIRS THE CLOCK ON A MINT
+
+Because the inspector's remedy runs only where there is an inspector, and
+only when a guest dials a name it has not dialled before. A VM with open
+egress, or a filtered one that only ever talks to hosts it already holds
+leaves for, gets no repair from it -- and a rewound guest fails real TLS
+too, just with a wider margin and nothing counting it. The keeper runs for
+every VM on a timer that owes nothing to any path that pauses vCPUs: a
+host resumed from suspend ticks it within the period, which is the case
+lib/vm_clock.py's header says no hook could ever catch.
+
+WHAT IT SAYS, AND WHAT IT DOES NOT
+
+One journal line when it acted, one when it reached the agent and failed
+(and exit 1, so the unit shows failed). Nothing when the clock was fine,
+which is every tick but one in a year; and nothing when there is no agent
+to ask, because a guest without qemu-guest-agent is a supported
+configuration that would otherwise say so once a minute forever. That
+state is reported by the inspector's `mint.remedy_unavailable`, where
+`doctor` reads it.
+"""
+import sys
+
+sys.dont_write_bytecode = True
+
+from vm_clock import CLOCK_FAILED, CLOCK_RESYNCED, keep_guest_clock
+
+
+def main(argv):
+    if len(argv) != 2:
+        print(f"Usage: {argv[0]} <name>", file=sys.stderr)
+        return 2
+    name = argv[1]
+    outcome, offset = keep_guest_clock(name)
+    if outcome == CLOCK_RESYNCED:
+        print(f"guest clock of '{name}' was {offset:+.1f}s from the host's; "
+              "set it from the host", flush=True)
+    elif outcome == CLOCK_FAILED:
+        print(f"guest clock of '{name}' is {offset:+.1f}s from the host's "
+              "and guest-set-time failed", file=sys.stderr, flush=True)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

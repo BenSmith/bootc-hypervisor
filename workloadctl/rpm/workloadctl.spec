@@ -140,6 +140,8 @@ install -Dpm 0755 %{_sourcedir}/libexec/workload-inspect-listener \
     %{buildroot}%{_libexecdir}/workloadctl/workload-inspect-listener
 install -Dpm 0755 %{_sourcedir}/libexec/workload-vm-resolve \
     %{buildroot}%{_libexecdir}/workloadctl/workload-vm-resolve
+install -Dpm 0755 %{_sourcedir}/libexec/workload-vm-clock \
+    %{buildroot}%{_libexecdir}/workloadctl/workload-vm-clock
 install -Dpm 0755 %{_sourcedir}/libexec/workload-broker-config \
     %{buildroot}%{_libexecdir}/workloadctl/workload-broker-config
 install -Dpm 0755 %{_sourcedir}/libexec/workload-vm-notify \
@@ -217,6 +219,9 @@ install -Dpm 0644 %{_sourcedir}/logrotate/workloadctl-inspect \
 
 install -Dpm 0644 %{_sourcedir}/security/workload-resolve.cil \
     %{buildroot}%{_datadir}/workloadctl/workload-resolve.cil
+
+install -Dpm 0644 %{_sourcedir}/security/workload-clock.cil \
+    %{buildroot}%{_datadir}/workloadctl/workload-clock.cil
 
 install -Dpm 0644 %{_sourcedir}/completions/workloadctl-completion.bash \
     %{buildroot}%{_datadir}/bash-completion/completions/workloadctl
@@ -432,6 +437,13 @@ if [ -x /usr/sbin/semodule ] && [ -f %{_datadir}/workloadctl/workload-resolve.ci
         restorecon /usr/libexec/workloadctl/workload-vm-resolve 2>/dev/null || :
     fi
 fi
+# The clock keeper's domain, on the same terms: it parses what the guest's
+# agent sends back, once a minute, for every VM.
+if [ -x /usr/sbin/semodule ] && [ -f %{_datadir}/workloadctl/workload-clock.cil ]; then
+    if semodule -i %{_datadir}/workloadctl/workload-clock.cil 2>/dev/null; then
+        restorecon /usr/libexec/workloadctl/workload-vm-clock 2>/dev/null || :
+    fi
+fi
 # On upgrade ($1 >= 2), running workloads keep the units the *previous* build
 # generated: %%post does not regenerate them, and nothing else will until a
 # reboot re-runs workload-generate or the operator re-enables. On a bootc host
@@ -499,6 +511,8 @@ if [ $1 -eq 0 ]; then
         restorecon /usr/libexec/workloadctl/workload-inspect-listener 2>/dev/null || :
         semodule -r workload-resolve 2>/dev/null || :
         restorecon /usr/libexec/workloadctl/workload-vm-resolve 2>/dev/null || :
+        semodule -r workload-clock 2>/dev/null || :
+        restorecon /usr/libexec/workloadctl/workload-vm-clock 2>/dev/null || :
     fi
 fi
 
@@ -524,6 +538,7 @@ fi
 %{_libexecdir}/workloadctl/workload-vm-svcaddr
 %{_libexecdir}/workloadctl/workload-inspect-listener
 %{_libexecdir}/workloadctl/workload-vm-resolve
+%{_libexecdir}/workloadctl/workload-vm-clock
 %{_libexecdir}/workloadctl/workload-broker-config
 %{_libexecdir}/workloadctl/workload-vm-qmp
 %{_libexecdir}/workloadctl/workload-vm-shutdown

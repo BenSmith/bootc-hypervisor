@@ -192,7 +192,9 @@ class TestPostunScriptlet(unittest.TestCase):
              "semodule -r workload-inspect",
              "restorecon /usr/libexec/workloadctl/workload-inspect-listener",
              "semodule -r workload-resolve",
-             "restorecon /usr/libexec/workloadctl/workload-vm-resolve"])
+             "restorecon /usr/libexec/workloadctl/workload-vm-resolve",
+             "semodule -r workload-clock",
+             "restorecon /usr/libexec/workloadctl/workload-vm-clock"])
 
     def test_upgrade_is_a_noop(self):
         # An admin's own bridge allow-list is never touched at any $1, and

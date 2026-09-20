@@ -315,6 +315,11 @@ class TestCurrentDestructiveGolden(unittest.TestCase):
                 'workload-forge.service',
                 'multi-user.target.wants/workload-forge.service',
                 'workload-forge-build.service',
+                # The clock keeper, for every VM and behind no predicate: it
+                # is about the guest's clock, not its egress, so this
+                # egress = "open" fixture has one too.
+                'workload-forge-clock.timer',
+                'workload-forge-clock.service',
                 # Superset semantics, like -pod/-net for containers: the proxy
                 # unit is always listed so the destructive view can unlink it,
                 # and emitted only when [vm.network].hosts is set.

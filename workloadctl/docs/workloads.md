@@ -1426,15 +1426,16 @@ sudo semodule -i /usr/share/workloadctl/workload-vm.cil
 sudo restorecon /usr/libexec/virtiofsd
 ```
 
-The same caveat applies to the two egress-inspection domains, which ship
-alongside it:
+The same caveat applies to the two egress-inspection domains and the clock
+keeper's, which ship alongside it:
 
 ```bash
 sudo semodule -i /usr/share/workloadctl/workload-inspect.cil
 sudo semodule -i /usr/share/workloadctl/workload-resolve.cil
+sudo semodule -i /usr/share/workloadctl/workload-clock.cil
 ```
 
-Neither has a binary to relabel — both listeners live in workloadctl's own
+None has a binary to relabel — all three helpers live in workloadctl's own
 private libexec directory and are entered from their units, not from a file
 context on a system path.
 

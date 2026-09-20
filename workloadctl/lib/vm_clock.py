@@ -110,6 +110,15 @@ GUEST_AGENT_TIMEOUT = 1.5
 # stay under five minutes is also short enough to be harmless.
 CLOCK_SKEW_THRESHOLD_SECONDS = 300.0
 
+# The keeper: one tick of resync_guest_clock_if_skewed per VM per minute, from
+# workload-<name>-clock.timer, while the VM is up. A minute is the window a
+# resumed guest can spend skewed before this half of the remedy reaches it
+# (ptp_kvm's four seconds and the pre-mint remedy both cut it shorter where
+# they apply), against a cost of one local unix-socket round trip -- or one
+# 1.5 s timeout on a guest with no agent. Neither number is worth tuning.
+CLOCK_KEEPER_PERIOD_SECONDS = 60
+VM_CLOCK_KEEPER_BIN = "/usr/libexec/workloadctl/workload-vm-clock"
+
 
 def guest_agent_sync(qga: QMPClient, max_messages: int = 8) -> None:
     """Handshake that guarantees the next reply we read is the one we asked for.
@@ -217,10 +226,12 @@ def set_guest_time(name: str, *, now: float | None = None) -> bool:
     return "error" not in reply and reply.get("return") == {}
 
 
-def resync_guest_clock_if_skewed(
+def keep_guest_clock(
         name: str, *,
-        threshold: float = CLOCK_SKEW_THRESHOLD_SECONDS) -> str:
-    """Repair the guest's clock if it has drifted past `threshold`.
+        threshold: float = CLOCK_SKEW_THRESHOLD_SECONDS,
+) -> tuple[str, float | None]:
+    """Repair the guest's clock if it has drifted past `threshold`, and say
+    by how much it was out: (outcome, offset), offset None when unknowable.
 
     The keeper's tick and the mint path's remedy, one function. Costs one
     local round trip and returns CLOCK_OK without a second one in the
@@ -233,7 +244,15 @@ def resync_guest_clock_if_skewed(
     """
     offset = guest_clock_offset(name)
     if offset is None:
-        return CLOCK_UNAVAILABLE
+        return CLOCK_UNAVAILABLE, None
     if abs(offset) <= threshold:
-        return CLOCK_OK
-    return CLOCK_RESYNCED if set_guest_time(name) else CLOCK_FAILED
+        return CLOCK_OK, offset
+    return (CLOCK_RESYNCED if set_guest_time(name) else CLOCK_FAILED), offset
+
+
+def resync_guest_clock_if_skewed(
+        name: str, *,
+        threshold: float = CLOCK_SKEW_THRESHOLD_SECONDS) -> str:
+    """keep_guest_clock for a caller that wants the outcome and not the
+    number: the pre-mint remedy counts words, and backup prints one."""
+    return keep_guest_clock(name, threshold=threshold)[0]

@@ -729,8 +729,10 @@ class TestPolicyLoading(unittest.TestCase):
         KeyError at the seam rather than an uncounted figure; a minter word
         no clock outcome maps to would be a figure nothing can ever move."""
         launcher = _mod()
-        clock_words = {getattr(vm_clock, n) for n in dir(vm_clock)
-                       if n.startswith("CLOCK_") and n != "CLOCK_SKEW_THRESHOLD_SECONDS"}
+        # The outcome words are the CLOCK_* strings; the module's other
+        # CLOCK_* names are numbers (a threshold, the keeper's period).
+        clock_words = {v for n, v in vars(vm_clock).items()
+                       if n.startswith("CLOCK_") and isinstance(v, str)}
         remedy_words = {getattr(egress_mint, n) for n in dir(egress_mint)
                         if n.startswith("REMEDY_")}
         self.assertEqual(set(launcher._CLOCK_TO_REMEDY), clock_words)

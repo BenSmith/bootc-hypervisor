@@ -636,9 +636,10 @@ Needs root, `/dev/kvm`, the workloadctl RPM and the same
 `/var/lib/broker-rig/base.qcow2` the other VM rigs use. Boots **one** throwaway
 filtered VM workload **with its egress inspector on**, measures its clock
 across a QMP `stop`/`cont`, tries both forms of the guest agent's
-`guest-set-time`, and then drives a real HTTPS request from a guest whose clock
-is deliberately wrong. Ten minutes end to end, most of it the 120-second pause
-and cloud-init's first boot.
+`guest-set-time`, drives a real HTTPS request from a guest whose clock is
+deliberately wrong, and then skews it again with nothing dialling and waits for
+the clock keeper. Twelve minutes end to end, most of it the 120-second pause,
+cloud-init's first boot, and two waits on a one-minute timer.
 
 **Why it exists.** Rung 3 mints 30-day leaves for the guest to validate, which
 puts the guest's clock on the critical path for all of its traffic. Drift is a
@@ -714,14 +715,27 @@ nothing. The request should succeed, because the mint path repairs the guest
 before signing.
 
 Two corroborating assertions matter as much as that one. The guest's offset must
-come back, and `clock_resyncs` in `inspect-status.json` must move — without
+come back, and `remedy_acted` in `inspect-status.json` must move — without
 both, the same green is produced by a backdate quietly widened to cover two
-hours. A third reads `clock_unavailable`: a guest with no `qemu-guest-agent` is
+hours. A third reads `remedy_unavailable`: a guest with no `qemu-guest-agent` is
 a supported configuration in which this whole remedy is *inert*, and every other
 line on this rig still passes in that state.
 
 This arm needs the host to have real internet, unlike the rest of the rig — it
 dials two names on the workload's allowlist.
+
+**Measurement 8 is the clock keeper, measured with the mint path held out of
+it.** `workload-<name>-clock.timer` runs `libexec/workload-vm-clock` once a
+minute for every VM, inspector or not, in its own `wlclock_t` domain. Left
+running it would repair measurement 7's skew inside its period and hand that
+measurement a pass it is not making, so the rig stops the timer before 7 and
+records that it did. Then: the same two-hour push-back, **nothing dialling**,
+`systemctl start` on the timer, and a poll on the offset for the keeper's period
+plus its accuracy. Three corroborations: the keeper's journal line appears
+exactly once, that line's `_SELINUX_CONTEXT` names `wlclock_t` (a oneshot
+leaves no process to ask, so the journal is the only record of the domain it
+ran in), and `remedy_acted` does **not** move across a later status tick —
+which is what says the keeper did it and not a mint.
 
 ---
 

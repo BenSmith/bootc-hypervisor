@@ -30,10 +30,12 @@ from broker_config import (
     vm_uses_credentials, vm_broker_hosts, vm_broker_upstream_addresses,
 )
 from nft_constants import SIDECAR_SLICE
+from vm_clock import CLOCK_KEEPER_PERIOD_SECONDS, VM_CLOCK_KEEPER_BIN
 from vm_defs import (
     VM_REBOOT_EXIT_CODE,
     VM_GUEST_UID,
     VM_GUEST_AGENT_PORT,
+    vm_guest_agent_socket,
     mac_address,
     parse_vm_port,
     find_ovmf_code,
@@ -527,6 +529,94 @@ def generate_vm_resolve_service(config, user_name: str) -> str:
     return unit.render()
 
 
+def generate_vm_clock_timer(config) -> str:
+    """Generate the timer that ticks one VM's clock keeper.
+
+    Monotonic, not calendar: OnUnitActiveSec= counts from the keeper's last
+    run on CLOCK_MONOTONIC, which does not advance while the host is
+    suspended -- so a host resumed after eight hours ticks this within one
+    period of coming back, which is the pause no hook could catch. A
+    calendar timer would be no better and would fire at :00 on every VM at
+    once.
+
+    PartOf=/After= the VM from this side and Wants= from the VM's: the
+    keeper has nothing to do for a VM that is not running, and a keeper that
+    cannot run must never hold the VM up, which is why it is not a
+    Requires= in either direction.
+    """
+    name = config["workload"]["name"]
+    period = f"{CLOCK_KEEPER_PERIOD_SECONDS}s"
+
+    unit = Unit()
+    unit.comment(f"clock keeper timer for {name}")
+    unit.comment(GENERATED_BY)
+
+    u = unit.section("Unit")
+    u.set("Description", f"Clock keeper timer for {name}")
+    u.set("PartOf", f"workload-{name}.service")
+    u.set("After", f"workload-{name}.service")
+
+    t = unit.section("Timer")
+    # OnActiveSec= is the first tick, from the timer starting with the VM;
+    # OnUnitActiveSec= is every tick after, from the keeper's last run.
+    # Without the first the timer waits for a service activation that
+    # nothing else provides.
+    t.set("OnActiveSec", period)
+    t.set("OnUnitActiveSec", period)
+    # The default accuracy is a minute, which on a one-minute period is a
+    # tick somewhere between one and two minutes after the last. Five
+    # seconds keeps the window the period promises.
+    t.set("AccuracySec", "5s")
+
+    return unit.render()
+
+
+def generate_vm_clock_service(config, user_name: str) -> str:
+    """Generate the service one tick of the clock keeper runs as.
+
+    A oneshot in the sidecar sandbox, as the workload user: the guest agent
+    socket is QEMU's, owned by that user, and the keeper needs nothing else
+    -- no network family at all, since its one socket is AF_UNIX. It runs in
+    its own SELinux domain (security/workload-clock.cil) for the reason the
+    responder does: it parses what the guest's agent sends back.
+
+    ConditionPathExists= on the agent socket, so a tick that lands while the
+    VM is between stops is skipped rather than failed; a missing socket is
+    not a keeper fault. A tick that reaches the agent and cannot set the
+    clock IS one, and exits 1 so the unit shows failed.
+    """
+    name = config["workload"]["name"]
+
+    unit = Unit()
+    unit.comment(f"clock keeper service for {name}")
+    unit.comment(GENERATED_BY)
+
+    u = unit.section("Unit")
+    u.set("Description", f"Clock keeper for {name}")
+    u.set("PartOf", f"workload-{name}.service")
+    u.set("After", f"workload-{name}.service")
+    u.set("ConditionPathExists", str(vm_guest_agent_socket(name)))
+
+    svc = unit.section("Service")
+    svc.set("Type", "oneshot")
+    svc.set("User", user_name)
+    svc.set("Group", user_name)
+    svc.set("Slice", SIDECAR_SLICE)
+    svc.add("ExecStart", f"{VM_CLOCK_KEEPER_BIN} {dq(name)}")
+    svc.blank()
+    # AF_UNIX and nothing else: the agent channel is a unix socket, and a
+    # keeper that could open an inet socket would be a keeper that could be
+    # made to. The sandbox names /run/workload-vm/<name> writable, which is
+    # what a connect() to a socket under ProtectSystem=strict needs.
+    harden_sidecar(svc, name, families="AF_UNIX",
+                   tasks_max=8, memory_max="64M")
+    svc.blank()
+    svc.add("StandardOutput", "journal")
+    svc.add("StandardError", "journal")
+
+    return unit.render()
+
+
 def generate_vm_build_service(config, user_name) -> str:
     """Generate the oneshot build service that creates system.qcow2."""
     name = config["workload"]["name"]
@@ -771,6 +861,10 @@ def generate_vm_service(config, user_name: str, uid: int, vfs_tags=None) -> str:
         # workload-bridge.service's After=network.target; that unit is gone.
         u.set("Wants", "network-online.target")
         u.set("After", f"{prereqs_str} network-online.target")
+    # The clock keeper, Wants= and not Requires=: it runs on the VM's behalf
+    # and the VM must never fail to start over it. The timer's own PartOf=
+    # and After= are the other half of the same edge.
+    u.add("Wants", f"workload-{name}-clock.timer")
     u.set("StartLimitIntervalSec", "300")
     u.set("StartLimitBurst", "3")
 
@@ -989,6 +1083,13 @@ def generate_vm_workload(config, user_name: str, uid: int):
             resolve_dests[0].write_text(
                 generate_vm_resolve_service(config, user_name))
             log_msg("  Created DNS responder service")
+
+    # The clock keeper, for every VM: it is about the guest's clock, not its
+    # egress, so no predicate gates it.
+    paths[("unit", "clock-timer")][0].write_text(generate_vm_clock_timer(config))
+    paths[("unit", "clock")][0].write_text(
+        generate_vm_clock_service(config, user_name))
+    log_msg("  Created clock keeper timer and service")
 
     # virtiofsd sidecar services — collision-safe tags, same order/set as the
     # VM service's chardevs and the purge/cloud-init sites (B3).

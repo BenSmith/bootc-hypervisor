@@ -117,6 +117,14 @@ def workload_run_files(config) -> list[WorkloadRunFile]:
         files.append(
             WorkloadRunFile(run / f"workload-{name}-build.service", "unit", "build", True)
         )
+        # The clock keeper, for every VM without a predicate: it is about
+        # the guest's clock and not its egress, so a bridged VM has one too.
+        files.append(WorkloadRunFile(
+            run / f"workload-{name}-clock.timer", "unit", "clock-timer", True
+        ))
+        files.append(WorkloadRunFile(
+            run / f"workload-{name}-clock.service", "unit", "clock", True
+        ))
         for tag in virtiofs_tags(config.config.get("vm", {}).get("volumes", [])):
             files.append(WorkloadRunFile(
                 run / f"workload-{name}-virtiofs-{tag}.service", "unit", "virtiofs", True

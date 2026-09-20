@@ -57,6 +57,8 @@ INSPECT_SELINUX_MODULE = "workload-inspect"
 INSPECT_SELINUX_CIL = "/usr/share/workloadctl/workload-inspect.cil"
 VM_RESOLVE_SELINUX_MODULE = "workload-resolve"
 VM_RESOLVE_SELINUX_CIL = "/usr/share/workloadctl/workload-resolve.cil"
+VM_CLOCK_SELINUX_MODULE = "workload-clock"
+VM_CLOCK_SELINUX_CIL = "/usr/share/workloadctl/workload-clock.cil"
 
 # --- The label the QMP socket directory has to carry ---
 #
