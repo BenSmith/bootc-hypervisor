@@ -667,18 +667,22 @@ somewhere inside the `workloadctl exec` round-trip, so the reading is bracketed
 by two host reads and the interval's *width* is that latency. The upper bound is
 the stable one; the lower tracks the round-trip.
 
-**Last green 2026-09-20, 27/27 on a TSC-clocksource KVM host and 24/24 on
+**Last green 2026-09-20, 29/29 on a TSC-clocksource KVM host and 26/26 on
 an hpet one (3b skipped, as designed), both under enforcing, against the
-installed RPM** (clock-keeper: measurement 8 is new -- the keeper's tick
-caught live in `wlclock_t`, a 7200 s skew repaired with nothing minting,
-`remedy_acted` unmoved -- and measurement 7 now runs with the timer held
-off; the status-document keys are `remedy_acted`/`remedy_unavailable`. The
-first run of the new row failed a working domain by reading the journal's
-`_SELINUX_CONTEXT`, above. A `semodule -DB` harvest on both hosts showed
-exactly the three denials `security/workload-clock.cil` declines to grant.)
-Previous: 2026-09-20, all rows, TSC host under enforcing (inspector-decouple: the guest-clock
-remedy is now a `clock_check` the launcher builds, and measurement 7 is the
-proof it still fires). Green on 2026-09-02 and
+installed RPM** (no-clock-hook: the inspector's per-mint clock resync is
+gone, and 7 now measures the failure it used to prevent -- `certificate is
+not yet valid` on a fresh leaf with the keeper held off, `mints +2` while the
+inspector reports healthy, the clock untouched, `diagnose` red with the
+offset -- before 8 releases the keeper and the same leaf validates on a cache
+hit with `diagnose` green. A `semodule -DB` harvest on both hosts: `wlclock_t`
+attempted exactly the three denials `security/workload-clock.cil` declines to
+grant, and `wlinspect_t`, minting and terminating for a real guest, attempted
+none of the three agent-socket grants that were removed from it.)
+Previous: 2026-09-20, 27/27 (TSC) and 24/24 (hpet) under enforcing
+(clock-keeper: measurement 8 arrived -- the keeper's tick caught live in
+`wlclock_t`; the first run of that row failed a working domain by reading
+the journal's `_SELINUX_CONTEXT`, above). Before that, 2026-09-20, TSC host
+under enforcing (inspector-decouple). Green on 2026-09-02 and
 2026-08-27; the re-run was against a later build, on a host also carrying live
 production workloads, with clean teardown and nothing else disturbed. Rungs since then
 deliberately deferred this rig — they touch nothing it covers — so the re-run

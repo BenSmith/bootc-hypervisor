@@ -103,6 +103,12 @@
 ;   (WAS: cert_t, container_file_t and svirt_image_t. All three were granted
 ;     in rung 3 -- see THE TERMINATING PLANE below. The reasoning that kept
 ;     them denied was sound and its premise expired.)
+;   (WAS, the other way: qemu_var_run_t:sock_file, svirt_t connectto and
+;     self:unix_stream_socket, granted in rung 3 for the mint-time clock
+;     check and REMOVED when the check left for workload-clock.cil. A
+;     `semodule -DB` run of clock_rig on two enforcing hosts, 2026-09-20,
+;     with the inspector minting and terminating for a real guest: this
+;     domain attempted none of the three. Nothing here opens a unix socket.)
 ;
 ; init_var_run_t:dir search was in this list for about an hour and does NOT
 ; belong: it is granted above, because the resolver traverses /run/systemd to
