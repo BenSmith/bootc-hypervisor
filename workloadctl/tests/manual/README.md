@@ -667,9 +667,17 @@ somewhere inside the `workloadctl exec` round-trip, so the reading is bracketed
 by two host reads and the interval's *width* is that latency. The upper bound is
 the stable one; the lower tracks the round-trip.
 
-**Last green 2026-09-20, 29/29 on a TSC-clocksource KVM host and 26/26 on
+**Last green 2026-09-21, 29/29 on a TSC-clocksource KVM host and 26/26 on
 an hpet one (3b skipped, as designed), both under enforcing, against the
-installed RPM** (no-clock-hook: the inspector's per-mint clock resync is
+installed RPM** (inspector-flags: the inspector is started from an
+`ExecStart=` that hands it `--name --policy --state-dir --status --record
+--broker`, all computed by the generator; the journal shows it terminating
+and forwarding for the guest from that line, 7 and 8 measure as below. The
+first TSC run went 28/29: the keeper's domain row read `init_t` off
+systemd's pre-exec child, which systemd 259 names `(workload-vm-clock)` in
+/proc for ~10 ms before execve -- the rig's catch now skips it, header.)
+Previous: 2026-09-20, 29/29 (TSC) and 26/26 (hpet)
+(no-clock-hook: the inspector's per-mint clock resync is
 gone, and 7 now measures the failure it used to prevent -- `certificate is
 not yet valid` on a fresh leaf with the keeper held off, `mints +2` while the
 inspector reports healthy, the clock untouched, `diagnose` red with the
@@ -678,7 +686,7 @@ hit with `diagnose` green. A `semodule -DB` harvest on both hosts: `wlclock_t`
 attempted exactly the three denials `security/workload-clock.cil` declines to
 grant, and `wlinspect_t`, minting and terminating for a real guest, attempted
 none of the three agent-socket grants that were removed from it.)
-Previous: 2026-09-20, 27/27 (TSC) and 24/24 (hpet) under enforcing
+Before that: 2026-09-20, 27/27 (TSC) and 24/24 (hpet) under enforcing
 (clock-keeper: measurement 8 arrived -- the keeper's tick caught live in
 `wlclock_t`; the first run of that row failed a working domain by reading
 the journal's `_SELINUX_CONTEXT`, above). Before that, 2026-09-20, TSC host

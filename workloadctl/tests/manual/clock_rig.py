@@ -80,7 +80,11 @@ measured 2026-09-20, the `_SELINUX_CONTEXT` on a `_TRANSPORT=stdout` line is
 the STREAM SOCKET's peer label, taken when systemd's pre-exec child connected
 it, and reads init_t for every service that transitions on exec while `_COMM`
 and `_EXE` on the same line are post-exec. A rig row that read the journal
-failed a working domain.
+failed a working domain. The same child is visible in /proc too: measured
+2026-09-21, systemd 259 renames its pre-exec child `(workload-vm-clock)` --
+the full basename in parentheses, one argv entry -- and that process is
+init_t for the ~10 ms before execve. A scan matching the bare name caught it
+there once in three runs; the catch skips a cmdline that starts with `(`.
 
 WHAT ONLY A REAL BOOT CAN SHOW
 
@@ -379,6 +383,14 @@ def catch_keeper(deadline):
     enough -- interpreter start, guest-sync, guest-get-time and on a skewed
     guest a guest-set-time that runs hwclock inside it -- that 50 ms is
     ample, and the scan costs nothing that would move the measurement.
+
+    NOT systemd's pre-exec child. Between fork and execve the executor
+    renames itself `(workload-vm-clock)` -- parenthesised, the whole cmdline
+    -- and is still init_t, because the transition is execve's. Matching the
+    bare name returned that label once (2026-09-21, measured with a 500 Hz
+    scan: `(workload-vm-clock)` in init_t at t, `/usr/bin/python3
+    /usr/libexec/.../workload-vm-clock` in wlclock_t at t+10ms, same pid).
+    The post-exec cmdline is NUL-separated argv and never starts with `(`.
     """
     proc = Path("/proc")
     while time.time() < deadline:
@@ -388,6 +400,8 @@ def catch_keeper(deadline):
             try:
                 cmdline = (entry / "cmdline").read_bytes()
                 if b"workload-vm-clock" not in cmdline:
+                    continue
+                if cmdline.startswith(b"("):
                     continue
                 return (entry / "attr" / "current").read_text().strip("\x00\n")
             except OSError:
