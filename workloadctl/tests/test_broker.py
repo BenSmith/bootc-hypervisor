@@ -689,7 +689,7 @@ _UNAUTHORIZED = b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\n\r\n"
 # derived from os.getuid(), because the suite does not run as _wl-<name> and
 # broker_listen_address refuses a uid outside the workload range -- see
 # TestTheBrokerEndpointComesFromTheUid for the derivation itself, which is the
-# launcher's and not the inspector's.
+# generator's and not the inspector's.
 BROKER_ADDR = broker_listen_address(10007)
 BROKER_ENDPOINT = (BROKER_ADDR, BROKER_INSTANCE_PORT)
 
@@ -1098,28 +1098,31 @@ class TestTheListenerReadsTheCredentialFromTheDocument(unittest.TestCase):
 
 
 class TestTheBrokerEndpointComesFromTheUid(unittest.TestCase):
-    """The derivation is the LAUNCHER's (workload-inspect-listener), not the
-    inspector's. The inspector takes an (address, port) pair and dials it;
-    it has no idea that a uid becomes a loopback address, which is what keeps
-    workload_addr and the rest of the host layout out of its closure.
+    """The derivation is the GENERATOR's (gen_egress.inspect_listener_command),
+    not the inspector's. The inspector takes an (address, port) pair on its
+    command line and dials it; it has no idea that a uid becomes a loopback
+    address, which is what keeps workload_addr and the rest of the host
+    layout out of its closure.
     """
 
-    def test_the_launcher_derives_it_from_its_own_uid(self):
-        """No registry and no allocation step: the inspector's launcher and
-        the broker's unit reach the same address from the same uid, so the
-        two halves cannot drift."""
-        mod = listener_mod()
-        with unittest.mock.patch.object(os, "getuid", return_value=10007):
-            self.assertEqual(mod.broker_endpoint(),
-                             (BROKER_ADDR, BROKER_INSTANCE_PORT))
+    def test_the_generator_derives_it_from_the_workloads_uid(self):
+        """No registry and no allocation step: the inspector's unit and the
+        broker's config are both rendered from the same uid with the same
+        function, so the two halves cannot drift."""
+        from gen_egress import inspect_listener_command
+        cmd = inspect_listener_command("web", 10007)
+        self.assertEqual(cmd[cmd.index("--broker") + 1],
+                         f"{BROKER_ADDR}:{BROKER_INSTANCE_PORT}")
 
-    def test_a_uid_outside_the_workload_range_yields_no_endpoint(self):
-        """Not an error at start: a hand-started listener may serve a policy
-        with no brokered host at all, and the refusal belongs on the first
-        brokered request (the Upstream test above), not on the start."""
+    def test_the_entrypoint_parses_the_pair_it_is_given(self):
+        """And derives nothing when it is not: a hand-written unit may
+        serve a policy with no brokered host at all, and the refusal belongs
+        on the first brokered request (the Upstream test above), not on the
+        start."""
         mod = listener_mod()
-        with unittest.mock.patch.object(os, "getuid", return_value=0):
-            self.assertIsNone(mod.broker_endpoint())
+        self.assertEqual(mod.broker_endpoint(f"{BROKER_ADDR}:{BROKER_INSTANCE_PORT}"),
+                         BROKER_ENDPOINT)
+        self.assertIsNone(mod.broker_endpoint(None))
 
     def test_the_inspector_dials_exactly_what_it_was_handed(self):
         upstream = Upstream(BROKER_ENDPOINT)

@@ -8,6 +8,7 @@ process itself, that the connection ceiling rejects rather than queues, and
 that the installed path agrees with the constant the unit's ExecStart reads.
 """
 
+import argparse
 import contextlib
 import io
 import json
@@ -675,8 +676,8 @@ class TestPolicyLoading(unittest.TestCase):
 
     def test_the_minter_is_built_on_the_state_dir_it_was_handed(self):
         """build_minter derives nothing from the name. The state directory
-        is an argument, so a launcher that keeps its CA somewhere workloadctl
-        would not is a launcher, not a patch."""
+        is an argument, so a unit that keeps its CA somewhere workloadctl
+        would not is a `--state-dir`, not a patch."""
         state = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, state)
         for path in (os.path.join(state, "ca.crt"),
@@ -820,11 +821,46 @@ class TestPolicyLoading(unittest.TestCase):
         with self.assertRaises(ValueError):
             load_policy(self._write('{"hosts": "example.com"}'))
 
-    def test_main_refuses_without_a_workload_name(self):
-        """argv[1] is how the listener knows which policy is its own; without
-        it there is nothing on four identically-named fds to recover it from."""
+    def test_main_refuses_without_its_flags(self):
+        """The flags are how the listener knows which policy is its own and
+        where everything else is; without them there is nothing on four
+        identically-named fds to recover any of it from, and no default is
+        allowed to guess. Each required flag missing on its own is a usage
+        error, not a start."""
         mod = _mod()
-        self.assertEqual(mod.main(["x"]), 2)
+        full = ["x", "--name", "wl", "--policy", "/p", "--state-dir", "/s",
+                "--status", "/st", "--record", "/r"]
+        for i in range(1, len(full), 2):
+            argv = full[:i] + full[i + 2:]
+            with contextlib.redirect_stderr(io.StringIO()) as err:
+                self.assertEqual(mod.main(argv), 2, argv)
+            self.assertIn(full[i], err.getvalue(), argv)
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(mod.main(["x"]), 2)
+
+    def test_a_unit_from_before_the_flags_is_told_so(self):
+        """`workload-inspect-listener <name>` was the shape until the flags,
+        and a unit the previous build generated still has it after an
+        upgrade that did not regenerate. Five missing flags is true and
+        points nowhere; the line the operator lands on from the failed
+        activation names the cause."""
+        mod = _mod()
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            self.assertEqual(mod.main(["x", "wl"]), 2)
+        self.assertIn("bare name", err.getvalue())
+        self.assertIn("Regenerate", err.getvalue())
+
+    def test_the_broker_flag_is_optional_and_parsed(self):
+        """None when absent (the inspector refuses brokered requests
+        legibly, at the request), a pair when given, a usage error when
+        malformed -- never a start with a pair the listener guessed at."""
+        mod = _mod()
+        self.assertIsNone(mod.broker_endpoint(None))
+        self.assertEqual(mod.broker_endpoint("127.129.0.7:8081"),
+                         ("127.129.0.7", 8081))
+        for bad in ("127.129.0.7", ":8081", "127.129.0.7:x"):
+            with self.assertRaises(argparse.ArgumentTypeError, msg=bad):
+                mod.broker_endpoint(bad)
 
 
 class TestEntrypointWiring(unittest.TestCase):
@@ -862,17 +898,16 @@ class TestEntrypointWiring(unittest.TestCase):
                    return_value=Policy(tls="splice", hosts=())), \
                 patch(mod, "build_minter", return_value=None), \
                 patch(mod, "inherited_listening_sockets", return_value=[]), \
-                patch(mod, "inspect_status_path",
-                      return_value=os.path.join(d, "status.json")), \
-                patch(mod, "inspect_record_path",
-                      return_value=os.path.join(d, "requests.log")), \
                 patch(mod, "Listener", Capture), \
                 patch(egress_record.RequestLog, "reopen", autospec=True) as reopen, \
                 patch(egress_record.RequestLog, "close", autospec=True) as close, \
                 contextlib.redirect_stdout(io.StringIO()):
             poker = threading.Thread(target=poke)
             poker.start()
-            rc = mod.main(["x", "wl"])
+            rc = mod.main(["x", "--name", "wl", "--policy", "/unread",
+                           "--state-dir", d,
+                           "--status", os.path.join(d, "status.json"),
+                           "--record", os.path.join(d, "requests.log")])
             poker.join()
         self.assertEqual(rc, 0)
         record = seen["listener"].inspection.record

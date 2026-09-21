@@ -334,7 +334,7 @@ class TestTheUnitCarriesTheDirectory(unittest.TestCase):
                    "network": {"egress": "filtered",
                                "hosts": ["example.com"]}},
         }
-        return gen.generate_inspect_service(config, "_wl-recdemo")
+        return gen.generate_inspect_service(config, "_wl-recdemo", 10004)
 
     def test_it_names_the_workloads_own_directory(self):
         self.assertIn(f"LogsDirectory={inspect_logs_directory('recdemo')}",

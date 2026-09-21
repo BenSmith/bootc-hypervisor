@@ -24,7 +24,10 @@ Installed to /usr/libexec/workloadctl/gen_egress.py.
 from workload_lib import workload_state_dir, dq, uq
 from run_files import GENERATED_BY
 from egress_plane import PLANES
-from egress_policy import inspect_logs_directory
+from egress_policy import (
+    inspect_logs_directory, inspect_policy_path, inspect_record_path,
+    inspect_status_path,
+)
 from egress_ca import denial_dir, leaf_dir
 from nft_elements import inspect_cgroup_command, inspect_cgroup_filter_command
 from broker_config import (
@@ -33,7 +36,10 @@ from broker_config import (
 )
 from config_parser import SOCKET_DIR
 from nft_constants import SIDECAR_SLICE
-from workload_addr import INSPECT_LISTENER_BIN, inspect_address
+from workload_addr import (
+    BROKER_INSTANCE_PORT, INSPECT_LISTENER_BIN, broker_listen_address,
+    inspect_address,
+)
 from unit_file import Unit
 
 
@@ -219,14 +225,66 @@ def harden_sidecar(svc, name: str, *, families: str, tasks_max: int,
     svc.set("MemoryMax", memory_max)
 
 
-def generate_inspect_service(config, user_name: str) -> str:
+def inspect_listener_command(name: str, uid: int) -> list:
+    """The listener's argv: the binary and the five values it is handed.
+
+    THIS IS WHERE THE INSPECTOR AND WORKLOADCTL MEET, and it is the only
+    place. The inspector (lib/inspect_listener.py and its closure, the
+    entrypoint included) knows nothing about workloads -- not where one
+    keeps its policy, its state, its counters or its record, and not what a
+    uid becomes. Each of those is a fact about how workloadctl lays out a
+    host, computed HERE from the name and uid the generator already holds,
+    and written into ExecStart= as a flag. The entrypoint parses; it derives
+    nothing. tests/test_inspector_closure.py asserts both halves: that the
+    entrypoint's closure reaches no workload-side module, and that this
+    command names every one of the five.
+
+    It used to be `workload-inspect-listener <name>`, with the entrypoint
+    importing egress_policy, workload_lib and workload_addr to compute the
+    rest for itself -- a launcher. The generator already imported all three
+    for other lines of this unit, so moving the derivation cost nothing
+    here and removed the last workload-side import from the inspector's
+    side of the line. A third launcher on a third substrate now writes a
+    unit, not a program.
+
+    The broker pair is computed from the uid with the same function the
+    broker's own config is rendered from (broker_config, at every start of
+    the broker unit), so the address in this unit and the address in
+    broker.toml cannot drift: no registry, no allocation step. Always
+    emitted, even for a policy with no brokered host, because the policy is
+    read at the listener's start and this unit is written before it exists;
+    a pair that goes unused costs nothing, and a pair that is missing when a
+    policy edit adds a `credential` costs a regenerate the operator was not
+    told about.
+
+    The name rides along as a LABEL, not a lookup key: the CA subject and
+    the log lines carry it. Every VALUE goes through dq (the systemd-Exec
+    literal-token helper) on the ExecStart= line, so a name or path carrying
+    a space stays one token; the binary and the flags are written bare, as
+    every other Exec= line in these units writes its binary and verbs.
+    """
+    return [
+        INSPECT_LISTENER_BIN,
+        "--name", name,
+        "--policy", inspect_policy_path(name),
+        "--state-dir", str(workload_state_dir(name)),
+        "--status", inspect_status_path(name),
+        "--record", str(inspect_record_path(name)),
+        "--broker", f"{broker_listen_address(uid)}:{BROKER_INSTANCE_PORT}",
+    ]
+
+
+def generate_inspect_service(config, user_name: str, uid: int) -> str:
     """Generate the service unit for one workload's transparent egress
     inspector.
 
     Socket-activated by the matching .socket: the kernel hands the listener its
     accepted connection when the guest first dials. It runs as _wl-<name> so
     the inspector's own traffic carries the workload's uid, which is what the
-    two cgroup exemptions below key on.
+    two cgroup exemptions below key on. The uid is passed in and never looked
+    up, for the reason generate_inspect_socket gives: on a first enable the
+    user does not exist yet. Here it is what the broker endpoint on the
+    ExecStart= line is derived from.
 
     The two cgroup elements are armed and removed HERE, not by the socket's
     helper: an element resolves to a cgroup id at add time and systemd makes a
@@ -296,13 +354,15 @@ def generate_inspect_service(config, user_name: str) -> str:
     ):
         svc.add("ExecStartPre",
                 "+" + " ".join(dq(a) for a in cmd))
-    # The workload name is an argument, not something the listener derives.
-    # It is socket-activated with four identically-named fds, so there is
-    # nothing on the socket to recover it from, and the alternative -- reading
-    # it back out of getpwuid(geteuid()) -- would make the listener's identity
-    # depend on the _wl- naming convention instead of on the unit it was
-    # generated for. It is what the listener resolves its policy path from.
-    svc.add("ExecStart", f"{INSPECT_LISTENER_BIN} {dq(name)}")
+    # Everything the listener needs to know about this workload, as flags:
+    # inspect_listener_command says why the derivation lives here and not in
+    # the listener. The name among them because the listener cannot recover
+    # it: it is socket-activated with four identically-named fds, and reading
+    # it back out of getpwuid(geteuid()) would make its identity depend on
+    # the _wl- naming convention instead of on the unit it was generated for.
+    binary, *args = inspect_listener_command(name, uid)
+    svc.add("ExecStart", " ".join(
+        [binary] + [a if a.startswith("--") else dq(a) for a in args]))
     # Remove both exemptions on stop, kill and failure. ExecStopPost so a
     # killed or failed inspector still withdraws them; `-+` tolerant because
     # the elements are legitimately absent when the start failed before

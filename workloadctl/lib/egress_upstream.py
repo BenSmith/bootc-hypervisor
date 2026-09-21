@@ -96,9 +96,10 @@ class Upstream:
         # started without one. Handed in rather than derived: the derivation
         # is "this uid's loopback address plus the instance port", which is a
         # fact about how workloadctl lays out a host, and the inspector has no
-        # business knowing it -- the launcher (workload-inspect-listener) does
-        # the derivation from its own uid and passes the pair. A None here
-        # makes a brokered dial a legible refusal rather than a guess.
+        # business knowing it -- the generator (gen_egress) does the
+        # derivation from the workload's uid and writes the pair into the
+        # unit's ExecStart=. A None here makes a brokered dial a legible
+        # refusal rather than a guess.
         self._broker_endpoint = (
             None if broker_endpoint is None else tuple(broker_endpoint))
 
@@ -142,8 +143,9 @@ class Upstream:
         Cleartext, and on loopback, which is not a downgrade: the leg the guest
         cares about is the broker's own, which is TLS to the provider and
         verified there. This hop never leaves the host, and the endpoint it
-        goes to was handed to this process by its launcher, derived from the
-        workload's uid -- so a second workload's inspector, handed its own,
+        goes to was handed to this process on its command line, derived by
+        the generator from the workload's uid -- so a second workload's
+        inspector, handed its own,
         reaches its own broker and finds nothing here. That derivation is the
         whole of ADR 007 decision 6: a single broker on 127.0.0.1 would be
         reachable by every workload on the box.

@@ -290,11 +290,11 @@ def vm_inspect_policy(net: dict) -> dict:
     listener (`entry.get("credential")`), so the cheaper side of the trade is
     the reader's.
 
-    NO ADDRESS is carried with it. The listener's launcher derives the
-    broker's endpoint from its own uid, which it already has, and hands it
-    to the listener; putting it here would make the document
-    non-deterministic w.r.t. the TOML and break the byte comparison and the
-    digest. `placeholder` and `env` are not carried either -- they are
+    NO ADDRESS is carried with it. The generator derives the broker's
+    endpoint from the workload's uid, which it already has, and writes it
+    into the listener's unit as a flag (gen_egress.inspect_listener_command);
+    putting it here would make the document non-deterministic w.r.t. the
+    TOML and break the byte comparison and the digest. `placeholder` and `env` are not carried either -- they are
     seed-time and broker-config facts, and the listener decides nothing by them.
 
     NO `reason` OF ANY KIND IS CARRIED -- not the per-host ones, not

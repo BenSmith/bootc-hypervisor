@@ -583,7 +583,7 @@ def generate_container_workload(config, user_name: str, uid: int) -> bool:
         inspect_dests = paths.get(("unit", "inspect"), [])
         if inspect_dests:
             inspect_dests[0].write_text(
-                generate_inspect_service(config, user_name))
+                generate_inspect_service(config, user_name, uid))
             log_msg("  Created egress inspector service")
 
     # The credential broker instance (P2-2), on the same reuse terms:

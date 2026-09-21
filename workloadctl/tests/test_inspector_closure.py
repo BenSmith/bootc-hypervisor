@@ -1,16 +1,23 @@
 #!/usr/bin/env python3
 """The inspector knows nothing about workloads: its import closure says so.
 
-The egress inspector (lib/inspect_listener.py and everything it imports) is
-started by workloadctl, on a host workloadctl laid out, from a document
-workloadctl rendered -- and none of that is the inspector's to know. It takes
-a policy document, a state directory and a broker endpoint, all as values,
-and its closure contains no module that reads a workload's config, no module
-that knows where a workload keeps its state, no module that turns a uid into
-an address, and no module that can speak to a guest. The entrypoint
-(libexec/workload-inspect-listener) is the one place those facts are
-derived, and it is a LAUNCHER: it imports the workloadctl side to compute
-the values and the inspector side to hand them over.
+The egress inspector (libexec/workload-inspect-listener, lib/inspect_listener.py
+and everything they import) is started by workloadctl, on a host workloadctl
+laid out, from a document workloadctl rendered -- and none of that is the
+inspector's to know. It takes a policy document, a state directory, a
+status file, a record file and a broker endpoint, all as flags on its
+command line, and its closure contains no module that reads a workload's
+config, no module that knows where a workload keeps its state, no module
+that turns a uid into an address, and no module that can speak to a guest.
+The GENERATOR (gen_egress.inspect_listener_command) is the one place those
+facts are derived: it imports the workloadctl side to compute the values
+and writes them into the unit's ExecStart=.
+
+The entrypoint was a LAUNCHER until the flags -- it took a workload name and
+imported egress_policy, workload_lib and workload_addr to compute the rest,
+so it was the one file importing both sides. This file then held the
+launcher's workload-side imports to an exact set. Now it holds them to
+none, and holds the generator to naming every value.
 
 WHY A CLOSURE AND NOT A LIST OF IMPORTS
 
@@ -37,8 +44,9 @@ from tests import REPO_ROOT
 LIB = Path(REPO_ROOT) / "lib"
 LAUNCHER = Path(REPO_ROOT) / "libexec" / "workload-inspect-listener"
 
-# The inspector's roots: the module the launcher hands values to, and the
-# reader that turns the document into the Policy it is handed.
+# The inspector's roots: the module the entrypoint hands values to, and the
+# reader that turns the document into the Policy it is handed. The
+# entrypoint itself is walked too (see _closure); it is not a lib module.
 INSPECTOR_ROOTS = ("inspect_listener", "inspect_policy")
 
 # Modules the inspector's closure must not contain. Each is named for what it
@@ -59,25 +67,30 @@ WORKLOAD_SIDE = frozenset({
     # Substrates and the machinery only a substrate has.
     "vm_defs", "vm_clock", "qmp", "substrate", "substrate_vm",
     "substrate_container", "podman",
-    # Arming and generation are the launcher's world, not the listener's.
+    # Arming and generation are the generator's world, not the listener's.
     "inspect_arm", "filter_arm", "nft", "nft_elements", "nft_constants",
     "gen_egress", "gen_vm", "gen_container",
 })
 
-# What the launcher may import from the workload side, exactly. Set equality
-# rather than a subset, so that a new derivation is a deliberate edit here
-# and a derivation that moved into the inspector (leaving this list short)
-# fails too.
-LAUNCHER_WORKLOAD_IMPORTS = frozenset({
-    "egress_policy",   # where the policy, status and record files are
-    "workload_lib",    # where the state directory is
-    "workload_addr",   # what the uid becomes, and the broker's port
+# The flags the generator hands the entrypoint, exactly: one per value the
+# inspector must be told and cannot derive. Set equality rather than a
+# subset, so that a new derivation is a deliberate edit here and a value
+# that stopped being handed over (because the inspector started deriving it
+# for itself) fails too.
+HANDED_FLAGS = frozenset({
+    "--name",       # a label: the CA subject and the log lines
+    "--policy",     # where the policy document is
+    "--state-dir",  # where the CA and the leaf caches are
+    "--status",     # where the counters go
+    "--record",     # where the per-request record goes
+    "--broker",     # what the uid became, and the broker's port
 })
-# NOT vm_clock, and it was: the launcher once handed the inspector a
-# guest-clock resync to run before every fresh mint. The clock keeper
-# (workload-<name>-clock.timer) owns that on every VM now, so the launcher
-# derives nothing about the guest and the inspector's closure holds no QMP
-# client. A vm_clock import reappearing in either is the seam coming back.
+# NOT a clock hook, and there was one: the launcher once handed the
+# inspector a guest-clock resync to run before every fresh mint. The clock
+# keeper (workload-<name>-clock.timer) owns that on every VM now, so nothing
+# about the guest is handed over and the inspector's closure holds no QMP
+# client. A vm_clock import reappearing anywhere below is the seam coming
+# back.
 
 
 def _lib_modules():
@@ -105,9 +118,13 @@ def _direct_imports(path, known):
     return found
 
 
-def _closure(roots, mods):
+def _closure(roots, mods, *, launcher=None):
+    """The lib modules reachable from `roots`, plus, when given, from the
+    entrypoint file -- which has no `.py` and so is not in `mods`."""
     seen = set()
     todo = list(roots)
+    if launcher is not None:
+        todo.extend(_direct_imports(launcher, set(mods)))
     while todo:
         name = todo.pop()
         if name in seen or name not in mods:
@@ -131,7 +148,7 @@ def _imports_tomllib(path):
 class TestTheScannerSeesTheTree(unittest.TestCase):
     """Guards the guard: every assertion below is about what the walk FOUND."""
 
-    def test_the_roots_and_the_launcher_exist(self):
+    def test_the_roots_and_the_entrypoint_exist(self):
         mods = _lib_modules()
         for root in INSPECTOR_ROOTS:
             self.assertIn(root, mods)
@@ -162,53 +179,89 @@ class TestTheScannerSeesTheTree(unittest.TestCase):
 class TestTheInspectorKnowsNothingAboutWorkloads(unittest.TestCase):
 
     def test_the_closure_contains_no_workload_side_module(self):
-        closure = _closure(INSPECTOR_ROOTS, _lib_modules())
+        closure = _closure(INSPECTOR_ROOTS, _lib_modules(), launcher=LAUNCHER)
         crossed = sorted(closure & WORKLOAD_SIDE)
         self.assertEqual(
             crossed, [],
             "the inspector's import closure reaches the workload side; the "
-            "value it needs from there belongs in the launcher, handed in as "
-            f"an argument: {crossed}")
+            "value it needs from there belongs in the generator, handed in "
+            f"as a flag: {crossed}")
 
     def test_the_closure_reads_no_toml(self):
         """The rule's plainest reading, checked independently of the table:
         nothing the inspector imports parses TOML. A module that did would
         be one the table should have named."""
         mods = _lib_modules()
-        closure = _closure(INSPECTOR_ROOTS, mods)
+        closure = _closure(INSPECTOR_ROOTS, mods, launcher=LAUNCHER)
         readers = sorted(m for m in closure if _imports_tomllib(mods[m]))
         self.assertEqual(readers, [], readers)
+        self.assertFalse(_imports_tomllib(LAUNCHER))
 
     def test_the_inspector_derives_no_path_address_or_state_dir(self):
-        """The three values the launcher hands over, asserted by absence of
-        the functions that would derive them. A closure test would catch the
-        import; this catches a copy."""
+        """The values the generator hands over, asserted by absence of the
+        functions that would derive them -- in the closure and in the
+        entrypoint. A closure test would catch the import; this catches a
+        copy."""
         mods = _lib_modules()
-        closure = _closure(INSPECTOR_ROOTS, mods)
+        closure = _closure(INSPECTOR_ROOTS, mods, launcher=LAUNCHER)
+        sources = {m: mods[m].read_text() for m in closure}
+        sources["workload-inspect-listener"] = LAUNCHER.read_text()
+        # Call-shaped, so that a docstring pointing a reader at where the
+        # path IS defined (egress_record's does) is not a finding; a call is.
         for name in ("broker_listen_address", "workload_state_dir",
                      "workload_root_dir", "inspect_policy_path",
+                     "inspect_status_path", "inspect_record_path",
                      "resync_guest_clock_if_skewed"):
-            holders = sorted(m for m in closure
-                             if name in mods[m].read_text())
-            self.assertEqual(holders, [], f"{name} named in {holders}")
+            holders = sorted(m for m, text in sources.items()
+                             if f"{name}(" in text)
+            self.assertEqual(holders, [], f"{name} called in {holders}")
 
 
-class TestTheLauncherIsTheOnlyPlaceTheTwoMeet(unittest.TestCase):
+class TestTheGeneratorIsTheOnlyPlaceTheTwoMeet(unittest.TestCase):
+    """The entrypoint imports nothing from the workload side, and the
+    generator's ExecStart= names every value it needs."""
 
-    def test_the_launcher_imports_exactly_the_derivations(self):
+    def test_the_entrypoint_imports_nothing_from_the_workload_side(self):
+        """This set was {egress_policy, workload_lib, workload_addr} while
+        the entrypoint was a launcher. A module reappearing here is the
+        derivation coming back into the inspector's process."""
         mods = _lib_modules()
         direct = _direct_imports(LAUNCHER, set(mods))
-        self.assertEqual(direct & WORKLOAD_SIDE, LAUNCHER_WORKLOAD_IMPORTS)
+        self.assertEqual(sorted(direct & WORKLOAD_SIDE), [])
 
-    def test_the_launcher_hands_every_value_across(self):
-        """Each derivation the launcher makes has to reach the inspector as
-        an argument, or the launcher derived something the inspector then
-        re-derived for itself. Read the source rather than run it: main()
-        needs inherited sockets."""
+    def test_the_generator_hands_every_value_across(self):
+        """Each flag the entrypoint requires appears on the rendered
+        ExecStart=, with the value the workload side derives for it -- or the
+        generator dropped one and the listener fails its start on the
+        guest's first dial, long after the generator ran."""
+        from egress_policy import (
+            inspect_policy_path, inspect_record_path, inspect_status_path,
+        )
+        from gen_egress import inspect_listener_command
+        from workload_addr import BROKER_INSTANCE_PORT, broker_listen_address
+        from workload_lib import workload_state_dir
+        cmd = inspect_listener_command("web", 10004)
+        flags = {cmd[i]: cmd[i + 1] for i in range(1, len(cmd), 2)}
+        self.assertEqual(set(flags), HANDED_FLAGS)
+        self.assertEqual(flags, {
+            "--name": "web",
+            "--policy": inspect_policy_path("web"),
+            "--state-dir": str(workload_state_dir("web")),
+            "--status": inspect_status_path("web"),
+            "--record": str(inspect_record_path("web")),
+            "--broker": f"{broker_listen_address(10004)}:{BROKER_INSTANCE_PORT}",
+        })
+
+    def test_the_entrypoint_requires_every_handed_flag(self):
+        """The other direction: a flag the generator emits that the
+        entrypoint does not take is an argparse error at start, and a flag
+        the entrypoint takes that the generator does not emit is a required
+        argument missing -- both fail the start, but only on the guest's
+        first dial. Read from the source: the parser is built inside a
+        function so the module can be loaded without running it."""
         text = LAUNCHER.read_text()
-        for handed in ("workload_state_dir(name)",
-                       "broker_endpoint=", "status_path=", "record_path="):
-            self.assertIn(handed, text, handed)
+        for flag in HANDED_FLAGS:
+            self.assertIn(f'"{flag}"', text, flag)
 
 
 if __name__ == "__main__":

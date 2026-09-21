@@ -5,17 +5,37 @@ egress inspector. The inspector itself is lib/inspect_listener.py; this
 process reads the policy, builds the minter, recovers the inherited sockets
 and runs the accept loop until SIGTERM.
 
-WHAT THIS FILE IS, AND WHAT THE INSPECTOR IS NOT
+WHAT THIS FILE IS, AND WHAT IT IS NOT
 
-This is workloadctl's LAUNCHER for the inspector, and it is the only place
-the two meet. The inspector (inspect_listener and everything it imports)
-takes a policy document, a state directory and a broker endpoint, and knows
-nothing about workloads: not the config grammar, not where a workload keeps
-its state, not how a uid becomes a loopback address, not what substrate the
-guest on the other end is. Every one of those is derived HERE, from the
-workload name, and handed across as a value. tests/test_inspector_closure.py
-holds that line, so the inspector stays startable by something that is not
-workloadctl, on a host not laid out the way workloadctl lays one out.
+This is the inspector's entrypoint, and it is NOT workloadctl's launcher for
+it -- it was, and the difference is every flag below. The inspector
+(inspect_listener and everything it imports, this file included) takes a
+policy document, a state directory, a status file, a record file and a
+broker endpoint, and knows nothing about workloads: not the config grammar,
+not where a workload keeps its state, not how a uid becomes a loopback
+address, not what substrate the guest on the other end is. Every one of
+those is a fact about how workloadctl lays out a host, and every one is
+computed by the GENERATOR (lib/gen_egress.py, generate_inspect_service) and
+written into the unit's ExecStart= as an argument. This file derives
+nothing; it parses. tests/test_inspector_closure.py holds that line, so the
+inspector stays startable by something that is not workloadctl, on a host
+not laid out the way workloadctl lays one out, by writing a unit that
+answers the same five questions differently.
+
+Until the flags, this file imported egress_policy, workload_lib and
+workload_addr to turn a workload name into those values itself, which made
+it the one file that imported both sides. That was a launcher: a thin
+program whose whole job was the derivation. Moving the derivation into the
+generator -- which already knew all five values, and already imported every
+module needed to compute them -- left nothing here that was not the
+inspector's own, so there is no launcher any more, and the entrypoint's
+closure is the inspector's closure.
+
+The workload name is still taken, as a LABEL: the CA subject and the log
+lines carry it. It is a flag rather than argv[1] so that a unit written by
+hand cannot pass a name and nothing else and get a listener that starts,
+serves, and fails every guest handshake looking for a policy it was never
+told the path of.
 
 The guest's clock is NOT the inspector's concern, and it once was: a
 per-mint "remedy" the launcher handed in dialled the QEMU guest agent on
@@ -26,21 +46,19 @@ either validates or does not.
 
 WHERE THE POLICY COMES FROM
 
-/run/workload-vm/<name>/inspect.json, written by `workload-vm-inspect up` (the
-socket unit's ExecStartPre) and read HERE once, at start. The workload name is
-argv[1]: this process is socket-activated with four identical fd names, so
-there is nothing on the socket to derive it from, and deriving it from getpwuid
-would make the listener's identity depend on a naming convention rather than on
-what the unit was generated for. A policy that cannot be read is a failed
-start, never an empty allowlist — an empty allowlist is a listener that refuses
-everything while reporting itself healthy.
+Wherever --policy says. Under workloadctl that is
+/run/workload-vm/<name>/inspect.json, written by `workload-vm-inspect up`
+(the socket unit's ExecStartPre) and read HERE once, at start. A policy that
+cannot be read is a failed start, never an empty allowlist -- an empty
+allowlist is a listener that refuses everything while reporting itself
+healthy.
 
 WHY IT NEVER BINDS
 
 It is socket-activated: the .socket unit binds the four listeners and
 hands them in as inherited fds. This process recovers them from LISTEN_PID /
 LISTEN_FDS and accepts on them; it opens no socket of its own. That is not
-defensiveness — socket activation is what moves the bind out of the workload
+defensiveness -- socket activation is what moves the bind out of the workload
 SELinux domain and into an inherited fd. A fallback that bound the ports
 itself when the activation environment was missing would silently undo that:
 it would run as the workload user, in the workload domain, and bind the very
@@ -48,22 +66,18 @@ listener a guest is redirected into. So a missing environment is a loud
 failure, never a second path.
 """
 
+import argparse
 import os
 import signal
 import sys
 
 sys.dont_write_bytecode = True
 
-from egress_policy import (
-    inspect_policy_path, inspect_record_path, inspect_status_path,
-)
 from inspect_policy import load_policy
 from inspect_listener import Listener, build_minter
 from sd_listen import NotSocketActivated
 from sd_listen import (
     inherited_listening_sockets as sd_inherited_listening_sockets)
-from workload_addr import BROKER_INSTANCE_PORT, broker_listen_address
-from workload_lib import workload_state_dir
 
 
 def inherited_listening_sockets():
@@ -79,30 +93,90 @@ def inherited_listening_sockets():
                  "inherited fd and back into the workload SELinux domain"))
 
 
-def broker_endpoint():
-    """(address, port) of this workload's broker instance, or None.
+def broker_endpoint(value):
+    """The --broker value as an (address, port) pair, or None when absent.
 
-    Derived from this process's own uid, which is the workload's: the
-    inspector and the broker's unit reach the same address from the same uid,
-    so the two halves cannot drift -- no registry, no allocation step. A uid
-    outside the workload range (a listener started by hand, outside its
-    unit) yields None rather than an error, and the inspector turns None into
-    a legible refusal on the first brokered request instead of failing a
-    start that may have no brokered host at all.
+    Handed in, not derived. It was derived, from this process's own uid --
+    which is the workload's, and which the broker's unit turns into the same
+    address -- and the reasoning still holds one level up: the generator
+    computes both halves from the same uid with the same function, so the
+    pair in this unit's ExecStart= and the pair in broker.toml cannot drift.
+    What moved is only WHERE the derivation runs, from the inspector's
+    process to the generator's, which is the side that is allowed to know
+    what a uid becomes.
+
+    None is a legitimate value, not an error: a unit written for a policy
+    with no brokered host may leave the flag off, and the inspector turns None
+    into a legible refusal on the first brokered request rather than failing
+    a start that may never see one.
     """
-    try:
-        return (broker_listen_address(os.getuid()), BROKER_INSTANCE_PORT)
-    except ValueError:
+    if value is None:
         return None
+    address, sep, port = value.rpartition(":")
+    if not sep or not address:
+        raise argparse.ArgumentTypeError(
+            f"{value!r}: expected ADDRESS:PORT")
+    try:
+        return (address, int(port))
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            f"{value!r}: port is not a number") from None
+
+
+def parse_args(argv):
+    """The five values the unit hands over, plus the label.
+
+    Every path is required and none has a default, for the reason
+    load_policy gives about the policy in particular: a default is a guess
+    about how the host is laid out, and this program is the one that is not
+    allowed to guess. A unit that leaves one off fails at start with a usage
+    line naming the flag, not on the guest's first dial with an ENOENT.
+    """
+    parser = argparse.ArgumentParser(
+        prog=os.path.basename(argv[0]),
+        description="socket-activated transparent egress inspector")
+    parser.add_argument("--name", required=True,
+                        help="the workload this listener serves; a label, "
+                             "carried on the CA subject and the log lines")
+    parser.add_argument("--policy", required=True,
+                        help="the policy document (JSON), read once at start")
+    parser.add_argument("--state-dir", required=True,
+                        help="where the egress CA and the leaf caches live")
+    parser.add_argument("--status", required=True,
+                        help="where the counters are written")
+    parser.add_argument("--record", required=True,
+                        help="where the per-request record is appended")
+    parser.add_argument("--broker", type=broker_endpoint, default=None,
+                        metavar="ADDRESS:PORT",
+                        help="the credential broker instance brokered "
+                             "requests are sent to; absent means every "
+                             "brokered request is refused")
+    return parser.parse_args(argv[1:])
 
 
 def main(argv=None):
     argv = sys.argv if argv is None else argv
-    if len(argv) != 2:
-        print(f"usage: {argv[0]} <workload-name>", file=sys.stderr)
+    if len(argv) == 2 and not argv[1].startswith("-"):
+        # The shape the unit had before the flags: a bare workload name, with
+        # the entrypoint deriving the rest. argparse would report it as five
+        # missing flags, which is true and points nowhere. This is a unit the
+        # previous build generated and this build did not regenerate; the
+        # package's %post already says so at upgrade, and the journal line an
+        # operator lands on from a failed socket activation should say it too.
+        print(f"error: {argv[0]} was given a bare name ({argv[1]!r}) and "
+              f"takes flags; this unit was generated by a build that derived "
+              f"the rest from the name. Regenerate the workload's units.",
+              file=sys.stderr)
         return 2
-    name = argv[1]
-    policy_path = inspect_policy_path(name)
+    try:
+        args = parse_args(argv)
+    except SystemExit as exc:
+        # argparse's own usage line is already on stderr; what is ours is the
+        # exit status, which is 2 for a bad invocation as it always was and
+        # 0 for --help.
+        return int(exc.code or 0)
+    name = args.name
+    policy_path = args.policy
     try:
         policy = load_policy(policy_path)
     except (OSError, ValueError) as exc:
@@ -112,7 +186,7 @@ def main(argv=None):
         print(f"error: could not read {policy_path}: {exc}", file=sys.stderr)
         return 1
     try:
-        minter = build_minter(name, workload_state_dir(name), policy)
+        minter = build_minter(name, args.state_dir, policy)
     except FileNotFoundError as exc:
         # Before the sockets, like the policy read, and for the same reason: a
         # listener that accepted connections it could mint no leaf for would
@@ -126,9 +200,9 @@ def main(argv=None):
         print(f"error: {exc}", file=sys.stderr)
         return 1
     listener = Listener(sockets, policy=policy, minter=minter,
-                        status_path=inspect_status_path(name),
-                        record_path=inspect_record_path(name),
-                        broker_endpoint=broker_endpoint())
+                        status_path=args.status,
+                        record_path=args.record,
+                        broker_endpoint=args.broker)
     print(f"policy loaded from {policy_path}: {policy.summary}", flush=True)
     signal.signal(signal.SIGTERM, lambda *_args: listener.stop())
     # Rotation is logrotate's (see /etc/logrotate.d/workloadctl-inspect), and

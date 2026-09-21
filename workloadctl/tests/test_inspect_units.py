@@ -29,7 +29,10 @@ from nft_constants import NFT_SET_INSPECT_CG, NFT_SET_EGRESS_CG
 from inspect_listener import MAX_CONNECTIONS
 from nft_constants import SIDECAR_SLICE
 from vm_defs import EGRESS_DEFAULT
-from workload_addr import INSPECT_LISTENER_BIN, inspect_address
+from workload_addr import (
+    BROKER_INSTANCE_PORT, INSPECT_LISTENER_BIN, broker_listen_address,
+    inspect_address,
+)
 from workload_lib import dq
 
 UID = 10004  # worked example, matching test_inspect.py
@@ -114,7 +117,7 @@ class TestGeneratedSocket(unittest.TestCase):
     def test_the_service_carrying_the_prestart_is_rejected(self):
         """The whole point of §7.7: the prestart on the service is too late by
         one unit. It belongs on the socket, which is what binds first."""
-        service = self.gen.generate_inspect_service(_config({}), "_wl-web")
+        service = self.gen.generate_inspect_service(_config({}), "_wl-web", UID)
         self.assertNotIn("workload-vm-inspect up", service)
         self.assertNotIn("ExecStartPre=+/usr/libexec/workloadctl/"
                          "workload-vm-inspect", service)
@@ -223,7 +226,7 @@ class TestGeneratedService(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.gen = importlib.import_module("gen_egress")
-        cls.unit = cls.gen.generate_inspect_service(_config({}), "_wl-web")
+        cls.unit = cls.gen.generate_inspect_service(_config({}), "_wl-web", UID)
 
     def test_runs_as_the_workload_user(self):
         self.assertIn("User=_wl-web", self.unit)
@@ -292,17 +295,25 @@ class TestGeneratedService(unittest.TestCase):
     def test_execstart_is_the_listener_binary(self):
         self.assertIn(f"ExecStart={INSPECT_LISTENER_BIN}", self.unit)
 
-    def test_execstart_names_the_workload(self):
-        """The listener resolves its policy path from argv[1].
-
-        Socket activation gives it four identically-named fds and no way to
-        recover which workload it serves, so an ExecStart that dropped the
-        argument produces a listener that cannot find inspect.json -- which
-        fails its start, but only on the guest's first dial, long after the
-        generator ran.
+    def test_execstart_hands_the_listener_every_value(self):
+        """The listener derives nothing: its policy path, state directory,
+        status and record files and broker endpoint are all flags on this
+        line, computed here from the name and uid (inspect_listener_command
+        says why). Socket activation gives it four identically-named fds and
+        no way to recover any of them, so an ExecStart that dropped one
+        produces a listener that fails its start -- but only on the guest's
+        first dial, long after the generator ran. The exact set is
+        tests/test_inspector_closure.py's; this asserts the rendering, with
+        every value dq-quoted and the flags bare.
         """
-        self.assertIn(f'ExecStart={INSPECT_LISTENER_BIN} {dq("web")}',
-                      self.unit)
+        binary, *args = self.gen.inspect_listener_command("web", UID)
+        self.assertEqual(binary, INSPECT_LISTENER_BIN)
+        expected = " ".join(
+            [binary] + [a if a.startswith("--") else dq(a) for a in args])
+        self.assertIn(f"ExecStart={expected}\n", self.unit)
+        self.assertIn(f'--name {dq("web")}', expected)
+        self.assertIn(f'--broker {dq(f"{broker_listen_address(UID)}:{BROKER_INSTANCE_PORT}")}',
+                      expected)
 
     def test_partof_the_vm(self):
         """PartOf= is what makes the service actually stop with the VM, which
@@ -338,7 +349,7 @@ class TestSidecarHardening(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.inspect = importlib.import_module("gen_egress") \
-            .generate_inspect_service(_config({}), "_wl-web")
+            .generate_inspect_service(_config({}), "_wl-web", UID)
         cls.resolve = importlib.import_module("gen_vm") \
             .generate_vm_resolve_service(_config({}), "_wl-web")
 

@@ -1052,7 +1052,7 @@ def generate_vm_workload(config, user_name: str, uid: int):
             log_msg("  Created egress inspector socket")
         inspect_dests = paths.get(("unit", "inspect"), [])
         if inspect_dests:
-            inspect_dests[0].write_text(generate_inspect_service(config, user_name))
+            inspect_dests[0].write_text(generate_inspect_service(config, user_name, uid))
             log_msg("  Created egress inspector service")
 
     # The credential broker instance, on the inspector's terms plus at least one

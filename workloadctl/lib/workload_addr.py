@@ -355,9 +355,10 @@ def broker_listen_address(uid: int) -> str:
 # Beside the address rather than in broker_config, where it started, because
 # the two are the endpoint and have the same three readers: the render that
 # writes them into broker.toml, the arming that exempts them in nft, and the
-# launcher that hands them to the inspector. The inspector itself is given the
-# pair and derives neither -- it is on the far side of the line that keeps
-# the config grammar out of its closure, and broker_config is that grammar.
+# generator that writes them into the inspector's unit. The inspector itself
+# is given the pair on its command line and derives neither -- it is on the
+# far side of the line that keeps the config grammar out of its closure, and
+# broker_config is that grammar.
 BROKER_INSTANCE_PORT = 8081
 
 

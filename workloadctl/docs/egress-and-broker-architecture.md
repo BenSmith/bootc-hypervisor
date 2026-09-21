@@ -225,9 +225,10 @@ Two consequences worth holding onto:
   otherwise dial another workload's inspector and pollute its records.
 - **Two constants must agree** across three readers: the broker's
   `listen_address`/`listen_port`, what the generator renders into `broker.toml`,
-  and what the inspector's launcher hands it (`broker_listen_address` and
-  `BROKER_INSTANCE_PORT`, both in `lib/workload_addr.py`). The inspector is
-  given the pair and derives neither. A mismatch presents exactly as the
+  and what the generator writes onto the inspector's `ExecStart=`
+  (`broker_listen_address` and `BROKER_INSTANCE_PORT`, both in
+  `lib/workload_addr.py`). The inspector is given the pair as a flag and
+  derives neither. A mismatch presents exactly as the
   broker being down — connection refused, no log line anywhere.
 
 ---
@@ -281,19 +282,19 @@ Both substrates read the *same* policy document shape and run the same listener,
 which is why the brokered path needed one implementation and two arming scripts.
 
 The listener holds that property by construction, not by convention: the
-inspector (`lib/inspect_listener.py` and its closure) knows nothing about
-either substrate, or about workloads at all. It is handed a policy document,
-a state directory, a broker `(address, port)` and an optional clock hook as
-values, and `tests/test_inspector_closure.py` asserts its closure contains no
-config grammar, no `workload_lib`, no `vm_defs`, no `qmp` and nothing that
-turns a uid into an address. `libexec/workload-inspect-listener` is the
-launcher — the one file that imports both sides — and every one of those
-values is derived there from the workload name. The document's vocabulary
-(the hostname rule, the TLS modes, a policy entry and how entries govern, the
+inspector (`libexec/workload-inspect-listener`, `lib/inspect_listener.py` and
+their closure) knows nothing about either substrate, or about workloads at
+all. It is handed a policy document, a state directory, a status file, a
+record file and a broker `(address, port)` as flags on its command line, and
+`tests/test_inspector_closure.py` asserts its closure contains no config
+grammar, no `workload_lib`, no `vm_defs`, no `qmp` and nothing that turns a
+uid into an address. The generator (`gen_egress.inspect_listener_command`) is
+the one place those values are derived from the workload name and uid, and
+it writes them onto the unit's `ExecStart=`. The document's vocabulary (the
+hostname rule, the TLS modes, a policy entry and how entries govern, the
 digest keys) is `lib/inspect_document.py`, imported by the renderer and the
-reader alike, so a third launcher on a third substrate would write the same
-document and start the same binary with different answers to the same four
-questions.
+reader alike, so a third substrate would write the same document and a unit
+starting the same binary with different answers to the same five questions.
 
 ---
 
