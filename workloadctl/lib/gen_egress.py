@@ -30,10 +30,7 @@ from egress_policy import (
 )
 from egress_ca import denial_dir, leaf_dir
 from nft_elements import inspect_cgroup_command, inspect_cgroup_filter_command
-from broker_config import (
-    BROKER_BIN, broker_config_path, broker_credential,
-    broker_runtime_directory, host_resolver_addresses,
-)
+from broker_config import broker_credential, host_resolver_addresses
 from config_parser import SOCKET_DIR
 from nft_constants import SIDECAR_SLICE
 from workload_addr import (
@@ -248,9 +245,9 @@ def inspect_listener_command(name: str, uid: int) -> list:
     unit, not a program.
 
     The broker pair is computed from the uid with the same function the
-    broker's own config is rendered from (broker_config, at every start of
-    the broker unit), so the address in this unit and the address in
-    broker.toml cannot drift: no registry, no allocation step. Always
+    broker's own `--listen` flag is (broker_config.broker_command, when its
+    unit is written), so the address in this unit and the address the broker
+    binds cannot drift: no registry, no allocation step. Always
     emitted, even for a policy with no brokered host, because the policy is
     read at the listener's start and this unit is written before it exists;
     a pair that goes unused costs nothing, and a pair that is missing when a
@@ -434,16 +431,17 @@ def generate_inspect_service(config, user_name: str, uid: int) -> str:
 
 
 def generate_broker_service(config, uid: int, *, before: str,
-                            hosts, upstream) -> str:
+                            hosts, upstream, command) -> str:
     """Generate the credential broker instance for one workload.
 
-    Substrate-neutral through three keyword parameters, on the same terms as
+    Substrate-neutral through four keyword parameters, on the same terms as
     generate_inspect_socket/_service (D6): nothing in the unit below is
     VM-specific, so each substrate is a call site rather than a generator of
     its own. `before` is the unit this one must be ordered ahead of, `hosts`
     the (host, credential) pairs, `upstream` the addresses those hosts
-    resolve to. None has a default, for the reason generate_inspect_socket's
-    `arming_helper` has none.
+    resolve to, `command` the broker's argv (broker_config.vm_broker_command
+    or container_broker_command). None has a default, for the reason
+    generate_inspect_socket's `arming_helper` has none.
 
     P2-3: `before` exists because the VM default is WRONG for a container in
     pod/bridge mode. There the umbrella carries `After=` its member services,
@@ -504,22 +502,28 @@ def generate_broker_service(config, uid: int, *, before: str,
 
     svc = unit.section("Service")
     svc.set("Type", "exec")
-    # The config is written into the unit's own runtime directory, by the unit,
-    # at every start (D2). systemd creates the leaf as the DynamicUser at 0700
-    # and removes it on stop, so the file is readable by the broker, unreadable
-    # by the workload uid, and gone when the broker is -- no chown of ours, and
-    # no way to serve the previous boot's credential set.
-    svc.set("RuntimeDirectory", broker_runtime_directory(name))
-    svc.set("RuntimeDirectoryMode", "0700")
-    # NOT `+` prefixed. This runs unprivileged, as the instance's own dynamic
-    # user, which is what makes the file it writes owned by that user; it needs
-    # no privilege, because everything it reads (the workload TOML, the passwd
-    # db) is world-readable and the only thing it writes is $RUNTIME_DIRECTORY.
-    # And not `-` either: a broker started against a stale or missing config is
-    # a broker serving the wrong credentials or none.
-    svc.add("ExecStartPre",
-            f"/usr/libexec/workloadctl/workload-broker-config config {dq(name)}")
-    svc.add("ExecStart", f"{BROKER_BIN} {dq(str(broker_config_path(name)))}")
+    # Everything the broker needs to know about this workload, as flags, the
+    # way the inspector's ExecStart= carries the inspector's: the address it
+    # binds and the uid it serves (both from the uid, computed here and not
+    # by the broker), one --host per credentialed host naming the credential
+    # id the LoadCredentialEncrypted= line below loads it under, and the
+    # per-credential placeholder and auth convention. No ExecStartPre and no
+    # RuntimeDirectory=: there was a broker.toml here, rendered at every
+    # start from the same TOML this unit was rendered from, and a document
+    # that is a pure function of the unit's inputs is the unit's to carry.
+    # No material is on the line -- a credential id names a file under
+    # $CREDENTIALS_DIRECTORY, and the line holds nothing the workload does
+    # not already hold (its hosts, its placeholders, its own uid) or that
+    # this world-readable unit does not already name (the credential ids).
+    #
+    # Each value is quoted with dq (the systemd-Exec literal-token helper):
+    # a placeholder is operator prose and may carry a quote, a `$` or a `%`,
+    # and this is the second unit to put one on an Exec line (the container
+    # `--env` was first). The binary and the flags are written bare, as
+    # every other Exec= line in these units writes its binary and verbs.
+    binary, *args = command
+    svc.add("ExecStart", " ".join(
+        [binary] + [a if a.startswith("--") else dq(a) for a in args]))
     svc.blank()
     # One line per DECLARED credential, not per credential-backed host: two
     # hosts may share one, and loading it twice under one id is an error.

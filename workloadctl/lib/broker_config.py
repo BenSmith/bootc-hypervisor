@@ -1,15 +1,26 @@
 #!/usr/bin/env python3
-"""The broker instance's document, broker.toml: rendered and written.
+"""The broker instance's command line, and the predicates that decide it.
 
-One per declaring workload, per ADR 007. This is the generator side: the
-config file, a unit's worth of arguments, and write_instance_config, the
-ExecStartPre that renders the file into the instance's runtime directory.
-What `libexec/agent-broker` makes of that file at startup -- the key
-vocabulary, the refusals, and the (workload, Host) profile table -- is
-broker_profiles. A writer and a reader that each spell the keys drift, and
-a key rendered at one level and accepted at another is a broker that
-refuses to start, so tests/test_broker.py pins the render against
-broker_profiles' key sets.
+One per declaring workload, per ADR 007. This is the generator side: which
+workloads get an instance, what it is told, and the argv the unit's
+ExecStart= carries. What `libexec/agent-broker` makes of those flags at
+startup -- the refusals and the per-Host profile table -- is
+broker_profiles. A writer and a reader that each spell the flags drift, and
+a flag emitted here and not taken there is a broker that refuses to start,
+so tests/test_broker_closure.py pins the command against the entrypoint's
+parser.
+
+IT WAS A DOCUMENT. broker_command replaces render_broker_config, which
+rendered a broker.toml that write_instance_config -- the unit's ExecStartPre,
+as its DynamicUser, into its RuntimeDirectory -- wrote at every start. Every
+value in that file was a pure function of the workload TOML and the uid,
+which is exactly what this module holds when the unit is generated, so the
+file was a second rendering of facts the ExecStart= line carries itself.
+What it cost: a TOML reader in the broker, a key vocabulary at each level
+for the two to agree on, a writer, a helper binary, an ExecStartPre and a
+RuntimeDirectory=. What it bought, it did not: "never serving a previous
+boot's credential set" is LoadCredentialEncrypted='s property, and the
+file held no material.
 
 `VmCredential` and its parse live here rather than with the rest of
 `[vm.network]` because every field on a credential decides something about the
@@ -20,8 +31,6 @@ Installed to /usr/libexec/workloadctl/broker_config.py.
 """
 
 import ipaddress
-import json
-import os
 import socket
 from pathlib import Path
 from typing import NamedTuple
@@ -32,7 +41,6 @@ from container_network_config import (
     container_uses_inspect,
 )
 from credential_entries import parse_credential_entries
-from broker_profiles import BrokerConfigError
 from workload_addr import (IP_BIN, ADVERTISED_IFACE, BROKER_INSTANCE_PORT,
                            broker_listen_address, inspect_address)
 from egress_policy import vm_uses_inspect
@@ -43,39 +51,6 @@ from egress_policy import vm_policy_entries
 # The program the generated unit runs. One instance per workload, generated;
 # there is no host-wide unit for an operator to enable.
 BROKER_BIN = "/usr/libexec/workloadctl/agent-broker"
-
-# Where the generated config lives (D2), as the unit's RuntimeDirectory= and as
-# the path the two readers -- the broker and its writer -- resolve.
-#
-# /run and NOT /etc, which is what the design's 7.8 first said. The requirement
-# it states is that the config is unreadable by the workload uid, and 0700 under
-# /run meets that identically while adding two things /etc cannot: it is a pure
-# function of the workload TOML, regenerated at every start, so it cannot
-# diverge from the bundle the way an /etc file nothing reconciles can; and it
-# cannot serve the previous boot's credential set.
-#
-# systemd creates and removes the directory as the instance's DynamicUser, so
-# the writer runs unprivileged INSIDE the unit and the file is owned by a uid
-# that exists only while the broker does. There is no chown of ours anywhere.
-#
-# Only the derived config moves. The material stays in
-# /etc/credstore.encrypted/broker/<workload>/, which is operator-created,
-# encrypted, and has to survive a reboot.
-BROKER_RUNTIME_SUBDIR = "workloadctl/broker"
-BROKER_CONFIG_NAME = "broker.toml"
-
-
-def broker_runtime_directory(name: str) -> str:
-    """The unit's RuntimeDirectory= value (relative to /run, as systemd wants)."""
-    return f"{BROKER_RUNTIME_SUBDIR}/{name}"
-
-
-def broker_config_dir(name: str) -> Path:
-    return Path("/run") / BROKER_RUNTIME_SUBDIR / name
-
-
-def broker_config_path(name: str) -> Path:
-    return broker_config_dir(name) / BROKER_CONFIG_NAME
 
 
 # --- The credential table, and the blocks that name one ---
@@ -103,8 +78,8 @@ class VmCredential(NamedTuple):
 
     `auth_header` and `auth_format` are the provider's HTTP convention, and they
     are here rather than on the policy entry for the same reason: a credential
-    is minted for one provider, and `docs/agent-broker.toml.example` already
-    documents them per provider beside the key. Both are OPTIONAL and default to
+    is minted for one provider, and docs/agent-broker.md §10 documents them
+    per provider beside the key. Both are OPTIONAL and default to
     the broker's own (`x-api-key`, `{secret}`), which is the Anthropic
     convention -- so a workload that says nothing gets exactly what it got
     before these keys existed.
@@ -180,7 +155,7 @@ def broker_credential(name: str, credential: str) -> tuple[Path, str]:
 
     The id is also what the broker looks the credential up by: systemd writes
     each into $CREDENTIALS_DIRECTORY under exactly this name, and
-    render_vm_broker_config writes the same string as `credential =`.
+    broker_command writes the same string after the `=` of each `--host`.
     """
     path, seal = credential_path(Path(CREDSTORE_DIR), f"broker/{name}/{credential}")
     return path, seal
@@ -250,122 +225,111 @@ def container_uses_credentials(config: dict) -> bool:
     return bool(container_credential_entries(net))
 
 
-def _toml_basic_string(value: str) -> str:
-    """One TOML basic string. json.dumps is the same grammar for what we emit.
-
-    Everything that reaches here has been through validation -- credential
-    names, guest variable names and hosts each have a character class -- except
-    `placeholder`, which is operator prose and the one value that can carry a
-    quote or a backslash. Escaped rather than trusted, because a placeholder
-    that broke the file would take the broker down with a parse error naming a
-    line the operator never wrote.
-    """
-    return json.dumps(value)
-
-
-def render_vm_broker_config(config: dict, uid: int) -> str:
-    """The broker.toml for one VM workload's instance. See render_broker_config."""
+def vm_broker_command(config: dict, uid: int) -> list[str]:
+    """The argv for one VM workload's instance. See broker_command."""
     net = (config.get("vm", {}) or {}).get("network", {}) or {}
-    return render_broker_config(
+    return broker_command(
         config["workload"]["name"], uid, vm_broker_hosts(config),
         vm_credential_entries(net if isinstance(net, dict) else {}))
 
 
-def render_container_broker_config(config: dict, uid: int) -> str:
-    """The broker.toml for one container workload's instance.
+def container_broker_command(config: dict, uid: int) -> list[str]:
+    """The argv for one container workload's instance.
 
-    A call site, not a second renderer. ContainerCredential and
-    VmCredential are field-identical by construction, and both of the defects
-    the VM render was fixed for -- the per-entry duplicate table that TOML
-    refuses, and the dropped auth_header/auth_format that 401s a fully
-    authorised request -- would have been reproduced verbatim by a container
-    twin, which is why there is not one.
+    A call site, not a second builder. ContainerCredential and VmCredential
+    are field-identical by construction, and both of the defects the VM
+    render was fixed for -- the per-entry duplicate table that TOML refused,
+    and the dropped auth_header/auth_format that 401s a fully authorised
+    request -- would have been reproduced verbatim by a container twin,
+    which is why there is not one.
     """
     net = config.get("network", {}) or {}
-    return render_broker_config(
+    return broker_command(
         config["workload"]["name"], uid, container_broker_hosts(config),
         container_credential_entries(net if isinstance(net, dict) else {}))
 
 
-def render_broker_config(name: str, uid: int, hosts, credentials) -> str:
-    """The broker.toml for one workload's instance, either substrate.
+def broker_command(name: str, uid: int, hosts, credentials) -> list[str]:
+    """The argv of one workload's instance, either substrate: the binary and
+    every flag it takes, unquoted. The unit writes it with dq per value.
 
-    Takes the (host, credential-name) pairs and the declared credential blocks
-    rather than the config, so nothing here reads a [vm.] or [network.] key --
-    that is the whole of what makes it shared.
+    Takes the (host, credential-name) pairs and the declared credential
+    blocks rather than the config, so nothing here reads a [vm.] or
+    [network.] key -- that is the whole of what makes it shared.
 
-    A pure function of the workload TOML and the uid, which is the property D2
-    chose /run for: there is nothing here to reconcile, so two of the three
-    startup cross-checks 7.8 asked for cannot fail and are not written. The
-    third -- a `placeholder` byte-identical to the decrypted material -- lives
-    in the broker, because only the broker can see the plaintext.
+    A pure function of the workload TOML and the uid: there is nothing here
+    to reconcile at start, and nothing on the line the broker could derive
+    for itself. The uid is written twice, as the address it makes and as the
+    caller it is, because the broker is told both and computes neither.
 
-    `listen_address` is generated and never defaulted (ADR 007 decision 6): the
-    broker's own default was 127.0.0.1, which is where every OTHER workload's
-    inspector is dialling, so an instance that fell back to it would serve
-    callers it holds no material for and hand them refusals -- or, once two
-    instances raced for the same socket, one workload's key to another's
-    request. The broker refuses to start without the key for the same reason.
+    The listen address is generated and never defaulted (ADR 007 decision
+    6): the broker's own default was 127.0.0.1, which is where every OTHER
+    workload's inspector is dialling, so an instance that fell back to it
+    would serve callers it holds no material for and hand them refusals --
+    or, once two instances raced for the same socket, one workload's key to
+    another's request. The broker's parser requires the flag for the same
+    reason.
     """
-    lines = [
-        f"# Generated for workload {name} by workload-broker-config. DO NOT EDIT:",
-        "# this file is a pure function of the workload's egress tables and",
-        "# is rewritten from them at every start of the broker unit.",
-        "",
-        f"listen_address = {_toml_basic_string(broker_listen_address(uid))}",
-        f"listen_port = {BROKER_INSTANCE_PORT}",
+    cmd = [
+        BROKER_BIN,
+        "--name", name,
+        "--listen", f"{broker_listen_address(uid)}:{BROKER_INSTANCE_PORT}",
+        "--caller-uid", str(uid),
     ]
-    # ONE TABLE PER HOST, not per policy entry, and the difference is a file
-    # that parses. Splitting a host's rules across entries -- `/v1/*` for GET,
-    # `/v2/*` for POST, one credential -- is the ordinary way to write §3, and
-    # it validates: the only per-host credential rule refuses entries that
-    # disagree about WHICH credential. Rendered per entry, that config emitted
-    # `[sandboxes.x.hosts."api"]` twice, which TOML refuses outright, so the
-    # broker exited at start and every brokered request 502'd on a workload
-    # whose config `validate` had just called clean.
+    # ONE FLAG PER HOST, not per policy entry. Splitting a host's rules
+    # across entries -- `/v1/*` for GET, `/v2/*` for POST, one credential --
+    # is the ordinary way to write §3, and it validates: the only per-host
+    # credential rule refuses entries that disagree about WHICH credential.
+    # Rendered per entry, the old document held one host's table twice,
+    # which TOML refused outright, so the broker exited at start and every
+    # brokered request 502'd on a workload whose config `validate` had just
+    # called clean. The broker refuses a repeated host for the same reason
+    # (the two spellings rule), so this collapse is what keeps it starting.
     #
     # Collapsing on the host is sound because a credentialed host is always a
-    # literal (a wildcard selecting a credential is a validation error) and two
-    # entries for one host cannot name different credentials (also one).
-    seen_hosts: set[str] = set()
+    # literal (a wildcard selecting a credential is a validation error) and
+    # two entries for one host cannot name different credentials (also one).
+    seen_hosts: list[str] = []
+    selected: list[str] = []
     for host, credential in hosts:
         if host in seen_hosts:
             continue
-        seen_hosts.add(host)
+        seen_hosts.append(host)
         _path, cred_id = broker_credential(name, credential)
-        lines += [
-            "",
-            f"[sandboxes.{_toml_basic_string(name)}."
-            f"hosts.{_toml_basic_string(host)}]",
-            # https:// and no path. The upstream is the host policy authorised
-            # and nothing else: a base path here would be prepended to the
-            # request the inspector already matched against `paths`, so the
-            # origin would receive a path no rule in this design ever saw.
-            f"upstream = {_toml_basic_string('https://' + host)}",
-            f"credential = {_toml_basic_string(cred_id)}",
-        ]
+        # https://<host> and no path, on the broker's side: the upstream is
+        # the host the policy authorised and nothing else, so the flag
+        # names the host and the broker supplies the scheme and the port.
+        cmd += ["--host", f"{host}={cred_id}"]
+        if credential not in selected:
+            selected.append(credential)
+    # The per-credential facts, once per SELECTED credential rather than
+    # per host: two hosts may share one, and the broker refuses a
+    # credential described twice. Each is emitted ONLY when the block
+    # states one. An absent flag leaves the broker's own default in force,
+    # which keeps the default in one place -- writing it out here would
+    # mean two copies to disagree later. A credential no host selects is
+    # not described at all; the broker refuses a description with no
+    # selector, and validate refuses the block.
+    for credential in selected:
         cred = _credential_named(credentials, credential)
-        if cred is not None and cred.placeholder is not None:
-            lines.append(
-                f"placeholder = {_toml_basic_string(cred.placeholder)}")
-        # Emitted ONLY when the block states one. An absent key leaves the
-        # broker's own default in force, which keeps the default in one place
-        # -- writing it out here would mean two copies to disagree later.
-        if cred is not None and cred.auth_header:
-            lines.append(
-                f"auth_header = {_toml_basic_string(cred.auth_header)}")
-        if cred is not None and cred.auth_format:
-            lines.append(
-                f"auth_format = {_toml_basic_string(cred.auth_format)}")
-    return "\n".join(lines) + "\n"
+        if cred is None:
+            continue
+        _path, cred_id = broker_credential(name, credential)
+        if cred.placeholder is not None:
+            cmd += ["--placeholder", f"{cred_id}={cred.placeholder}"]
+        if cred.auth_header:
+            cmd += ["--auth-header", f"{cred_id}={cred.auth_header}"]
+        if cred.auth_format:
+            cmd += ["--auth-format", f"{cred_id}={cred.auth_format}"]
+    return cmd
 
 
 def _credential_named(credentials, credential: str):
     """The declared block a policy entry's `credential` selects, or None.
 
-    Returns the whole block rather than one field: the render needs three of
-    them now, and three lookups walking the same list is how one of them comes
-    to be looked up under a name the other two do not use.
+    Returns the whole block rather than one field: the command needs three
+    of them, and three lookups walking the same list is how one of them
+    comes to be looked up under a name the other two do not use.
 
     Takes the list, not a config, so it serves VmCredential and
     ContainerCredential alike -- the two are field-identical.
@@ -480,60 +444,3 @@ def inspect_link_delete_commands(uid: int) -> tuple[list[str], list[str]]:
     v4 = [IP_BIN, "addr", "del", f"{addr.v4}/32", "dev", ADVERTISED_IFACE]
     v6 = [IP_BIN, "addr", "del", f"{addr.v6}/128", "dev", ADVERTISED_IFACE]
     return v4, v6
-
-
-
-
-def write_instance_config(config: dict, uid: int) -> Path:
-    """Render one workload's broker.toml into the instance's runtime directory
-    and return its path.
-
-    A pure function of the workload TOML and the workload uid, rewritten at
-    every start (design D2). Nothing here reconciles anything: there is no
-    previous file to compare against, because systemd removed the runtime
-    directory when the instance last stopped, and that is precisely what stops
-    an instance serving the previous boot's credential set.
-
-    UNPRIVILEGED, and the whole verb depends on it. It runs as the instance's
-    own DynamicUser, inside the unit's sandbox, so the file it writes is owned
-    by the uid the broker runs as and by nothing else -- no chown, and no window
-    in which the material's config is readable by the workload uid. Everything
-    it reads (the bundle, the passwd db) is world-readable.
-
-    Refusing is the right outcome for every error below. A broker started
-    against a missing or stale config either refuses every request or attaches
-    the wrong credential to one, and the second is silent.
-    """
-    name = config["workload"]["name"]
-    # One helper, both substrates. The unit directive is identical on either
-    # side and the config it writes is the same file at the same path, so the
-    # only thing that differs is which table the credentials are read from --
-    # a branch here rather than a second ExecStartPre binary to keep in step.
-    is_vm = isinstance(config.get("vm"), dict)
-    uses = vm_uses_credentials(config) if is_vm else container_uses_credentials(config)
-    render = render_vm_broker_config if is_vm else render_container_broker_config
-    block = "[[vm.network.credential]]" if is_vm else "[[network.credential]]"
-    if not uses:
-        # The generator does not emit an instance for such a workload, so
-        # reaching here means a unit outlived the config that produced it --
-        # a hand-edited unit, or a TOML edited without a regeneration. Refused
-        # rather than written empty: the broker exits on a config with no
-        # sandboxes anyway, and this message names the cause.
-        raise BrokerConfigError(
-            f"{name} declares no {block} blocks (or is not inspected), so it "
-            f"has no broker instance. This unit is stale: "
-            f"`workloadctl reload {name}`")
-    path = broker_config_path(name)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    text = render(config, uid)
-    # Written through a temporary and renamed, so a broker that is somehow
-    # already reading cannot see a half-written table -- and 0600 before the
-    # rename rather than after, so the file is never briefly wider than it ends
-    # up. The directory is already 0700 (RuntimeDirectoryMode=); this is the
-    # second half of the same rule and costs nothing.
-    tmp = path.with_name(path.name + ".new")
-    with open(tmp, "w") as fh:
-        fh.write(text)
-    os.chmod(tmp, 0o600)
-    os.replace(tmp, path)
-    return path

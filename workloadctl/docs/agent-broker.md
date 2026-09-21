@@ -100,10 +100,10 @@ configured to use it, and the redirect does not ask.
 ## 3. What the broker is, and is not
 
 A reverse proxy that holds a workload's credentials and speaks only to the
-upstreams its own config names.
+upstreams its own command line names.
 
-**Deliberately not a general proxy.** The set of upstreams is fixed by config
-and is *never* taken from the request. Absolute-form request targets
+**Deliberately not a general proxy.** The set of upstreams is fixed by the
+`--host` flags on the generated unit and is *never* taken from the request. Absolute-form request targets
 (`GET https://elsewhere/...`, which is how a client asks a proxy to choose a
 destination) are rejected with 400. A broker that forwarded to a guest-chosen
 destination would be an SSRF pivot with a credential welded to it — precisely
@@ -113,8 +113,9 @@ the failure this design exists to avoid, and a failure found in the field.
 holds a *table* of credentials keyed by `Host`, and the inspector supplies the
 `Host` of the request it is relaying — so a value that originated in the guest
 does select a row. What carries the security property is that **the guest can
-only select among rows the host wrote**: every row's `upstream` is
-configuration, and a `Host` naming no row is a 403, not a fetch. The guest can
+only select among rows the host wrote**: every row's upstream is
+`https://<the Host the generator named>`, and a `Host` naming no row is a 403,
+not a fetch. The guest can
 pick a losing ticket out of a hat the operator filled; it cannot write one.
 
 Decisions worth not re-litigating:
@@ -190,8 +191,10 @@ unknown sources would make every guest the same caller rather than none.
 workload's own user, so the socket on the other end of an accepted connection is
 owned by `_wl-<name>`. The kernel records that owner; `/proc/net/tcp` exposes
 it. Match the mirror tuple — the row whose local address is our peer and whose
-remote address is our local — and read the uid column. `pwd.getpwuid()` turns it
-into the workload name, so config stays keyed on something readable.
+remote address is our local — and read the uid column. It is compared to the
+one uid the instance was started for (`--caller-uid` on its `ExecStart=`) and
+never resolved to a name: the broker does not know what a workload user is
+called, and the generator that does know writes the number onto the unit.
 
 **"Our local" is a set, not simply the address we are bound to.** On the path
 as configured the inspector dials the broker's own bound address, so
@@ -264,8 +267,8 @@ of the conclusion when every sandbox shares a single key.
 credential material gets its own broker holding only its own keys, and the
 dispatch key is `(uid, Host)` — the `Host` half is what lets one workload hold
 credentials for several providers, and the uid half is an assertion rather than
-a route: the config names exactly one sandbox, so a resolved caller that is not
-it is a 403 on a connection that should have been impossible to open.
+a route: the unit names exactly one caller, so a resolved uid that is not it is
+a 403 on a connection that should have been impossible to open.
 
 Peer-uid identity is what makes that split cheap. It works unchanged whether the
 uid *routes* (a shared broker choosing among callers) or merely *asserts* (an
@@ -283,9 +286,22 @@ What the host must provide, and what a request actually traverses.
 mechanism, described below in the VM's terms — gets a
 `workload-<name>-broker.service` written by the boot generator:
 `DynamicUser=yes`, bound to `broker_listen_address(uid)` — `127.129.0.0` plus
-the workload's offset from `UID_MIN`, port 8081 — with a `broker.toml`
-regenerated into `/run` at every start by `workload-broker-config config <name>`.
-Its only caller is that workload's own egress inspector.
+the workload's offset from `UID_MIN`, port 8081 — and told everything else on
+its `ExecStart=`: the uid it serves, one `--host HOST=CREDENTIAL` per
+credential-backed policy entry naming the seal the unit's
+`LoadCredentialEncrypted=` loads, and each credential's placeholder and auth
+convention. Its only caller is that workload's own egress inspector.
+
+There is no config file. There was one — a `broker.toml` an `ExecStartPre`
+rendered into the unit's `RuntimeDirectory=` at every start, from the workload
+TOML, as the unit's dynamic user — and every value in it was a pure function of
+what the generator already held when it wrote the unit. The property the file
+was chosen for, never serving a previous boot's credential set, is
+`LoadCredentialEncrypted=`'s: the material is decrypted afresh at every start,
+and the file held none. So the reader, the writer, the helper binary, the
+`ExecStartPre` and the runtime directory went, and the broker's process now
+imports nothing that reads a workload's config or knows what a uid is called
+(`tests/test_broker_closure.py`).
 
 A request therefore goes: guest → passt (re-originates as the workload uid) →
 the nat redirect that sends every filtered guest's 80/443 to its inspector →
@@ -311,17 +327,15 @@ The guest's leg is unchanged from any other inspected host. It asked for
 entirely on the host side of a connection the guest had already given up
 control of.
 
-**Two constants must agree**: this program's `listen_address`/`listen_port`
-against what the generator renders and what the inspector is handed
-(`broker_listen_address` and `BROKER_INSTANCE_PORT`, both in
-`lib/workload_addr.py`). The inspector itself derives neither: the generator
-computes the pair from the workload's uid and writes it onto the listener's
-`ExecStart=` as `--broker ADDRESS:PORT`, so the inspector's closure holds
-nothing that knows what a uid becomes. A
-mismatch presents exactly as the broker being down — connection refused, no log
-line on either side, nothing pointing at the cause. `tests/test_broker.py`
-asserts they agree, which is most of the reason the broker moved into this
-package.
+**One derivation, two units.** The generator computes the pair from the
+workload's uid (`broker_listen_address` and `BROKER_INSTANCE_PORT`, both in
+`lib/workload_addr.py`) and writes it onto the broker's `ExecStart=` as
+`--listen ADDRESS:PORT` and onto the listener's as `--broker ADDRESS:PORT`.
+Neither daemon derives it: both closures hold nothing that knows what a uid
+becomes. A mismatch would present exactly as the broker being down —
+connection refused, no log line on either side, nothing pointing at the cause —
+and `tests/test_broker.py` asserts the two lines carry the same pair, which is
+most of the reason the broker moved into this package.
 
 Consequences worth knowing:
 
@@ -342,11 +356,16 @@ Consequences worth knowing:
   reason. That is correct — it is host infrastructure, not a workload — but it
   means the broker is the one component that can reach the provider directly,
   and it should be treated as such.
-- **The workload uid cannot read its own broker's config.** The instance runs as
-  a dynamic user disjoint from `_wl-<name>`, and `broker.toml` names the
-  credential the instance loads. A workload that could read it would learn the
-  seal name, which is the one thing standing between it and asking systemd for
-  the material.
+- **The broker's command line holds nothing the workload does not already
+  hold.** It is on a world-readable unit, so this has to be true rather than
+  arranged: the address is derived from the workload's own uid, the hosts are
+  the workload's own policy, the placeholders are what the workload was seeded
+  with, and the credential ids are the seal names the same unit's
+  `LoadCredentialEncrypted=` lines already spell. The material itself is never
+  on any line — it arrives under `$CREDENTIALS_DIRECTORY`, on a tmpfs owned by
+  a dynamic user disjoint from `_wl-<name>`, and a seal name is a filename,
+  not a key. `broker_rig.py` reads the live unit's `ExecStart=` back and
+  asserts no secret is on it.
 
 > **There is no host-wide broker and no advertised endpoint.**
 > `[vm.network].broker = true` is refused by `validate` by name, naming
@@ -356,11 +375,14 @@ Consequences worth knowing:
 
 ## 8. TLS to the guest, and the private-CA trap
 
-`tls_cert`/`tls_key` serve HTTPS to the guest for clients that refuse plaintext
-credentials. One certificate for one name from a private CA the guest trusts —
-internal PKI, not interception. Most deployments will not need it.
+`--tls-cert`/`--tls-key` serve HTTPS to the guest for clients that refuse
+plaintext credentials. One certificate for one name from a private CA the
+guest trusts — internal PKI, not interception. Most deployments will not need
+it, and the generator never emits the flags: they exist for a hand-written
+unit, and the inspector→broker leg they would protect is loopback (ADR 007
+decision 7).
 
-`relax_x509_strict` exists for one specific failure: Python 3.13+ enables
+`--relax-x509-strict` exists for one specific failure: Python 3.13+ enables
 `VERIFY_X509_STRICT`, which enforces RFC 5280's requirement that a CA
 certificate carry a `keyUsage` extension with `keyCertSign`. A private root
 without it is rejected with a message that reads like a missing trust anchor
@@ -425,13 +447,14 @@ nothing to check.
 ## 10. Running it
 
 The broker ships in the workloadctl RPM and therefore in the hypervisor image:
-the program at `/usr/libexec/workloadctl/agent-broker`, this file and an
-annotated `agent-broker.toml.example` under `/usr/share/doc/workloadctl/`.
+the program at `/usr/libexec/workloadctl/agent-broker` and this file under
+`/usr/share/doc/workloadctl/`.
 
 **There is no unit to enable and no config to edit.** There is no host-wide
-`agent-broker.service` and no shared config directory: an instance is generated
-per workload from that workload's own TOML, and starts and stops with it.
-Turning it on is two steps in the workload, none of them on the host:
+`agent-broker.service`, no shared config directory and no config file at all:
+an instance is generated per workload from that workload's own TOML, told
+everything on its `ExecStart=`, and starts and stops with it. Turning it on is
+two steps in the workload, none of them on the host:
 
 ```bash
 # 1. seal the material under the workload's own scope
@@ -463,35 +486,62 @@ and because systemd-creds binds the seal name into the blob and verifies it on
 decrypt, a unit handed another workload's file fails at start rather than
 loading that workload's key.
 
-Configuration that matters, beyond the comments in the example:
+What the generator writes for that, on `workload-agent-vm-broker.service`
+(one line, wrapped here; every value is quoted for a systemd Exec line):
+
+```
+ExecStart=/usr/libexec/workloadctl/agent-broker --name "agent-vm"
+    --listen "127.129.0.7:8081" --caller-uid "10007"
+    --host "api.anthropic.com=broker-agent-vm-anthropic"
+    --placeholder "broker-agent-vm-anthropic=sk-ant-placeholder-not-a-real-key"
+LoadCredentialEncrypted=broker-agent-vm-anthropic:/etc/credstore.encrypted/broker/agent-vm/anthropic
+```
+
+The flags, and what each one is:
+
+| flag | what it is | emitted |
+|---|---|---|
+| `--name NAME` | the workload's name; a label for the log lines, nothing is looked up by it | always |
+| `--listen ADDRESS:PORT` | the uid-derived loopback address (§7); `0.0.0.0`, `::` and `*` are refused by name | always |
+| `--caller-uid UID` | the one uid whose connections are served (§5); anyone else is a 403 | always |
+| `--host HOST=CREDENTIAL` | one per credential-backed policy entry: the `Host`, and the seal name the unit's `LoadCredentialEncrypted=` loaded the material under. The upstream is `https://HOST`, port 443, no path | one per host |
+| `--placeholder CREDENTIAL=TEXT` | the fiction the guest holds; the broker refuses to start if it equals the decrypted material | when the block states it |
+| `--auth-header CREDENTIAL=FIELD` | the provider's header; default `x-api-key` | when the block states it |
+| `--auth-format CREDENTIAL=FORMAT` | the header value with `{secret}` substituted; default `{secret}` | when the block states it |
+| `--tls-cert PATH --tls-key PATH` | HTTPS to the guest (§8) | never |
+| `--relax-x509-strict` | §8 | never |
+| `--connect-timeout S`, `--read-timeout S` | the upstream leg; defaults 15 and 900 | never |
+
+Configuration that matters:
 
 - **The set of upstreams is fixed and never taken from a request**, and the
   qualification in §3 applies: a `Host` selects among rows the host wrote, and
   one naming no row is a 403. Absolute-form request targets are rejected with
   400.
-- **`[sandboxes.<workload-name>]` is keyed by workload name**, resolved from the
-  uid owning the far end of the connection (§5). A generated config has exactly
-  one, and anything else gets 403.
+- **One caller per instance**, the uid on the line, resolved against the uid
+  owning the far end of the connection (§5). Anything else gets 403, and the
+  log line carries the bare uid because the broker has no name for it.
 - **The unit must not set `PrivateUsers=`.** From a user namespace that cannot
-  map a workload's uid, every caller reads as the overflow uid and they all
-  merge into one identity, with no error anywhere. The broker refuses to start
+  map the caller's uid, it reads as the overflow uid and merges with every
+  other unmapped caller, with no error anywhere. The broker refuses to start
   when it can prove this is happening and warns when it cannot. The generated
   unit does not set it; this matters if you write one by hand.
 - **Credentials are read at start and not re-read**, so rotating one means
   restarting that workload's broker instance. Editing the workload's TOML
-  regenerates `broker.toml` at the next start, so a changed `auth_header` or
-  `upstream` needs the same restart.
-- **`relax_x509_strict`** exists for private CAs missing `keyUsage`, which
+  changes the unit at the next `workloadctl reload`, so a changed
+  `auth_header` or a new host needs a regenerate and the same restart — the
+  unit is a run-file and `drift` sees the difference until then.
+- **`--relax-x509-strict`** exists for private CAs missing `keyUsage`, which
   Python 3.13+ rejects (§8). Do not set it without a reason.
-- **A key the broker does not read is a startup error**, at the top level and
-  inside `[sandboxes.<name>]` alike, with the nearest real key suggested. Every
-  option here decides who receives a credential or how the guest is served, so
-  a typo that silently falls back to the default gives an operator a broker
-  that starts, looks healthy, and applies a policy they did not pick. `validate`
-  catches these before the generator writes a unit; the broker's own check is
-  what covers a hand-written config.
-- **`allow_unknown_callers` is for local testing and logs a warning at
-  startup.** The generator never emits it.
+- **A flag the broker cannot join is a startup error**: a `--placeholder`,
+  `--auth-header` or `--auth-format` naming a credential no `--host` selects,
+  a credential described twice, two spellings of one host, a listen address
+  that binds the world. Every flag here decides who receives a credential or
+  how the guest is served, so a value that silently fell back to a default
+  would give an operator a broker that starts, looks healthy, and applies a
+  policy they did not pick. `validate` catches the TOML-side versions before
+  the generator writes a unit; the broker's own checks are what cover a
+  hand-written one.
 
 **Broker material is not carried by `backup`.** `workloadctl backup` copies a
 workload's `data/` subtree and the credentials its own config references; the
@@ -506,7 +556,7 @@ does not. Re-seal them on the restore host with `secret create`.
 
 | | |
 |---|---|
-| `403` | The caller resolved to no configured sandbox — or could not be resolved at all, which is never rescued by `allow_unknown_callers` (§5). |
+| `403` | The caller is not the uid the instance was started for — or could not be resolved at all, which is refused rather than rescued (§5); or the `Host` names no `--host` row. |
 | `400` | An absolute-form request target (that is a *proxy's* job, not this one's); a `Content-Length` that is not a non-negative number; or two of them, which frame two different messages. |
 | `411` | A chunked request body. The broker does not decode one, and refusing is deliberate: forwarding it as an empty body would have the provider answer a request the caller never sent. Send `Content-Length`. |
 | `413` | A body over 64 MiB. |
@@ -570,12 +620,12 @@ handled by workloadctl's own guest env; read §4 before touching a trust-store
 variable by hand, because `NODE_EXTRA_CA_CERTS` appends and `SSL_CERT_FILE`
 replaces.
 
-For local development the program takes its config path as its only argument and
-falls back to `AGENT_BROKER_SECRET` for the credential, logging a warning:
+For local development the program takes the same flags and falls back to
+`AGENT_BROKER_SECRET` for every credential, logging a warning. Name your own
+uid as the caller, since a request from your own login is otherwise a 403:
 
 ```bash
-AGENT_BROKER_SECRET='sk-...' /usr/libexec/workloadctl/agent-broker /tmp/b.toml
+AGENT_BROKER_SECRET='sk-...' /usr/libexec/workloadctl/agent-broker \
+    --name dev --listen 127.0.0.1:8081 --caller-uid "$(id -u)" \
+    --host api.anthropic.com=anthropic
 ```
-
-Set `allow_unknown_callers = true` for that, since a caller from your own login
-is not a workload user and matches no sandbox.

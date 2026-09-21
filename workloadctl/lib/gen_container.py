@@ -21,6 +21,7 @@ from workload_lib import workload_state_dir, dq, uq, normalize_containers
 from run_files import GENERATED_BY
 from broker_config import (
     container_broker_hosts, container_broker_upstream_addresses,
+    container_broker_command,
     container_uses_credentials,
 )
 from secrets_template import auto_detect_credentials
@@ -602,7 +603,8 @@ def generate_container_workload(config, user_name: str, uid: int) -> bool:
                     before=container_broker_before(config, mode),
                     hosts=container_broker_hosts(config),
                     upstream=container_broker_upstream_addresses(
-                        config)))
+                        config),
+                    command=container_broker_command(config, uid)))
             log_msg("  Created credential broker instance")
 
     # Main service: Requires+After setup service so User= is resolvable

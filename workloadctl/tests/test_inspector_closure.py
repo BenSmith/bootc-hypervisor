@@ -60,8 +60,11 @@ WORKLOAD_SIDE = frozenset({
     # The config grammar and its readers.
     "config_parser", "container_network_config", "vm_network_config",
     "credential_entries", "workloadctl_core", "workload_lib",
-    # The renderers that produce the documents the inspector reads.
-    "egress_policy", "broker_config", "broker_profiles",
+    # The renderers that produce the documents the inspector reads, and
+    # the broker's command line. (broker_profiles was here while it read
+    # broker.toml; it reads flags now and knows no workload, so it is fenced
+    # by test_broker_closure rather than named here.)
+    "egress_policy", "broker_config",
     # Where a workload's things live, and what a uid becomes.
     "workload_addr", "workload_uid", "run_files", "secrets_template",
     # Substrates and the machinery only a substrate has.

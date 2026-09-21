@@ -28,6 +28,7 @@ from run_files import GENERATED_BY
 from egress_policy import vm_uses_inspect, uses_resolve
 from broker_config import (
     vm_uses_credentials, vm_broker_hosts, vm_broker_upstream_addresses,
+    vm_broker_command,
 )
 from nft_constants import SIDECAR_SLICE
 from vm_clock import CLOCK_KEEPER_PERIOD_SECONDS, VM_CLOCK_KEEPER_BIN
@@ -1066,7 +1067,8 @@ def generate_vm_workload(config, user_name: str, uid: int):
                 config, uid,
                 before=f"workload-{config['workload']['name']}.service",
                 hosts=vm_broker_hosts(config),
-                upstream=vm_broker_upstream_addresses(config)))
+                upstream=vm_broker_upstream_addresses(config),
+                command=vm_broker_command(config, uid)))
             log_msg("  Created credential broker service")
 
     # The synthesising responder, on the inspector's terms plus `resolver` not

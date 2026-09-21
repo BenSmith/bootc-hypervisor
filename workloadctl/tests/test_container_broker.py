@@ -1,14 +1,15 @@
 """The container-side credential broker instance (Phase 2 of container egress parity).
 
 There is no second broker here, and that is the design rather than an
-economy. `libexec/agent-broker`, the unit generator, the `broker.toml` render,
-the run-file entry and the nftables carve-out are all the VM ones, reached
-from the container branch with substrate-specific values passed in. So most
-of what this file asserts is that the two callers produce the SAME artifact
-for the same declaration -- because the alternative shape, a container twin of
-each, would have reproduced both of the render defects the VM side was already
-fixed for (a per-entry duplicate table that TOML refuses, and a dropped
-`auth_header`/`auth_format` that 401s a fully authorised request).
+economy. `libexec/agent-broker`, the unit generator, the broker's command
+line, the run-file entry and the nftables carve-out are all the VM ones,
+reached from the container branch with substrate-specific values passed in.
+So most of what this file asserts is that the two callers produce the SAME
+artifact for the same declaration -- because the alternative shape, a
+container twin of each, would have reproduced both of the render defects the
+VM side was already fixed for (a per-entry duplicate table that TOML refused,
+and a dropped `auth_header`/`auth_format` that 401s a fully authorised
+request).
 
 The one place the two substrates genuinely differ is ordering, and it is the
 one that reaches a host unnoticed: `Before=workload-<name>.service` is correct
@@ -30,13 +31,12 @@ from nft_elements import internal_ok_elements
 from broker_config import (
     container_broker_hosts,
     container_broker_upstream_addresses, container_uses_credentials,
-    render_container_broker_config, render_vm_broker_config,
+    container_broker_command, vm_broker_command,
     broker_credential,
 )
 from workload_addr import BROKER_INSTANCE_PORT, UID_MIN, broker_listen_address
 from container_validate import validate_container_network
-
-import tomllib
+from tests.test_broker import flags_of
 
 
 CREDENTIAL = {"name": "example-token",
@@ -184,14 +184,14 @@ class TestValidationRefusesWhatCannotBeBrokered(unittest.TestCase):
         self.assertEqual(self._errors(), [])
 
 
-class TestTheRenderIsTheVmRender(unittest.TestCase):
-    """P2-1: one renderer, two callers.
+class TestTheCommandIsTheVmCommand(unittest.TestCase):
+    """P2-1: one builder, two callers.
 
     ContainerCredential and VmCredential are field-identical by construction,
-    so the same declaration must produce the same file. Asserted against the
-    VM render itself rather than against a spelled-out expectation, because
+    so the same declaration must produce the same argv. Asserted against the
+    VM command itself rather than against a spelled-out expectation, because
     what matters is that the two cannot drift -- a container twin would have
-    carried its own copy of every defect this render has been fixed for.
+    carried its own copy of every defect this builder has been fixed for.
     """
 
     def _vm_equivalent(self, name="capp"):
@@ -202,53 +202,55 @@ class TestTheRenderIsTheVmRender(unittest.TestCase):
                                    "policy": [{"host": "api.example.test",
                                                "credential": "example-token"}]}}}
 
-    def test_the_two_substrates_render_the_same_bytes(self):
+    def test_the_two_substrates_build_the_same_argv(self):
         uid = UID_MIN + 3
-        self.assertEqual(render_container_broker_config(cred_config(), uid),
-                         render_vm_broker_config(self._vm_equivalent(), uid))
+        self.assertEqual(container_broker_command(cred_config(), uid),
+                         vm_broker_command(self._vm_equivalent(), uid))
 
-    def test_it_parses_and_carries_the_uid_derived_address(self):
+    def test_it_carries_the_uid_derived_address_and_the_uid(self):
         uid = UID_MIN + 3
-        doc = tomllib.loads(render_container_broker_config(cred_config(), uid))
-        self.assertEqual(doc["listen_address"], broker_listen_address(uid))
-        self.assertEqual(doc["listen_port"], BROKER_INSTANCE_PORT)
-        self.assertNotEqual(doc["listen_address"], "127.0.0.1")
+        flags = flags_of(container_broker_command(cred_config(), uid))
+        self.assertEqual(flags["--listen"],
+                         [f"{broker_listen_address(uid)}:{BROKER_INSTANCE_PORT}"])
+        self.assertEqual(flags["--caller-uid"], [str(uid)])
+        self.assertNotIn("127.0.0.1", flags["--listen"][0])
 
-    def test_two_policy_entries_for_one_host_render_one_table(self):
-        """S6, which is a file that TOML refuses: split a host's rules across
-        entries -- the ordinary way to write a method/path policy -- and a
-        per-entry render emits the same table twice, so the broker exits at
-        start and every brokered request 502s on a config `validate` just
-        called clean."""
+    def test_two_policy_entries_for_one_host_emit_one_flag(self):
+        """S6, which was a file that TOML refused: split a host's rules
+        across entries -- the ordinary way to write a method/path policy --
+        and a per-entry render emitted the same table twice, so the broker
+        exited at start and every brokered request 502'd on a config
+        `validate` just called clean. The broker refuses a repeated --host
+        too, so the collapse is still what keeps it starting."""
         config = cred_config(policy=[
             {"host": "api.example.test", "methods": ["GET"],
              "paths": ["/v1/*"], "credential": "example-token"},
             {"host": "api.example.test", "methods": ["POST"],
              "paths": ["/v2/*"], "credential": "example-token"},
         ])
-        doc = tomllib.loads(
-            render_container_broker_config(config, UID_MIN + 3))
-        self.assertEqual(
-            list(doc["sandboxes"]["capp"]["hosts"]), ["api.example.test"])
+        flags = flags_of(container_broker_command(config, UID_MIN + 3))
+        self.assertEqual([v.split("=")[0] for v in flags["--host"]],
+                         ["api.example.test"])
 
-    def test_the_providers_auth_convention_reaches_the_file(self):
-        """S5. Without these two keys the broker falls back to its own
+    def test_the_providers_auth_convention_reaches_the_line(self):
+        """S5. Without these two flags the broker falls back to its own
         default, and a provider wanting `Authorization: Bearer` answers 401
         on a request every layer here authorised."""
         credential = dict(CREDENTIAL, auth_header="Authorization",
                           auth_format="Bearer {credential}")
-        doc = tomllib.loads(render_container_broker_config(
+        flags = flags_of(container_broker_command(
             cred_config(credential=[credential]), UID_MIN + 3))
-        host = doc["sandboxes"]["capp"]["hosts"]["api.example.test"]
-        self.assertEqual(host["auth_header"], "Authorization")
-        self.assertEqual(host["auth_format"], "Bearer {credential}")
+        _path, cred_id = broker_credential("capp", "example-token")
+        self.assertEqual(flags["--auth-header"], [f"{cred_id}=Authorization"])
+        self.assertEqual(flags["--auth-format"],
+                         [f"{cred_id}=Bearer {{credential}}"])
 
-    def test_an_omitted_convention_leaves_the_key_out(self):
+    def test_an_omitted_convention_leaves_the_flag_out(self):
         """One default, in the broker. Writing it here would be a second copy
         to disagree with the first."""
-        host = tomllib.loads(render_container_broker_config(
-            cred_config(), UID_MIN + 3))["sandboxes"]["capp"]["hosts"]
-        self.assertNotIn("auth_header", host["api.example.test"])
+        flags = flags_of(container_broker_command(cred_config(), UID_MIN + 3))
+        self.assertNotIn("--auth-header", flags)
+        self.assertNotIn("--auth-format", flags)
 
     def test_an_uncredentialed_entry_is_not_in_the_table(self):
         """A host the container reaches carrying whatever it holds is not the

@@ -142,8 +142,6 @@ install -Dpm 0755 %{_sourcedir}/libexec/workload-vm-resolve \
     %{buildroot}%{_libexecdir}/workloadctl/workload-vm-resolve
 install -Dpm 0755 %{_sourcedir}/libexec/workload-vm-clock \
     %{buildroot}%{_libexecdir}/workloadctl/workload-vm-clock
-install -Dpm 0755 %{_sourcedir}/libexec/workload-broker-config \
-    %{buildroot}%{_libexecdir}/workloadctl/workload-broker-config
 install -Dpm 0755 %{_sourcedir}/libexec/workload-vm-notify \
     %{buildroot}%{_libexecdir}/workloadctl/workload-vm-notify
 install -Dpm 0755 %{_sourcedir}/libexec/workload-vm-qmp \
@@ -155,16 +153,19 @@ install -Dpm 0755 %{_sourcedir}/libexec/workload-vm-shutdown \
 # provider API key a sandbox is never given, and hands it to outbound requests
 # the sandbox makes through it (docs/agent-broker.md).
 #
-# It keeps its own name instead of a workload-* one. libexec already holds
-# workload-broker-config, which is a different thing entirely -- the helper that
-# writes one instance's broker.toml -- and two names a hyphen apart for the
-# config writer and the daemon is a confusion nobody needs at 3am.
+# It keeps its own name instead of a workload-* one: it is not a helper of a
+# workload's units but a daemon those units run, and the workload-* names are
+# the helpers. (libexec once also held workload-broker-config, the helper that
+# wrote one instance's broker.toml; it went with the document, so the two
+# names a hyphen apart are no longer a 3am confusion to avoid.)
 #
-# It is a main() over four lib/ modules -- broker_config, broker_request,
+# It is a main() over four lib/ modules -- broker_profiles, broker_request,
 # broker_server, and peer_identity, the caller-identification it shares with
 # the egress inspector's listener -- so being installed beside them is
 # load-bearing: it is how the imports resolve, via this entrypoint's own
-# sys.path[0]. Everything else it uses is stdlib.
+# sys.path[0]. Everything else it uses is stdlib. Everything it needs to
+# know it is told on the generated unit's ExecStart=; it reads no file of
+# ours (tests/test_broker_closure.py).
 install -Dpm 0755 %{_sourcedir}/libexec/agent-broker \
     %{buildroot}%{_libexecdir}/workloadctl/agent-broker
 
@@ -232,18 +233,14 @@ install -Dpm 0644 %{_sourcedir}/docs/workloads.md \
 install -Dpm 0644 %{_sourcedir}/docs/schema-reference.toml \
     %{buildroot}%{_docdir}/workloadctl/schema-reference.toml
 
-# The broker's design doc and its annotated config. The generated units'
-# Documentation= points at the first; the second documents the shape of the
-# broker.toml that workload-broker-config now RENDERS, and an operator no longer
-# copies or edits it -- the config is a pure function of the workload TOML,
-# written into /run at every start. It ships under docdir, where it always did,
-# and the reason has changed from "so upgrades never touch a real broker.toml"
-# to "there is no real broker.toml to touch".
+# The broker's design doc. The generated units' Documentation= points at it.
+# There was an annotated agent-broker.toml.example beside it, for the
+# broker.toml an operator once copied and edited and the generator then
+# rendered; the broker takes its configuration as flags on the generated
+# unit's ExecStart= now and there is no file to show the shape of. §10 of the
+# doc shows the command line instead.
 install -Dpm 0644 %{_sourcedir}/docs/agent-broker.md \
     %{buildroot}%{_docdir}/workloadctl/agent-broker.md
-
-install -Dpm 0644 %{_sourcedir}/docs/agent-broker.toml.example \
-    %{buildroot}%{_docdir}/workloadctl/agent-broker.toml.example
 
 # Shipped workload bundles: one subdir per bundle co-locating the template
 # declaration (workload.toml) with its control files (Containerfile, build.sh,
@@ -483,9 +480,9 @@ fi
 # until its workload restarts, which is the same bargain every other
 # per-workload unit takes and a weaker one than the host-wide agent-broker.service
 # had — that unit was named here and restarted on every upgrade. The cost is
-# bounded by the credential never being re-read: broker.toml is regenerated at
-# every start, so a broker that has not restarted is running old code against
-# the config it started with, not against a stale credential set.
+# bounded by the credential never being re-read: the material is decrypted
+# at every start, so a broker that has not restarted is running old code
+# against the flags it started with, not against a stale credential set.
 %systemd_postun_with_restart workload-exporter.timer workload-exporter-disk.timer
 # On full uninstall ($1 == 0, not upgrade) reverse the host-global state this
 # package registers, which no per-workload teardown can safely remove (it is
@@ -539,7 +536,6 @@ fi
 %{_libexecdir}/workloadctl/workload-inspect-listener
 %{_libexecdir}/workloadctl/workload-vm-resolve
 %{_libexecdir}/workloadctl/workload-vm-clock
-%{_libexecdir}/workloadctl/workload-broker-config
 %{_libexecdir}/workloadctl/workload-vm-qmp
 %{_libexecdir}/workloadctl/workload-vm-shutdown
 %{_libexecdir}/workloadctl/agent-broker

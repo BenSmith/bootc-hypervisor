@@ -107,12 +107,14 @@ CLOUD_SHA = "28680fe5b371a5a82ebf43a31926e086a168e59949d03969c5093e7071f90b7f"
 
 # Spelled out rather than imported, on every other rig's reasoning: a rig that
 # computes both sides from one constant cannot notice them drifting apart, and
-# these five are exactly the values a guest-invisible mechanism is described by.
+# these three are exactly the values a guest-invisible mechanism is described by.
 UID_MIN = 10000                             # lib/workload_addr.py
 BROKER_ADDR_BASE = "127.129.0.0"            # mirrors workload_addr.BROKER_ADDR_BASE
 BROKER_PORT = 8081                          # workload_addr.BROKER_INSTANCE_PORT
-BROKER_RUNDIR = "/run/workloadctl/broker"   # BROKER_RUNTIME_SUBDIR
-BROKER_CONFIG = "broker.toml"               # BROKER_CONFIG_NAME
+# There were two more: the runtime directory and the name of the broker.toml
+# an ExecStartPre rendered into it. The broker takes everything as flags on
+# its ExecStart= now and there is no file; the rows that read it read the
+# manager's parsed ExecStart= instead.
 
 # The installed broker and the installed everything else. `just rpm-install`
 # refreshes them; a green run then means the PACKAGE is right, which is the
@@ -691,15 +693,34 @@ def guards():
            f"{addresses}")
 
     for arm in ARMS:
-        # The generated config holds every credential NAME this instance loads
-        # and must not be readable by the uid a guest escape obtains.
-        cfg = f"{BROKER_RUNDIR}/{arm.name}/{BROKER_CONFIG}"
-        p = run(["setpriv", f"--reuid={uid_of(arm.name)}",
-                 f"--regid={gid_of(arm.name)}", "--clear-groups",
-                 "cat", cfg], check=False, timeout=60)
-        record(f"{arm.name} broker config is unreadable by the workload uid",
-               p.returncode != 0 and arm.credential not in p.stdout,
-               f"rc={p.returncode} stdout={p.stdout[:80]!r}")
+        # The broker is told everything on its ExecStart= and there is no
+        # config file. Read from the MANAGER's parsed state, not the
+        # generated file: only the host says what was actually loaded, and
+        # the two differ after an RPM upgrade without a regenerate.
+        unit = f"workload-{arm.name}-broker.service"
+        loaded = run(["systemctl", "show", "-p", "ExecStart", "--value", unit],
+                     check=False).stdout
+        uid = uid_of(arm.name)
+        record(f"{arm.name} is told its own uid and address on the loaded line",
+               f"--caller-uid {uid} " in loaded and
+               f"--listen {addresses[arm.name]}:{BROKER_PORT} " in loaded,
+               f"ExecStart={loaded.strip()[:200]!r}")
+        # The line is on a world-readable unit, so what it must NOT carry is
+        # the material. The positive half is the placeholder: it IS on the
+        # line, which is what makes the negative below a measurement rather
+        # than a broker that was handed nothing.
+        record(f"{arm.name} broker line carries the placeholder",
+               f"={arm.placeholder} " in loaded,
+               f"placeholder {arm.placeholder!r} not in {loaded.strip()[:200]!r}")
+        record(f"{arm.name} broker line carries no secret",
+               not any(a.secret in loaded for a in ARMS),
+               f"a secret is on the loaded ExecStart= of {unit}")
+        pre = run(["systemctl", "show", "-p", "ExecStartPre", "--value", unit],
+                  check=False).stdout.strip()
+        record(f"{arm.name} broker has no ExecStartPre and no config file",
+               pre == "" and
+               not Path(f"/run/workloadctl/broker/{arm.name}").exists(),
+               f"ExecStartPre={pre!r}")
 
     for arm in ARMS:
         r = guest(arm.name, f'echo "[${GUEST_ENV}]"')
@@ -751,10 +772,10 @@ def claim_1_and_4():
         body, code, rc = parse(r)
         doc = stub_body(body)
         # `x-api-key`, not `Authorization`, and that is the BROKER's default
-        # rather than a choice this rig made: render_vm_broker_config emits
-        # neither `auth_header` nor `auth_format`, so every generated instance
-        # runs the broker's own defaults (`x-api-key: {secret}`). A workload
-        # cannot currently name a provider that wants `Authorization: Bearer`.
+        # rather than a choice this rig made: broker_command emits neither
+        # `--auth-header` nor `--auth-format` for a block that says nothing,
+        # so an instance told nothing runs the broker's own defaults
+        # (`x-api-key: {secret}`). Arm b names the other convention.
         auth = (doc or {}).get(arm.header.lower(), "")
         seen[arm.name] = auth
         record(f"{arm.name} reaches {PROVIDER} and the BROKER's key arrives "

@@ -2,12 +2,12 @@
 The credential block: [[network.credential]] and [[vm.network.credential]],
 parsed and validated once for both substrates.
 
-A container's block and a VM's block are the same five keys, rendered into
-the same broker.toml by the same generator and read by the same broker
-binary, so one parse loop and one rule set serve both; the NamedTuple to
-build and the reserved-variable set to refuse are the substrate's
+A container's block and a VM's block are the same five keys, written onto
+the same broker command line by the same generator and read by the same
+broker binary, so one parse loop and one rule set serve both; the NamedTuple
+to build and the reserved-variable set to refuse are the substrate's
 contribution. parse_credential_entries is shape-tolerant and is what the
-broker's config render reads; validate_credential_entries is what the two
+broker's command builder reads; validate_credential_entries is what the two
 egress validators apply.
 
 Installed to /usr/libexec/workloadctl/credential_entries.py.
@@ -15,6 +15,8 @@ Installed to /usr/libexec/workloadctl/credential_entries.py.
 
 import re
 import string
+
+from broker_profiles import BROKER_DEFAULT_AUTH_FORMAT, BROKER_DEFAULT_AUTH_HEADER
 
 
 def parse_credential_entries(net: dict, credential_cls) -> list:
@@ -56,9 +58,9 @@ def parse_credential_entries(net: dict, credential_cls) -> list:
 # --- Shared credential-block validation ---
 #
 # One implementation for both substrates, because a [[network.credential]] and
-# a [[vm.network.credential]] are the same block: the same five keys, rendered
-# into the same broker.toml by the same generator and read by the same broker
-# binary. Every rule here fails the same way when it is absent: the broker
+# a [[vm.network.credential]] are the same block: the same five keys, written
+# onto the same broker command line by the same generator and read by the
+# same broker binary. Every rule here fails the same way when it is absent: the broker
 # attaches the wrong header or none at all, the provider answers 401, and every
 # layer on this host considers the request fully authorised -- so a rule that
 # goes missing has no symptom this side of the provider.
@@ -114,11 +116,10 @@ _AUTH_HEADER_REFUSED = {
 }
 
 
-# The broker's defaults. Applied by broker_config.load_config, which the
-# shipped program runs; here they are only quoted at an operator, because the
-# render emits nothing for an absent key.
-BROKER_DEFAULT_AUTH_HEADER = "x-api-key"
-BROKER_DEFAULT_AUTH_FORMAT = "{secret}"
+# The broker's defaults are broker_profiles' (imported at the top): its
+# build_profiles applies them, which the shipped program runs; here they are
+# only quoted at an operator, because the command emits no flag for an
+# absent key.
 
 
 def _validate_auth_header(table: str, name: str, header: str) -> list[str]:

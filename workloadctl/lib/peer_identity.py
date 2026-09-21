@@ -22,12 +22,10 @@ egress rules already match on.
 """
 
 import ipaddress
-import pwd
 import socket
 import struct
 from pathlib import Path
 
-WORKLOAD_USER_PREFIX = "_wl-"
 PROC_NET_TCP = ("/proc/net/tcp", "/proc/net/tcp6")
 
 # Recovers what a connection was aimed at before the host translated it.
@@ -165,17 +163,6 @@ def peer_uid(locals_, peer):
     return None
 
 
-def workload_name(uid):
-    """Workload name behind a uid, or None if it is not a workload user."""
-    try:
-        user = pwd.getpwuid(uid).pw_name
-    except KeyError:
-        return None
-    if not user.startswith(WORKLOAD_USER_PREFIX):
-        return None
-    return user[len(WORKLOAD_USER_PREFIX):]
-
-
 def userns_ranges(uid_map):
     """The host uid ranges this namespace can represent, as (start, count).
 
@@ -202,25 +189,24 @@ def userns_maps_everything(uid_map):
                for start, count in userns_ranges(uid_map))
 
 
-def unmappable_sandboxes(sandbox_names, uid_map):
-    """Configured sandboxes whose uid this namespace cannot represent.
+def unmappable_uids(uids, uid_map):
+    """The uids among `uids` this namespace cannot represent.
 
     Checked against the uids that actually matter rather than against the shape
     of the map, because a namespace can be restricted and still map the whole
     workload range -- refusing that would be a false alarm, and an operator who
     hits one learns to route around the check.
+
+    Uids, not names: the broker is told the uid of its one caller on its
+    command line and never looks a workload user up, so this answers about
+    the number it was given. (It answered about workload USERS while the
+    broker read a document keyed by workload name, and the passwd lookup that
+    turned a name into a uid -- with the user-name prefix it had to know to
+    do so -- was the last workload-side fact in either daemon's process.)
     """
     ranges = userns_ranges(uid_map)
-    unmappable = []
-    for name in sandbox_names:
-        user = WORKLOAD_USER_PREFIX + name
-        try:
-            uid = pwd.getpwnam(user).pw_uid
-        except KeyError:
-            continue  # workload not created yet; nothing to check against
-        if not any(start <= uid < start + count for start, count in ranges):
-            unmappable.append(f"{user} (uid {uid})")
-    return unmappable
+    return [uid for uid in uids
+            if not any(start <= uid < start + count for start, count in ranges)]
 
 
 def overflow_uid():

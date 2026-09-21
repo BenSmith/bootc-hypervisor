@@ -1,8 +1,8 @@
 """The per-workload credential broker instance (ADR 007).
 
-Values that appear in a shipped file -- a generated unit, a rendered
-broker.toml -- are spelled out here rather than imported and re-derived: the
-point of the test is that the file and the module agree, and a test that
+Values that appear in a shipped file -- a generated unit, the broker's
+ExecStart= line -- are spelled out here rather than imported and re-derived:
+the point of the test is that the file and the module agree, and a test that
 computes both sides from the same constant cannot fail when they drift apart.
 
 WHAT USED TO BE AT THE TOP OF THIS FILE, and why it is worth a line rather than
@@ -22,7 +22,6 @@ from tests import load_script
 
 # `lib/` reaches sys.path via tests/__init__, so this import follows it.
 import vm_default_seed
-import contextlib
 import io
 import tempfile
 import unittest
@@ -30,8 +29,7 @@ from pathlib import Path
 
 from egress_ca import CA_ENV_VARS
 from egress_ca import RESERVED_GUEST_ENV
-from broker_config import (BROKER_BIN,
-                           render_vm_broker_config, broker_config_path,
+from broker_config import (BROKER_BIN, vm_broker_command,
                            broker_credential, vm_broker_hosts,
                            vm_broker_upstream_addresses, vm_credential_entries,
                            vm_credential_env, host_resolver_addresses,
@@ -42,7 +40,6 @@ from vm_validate import validate_vm_network
 import broker_profiles
 from workload_addr import BROKER_INSTANCE_PORT, UID_MIN, broker_listen_address
 import ipaddress
-import tomllib
 
 
 def cred_config(name="agent", **net):
@@ -89,82 +86,136 @@ class TestUsesCredentials(unittest.TestCase):
                                               "container": {"image": "x"}}))
 
 
-class TestTheGeneratedConfig(unittest.TestCase):
-    """render_vm_broker_config -- what the instance is told, and what it is not.
+def flags_of(cmd):
+    """{flag: [values]} of a broker argv, the binary dropped. A list per
+    flag because --host and the three per-credential flags repeat."""
+    table = {}
+    for i in range(1, len(cmd), 2):
+        table.setdefault(cmd[i], []).append(cmd[i + 1])
+    return table
+
+
+class TestTheGeneratedCommand(unittest.TestCase):
+    """vm_broker_command -- what the instance is told, and what it is not.
 
     The address assertions are NEGATIVE as well as positive on purpose. Both
     wrong values (127.0.0.1, the broker's own retired default, and 0.0.0.0) put
     one workload's broker where every other workload's inspector is dialling,
     which is exactly the hole ADR 007 decision 6 closes; a test that only
-    asserted the derived value would pass on a render that also bound the world.
+    asserted the derived value would pass on a command that also bound the
+    world.
     """
 
-    def render(self, cfg=None, uid=UID_MIN + 5):
-        return render_vm_broker_config(cfg or cred_config(), uid)
+    def command(self, cfg=None, uid=UID_MIN + 5):
+        return vm_broker_command(cfg or cred_config(), uid)
 
-    def test_it_is_parseable_toml(self):
-        tomllib.loads(self.render())
+    def flags(self, cfg=None, uid=UID_MIN + 5):
+        return flags_of(self.command(cfg, uid))
+
+    def test_it_is_the_packaged_binary_and_flag_value_pairs(self):
+        cmd = self.command()
+        self.assertEqual(cmd[0], BROKER_BIN)
+        self.assertEqual(len(cmd) % 2, 1, cmd)
+        self.assertTrue(all(cmd[i].startswith("--")
+                            for i in range(1, len(cmd), 2)), cmd)
+        self.assertFalse(any(cmd[i].startswith("--")
+                             for i in range(2, len(cmd), 2)), cmd)
 
     def test_the_listen_address_is_the_uid_derived_one(self):
-        cfg = tomllib.loads(self.render())
-        self.assertEqual(cfg["listen_address"],
-                         broker_listen_address(UID_MIN + 5))
+        self.assertEqual(self.flags()["--listen"],
+                         [f"{broker_listen_address(UID_MIN + 5)}:"
+                          f"{BROKER_INSTANCE_PORT}"])
 
     def test_the_listen_address_is_never_localhost_or_the_world(self):
         for uid in (UID_MIN, UID_MIN + 1, UID_MIN + 300):
-            addr = tomllib.loads(self.render(uid=uid))["listen_address"]
+            addr = self.flags(uid=uid)["--listen"][0].rsplit(":", 1)[0]
             self.assertNotIn(addr, ("127.0.0.1", "0.0.0.0", "::", "*"))
 
-    def test_the_port_is_the_instance_port(self):
-        self.assertEqual(tomllib.loads(self.render())["listen_port"],
-                         BROKER_INSTANCE_PORT)
+    def test_the_caller_is_the_uid_the_address_was_made_from(self):
+        """Written twice, as the address and as the caller, because the
+        broker is told both and computes neither."""
+        self.assertEqual(self.flags(uid=UID_MIN + 5)["--caller-uid"],
+                         [str(UID_MIN + 5)])
 
-    def test_the_sandbox_key_is_the_workload_name(self):
-        """The broker resolves a caller's uid to a workload NAME and looks it
-        up here; a key that is anything else refuses every request."""
-        cfg = tomllib.loads(self.render(cred_config(name="myagent")))
-        self.assertEqual(list(cfg["sandboxes"]), ["myagent"])
+    def test_the_name_is_the_workload_name(self):
+        """A label for the log lines, and nothing the broker looks anything
+        up by -- the caller is the uid."""
+        self.assertEqual(self.flags(cred_config(name="myagent"))["--name"],
+                         ["myagent"])
 
-    def test_the_host_row_carries_the_upstream_and_the_credential_id(self):
-        row = tomllib.loads(self.render())["sandboxes"]["agent"]["hosts"][
-            "api.example.test"]
-        self.assertEqual(row["upstream"], "https://api.example.test")
+    def test_the_host_flag_carries_the_host_and_the_credential_id(self):
         _path, cred_id = broker_credential("agent", "example-token")
-        self.assertEqual(row["credential"], cred_id)
-        self.assertEqual(row["placeholder"], "sk-000000PLACEHOLDER")
+        self.assertEqual(self.flags()["--host"],
+                         [f"api.example.test={cred_id}"])
+        self.assertEqual(self.flags()["--placeholder"],
+                         [f"{cred_id}=sk-000000PLACEHOLDER"])
 
-    def test_the_upstream_carries_no_path(self):
-        """A base path here would be prepended to the request the inspector
-        already matched against `paths`, so the origin would be sent a target
-        no rule in this design ever saw."""
-        row = tomllib.loads(self.render())["sandboxes"]["agent"]["hosts"][
-            "api.example.test"]
-        self.assertEqual(row["upstream"].count("/"), 2)
+    def test_the_credential_id_is_what_the_unit_loads_it_under(self):
+        """The id on --host is the filename the broker reads under
+        $CREDENTIALS_DIRECTORY, so it must be the seal name the unit's
+        LoadCredentialEncrypted= writes there -- the two are one string."""
+        cfg = cred_config()
+        unit = TestTheGeneratedUnit().unit(cfg)
+        loaded = [l.split("=", 1)[1].split(":", 1)[0]
+                  for l in unit.splitlines()
+                  if l.startswith("LoadCredentialEncrypted=")]
+        named = [v.split("=", 1)[1] for v in self.flags(cfg)["--host"]]
+        self.assertEqual(loaded, named)
 
-    def test_a_host_with_no_credential_gets_no_row(self):
+    def test_the_upstream_is_not_a_flag(self):
+        """https://<host> and no path, supplied by the broker: a base path
+        would be prepended to the request the inspector already matched
+        against `paths`, so the origin would be sent a target no rule in
+        this design ever saw. With nothing to vary there is nothing to
+        hand over."""
+        self.assertNotIn("--upstream", self.flags())
+        self.assertEqual(broker_profiles.UPSTREAM_PORT, 443)
+
+    def test_a_host_with_no_credential_gets_no_flag(self):
         cfg = cred_config()
         cfg["vm"]["network"]["policy"].append({"host": "plain.example.test"})
-        hosts = tomllib.loads(self.render(cfg))["sandboxes"]["agent"]["hosts"]
-        self.assertEqual(list(hosts), ["api.example.test"])
+        self.assertEqual([v.split("=")[0] for v in self.flags(cfg)["--host"]],
+                         ["api.example.test"])
 
     def test_two_hosts_may_share_one_credential(self):
+        """Two --host flags, ONE --placeholder: the broker refuses a
+        credential described twice."""
         cfg = cred_config()
         cfg["vm"]["network"]["hosts"].append("api2.example.test")
         cfg["vm"]["network"]["policy"].append(
             {"host": "api2.example.test", "credential": "example-token"})
-        hosts = tomllib.loads(self.render(cfg))["sandboxes"]["agent"]["hosts"]
-        self.assertEqual(sorted(hosts), ["api.example.test", "api2.example.test"])
+        flags = self.flags(cfg)
+        self.assertEqual(sorted(v.split("=")[0] for v in flags["--host"]),
+                         ["api.example.test", "api2.example.test"])
+        self.assertEqual(len(flags["--placeholder"]), 1)
 
-    def test_a_placeholder_carrying_a_quote_does_not_break_the_file(self):
+    def test_a_placeholder_carrying_a_quote_reaches_the_broker_intact(self):
+        """Unquoted in the argv; the unit quotes each value with dq. A
+        placeholder with a quote, a backslash, a `$` and a `%` is the case
+        that would break either half on its own."""
         cfg = cred_config()
-        cfg["vm"]["network"]["credential"][0]["placeholder"] = 'a"b\\c'
-        row = tomllib.loads(self.render(cfg))["sandboxes"]["agent"]["hosts"][
-            "api.example.test"]
-        self.assertEqual(row["placeholder"], 'a"b\\c')
+        cfg["vm"]["network"]["credential"][0]["placeholder"] = 'a"b\\c$d%e'
+        self.assertEqual(self.flags(cfg)["--placeholder"][0].split("=", 1)[1],
+                         'a"b\\c$d%e')
 
-    def test_the_config_path_is_under_the_units_runtime_directory(self):
-        self.assertEqual(str(broker_config_path("agent")),
-                         "/run/workloadctl/broker/agent/broker.toml")
+    def test_the_broker_accepts_what_the_command_says(self):
+        """The whole line, through the shipped reader: every flag the
+        command emits is one build_profiles takes, and the table it builds
+        is keyed by the host the command named. test_broker_closure pins
+        the flag SET against the entrypoint's parser; this pins the
+        VALUES."""
+        cfg = cred_config()
+        flags = self.flags(cfg)
+        profiles = broker_profiles.build_profiles(
+            flags["--name"][0], flags["--host"], flags.get("--placeholder", []),
+            flags.get("--auth-header", []), flags.get("--auth-format", []),
+            load=lambda cred_id: f"secret-of-{cred_id}")
+        self.assertEqual(list(profiles), ["api.example.test"])
+        _path, cred_id = broker_credential("agent", "example-token")
+        self.assertEqual(profiles["api.example.test"].secret,
+                         f"secret-of-{cred_id}")
+        self.assertEqual(profiles["api.example.test"].name,
+                         "agent/api.example.test")
 
 
 class TestTheCredentialId(unittest.TestCase):
@@ -196,20 +247,18 @@ class TestTheCredentialId(unittest.TestCase):
 class TestTheGeneratedUnit(unittest.TestCase):
     """The instance's unit. Four properties, each load-bearing on its own."""
 
-    @classmethod
-    def setUpClass(cls):
-        cls.gen = importlib.import_module("gen_egress")
-
     def unit(self, cfg=None, uid=UID_MIN + 5):
-        # The VM call site's three values, spelled here as gen_vm spells
+        # The VM call site's four values, spelled here as gen_vm spells
         # them: the generator takes no defaults, so a test of the VM shape
         # has to say which shape it is testing.
+        gen = importlib.import_module("gen_egress")
         cfg = cfg or cred_config()
-        return self.gen.generate_broker_service(
+        return gen.generate_broker_service(
             cfg, uid,
             before=f"workload-{cfg['workload']['name']}.service",
             hosts=vm_broker_hosts(cfg),
-            upstream=vm_broker_upstream_addresses(cfg))
+            upstream=vm_broker_upstream_addresses(cfg),
+            command=vm_broker_command(cfg, uid))
 
     def test_it_runs_as_a_dynamic_user_and_never_as_the_workload(self):
         """The whole of ADR 007's protection. The inspector runs as the uid
@@ -268,26 +317,40 @@ class TestTheGeneratedUnit(unittest.TestCase):
         self.assertIn("Before=workload-agent.service", unit)
         self.assertIn("PartOf=workload-agent.service", unit)
 
-    def test_the_config_is_written_by_an_unprivileged_execstartpre(self):
-        """Unprivileged so the file is owned by the dynamic user that reads it,
-        and not tolerant: a broker started against a stale config attaches the
-        wrong credential to a request, silently."""
-        unit = self.unit()
-        self.assertIn('ExecStartPre=/usr/libexec/workloadctl/'
-                      'workload-broker-config config "agent"', unit)
-        self.assertNotIn("ExecStartPre=+/usr/libexec/workloadctl/"
-                         "workload-broker-config config", unit)
-        self.assertNotIn("ExecStartPre=-/usr/libexec/workloadctl/"
-                         "workload-broker-config config", unit)
+    def test_it_execs_the_packaged_broker_with_every_value_on_the_line(self):
+        """The ExecStart= is the command, each value dq-quoted and each flag
+        bare: the unit is the only place the broker is told anything, so a
+        value that did not reach the line is one the broker starts without.
+        Spelled out rather than rendered through the same helper, so a
+        change to how the line is written is a change to this string."""
+        _path, cred_id = broker_credential("agent", "example-token")
+        self.assertIn(
+            f'ExecStart={BROKER_BIN} --name "agent" '
+            f'--listen "{broker_listen_address(UID_MIN + 5)}:8081" '
+            f'--caller-uid "{UID_MIN + 5}" '
+            f'--host "api.example.test={cred_id}" '
+            f'--placeholder "{cred_id}=sk-000000PLACEHOLDER"\n', self.unit())
 
-    def test_the_runtime_directory_is_private_to_the_instance(self):
-        unit = self.unit()
-        self.assertIn("RuntimeDirectory=workloadctl/broker/agent", unit)
-        self.assertIn("RuntimeDirectoryMode=0700", unit)
+    def test_a_placeholder_is_quoted_for_a_systemd_exec_line(self):
+        """dq, not a bare join: a quote, a backslash, a `$` and a `%` each
+        have a systemd spelling, and a placeholder is the one value on the
+        line an operator writes freely."""
+        cfg = cred_config()
+        cfg["vm"]["network"]["credential"][0]["placeholder"] = 'a"b\\c$d%e'
+        line = [l for l in self.unit(cfg).splitlines()
+                if l.startswith("ExecStart=")][0]
+        self.assertIn('=a\\"b\\\\c$$d%%e"', line)
 
-    def test_it_execs_the_packaged_broker_against_the_generated_config(self):
-        self.assertIn(f'ExecStart={BROKER_BIN} '
-                      f'"{broker_config_path("agent")}"', self.unit())
+    def test_there_is_no_config_file_no_writer_and_no_runtime_directory(self):
+        """The three things the document cost, asserted absent: a broker
+        that reads a file at start is a broker whose unit and whose file
+        can disagree, and the ExecStartPre that kept them agreeing was a
+        second binary with the workload side's whole closure."""
+        unit = self.unit()
+        self.assertNotIn("ExecStartPre=", unit)
+        self.assertNotIn("RuntimeDirectory", unit)
+        self.assertNotIn("broker.toml", unit)
+        self.assertNotIn("workload-broker-config", unit)
 
 
 class TestTheVmUnitWaitsForIt(unittest.TestCase):
@@ -523,109 +586,6 @@ class TestDriftSeesAHandEditedInstance(unittest.TestCase):
             self.unit.read_text().replace("IPAddressDeny=any", ""))
         names = [name for name, _live, _gen in self.cmd_drift.collect_drift()]
         self.assertIn("workload-vmcred-broker.service", names)
-
-
-class TestTheHelperWritesTheConfig(unittest.TestCase):
-    """`workload-broker-config config` -- the ExecStartPre that materialises D2.
-
-    It runs unprivileged, as the instance's own DynamicUser, inside the unit's
-    sandbox: everything it reads is world-readable and the only thing it writes
-    is the unit's RuntimeDirectory. That is what makes the file owned by the uid
-    that reads it, with no chown and no window in which it is wider.
-    """
-
-    def setUp(self):
-        from unittest import mock
-        import broker_config
-        self.mod = broker_config
-        self.tmp = Path(tempfile.mkdtemp(prefix="broker-config-"))
-        self.addCleanup(__import__("shutil").rmtree, self.tmp,
-                        ignore_errors=True)
-        self.path = self.tmp / "broker.toml"
-        self.enterContext(mock.patch.object(
-            self.mod, "broker_config_path", lambda name: self.path))
-
-    def write(self, cfg):
-        return self.mod.write_instance_config(cfg, UID_MIN + 5)
-
-    def test_it_writes_the_rendered_config(self):
-        self.assertEqual(self.write(cred_config()), self.path)
-        self.assertEqual(tomllib.loads(self.path.read_text())["listen_address"],
-                         broker_listen_address(UID_MIN + 5))
-
-    def test_the_file_is_readable_by_nobody_else(self):
-        self.write(cred_config())
-        self.assertEqual(self.path.stat().st_mode & 0o777, 0o600)
-
-    def test_it_leaves_no_temporary_behind(self):
-        self.write(cred_config())
-        self.assertEqual([p.name for p in self.tmp.iterdir()], ["broker.toml"])
-
-    def test_a_second_run_replaces_rather_than_appends(self):
-        """The config is a pure function of the TOML, rewritten at every start
-        -- which is what stops an instance serving the previous boot's set."""
-        self.write(cred_config())
-        cfg = cred_config()
-        cfg["vm"]["network"]["credential"][0]["placeholder"] = "sk-SECOND"
-        self.write(cfg)
-        row = tomllib.loads(self.path.read_text())["sandboxes"]["agent"][
-            "hosts"]["api.example.test"]
-        self.assertEqual(row["placeholder"], "sk-SECOND")
-
-    def test_a_workload_with_no_credentials_is_refused(self):
-        """Reaching here means a unit outlived the config that produced it.
-        Refused rather than written empty, so the message names the cause."""
-        cfg = cred_config()
-        cfg["vm"]["network"]["credential"] = []
-        cfg["vm"]["network"]["policy"] = [{"host": "api.example.test"}]
-        with self.assertRaisesRegex(self.mod.BrokerConfigError,
-                                    r"declares no \[\[vm.network.credential\]\]"):
-            self.write(cfg)
-        self.assertFalse(self.path.exists())
-
-    def test_a_container_is_refused_naming_its_own_block(self):
-        cfg = {"workload": {"name": "web"}, "network": {"hosts": ["a"]}}
-        with self.assertRaisesRegex(self.mod.BrokerConfigError,
-                                    r"declares no \[\[network.credential\]\]"):
-            self.write(cfg)
-
-
-class TestTheConfigVerbShim(unittest.TestCase):
-    """main() turns the name into the bundle and the uid the document is a
-    function of, and nothing else."""
-
-    def setUp(self):
-        self.mod = load_script("libexec/workload-broker-config")
-
-    def test_config_writes_for_the_named_workload(self):
-        from unittest import mock
-        cfg = cred_config()
-        with mock.patch.object(self.mod, "load_workload_config",
-                               lambda name: cfg), \
-                mock.patch.object(self.mod.pwd, "getpwnam",
-                                  lambda user: type("pw", (), {"pw_uid": 10005})), \
-                mock.patch.object(self.mod, "write_instance_config",
-                                  return_value=Path("/run/x")) as w, \
-                contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(self.mod.main(["prog", "config", "agent"]), 0)
-        w.assert_called_once_with(cfg, 10005)
-
-    def test_the_verb_is_rejected_with_the_wrong_argument_count(self):
-        buf = io.StringIO()
-        with contextlib.redirect_stderr(buf):
-            self.assertEqual(self.mod.main(["prog", "config"]), 2)
-        self.assertIn("config <name>", buf.getvalue())
-
-    def test_the_retired_verbs_are_rejected_rather_than_ignored(self):
-        """`up` and `down` were the reachability half and are gone with the
-        map. An ExecStartPre left behind on a hand-edited unit must fail rather
-        than silently do nothing, since doing nothing is what the old `up` did
-        for an unentitled workload -- indistinguishable from success."""
-        for verb in ("up", "down"):
-            with self.subTest(verb):
-                buf = io.StringIO()
-                with contextlib.redirect_stderr(buf):
-                    self.assertEqual(self.mod.main(["prog", verb, "agent"]), 2)
 
 
 # ---------------------------------------------------------------------------
@@ -1107,12 +1067,25 @@ class TestTheBrokerEndpointComesFromTheUid(unittest.TestCase):
 
     def test_the_generator_derives_it_from_the_workloads_uid(self):
         """No registry and no allocation step: the inspector's unit and the
-        broker's config are both rendered from the same uid with the same
+        broker's unit are both rendered from the same uid with the same
         function, so the two halves cannot drift."""
         from gen_egress import inspect_listener_command
         cmd = inspect_listener_command("web", 10007)
         self.assertEqual(cmd[cmd.index("--broker") + 1],
                          f"{BROKER_ADDR}:{BROKER_INSTANCE_PORT}")
+
+    def test_the_two_units_carry_the_same_pair(self):
+        """The inspector's --broker and the broker's --listen, for one uid,
+        read back from the two commands. A mismatch presents exactly as the
+        broker being down -- connection refused, no log line on either side
+        -- which is why it is asserted on the rendered values and not on
+        the function both call."""
+        from gen_egress import inspect_listener_command
+        dial = inspect_listener_command("web", 10007)
+        cfg = cred_config(name="web")
+        bind = vm_broker_command(cfg, 10007)
+        self.assertEqual(dial[dial.index("--broker") + 1],
+                         bind[bind.index("--listen") + 1])
 
     def test_the_entrypoint_parses_the_pair_it_is_given(self):
         """And derives nothing when it is not: a hand-written unit may
@@ -1292,9 +1265,12 @@ class TestTheMapSweepIsGone(unittest.TestCase):
     which goes away with the workload, so there is nothing a uid can inherit.
 
     Asserted by absence, which is the shape [[unit-gates-dont-see-the-seam]]
-    warns about -- so it is pinned against the verb that DOES survive rather
-    than against the string `workload-broker-config`, which would pass just as
-    happily if the helper were deleted outright.
+    warns about. It was pinned against the helper's surviving `config` verb
+    so that deleting the helper outright could not satisfy it -- and then
+    the helper WAS deleted outright, with the document it wrote, so the
+    positive half is now that no VM unit names the helper at all: the
+    broker instance is the one unit that ever did, and its ExecStart= names
+    the broker.
     """
 
     def _unit(self, config):
@@ -1312,18 +1288,15 @@ class TestTheMapSweepIsGone(unittest.TestCase):
                 self.assertNotIn("workload-broker-config up", unit)
                 self.assertNotIn("workload-broker-config down", unit)
 
-    def test_the_helper_still_has_its_config_verb(self):
-        """The negative above is only meaningful while the helper exists.
-
-        Deleting libexec/workload-broker-config entirely would satisfy every
-        assertion in the class above and break the broker instance's
-        ExecStartPre, which is the one caller left.
-        """
-        source = (Path(__file__).resolve().parent.parent
-                  / "libexec" / "workload-broker-config").read_text()
-        self.assertIn("write_instance_config(", source)
-        self.assertNotIn("def up(", source)
-        self.assertNotIn("def down(", source)
+    def test_the_helper_is_gone_and_nothing_names_it(self):
+        """The negative above is only meaningful while nothing regrows it.
+        The helper file is gone; the broker unit -- its one caller -- execs
+        the broker; and no generated VM unit spells its name."""
+        self.assertFalse((Path(__file__).resolve().parent.parent
+                          / "libexec" / "workload-broker-config").exists())
+        unit = TestTheGeneratedUnit().unit()
+        self.assertNotIn("workload-broker-config", unit)
+        self.assertIn(f"ExecStart={BROKER_BIN} ", unit)
 
 
 class TestTheAdvertisedAddressIsNotAdded(unittest.TestCase):
@@ -1491,38 +1464,44 @@ class TestTheProvidersAuthConvention(unittest.TestCase):
     workload.toml to fix it with.
     """
 
-    def _render(self, credential, policy=None):
+    def _flags(self, credential, policy=None):
         policy = policy or [{"host": "api.x.test", "credential": "k"}]
         config = {"workload": {"name": "agent"},
                   "vm": {"network": _cred_net(policy, credential)}}
         self.assertEqual(
             validate_vm_network(config["vm"]["network"]), [],
             "the fixture itself does not validate")
-        return tomllib.loads(render_vm_broker_config(config, UID_MIN + 7))
+        return flags_of(vm_broker_command(config, UID_MIN + 7))
 
     def test_a_provider_that_wants_bearer_can_be_named(self):
-        doc = self._render([{"name": "k", "placeholder": "P", "env": "E",
-                             "auth_header": "Authorization",
-                             "auth_format": "Bearer {secret}"}])
-        host = doc["sandboxes"]["agent"]["hosts"]["api.x.test"]
-        self.assertEqual(host["auth_header"], "Authorization")
-        self.assertEqual(host["auth_format"], "Bearer {secret}")
+        flags = self._flags([{"name": "k", "placeholder": "P", "env": "E",
+                              "auth_header": "Authorization",
+                              "auth_format": "Bearer {secret}"}])
+        _path, cred_id = broker_credential("agent", "k")
+        self.assertEqual(flags["--auth-header"], [f"{cred_id}=Authorization"])
+        self.assertEqual(flags["--auth-format"], [f"{cred_id}=Bearer {{secret}}"])
 
     def test_saying_nothing_emits_nothing_rather_than_the_default(self):
         """The default belongs to the broker, in one place. Writing it out here
         would make two copies, and the second one is the one that goes stale
         after the first changes."""
-        doc = self._render([{"name": "k", "placeholder": "P", "env": "E"}])
-        host = doc["sandboxes"]["agent"]["hosts"]["api.x.test"]
-        self.assertNotIn("auth_header", host)
-        self.assertNotIn("auth_format", host)
+        flags = self._flags([{"name": "k", "placeholder": "P", "env": "E"}])
+        self.assertNotIn("--auth-header", flags)
+        self.assertNotIn("--auth-format", flags)
 
-    def test_the_broker_accepts_both_keys_where_they_are_written(self):
-        """Rendered into the HOST table, which is the only level that takes
-        them. A key at the wrong level is refused by the broker at startup,
-        which for a generated unit is a restart loop."""
-        self.assertIn("auth_header", broker_profiles.HOST_KEYS)
-        self.assertIn("auth_format", broker_profiles.HOST_KEYS)
+    def test_the_broker_applies_both_where_they_are_written(self):
+        """Keyed by the credential id, which is how the broker joins them
+        to a --host. A key it cannot join is refused at startup, which for a
+        generated unit is a restart loop."""
+        flags = self._flags([{"name": "k", "placeholder": "P", "env": "E",
+                              "auth_header": "Authorization",
+                              "auth_format": "Bearer {secret}"}])
+        profiles = broker_profiles.build_profiles(
+            "agent", flags["--host"], flags["--placeholder"],
+            flags["--auth-header"], flags["--auth-format"],
+            load=lambda cred_id: "S")
+        self.assertEqual(profiles["api.x.test"].auth_header, "Authorization")
+        self.assertEqual(profiles["api.x.test"].auth_value, "Bearer S")
 
     def test_a_header_that_is_not_a_header_is_refused(self):
         for bad in ("X-Key: oops", "X Key", "X-Key\nInjected", ""):
@@ -1568,15 +1547,17 @@ class TestTheProvidersAuthConvention(unittest.TestCase):
         self.assertIsNone(creds[0].auth_format)
 
 
-class TestOneTablePerHost(unittest.TestCase):
-    """Splitting one host's rules across policy entries must still render.
+class TestOneFlagPerHost(unittest.TestCase):
+    """Splitting one host's rules across policy entries must still start.
 
     `/v1/*` for GET and `/v2/*` for POST, one credential, is the ordinary way
     to write §3 and it validates -- the per-host credential rule only refuses
-    entries that DISAGREE about which credential. Rendered per entry, it
-    emitted `[sandboxes.agent.hosts."api.x.test"]` twice, which TOML refuses
-    outright: the broker exited at start and every brokered request 502'd, on a
-    workload whose config `validate` had just called clean.
+    entries that DISAGREE about which credential. Rendered per entry, the
+    old document held `[sandboxes.agent.hosts."api.x.test"]` twice, which
+    TOML refused outright: the broker exited at start and every brokered
+    request 502'd, on a workload whose config `validate` had just called
+    clean. The broker refuses a repeated --host for a reason of its own (two
+    spellings of one host), so the collapse is still what keeps it up.
     """
 
     def _config(self, policy):
@@ -1585,27 +1566,26 @@ class TestOneTablePerHost(unittest.TestCase):
                     policy,
                     [{"name": "k", "placeholder": "P", "env": "E"}])}}
 
-    def test_two_entries_for_one_host_render_one_table(self):
+    def test_two_entries_for_one_host_emit_one_flag(self):
         policy = [{"host": "api.x.test", "credential": "k",
                    "paths": ["/v1/*"], "methods": ["GET"]},
                   {"host": "api.x.test", "credential": "k",
                    "paths": ["/v2/*"], "methods": ["POST"]}]
         config = self._config(policy)
         self.assertEqual(validate_vm_network(config["vm"]["network"]), [],
-                         "the fixture is refused, so the render is untested")
-        text = render_vm_broker_config(config, UID_MIN + 7)
-        # The assertion is that it PARSES. A count of tables would pass against
-        # a render that emitted the second one under a mangled key.
-        doc = tomllib.loads(text)
-        self.assertEqual(list(doc["sandboxes"]["agent"]["hosts"]),
-                         ["api.x.test"])
+                         "the fixture is refused, so the command is untested")
+        flags = flags_of(vm_broker_command(config, UID_MIN + 7))
+        # The assertion is that the BROKER TAKES IT. A count of flags would
+        # pass against a command the reader then refused for another reason.
+        profiles = broker_profiles.build_profiles(
+            "agent", flags["--host"], flags["--placeholder"], load=lambda c: "S")
+        self.assertEqual(list(profiles), ["api.x.test"])
 
-    def test_two_hosts_still_get_two_tables(self):
+    def test_two_hosts_still_get_two_flags(self):
         """The collapse must be on the host, not on the credential: two hosts
         sharing one credential are two upstreams."""
         policy = [{"host": "a.x.test", "credential": "k"},
                   {"host": "b.x.test", "credential": "k"}]
-        doc = tomllib.loads(
-            render_vm_broker_config(self._config(policy), UID_MIN + 7))
-        self.assertEqual(sorted(doc["sandboxes"]["agent"]["hosts"]),
+        flags = flags_of(vm_broker_command(self._config(policy), UID_MIN + 7))
+        self.assertEqual(sorted(v.split("=")[0] for v in flags["--host"]),
                          ["a.x.test", "b.x.test"])

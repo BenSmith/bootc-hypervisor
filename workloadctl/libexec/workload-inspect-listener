@@ -100,7 +100,8 @@ def broker_endpoint(value):
     which is the workload's, and which the broker's unit turns into the same
     address -- and the reasoning still holds one level up: the generator
     computes both halves from the same uid with the same function, so the
-    pair in this unit's ExecStart= and the pair in broker.toml cannot drift.
+    pair in this unit's ExecStart= and the `--listen` pair on the broker's
+    cannot drift.
     What moved is only WHERE the derivation runs, from the inspector's
     process to the generator's, which is the side that is allowed to know
     what a uid becomes.

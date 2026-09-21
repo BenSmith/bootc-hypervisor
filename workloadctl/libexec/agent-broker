@@ -10,45 +10,114 @@ host. No CA in the guest, no TLS interception, nothing to break certificate
 pinning.
 
 Callers are identified by the uid owning the far end of the connection, which
-the host assigns and nothing inside a guest can forge. Each one may carry its
-own credential and upstream. See docs/agent-broker.md §5 -- in particular the two
-ways this identification fails without erroring.
+the host assigns and nothing inside a guest can forge. An instance serves ONE
+caller, whose uid it is told; anyone else is refused. See docs/agent-broker.md
+§5 -- in particular the two ways this identification fails without erroring.
 
-Deliberately NOT a general proxy. The upstream is fixed by config and is never
-taken from the request, so a compromised sandbox cannot steer this at anything
-else. A broker that forwarded to a guest-chosen destination would be an SSRF
-pivot with a credential welded to it — the exact failure this design exists to
-avoid.
+Deliberately NOT a general proxy. The upstream is fixed by the flags and is
+never taken from the request, so a compromised sandbox cannot steer this at
+anything else. A broker that forwarded to a guest-chosen destination would be
+an SSRF pivot with a credential welded to it — the exact failure this design
+exists to avoid.
 
 stdlib only (matches workloadctl's no-third-party-deps rule). This file is the
-entrypoint: the document is broker_profiles', the request path broker_request's,
-the server broker_server's, and the caller identification peer_identity's.
+entrypoint: the profile table is broker_profiles', the request path
+broker_request's, the server broker_server's, and the caller identification
+peer_identity's.
 
-Usage: agent-broker /run/workloadctl/broker/<name>/broker.toml
+EVERYTHING IT KNOWS, IT IS TOLD. The flags below are the whole of what the
+broker needs and none of it is derived here: the generator
+(gen_egress.generate_broker_service, over broker_config.broker_command) is the
+one place a workload's name becomes a uid, a listen address and a set of
+credential ids, and it writes them onto the unit's ExecStart=. This program
+imports nothing that reads a workload's config, knows where one keeps its
+things, or turns a uid into anything; tests/test_broker_closure.py holds it
+to that. The material itself never appears on the command line: it arrives
+under $CREDENTIALS_DIRECTORY from the unit's LoadCredentialEncrypted= lines,
+and a --host flag names the credential id the unit loaded it under.
+
+Usage:
+  agent-broker --name NAME --listen ADDRESS:PORT --caller-uid UID
+               --host HOST=CREDENTIAL [--host ...]
+               [--placeholder CREDENTIAL=TEXT] [--auth-header CREDENTIAL=FIELD]
+               [--auth-format CREDENTIAL=FORMAT]
+               [--tls-cert PATH --tls-key PATH] [--relax-x509-strict]
+               [--connect-timeout SECONDS] [--read-timeout SECONDS]
 """
 
+import argparse
 import os
 import sys
 from pathlib import Path
 
-from broker_profiles import BrokerConfigError, build_profiles, load_config
-from broker_server import (
-    Handler, Server, guest_tls_context, log, upstream_tls_context,
+from broker_profiles import (
+    BrokerConfigError, build_profiles, listen_endpoint,
 )
-from peer_identity import overflow_uid, unmappable_sandboxes, userns_maps_everything
+from broker_server import (
+    CONNECT_TIMEOUT, READ_TIMEOUT, Handler, Server, guest_tls_context, log,
+    upstream_tls_context,
+)
+from peer_identity import overflow_uid, unmappable_uids, userns_maps_everything
+
+
+def parse_args(argv):
+    """The flags, exactly as the generator emits them. Every required one is
+    a value the broker cannot derive; every optional one has the default the
+    program always had, so a unit that names none gets what it got before
+    the flags existed."""
+    p = argparse.ArgumentParser(
+        prog="agent-broker",
+        description="credential-holding reverse proxy for one workload")
+    p.add_argument("--name", required=True,
+                   help="the workload's name: a label for the log lines")
+    p.add_argument("--listen", required=True, metavar="ADDRESS:PORT",
+                   help="the uid-derived loopback address this instance binds")
+    p.add_argument("--caller-uid", required=True, type=int, metavar="UID",
+                   help="the one uid whose connections are served")
+    p.add_argument("--host", action="append", default=[],
+                   metavar="HOST=CREDENTIAL",
+                   help="a Host this instance holds a credential for, and the "
+                        "credential id (the name under $CREDENTIALS_DIRECTORY) "
+                        "it attaches; repeatable")
+    p.add_argument("--placeholder", action="append", default=[],
+                   metavar="CREDENTIAL=TEXT",
+                   help="the fiction the guest holds in place of that "
+                        "credential; refused if it equals the real one")
+    p.add_argument("--auth-header", action="append", default=[],
+                   metavar="CREDENTIAL=FIELD",
+                   help="the header the credential is sent in "
+                        "(default x-api-key)")
+    p.add_argument("--auth-format", action="append", default=[],
+                   metavar="CREDENTIAL=FORMAT",
+                   help="the header value, with {secret} substituted "
+                        "(default {secret})")
+    p.add_argument("--tls-cert", metavar="PATH",
+                   help="serve HTTPS to the guest with this certificate "
+                        "(docs/agent-broker.md §8)")
+    p.add_argument("--tls-key", metavar="PATH")
+    p.add_argument("--relax-x509-strict", action="store_true",
+                   help="clear VERIFY_X509_STRICT for a private upstream CA "
+                        "missing keyUsage; verification otherwise unchanged")
+    p.add_argument("--connect-timeout", type=float, default=CONNECT_TIMEOUT,
+                   metavar="SECONDS")
+    p.add_argument("--read-timeout", type=float, default=READ_TIMEOUT,
+                   metavar="SECONDS")
+    args = p.parse_args(argv[1:])
+    if bool(args.tls_cert) != bool(args.tls_key):
+        p.error("--tls-cert and --tls-key go together")
+    return args
 
 
 def main(argv=None):
     argv = sys.argv if argv is None else argv
-    if len(argv) != 2:
-        sys.exit(f"usage: {argv[0]} <config.toml>")
+    args = parse_args(argv)
     try:
-        cfg = load_config(argv[1])
+        addr = listen_endpoint(args.listen)
     except BrokerConfigError as exc:
         sys.exit(str(exc))
 
     # Refuse to run somewhere identification cannot work. From a user namespace
-    # that does not map a workload's uid, that caller reads as the overflow uid
+    # that does not map the caller's uid, that caller reads as the overflow uid
     # -- which raises nothing, it just merges sandboxes into one identity. In a
     # unit this means PrivateUsers= must stay unset; the rest of the hardening
     # set is unaffected.
@@ -57,37 +126,38 @@ def main(argv=None):
     except OSError as exc:
         sys.exit(f"cannot read /proc/self/uid_map ({exc.strerror}); caller "
                  "identification needs it")
-    blind_to = unmappable_sandboxes(cfg["sandboxes"], uid_map)
-    if blind_to:
-        sys.exit("this user namespace cannot represent " + ", ".join(blind_to) +
-                 " -- those callers would be indistinguishable. Unset "
-                 "PrivateUsers= in the unit (docs/agent-broker.md §5)")
+    if unmappable_uids([args.caller_uid], uid_map):
+        sys.exit(f"this user namespace cannot represent uid {args.caller_uid} "
+                 f"({args.name}) -- its connections would be indistinguishable "
+                 "from any other unmapped caller's. Unset PrivateUsers= in the "
+                 "unit (docs/agent-broker.md §5)")
     if not userns_maps_everything(uid_map):
-        # Every configured sandbox checked out, but an unconfigured one might
-        # still land outside the map, and that failure is silent.
+        # The one caller checked out, but every other uid might still land
+        # outside the map, and that failure is silent.
         log("warn", msg="running in a user namespace; callers outside its uid "
                         "map cannot be identified")
 
-    Handler.config = cfg
     if not os.environ.get("CREDENTIALS_DIRECTORY") and os.environ.get("AGENT_BROKER_SECRET"):
         log("warn", msg="using AGENT_BROKER_SECRET; prefer systemd LoadCredentialEncrypted")
     try:
-        Handler.profiles = build_profiles(cfg)
+        Handler.profiles = build_profiles(
+            args.name, args.host, args.placeholder, args.auth_header,
+            args.auth_format)
     except BrokerConfigError as exc:
         sys.exit(str(exc))
+    Handler.name = args.name
+    Handler.workload_uid = args.caller_uid
     Handler.overflow = overflow_uid()
-    Handler.upstream_context = upstream_tls_context(cfg.get("relax_x509_strict"))
+    Handler.upstream_context = upstream_tls_context(args.relax_x509_strict)
+    Handler.connect_timeout = args.connect_timeout
+    Handler.read_timeout = args.read_timeout
 
-    addr = (cfg["listen_address"], int(cfg["listen_port"]))
     server = Server(addr, Handler)
-    server.guest_tls_context = guest_tls_context(cfg.get("tls_cert"), cfg.get("tls_key"))
+    server.guest_tls_context = guest_tls_context(args.tls_cert, args.tls_key)
     scheme = "https" if server.guest_tls_context else "http"
 
-    # The profile table's SHAPE, not an upstream: a line naming the top-level
-    # default would describe an inheritance source, not anything this
-    # instance serves.
     log("listening", url=f"{scheme}://{addr[0]}:{addr[1]}",
-        sandboxes=len({s for s, _ in Handler.profiles}),
+        workload=args.name, uid=args.caller_uid,
         hosts=len(Handler.profiles), unknown="refused")
     try:
         server.serve_forever()

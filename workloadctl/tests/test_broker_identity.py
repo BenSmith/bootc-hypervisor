@@ -250,23 +250,6 @@ class TestPeerUidLive(unittest.TestCase):
             sock.close()
 
 
-class TestWorkloadName(unittest.TestCase):
-
-    def test_strips_the_workload_prefix(self):
-        with mock.patch.object(peer_identity.pwd, "getpwuid",
-                               return_value=mock.Mock(pw_name="_wl-agent-scratch")):
-            self.assertEqual(peer_identity.workload_name(10000), "agent-scratch")
-
-    def test_a_non_workload_user_is_not_a_workload(self):
-        with mock.patch.object(peer_identity.pwd, "getpwuid",
-                               return_value=mock.Mock(pw_name="nginx")):
-            self.assertIsNone(peer_identity.workload_name(978))
-
-    def test_an_unknown_uid_is_not_a_workload(self):
-        with mock.patch.object(peer_identity.pwd, "getpwuid", side_effect=KeyError):
-            self.assertIsNone(peer_identity.workload_name(4242))
-
-
 INITIAL_NS = "         0          0 4294967295\n"
 # What `unshare -Ur` produces: one uid mapped, everything else invisible.
 SINGLE_UID_NS = "         0       1000          1\n"
@@ -289,37 +272,42 @@ class TestUsernsShape(unittest.TestCase):
         self.assertFalse(peer_identity.userns_maps_everything(""))
 
 
-class TestUnmappableSandboxes(unittest.TestCase):
+class TestUnmappableUids(unittest.TestCase):
     """The startup guard, checked against the uids that matter rather than the
     shape of the map -- a namespace can be restricted and still map every
-    workload, and refusing that would be a false alarm."""
+    workload, and refusing that would be a false alarm.
 
-    def sandboxes(self, uid_map, uid=10000):
-        with mock.patch.object(peer_identity.pwd, "getpwnam",
-                               return_value=mock.Mock(pw_uid=uid)):
-            return peer_identity.unmappable_sandboxes(["agent-scratch"], uid_map)
+    Uids, and no passwd lookup: the broker is told its caller's uid and
+    this answers about that number. There is no `_wl-` prefix anywhere in
+    either daemon's process now, which is asserted below by the module
+    importing nothing that could look one up."""
+
+    def unmappable(self, uid_map, uid=10000):
+        return peer_identity.unmappable_uids([uid], uid_map)
 
     def test_the_initial_namespace_can_see_every_workload(self):
-        self.assertEqual(self.sandboxes(INITIAL_NS), [])
+        self.assertEqual(self.unmappable(INITIAL_NS), [])
 
     def test_a_restricted_namespace_that_still_covers_workloads_is_fine(self):
         """This is the case the first version of the guard got wrong: it
         demanded the initial map and would have refused to run here."""
-        self.assertEqual(self.sandboxes(CONTAINER_NS), [])
+        self.assertEqual(self.unmappable(CONTAINER_NS), [])
 
-    def test_a_workload_outside_the_map_is_reported_by_name(self):
-        found = self.sandboxes(SINGLE_UID_NS)
-        self.assertEqual(len(found), 1)
-        self.assertIn("_wl-agent-scratch", found[0])
-        self.assertIn("10000", found[0])
+    def test_a_uid_outside_the_map_is_reported(self):
+        self.assertEqual(self.unmappable(SINGLE_UID_NS), [10000])
 
-    def test_a_workload_above_the_mapped_range_is_reported(self):
-        self.assertEqual(len(self.sandboxes(CONTAINER_NS, uid=70000)), 1)
+    def test_a_uid_above_the_mapped_range_is_reported(self):
+        self.assertEqual(self.unmappable(CONTAINER_NS, uid=70000), [70000])
 
-    def test_a_sandbox_whose_user_does_not_exist_yet_is_not_an_error(self):
-        with mock.patch.object(peer_identity.pwd, "getpwnam", side_effect=KeyError):
-            self.assertEqual(
-                peer_identity.unmappable_sandboxes(["not-created"], SINGLE_UID_NS), [])
+    def test_the_module_looks_nothing_up(self):
+        """No pwd, no prefix: a uid is compared to a uid. The lookup that
+        turned one into a workload name was the last workload-side fact in
+        the broker's process."""
+        import inspect
+        source = inspect.getsource(peer_identity)
+        self.assertNotIn("import pwd", source)
+        self.assertNotIn("_wl", source)
+        self.assertFalse(hasattr(peer_identity, "workload_name"))
 
 
 class TestIdentifyRefusals(unittest.TestCase):
@@ -339,48 +327,57 @@ class TestIdentifyRefusals(unittest.TestCase):
     three would be the same erasure by another route.
     """
 
-    def _handler(self, uid, sandboxes=()):
-        """A handler whose connection was admitted with `uid` on the far end.
+    def _handler(self, uid, workload_uid=10001):
+        """A handler whose connection was admitted with `uid` on the far end,
+        in an instance started for `workload_uid`.
 
         caller_uid is what Server.process_request resolved when it granted this
         connection a slot; the handler no longer looks it up itself, so the
-        fixture is the uid rather than a patched lookup.
+        fixture is the uid rather than a patched lookup. workload_uid is the
+        --caller-uid the instance was started with.
         """
         handler = broker_server.Handler.__new__(broker_server.Handler)
-        handler.profiles = {(name, "api.example.com"): f"profile-of-{name}"
-                            for name in sandboxes}
+        handler.name = "agent"
+        handler.workload_uid = workload_uid
+        handler.profiles = {"api.example.com": "profile-of-agent"}
         handler.overflow = 65534
         handler.caller_uid = uid
         return handler
 
     def test_no_peer_socket_is_refused_and_says_so(self):
-        sandbox, label = self._handler(None, ["agent"])._identify()
+        sandbox, label = self._handler(None)._identify()
         self.assertIsNone(sandbox)
         self.assertEqual(label, "no-peer-socket")
 
     def test_an_unmapped_uid_is_refused_and_says_so(self):
-        sandbox, label = self._handler(65534, ["agent"])._identify()
+        sandbox, label = self._handler(65534)._identify()
         self.assertIsNone(sandbox)
         self.assertEqual(label, "uid-unmapped")
 
-    def test_an_unlisted_caller_gets_nothing(self):
-        with mock.patch.object(broker_server, "workload_name",
-                               return_value="not-in-config"):
-            sandbox, label = self._handler(10001, ["agent"])._identify()
+    def test_another_uid_gets_nothing(self):
+        sandbox, label = self._handler(10002)._identify()
         self.assertIsNone(sandbox)
-        # The label still names the workload, so the log line says WHICH caller
-        # was refused rather than only that one was.
-        self.assertEqual(label, "not-in-config")
+        # The label still carries the uid, so the log line says WHICH caller
+        # was refused rather than only that one was -- and it is the bare
+        # number, because the broker has no name for a uid that is not its
+        # own workload's.
+        self.assertEqual(label, "uid:10002")
 
-    def test_a_listed_caller_resolves_to_its_sandbox_and_not_to_a_profile(self):
-        """_identify settles half the key now. Returning a profile here would
-        mean resolving it once per CONNECTION, and one keep-alive connection
-        from an inspector may carry requests for two credential-backed hosts --
+    def test_the_configured_caller_resolves_to_its_name_and_not_to_a_profile(self):
+        """_identify settles the caller. Returning a profile here would mean
+        resolving it once per CONNECTION, and one keep-alive connection from
+        an inspector may carry requests for two credential-backed hosts --
         the second would get the first's credential."""
-        with mock.patch.object(broker_server, "workload_name", return_value="agent"):
-            sandbox, label = self._handler(10001, ["agent"])._identify()
+        sandbox, label = self._handler(10001)._identify()
         self.assertEqual(sandbox, "agent")
         self.assertEqual(label, "agent")
+
+    def test_the_uid_is_compared_and_never_resolved(self):
+        """An instance whose workload_uid was never set serves nobody: the
+        comparison is against the flag, not against a lookup that might
+        find a `_wl-` user behind the caller."""
+        sandbox, _label = self._handler(10001, workload_uid=None)._identify()
+        self.assertIsNone(sandbox)
 
 
 if __name__ == "__main__":

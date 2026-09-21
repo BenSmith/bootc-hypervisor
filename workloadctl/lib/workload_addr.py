@@ -353,11 +353,11 @@ def broker_listen_address(uid: int) -> str:
 # (broker_listen_address), so two instances on the same port never collide.
 #
 # Beside the address rather than in broker_config, where it started, because
-# the two are the endpoint and have the same three readers: the render that
-# writes them into broker.toml, the arming that exempts them in nft, and the
-# generator that writes them into the inspector's unit. The inspector itself
-# is given the pair on its command line and derives neither -- it is on the
-# far side of the line that keeps the config grammar out of its closure, and
+# the two are the endpoint and have the same three readers: the command
+# that writes them onto the broker's unit, the arming that exempts them in
+# nft, and the generator that writes them onto the inspector's unit. Neither
+# daemon derives them; each is given the pair on its command line, on the far
+# side of the line that keeps the config grammar out of its closure, and
 # broker_config is that grammar.
 BROKER_INSTANCE_PORT = 8081
 

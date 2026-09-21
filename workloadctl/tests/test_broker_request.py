@@ -18,6 +18,7 @@ fake upstream up behind the real server.
 
 import contextlib
 import io
+import os
 import socket
 import threading
 import unittest
@@ -47,7 +48,7 @@ def profile(auth_header="x-api-key", auth_value="REAL-SECRET", host="api.example
 
 
 def profile_table(prof=None):
-    """A (workload, Host) table covering the hosts these tests dial.
+    """A per-Host table covering the hosts these tests dial.
 
     "x" is in it because most of these send `Host: x` -- they are about framing,
     budgets and relaying rather than about dispatch, and rewriting their bytes
@@ -56,11 +57,11 @@ def profile_table(prof=None):
     Registering a table rather than stubbing Handler._identify is deliberate:
     every one of these used to reach the handler through the fallback profile
     `allow_unknown_callers` produced, and that is gone. A stub would take the
-    real (workload, Host) lookup out of the path, so a change that stopped
-    checking the Host would leave this whole file green.
+    real Host lookup out of the path, so a change that stopped checking the
+    Host would leave this whole file green.
     """
     prof = prof or profile()
-    return {("agent", "x"): prof, ("agent", "api.example.com"): prof}
+    return {"x": prof, "api.example.com": prof}
 
 
 class TestForwardedHeaders(unittest.TestCase):
@@ -240,17 +241,17 @@ class BrokerServerCase(unittest.TestCase):
         case = self
 
         class H(broker_server.Handler):
-            config = {"connect_timeout": 1.0, "read_timeout": 1.0}
+            connect_timeout = 1.0
+            read_timeout = 1.0
             profiles = profile_table()
             overflow = 65534
+            # The caller here is the test process, so the instance is started
+            # for its uid -- as the flag would say -- or _identify would
+            # refuse it before any of these assertions ran.
+            name = "agent"
+            workload_uid = os.getuid()
             if case.handler_timeout is not None:
                 timeout = case.handler_timeout
-
-        # The caller here is the test process, whose uid owns no workload user,
-        # so _identify would refuse it before any of these assertions ran.
-        patcher = mock.patch.object(broker_server, "workload_name", lambda uid: "agent")
-        patcher.start()
-        self.addCleanup(patcher.stop)
 
         self.server = broker_server.Server(("127.0.0.1", 0), H)
         self.port = self.server.server_address[1]
@@ -320,16 +321,15 @@ class TestAFailedSpawnDoesNotLeakASlot(unittest.TestCase):
 
     def test_the_slot_comes_back_after_the_thread_fails_to_start(self):
         # This case builds its own server rather than using BrokerServerCase, so
-        # it needs the same identity stub: without it the probe below is refused
+        # it needs the same identity: without it the probe below is refused
         # at _identify and answers 403, which would ALSO prove the slot came
         # back -- and would make the 411 assertion pass for the wrong reason if
         # it were ever loosened.
-        self.enterContext(
-            mock.patch.object(broker_server, "workload_name", lambda uid: "agent"))
         with mock.patch.object(broker_server, "MAX_CONCURRENT", 1):
             class H(broker_server.Handler):
-                config = {"connect_timeout": 1.0, "read_timeout": 1.0}
+                connect_timeout, read_timeout = 1.0, 1.0
                 profiles, overflow = profile_table(), 65534
+                name, workload_uid = "agent", os.getuid()
 
             server = broker_server.Server(("127.0.0.1", 0), H)
             self.addCleanup(server.server_close)
@@ -592,14 +592,14 @@ class TestTheHostSelectsTheCredential(BrokerServerCase):
 
     def setUp(self):
         super().setUp()
-        # Two hosts under one sandbox with two different keys -- the shape the
-        # (workload, Host) key exists for, and the one a workload-keyed table
+        # Two hosts with two different keys -- the shape the per-Host key
+        # exists for, and the one a table with a single profile per instance
         # could not represent.
         cls = type(self.server.RequestHandlerClass.__name__,
                    (self.server.RequestHandlerClass,), {})
         cls.profiles = {
-            ("agent", "api.example.com"): profile(auth_value="KEY-FOR-EXAMPLE"),
-            ("agent", "api.github.com"): profile(
+            "api.example.com": profile(auth_value="KEY-FOR-EXAMPLE"),
+            "api.github.com": profile(
                 auth_value="KEY-FOR-GITHUB", host="api.github.com"),
         }
         self.server.RequestHandlerClass = cls

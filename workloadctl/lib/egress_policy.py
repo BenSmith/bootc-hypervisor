@@ -295,7 +295,7 @@ def vm_inspect_policy(net: dict) -> dict:
     into the listener's unit as a flag (gen_egress.inspect_listener_command);
     putting it here would make the document non-deterministic w.r.t. the
     TOML and break the byte comparison and the digest. `placeholder` and `env` are not carried either -- they are
-    seed-time and broker-config facts, and the listener decides nothing by them.
+    seed-time and broker-command facts, and the listener decides nothing by them.
 
     NO `reason` OF ANY KIND IS CARRIED -- not the per-host ones, not
     `tls_reason`. A reason is written for a person reviewing the config, and

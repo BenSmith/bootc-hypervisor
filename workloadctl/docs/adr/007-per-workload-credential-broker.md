@@ -2,6 +2,8 @@
 
 **Status:** Implemented. Depends on the transparent egress inspector
 ([ADR 008](008-transparent-egress-inspection.md)), which is what dials the broker.
+Amended 2026-09-21: the instance's configuration is its command line, not a
+file — see the note under decision 8 and the third detail that bites.
 
 ## Context
 
@@ -137,6 +139,27 @@ than only requests to one endpoint.
    those.) Two things follow for free — the instance lands in
    `workload_run_files()`, so `PartOf=` and ordering work as every other workload
    unit's does, and `drift` covers it as an ordinary run-file.
+
+   *Amendment.* The instance was first given a `broker.toml`, rendered by an
+   `ExecStartPre` into the unit's `RuntimeDirectory=` at every start from the
+   workload TOML. Every value in that file was a pure function of what the
+   generator held when it wrote the unit, so the file was a second rendering of
+   the unit's own inputs — with a TOML reader, a key vocabulary, a writer and a
+   helper binary to keep the two in step, and a caller lookup through passwd
+   because the file was keyed by workload *name*. The unit now carries the
+   values on `ExecStart=` (`--name`, `--listen`, `--caller-uid`, one
+   `--host HOST=CREDENTIAL` per credentialed entry, and the per-credential
+   `--placeholder`/`--auth-header`/`--auth-format`), the broker compares the
+   caller's uid to the one it was given, and its process imports nothing that
+   reads a workload's config or resolves a user
+   (`tests/test_broker_closure.py`). What the file was chosen for — never
+   serving a previous boot's credential set — was never its property: it held
+   no material, and `LoadCredentialEncrypted=` decrypts afresh at every start
+   regardless. What is genuinely given up is the per-start cross-check a
+   stale unit got for free, a config naming a credential the unit did not
+   load; a stale unit is now self-consistently stale, exactly as its
+   `IPAddressAllow=` list and the inspector's unit already were, and `drift`
+   is what reports it.
 
 9. **The `credential` name in `workload.toml` is the authority, and nothing
    travels on the wire.** The broker's `(workload, Host)` table must contain a
@@ -289,6 +312,8 @@ unsupported rather than discovered when a tool fails.
   (`ghp_`, `sk-ant-`, `sk_live_`). The placeholder the seed writes has to be
   plausible per provider, or the client fails before the broker sees a packet.
 - Two policy entries for one host — the documented way to vary `methods` by path —
-  render that host's broker table twice, which TOML refuses. The render collapses
-  on the host. `validate` had called such a config clean and the broker then exited
-  at start, so every brokered request answered 502.
+  rendered that host's broker table twice, which TOML refused. The command
+  collapses on the host, and the broker refuses a repeated `--host` for a reason
+  of its own (two spellings of one host), so the collapse is still what keeps
+  it starting. `validate` had called such a config clean and the broker then
+  exited at start, so every brokered request answered 502.

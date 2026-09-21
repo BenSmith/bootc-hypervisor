@@ -134,6 +134,17 @@ made the way it always is, and the rig leaves no trust anchor behind on a
 machine it borrowed. Nothing about the path under test is weakened — the drop-in
 adds one environment variable and changes no directive.
 
+**The guard rows read the manager's parsed `ExecStart=`, not a file.** The
+broker takes everything as flags on the generated unit now: there is no
+`broker.toml`, no `ExecStartPre` and no runtime directory, and the row that
+used to `cat` the config as the workload uid and expect a refusal has become
+four rows on `systemctl show -p ExecStart` — the line names the workload's own
+uid and address; it carries the placeholder (the positive half, so the next
+row measures something); it carries no secret (it is on a world-readable unit,
+so this has to be true rather than arranged); and `ExecStartPre` is empty and
+the runtime directory absent. **Not yet run on the broker-flags build**; see
+the last green below for what was.
+
 **Last green 2026-09-21, all 35 rows, on a KVM host under enforcing, against
 the installed RPM** (the inspector-flags merge: the inspector's broker endpoint
 is now a `--broker` flag the generator computes, and this is the rig that dials
@@ -174,9 +185,12 @@ Three more came out of reading what the first two implied:
 - **Two policy entries for one host rendered an unparseable `broker.toml`.**
   Splitting a host's rules — `/v1/*` for GET, `/v2/*` for POST, one credential
   — is the ordinary way to write §3 and it validates, but it emitted the host's
-  table twice, which TOML refuses: the broker exited at start and every
+  table twice, which TOML refused: the broker exited at start and every
   brokered request 502'd on a config `validate` had just called clean. Both
-  arms now deploy that shape deliberately.
+  arms now deploy that shape deliberately. (The file is gone — the broker
+  takes `--host` flags — but the broker refuses a repeated host for a reason
+  of its own, so the shape still has to collapse on the host and the arms
+  still deploy it.)
 - **The origin was dialled for a brokered host and never written to.** The
   connection was opened before the request was read, verified, pooled and
   abandoned — which made the ORIGIN's reachability and certificate a

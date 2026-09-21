@@ -115,11 +115,12 @@ A second uid does not fix it, because `uid → workload` is a **bijection** and
 that bijection is what keeps the design registry-free. Breaking it is not a
 local change to six rules; it turns arithmetic into a lookup at every one of:
 
-- `workload_name(uid)` in `lib/peer_identity.py` — how the broker answers
-  "which workload is calling me" and how the listener attributes a caller.
-  This is the load-bearing case: with two uids per workload the map is no
-  longer injective, so every consumer must first ask which *kind* of uid it
-  holds.
+- the broker's `--caller-uid` and the listener's caller attribution, both
+  over `lib/peer_identity.py` — "which workload is calling me" is one uid
+  compared to one uid. (It was `workload_name(uid)`, a passwd lookup in the
+  same module, until the broker took its caller as a flag.) This is the
+  load-bearing case: with two uids per workload the map is no longer
+  injective, so every consumer must first ask which *kind* of uid it holds.
 - `derived_subid_range()` in `lib/workload_uid.py` — a 64K subid block per
   uid. A second uid per workload either halves the workload ceiling or needs a
   second, non-subid uid range to live in.
@@ -133,7 +134,8 @@ Plus group or ACL access to the CA key and policy under `/run`, and a rewrite
 of six security-critical rules in the path that took six rungs to get right.
 The two-selector split is the price of "the uid *is* the workload", and that
 property buys far more elsewhere than the split costs in one chain. Do not
-re-propose this without first showing what replaces `workload_name()`.
+re-propose this without first showing what the generator would write as
+`--caller-uid`.
 
 ### Why the ingress/egress asymmetry is correct
 

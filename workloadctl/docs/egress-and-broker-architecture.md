@@ -223,13 +223,13 @@ Two consequences worth holding onto:
   listener range would silently reopen cross-workload reach. The guard sets
   `wl_inspect_live`/`wl_inspect_live6` exist because any local uid could
   otherwise dial another workload's inspector and pollute its records.
-- **Two constants must agree** across three readers: the broker's
-  `listen_address`/`listen_port`, what the generator renders into `broker.toml`,
-  and what the generator writes onto the inspector's `ExecStart=`
-  (`broker_listen_address` and `BROKER_INSTANCE_PORT`, both in
-  `lib/workload_addr.py`). The inspector is given the pair as a flag and
-  derives neither. A mismatch presents exactly as the
-  broker being down — connection refused, no log line anywhere.
+- **One derivation, two units.** The generator computes the broker pair from
+  the uid (`broker_listen_address` and `BROKER_INSTANCE_PORT`, both in
+  `lib/workload_addr.py`) and writes it onto the broker's `ExecStart=` as
+  `--listen` and onto the inspector's as `--broker`. Neither daemon derives
+  it. A mismatch would present exactly as the broker being down — connection
+  refused, no log line anywhere — and `tests/test_broker.py` holds the two
+  lines to the same pair.
 
 ---
 
@@ -244,7 +244,7 @@ flowchart TB
   subgraph shared["Shared, byte-for-byte"]
     LST["workload-inspect-listener<br/>TLS termination, SNI/Host policy, broker dial"]
     NFT2["inet workload_filter + inet workload_proxy skeletons"]
-    BRK["libexec/agent-broker + workload-broker-config config"]
+    BRK["libexec/agent-broker — told everything on its ExecStart="]
     PI["lib/peer_identity.py — caller identified by the uid owning the far end"]
   end
 
@@ -316,7 +316,7 @@ flowchart LR
   I2 -->|"policy entry names credential 'anthropic'"| B2
   CS --> B2
   B2 -->|"ordinary verified TLS, real key"| P2
-  A -.->|"cannot name, cannot reach, cannot read broker.toml"| B2
+  A -.->|"cannot name, cannot reach, is never told about"| B2
 ```
 
 The split of labour is the reason this is ~600 lines and not a TLS-rewriting
@@ -340,9 +340,16 @@ Properties that follow from the picture, each of which is load-bearing:
 - The broker is **not a general proxy**: upstreams come from config and never
   from the request; absolute-form request targets are a 400; a `Host` naming no
   row is a 403. The guest picks among rows the host wrote.
-- **The workload uid cannot read its own `broker.toml`.** The instance runs as a
-  dynamic user disjoint from `_wl-<name>`, and the file names the seal — which is
-  the one thing between a workload and asking systemd for the material.
+- **The broker is told everything on its command line and derives nothing.**
+  `--name`, `--listen`, `--caller-uid`, one `--host HOST=CREDENTIAL` per
+  credentialed policy entry and the per-credential placeholder and auth
+  convention, all computed by the generator and written onto the unit; no
+  config file, no `ExecStartPre`, no TOML in its process and no passwd lookup
+  (`tests/test_broker_closure.py`). The line holds nothing the workload does
+  not already hold — its own hosts, its own placeholders, its own uid — and
+  the seal names it carries are the ones the same unit's
+  `LoadCredentialEncrypted=` lines spell. The material is decrypted into a
+  tmpfs owned by a dynamic user disjoint from `_wl-<name>`, and is on no line.
 - The upstream leg **is not attributable to the sandbox**: the broker egresses as
   its own dynamic user outside the workload uid range, so the connection-marking
   rule does not tag it and per-workload packet capture will not show that half.

@@ -96,27 +96,31 @@ Virtiofs volumes have their own design doc, `workloadctl/docs/vm-virtiofs.md` �
 coding-agent VM or a filtered container -- is never given, and attaches it to
 outbound requests that workload makes through it.
 It is a whole program shipped by the workloadctl RPM, stdlib only: the
-entrypoint is a `main()` shim over `lib/broker_profiles.py` (the document, read),
-`lib/broker_config.py` (the document, rendered), `lib/broker_request.py` (what goes upstream), `lib/broker_server.py`
+entrypoint is a `main()` shim over `lib/broker_profiles.py` (the flags, read),
+`lib/broker_request.py` (what goes upstream), `lib/broker_server.py`
 (Handler, Server, the ceilings) and `lib/peer_identity.py` (caller
-identification, shared with the egress inspector's listener).
-Callers are identified by the uid owning the far end of the connection.
+identification, shared with the egress inspector's listener). The generator
+side is `lib/broker_config.py` (which workloads get an instance, and
+`broker_command`, the argv the unit carries). Callers are identified by the
+uid owning the far end of the connection, compared to the one uid the
+instance was started for.
 
 **One instance per workload, and the workload is never told where it is.**
 One mechanism on both substrates: a VM declaring `[[vm.network.credential]]`
 and a container declaring `[[network.credential]]` get the same generated
-unit, the same `broker.toml` render and the same binary. A declaring workload
+unit, the same command line and the same binary. A declaring workload
 gets `workload-<name>-broker.service` — written by the generator, `DynamicUser=yes`,
-bound to `vm_broker_listen_address(uid)` (`127.129.0.0` + the uid offset), with
-a `broker.toml` regenerated into `/run` at every start. Its only caller is that
-workload's own egress inspector, which recognises a host whose policy entry
-names a `credential` and sends that request to the broker instead of to the
-origin. So a workload cannot name the broker, cannot choose to use it, and
-cannot be pointed at another workload's.
-
-`libexec/workload-broker-config` is not the broker: it is the one-verb helper that
-writes an instance's `broker.toml` (`workload-broker-config config <name>`), run as
-that unit's `ExecStartPre`. `tests/test_broker.py` covers both halves.
+bound to `broker_listen_address(uid)` (`127.129.0.0` + the uid offset), and
+told everything else on its `ExecStart=`: `--name`, `--listen`, `--caller-uid`,
+one `--host HOST=CREDENTIAL` per credentialed policy entry, and each
+credential's `--placeholder`/`--auth-header`/`--auth-format`. There is no
+config file, no `ExecStartPre` and no TOML in the broker's process
+(`tests/test_broker_closure.py`, the twin of `test_inspector_closure.py`).
+Its only caller is that workload's own egress inspector, which recognises a
+host whose policy entry names a `credential` and sends that request to the
+broker instead of to the origin. So a workload cannot name the broker, cannot
+choose to use it, and cannot be pointed at another workload's.
+`tests/test_broker.py` covers the generator half and the seam.
 
 There was a host-wide `agent-broker.service` reached by every guest at an
 advertised `192.0.2.1:8081` through a uid-keyed nft map. All of it is deleted —
@@ -137,7 +141,7 @@ dialled the packet was dropped by the rule that stops a guest reaching the LAN.
 The other three: the generated config could not name a provider's
 `auth_header`/`auth_format`, so any provider wanting `Authorization: Bearer`
 got a 401 on a fully authorised request; two policy entries for one host
-rendered a `broker.toml` TOML refuses; and a brokered host was dialled at the
+rendered a `broker.toml` TOML refused; and a brokered host was dialled at the
 origin and never written to, making the origin's reachability a prerequisite
 for a request that goes to loopback. None is visible without a real packet
 ([[unit-gates-dont-see-the-seam]]). See `workloadctl/tests/manual/README.md`.

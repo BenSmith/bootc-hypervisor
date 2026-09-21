@@ -1,7 +1,7 @@
 """The broker's server: one handler thread per admitted connection.
 
-Handler settles the caller's identity once per connection, looks its
-(workload, Host) profile up, and forwards one buffered request at a time to
+Handler settles the caller's identity once per connection, looks the
+request's Host up in the profile table, and forwards one buffered request at a time to
 the fixed upstream with the credential attached -- the decisions themselves
 are broker_request's. Server bounds the pool: a global ceiling, a per-caller
 ceiling, and an in-flight body budget, each refusing fast rather than
@@ -22,7 +22,7 @@ import time
 
 from broker_profiles import normalise_host
 from broker_request import forwarded_headers, request_framing, response_framing
-from peer_identity import local_endpoints, peer_uid, workload_name
+from peer_identity import local_endpoints, peer_uid
 
 # At most this much request body summed over every connection at once. The
 # request is buffered whole before it is forwarded, and broker_request's
@@ -41,6 +41,12 @@ from peer_identity import local_endpoints, peer_uid, workload_name
 # gets a fast error it can retry instead of a hang -- the same choice the
 # per-caller connection ceiling makes.
 MAX_INFLIGHT_BYTES = 256 * 1024 * 1024
+
+# The upstream leg's two timeouts, and the defaults the flags override. The
+# read timeout is long on purpose: streamed completions idle between tokens
+# for far longer than a connect should be allowed to take.
+CONNECT_TIMEOUT = 15.0
+READ_TIMEOUT = 900.0
 
 CHUNK = 64 * 1024
 
@@ -65,10 +71,16 @@ def log(event, **fields):
 
 class Handler(http.server.BaseHTTPRequestHandler):
     # Set by main(). Class attributes so every request sees the same objects.
-    config = None
+    # `name` is a label for the log lines; `workload_uid` is the identity of
+    # the one caller this instance serves, told to it and never looked up;
+    # `profiles` is keyed by normalised Host.
+    name = None
+    workload_uid = None
     profiles = {}
     overflow = 65534
     upstream_context = None
+    connect_timeout = CONNECT_TIMEOUT
+    read_timeout = READ_TIMEOUT
 
     protocol_version = "HTTP/1.1"
     server_version = "agent-broker"
@@ -131,23 +143,27 @@ class Handler(http.server.BaseHTTPRequestHandler):
         or a uid this namespace cannot map -- are refusals, because both make
         every caller look alike.
 
-        This settles HALF the profile key. The other half is the `Host`, which
-        is per request rather than per connection: one keep-alive connection
-        from one inspector may carry requests for two credential-backed hosts,
-        and resolving the profile once at setup would give the second request
-        the first request's credential.
+        The uid is compared to the ONE the instance was started for, and
+        never resolved to a name: an instance serves one workload (ADR 007
+        decision 6), so this is an assertion rather than a route, and the
+        broker holds no notion of what a uid is called. The label the log
+        line carries is the name it was handed, or the bare uid for a caller
+        that is not it.
+
+        This settles the caller. The `Host` is per request rather than per
+        connection: one keep-alive connection from one inspector may carry
+        requests for two credential-backed hosts, and resolving the profile
+        once at setup would give the second request the first request's
+        credential.
         """
         uid = self.caller_uid
         if uid is None:
             return None, "no-peer-socket"
         if uid == self.overflow:
             return None, "uid-unmapped"
-
-        name = workload_name(uid)
-        label = name or f"uid:{uid}"
-        if name is not None and any(s == name for s, _ in self.profiles):
-            return name, label
-        return None, label
+        if uid == self.workload_uid:
+            return self.name, self.name
+        return None, f"uid:{uid}"
 
     def _fail(self, status, message):
         """Answer without forwarding, and end the connection.
@@ -180,13 +196,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._fail(403, "caller not registered with the broker\n")
             return
 
-        # The second half of the key. Resolved from THIS BROKER'S OWN TABLE --
-        # the header selects a row and supplies nothing. A Host with no row is
-        # refused: there is no default profile in either dimension (ADR 007
-        # decision 3), so a workload's second, unlisted destination cannot
-        # silently receive its first destination's key.
+        # The other half of the decision. Resolved from THIS BROKER'S OWN
+        # TABLE -- the header selects a row and supplies nothing. A Host with
+        # no row is refused: there is no default profile (ADR 007 decision
+        # 3), so a workload's second, unlisted destination cannot silently
+        # receive its first destination's key.
         host = normalise_host(self.headers.get("Host"))
-        profile = self.profiles.get((sandbox, host)) if host else None
+        profile = self.profiles.get(host) if host else None
         if profile is None:
             log("deny", reason="host-not-configured", sandbox=label,
                 host=host or "")
@@ -232,12 +248,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 profile.host,
                 profile.port,
                 context=self.upstream_context,
-                timeout=self.config["connect_timeout"],
+                timeout=self.connect_timeout,
             )
             conn.request(method, path, body=body, headers=headers)
             # Streamed completions can idle between tokens for far longer than
             # a connect timeout should allow.
-            conn.sock.settimeout(self.config["read_timeout"])
+            conn.sock.settimeout(self.read_timeout)
             resp = conn.getresponse()
             sent = self._relay(resp)
             log("ok", sandbox=sandbox, method=method, path=self.path,
