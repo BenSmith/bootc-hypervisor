@@ -1263,6 +1263,12 @@ Two mechanisms repair it, and they cover each other's gaps:
   the host's clock over a KVM hypercall: no network, so it works inside the
   filter, and **nothing is required on the host** — no QEMU flag, no device, no
   time server to run. Correction lands on chrony's own four-second poll.
+  The same block deletes the stock `pool` line, so the refclock is chrony's
+  only source. In a filtered guest that pool would not be dead but *misdirected*:
+  the resolver answers every name with the listener's address, so chrony dials
+  UDP 123 at a listener that serves no such thing, and the filter counts each
+  attempt on the self-dial element `diagnose` reports — eight packets a boot
+  and one per poll interval after, for the life of the guest.
 - **On the host — the mint-path check.** Before signing a leaf on a cache miss,
   workloadctl compares the guest's clock to its own over the guest agent and
   resyncs if they differ by more than five minutes. This one needs no guest

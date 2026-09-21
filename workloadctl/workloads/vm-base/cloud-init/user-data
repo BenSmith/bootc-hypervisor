@@ -211,7 +211,11 @@ write_files:
 # is lost by the guest exactly and permanently, and NTP will not put it back: a
 # stock chrony steps only during its first three updates and slews forever
 # after, at a rate that needs months to walk off a two-hour jump. In a filtered
-# guest NTP is dead anyway, since this design closed the UDP path it needs.
+# guest NTP is dead anyway, since this design closed the UDP path it needs --
+# and worse than dead: the resolver hands every name the listener's address,
+# so the stock `pool` line has chrony dialling UDP 123 at a listener that does
+# not serve it, and each attempt is counted by `diagnose` as a wrong-port
+# self-dial. The block below deletes that line before adding the refclock.
 #
 # ptp_kvm costs nothing and needs no network: the guest reads the host's clock
 # over a KVM hypercall. Nothing is required on the host side. The three pieces
@@ -230,6 +234,7 @@ runcmd:
       for _ in 1 2 3 4 5; do [ -e /dev/ptp_kvm ] && break; sleep 1; done
     fi
     if [ -e /dev/ptp_kvm ] && [ -f /etc/chrony.conf ] && ! grep -qF '# workloadctl: paravirtual clock' /etc/chrony.conf; then
+      sed -i '/^pool /d' /etc/chrony.conf
       printf '%s\n' '# workloadctl: paravirtual clock' 'refclock PHC /dev/ptp_kvm poll 2 dpoll -2 offset 0' 'makestep 1 -1' >> /etc/chrony.conf
       systemctl restart chronyd || true
     fi

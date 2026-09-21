@@ -128,6 +128,59 @@ class TestSteppingIsUnconditional(unittest.TestCase):
         self.assertNotIn("makestep 1.0 3", script)
 
 
+class TestTheStockPoolGoes(unittest.TestCase):
+    """The refclock is the guest's only source; the stock `pool` line is removed.
+
+    Not tidiness. A filtered guest's resolver synthesises the listener address
+    for EVERY name (resolve_policy: unconditional, by design), so the pool
+    resolves and chrony dials UDP 123 at a listener that serves no such thing.
+    The filter drops it on the wrong-port self-dial element, which is the one
+    `diagnose` reads out as "the guest expects a service it was not given" --
+    eight packets per boot, one per poll interval after, on every filtered VM,
+    forever. Found on the first production inspector (2026-09-21), from that
+    line.
+    """
+
+    def test_the_block_deletes_the_pool_line(self):
+        script = "\n".join(vm_ptp_kvm_runcmd_lines())
+        self.assertIn(f"sed -i '/^pool /d' {VM_PTP_KVM_CHRONY_PATH}", script)
+
+    def test_before_the_refclock_is_appended(self):
+        """Order matters only for the reader, but it is the order that says
+        what the file becomes: the stock source out, ours in."""
+        script = "\n".join(vm_ptp_kvm_runcmd_lines())
+        self.assertLess(script.index("sed -i '/^pool /d'"),
+                        script.index("refclock PHC"))
+
+    def test_only_pool_lines_and_only_at_line_start(self):
+        """`^pool ` and nothing wider. A `server` line is an operator's
+        deliberate addition and stays; a commented-out `#pool` is prose."""
+        line = next(l for l in vm_ptp_kvm_runcmd_lines() if "sed -i" in l)
+        self.assertIn("'/^pool /d'", line)
+        self.assertNotIn("server", line)
+
+    def test_the_shell_does_what_the_test_says(self):
+        """Run the sed over Fedora's stock lines and read the result, so the
+        assertion is about chrony.conf and not about a string."""
+        import subprocess
+        import tempfile
+        stock = ("# Use public servers from the pool.ntp.org project.\n"
+                 "pool 2.fedora.pool.ntp.org iburst\n"
+                 "sourcedir /run/chrony-dhcp\n"
+                 "server ntp.example.internal iburst\n"
+                 "driftfile /var/lib/chrony/drift\n")
+        with tempfile.NamedTemporaryFile("w", suffix=".conf", delete=False) as f:
+            f.write(stock)
+        line = next(l for l in vm_ptp_kvm_runcmd_lines() if "sed -i" in l)
+        subprocess.run(line.strip().replace(VM_PTP_KVM_CHRONY_PATH, f.name),
+                       shell=True, check=True)
+        got = open(f.name).read()
+        self.assertNotIn("\npool ", "\n" + got)
+        self.assertIn("# Use public servers from the pool.ntp.org project.", got)
+        self.assertIn("server ntp.example.internal iburst", got)
+        self.assertIn("sourcedir /run/chrony-dhcp", got)
+
+
 class TestTheChronyEditIsConditional(unittest.TestCase):
     """chronyd treats a refclock it cannot open as fatal.
 

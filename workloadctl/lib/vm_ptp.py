@@ -112,6 +112,18 @@ def vm_ptp_kvm_runcmd_lines() -> list[str]:
         # as a chrony that is configured and broken rather than absent.
         f"if [ -e {VM_PTP_KVM_DEVICE} ] && [ -f {VM_PTP_KVM_CHRONY_PATH} ] &&"
         f" ! grep -qF '{VM_PTP_KVM_CHRONY_MARKER}' {VM_PTP_KVM_CHRONY_PATH}; then",
+        # The stock `pool 2.fedora.pool.ntp.org iburst` goes, and not for
+        # tidiness. In a filtered guest the synthesising resolver answers
+        # EVERY name with the listener's address (resolve_policy: synthesis
+        # is unconditional), so the pool resolves, chrony dials UDP 123 at a
+        # listener that serves no such thing, and the filter drops it: eight
+        # packets per boot and one every poll interval for the life of the
+        # guest, each one counted on the wrong-port self-dial element that
+        # `diagnose` reports as a guest expecting a service it was not given.
+        # It was; it just cannot have it. An open guest loses nothing either:
+        # the refclock IS the host's clock, and a second source the host does
+        # not share can only disagree with it.
+        f"  sed -i '/^pool /d' {VM_PTP_KVM_CHRONY_PATH}",
         f"  printf '%s\\n' '{VM_PTP_KVM_CHRONY_MARKER}'"
         f" 'refclock PHC {VM_PTP_KVM_DEVICE} poll 2 dpoll -2 offset 0'"
         f" 'makestep 1 -1' >> {VM_PTP_KVM_CHRONY_PATH}",
