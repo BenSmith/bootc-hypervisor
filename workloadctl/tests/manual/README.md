@@ -142,15 +142,17 @@ four rows on `systemctl show -p ExecStart` — the line names the workload's own
 uid and address; it carries the placeholder (the positive half, so the next
 row measures something); it carries no secret (it is on a world-readable unit,
 so this has to be true rather than arranged); and `ExecStartPre` is empty and
-the runtime directory absent. **Not yet run on the broker-flags build**; see
-the last green below for what was.
+the runtime directory absent.
 
-**Last green 2026-09-21, all 35 rows, on a KVM host under enforcing, against
-the installed RPM** (the inspector-flags merge: the inspector's broker endpoint
-is now a `--broker` flag the generator computes, and this is the rig that dials
-it -- each record's `upstream` read back as its own uid-derived broker). Before
-that 2026-09-20 against inspector-decouple, where the endpoint was a value the
-launcher derived.
+**Last green 2026-09-21, all 41 rows, on a KVM host under enforcing, against
+the installed RPM** (broker-flags: the first run in which the broker started
+from the generator's `ExecStart=` flags, with the four guard rows above; both
+arms' keys arrived at the stub, `x-api-key` for the default convention and
+`Authorization: Bearer` for the overridden one, and no denial in the audit
+log). Before that 2026-09-21 at 35 rows against inspector-flags (the
+inspector's broker endpoint as a `--broker` flag the generator computes; this
+is the rig that dials it), and 2026-09-20 against inspector-decouple, where
+the endpoint was a value the launcher derived.
 It has now found five defects, none of which any unit test
 could see. The first two made the brokered path inert for a real guest:
 
@@ -861,9 +863,12 @@ the egress path was proven on a guest; this asks the same questions of a
 container, where the traffic is re-originated by pasta as the workload's own
 uid rather than by passt on a guest's behalf. Needs root, podman and the
 installed RPM. Throwaway container workloads, all prefixed `ceg-`. **Last green all 153 rows on a
-bare-metal Fedora 44 host under enforcing, 2026-09-21** (inspector-flags: the
-first run in which the container substrate's inspector started from the
-generator's flag line; the LAN row run with `CEG_LAN_HOST` set), before that
+bare-metal Fedora 44 host under enforcing, 2026-09-21** (broker-flags: the
+container substrate's broker instance started from the generator's
+`ExecStart=` flags and the brokered request reached the provider carrying the
+sealed key; the LAN row run with `CEG_LAN_HOST` set), earlier the same day
+against inspector-flags (the first run in which the container substrate's
+inspector started from the generator's flag line), before that
 2026-09-20 (inspector-decouple; one row skipped for want of `CEG_LAN_HOST`),
 and before that 2026-09-06
 against an RPM built from the branch under review, with the `rules`/`drift`/`pcap` reporting rows
