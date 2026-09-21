@@ -134,9 +134,12 @@ made the way it always is, and the rig leaves no trust anchor behind on a
 machine it borrowed. Nothing about the path under test is weakened — the drop-in
 adds one environment variable and changes no directive.
 
-**Last green 2026-09-20, all rows, on a KVM host under enforcing, against the
-installed RPM** (the inspector-decouple branch: the inspector's broker endpoint
-is now a value the launcher hands in, and this is the rig that dials it).
+**Last green 2026-09-21, all 35 rows, on a KVM host under enforcing, against
+the installed RPM** (the inspector-flags merge: the inspector's broker endpoint
+is now a `--broker` flag the generator computes, and this is the rig that dials
+it -- each record's `upstream` read back as its own uid-derived broker). Before
+that 2026-09-20 against inspector-decouple, where the endpoint was a value the
+launcher derived.
 It has now found five defects, none of which any unit test
 could see. The first two made the brokered path inert for a real guest:
 
@@ -340,10 +343,14 @@ workload's plane. It is an artifact of the rig's own route, not a policy
 finding: the guards match on destination, and a host with a real v6 uplink
 sources from a global address. Worth recognising rather than re-investigating.
 
-Last green 2026-08-25, **all rows**, on a bare-metal Fedora 44 KVM host
-under plain **enforcing** with the shipped dontaudit rules in place. That is the
-first recorded run of the post-deletion shape: the rig was rewritten in the same
-commit that deleted the proxy, so every earlier figure describes a different rig.
+Last green 2026-09-21, **all 57 rows**, on a bare-metal Fedora 44 KVM host
+under plain **enforcing**, against the installed RPM at the inspector-flags
+merge -- the first run in which the listener started from the generator's
+`ExecStart=` flags rather than a bare name it derived the rest from. Before that
+2026-08-25, all rows, same host and posture with the shipped dontaudit rules in
+place: the first recorded run of the post-deletion shape, since the rig was
+rewritten in the same commit that deleted the proxy and every earlier figure
+describes a different rig.
 
 Run under **enforcing**, not `semodule -DB`. A permissive or dontaudit-disabled
 pass measures the branch that ran, and an earlier denial changes which branch
@@ -839,9 +846,12 @@ The first rig here that needs **no KVM**. Everything the VM rigs prove about
 the egress path was proven on a guest; this asks the same questions of a
 container, where the traffic is re-originated by pasta as the workload's own
 uid rather than by passt on a guest's behalf. Needs root, podman and the
-installed RPM. Throwaway container workloads, all prefixed `ceg-`. **Last green all rows on a
-bare-metal Fedora 44 host under enforcing, 2026-09-20** (inspector-decouple;
-one row skipped for want of `CEG_LAN_HOST`), and before that 2026-09-06
+installed RPM. Throwaway container workloads, all prefixed `ceg-`. **Last green all 153 rows on a
+bare-metal Fedora 44 host under enforcing, 2026-09-21** (inspector-flags: the
+first run in which the container substrate's inspector started from the
+generator's flag line; the LAN row run with `CEG_LAN_HOST` set), before that
+2026-09-20 (inspector-decouple; one row skipped for want of `CEG_LAN_HOST`),
+and before that 2026-09-06
 against an RPM built from the branch under review, with the `rules`/`drift`/`pcap` reporting rows
 re-run after they were converted from measured gaps to assertions.
 
