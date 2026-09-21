@@ -33,15 +33,28 @@
 #   git clone ssh://git@<host-ip>:2222/<user>/<repo>.git
 #
 # Configuration:
-#   Forgejo stores its config at /data/gitea/conf/app.ini inside the container.
-#   Edit via: sudo workloadctl exec forgejo vi /data/gitea/conf/app.ini
-#   Or mount a custom config as a volume.
+#   The rootless image keeps its config at /var/lib/gitea/custom/conf/app.ini
+#   inside the container, which is ./gitea/custom/conf/app.ini in the volume.
+#   Edit it there, or set FORGEJO__<section>__<KEY> variables below: the
+#   image's entrypoint writes them into app.ini at every start.
 
 [workload]
 name = "forgejo"
 
 [container]
 image = "codeberg.org/forgejo/forgejo:15-rootless"
+
+# Sessions on disk. The image default is `PROVIDER = memory`, which keeps
+# every login inside the process: each restart of this container -- an image
+# update, a health-check kill, a host reboot -- logs every user out. The
+# file store lives in the volume and survives all of them. LOGIN_REMEMBER_DAYS
+# is the "Remember this device" token, which is separate from the session.
+[container.environment]
+FORGEJO__session__PROVIDER = "file"
+FORGEJO__session__PROVIDER_CONFIG = "/var/lib/gitea/data/sessions"
+FORGEJO__session__SESSION_LIFE_TIME = "2592000"
+FORGEJO__session__GC_INTERVAL_TIME = "86400"
+FORGEJO__security__LOGIN_REMEMBER_DAYS = "90"
 
 [container.health]
 cmd = "curl -sf http://localhost:3000/api/healthz"

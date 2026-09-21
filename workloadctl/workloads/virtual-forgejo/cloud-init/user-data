@@ -177,8 +177,17 @@ write_files:
       PATH = /var/lib/gitea/data/gitea.db
       DB_TYPE = sqlite3
 
+      # Sessions on disk. The default is `memory`, which keeps every login
+      # inside the process, so each restart of the forge logs everyone out.
+      [session]
+      PROVIDER = file
+      PROVIDER_CONFIG = /var/lib/gitea/data/sessions
+      SESSION_LIFE_TIME = 2592000
+      GC_INTERVAL_TIME = 86400
+
       [security]
       INSTALL_LOCK = false
+      LOGIN_REMEMBER_DAYS = 90
       # SECRET_KEY encrypts every Actions secret stored in the DB. Forgejo 15
       # does NOT regenerate it when missing (unlike INTERNAL_TOKEN / the JWT
       # secrets), so if it is ever lost, every stored secret becomes
