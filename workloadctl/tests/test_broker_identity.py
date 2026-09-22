@@ -255,6 +255,10 @@ INITIAL_NS = "         0          0 4294967295\n"
 SINGLE_UID_NS = "         0       1000          1\n"
 # A container: restricted, but it still maps the whole workload uid range.
 CONTAINER_NS = "         0          0          1\n         1          1      65536\n"
+# A rootless container: the same shape, with the two columns different. The
+# user is root inside and the subuid range is 1..65536 inside; outside they
+# are the user's uid and a range starting far above it.
+ROOTLESS_NS = "         0       1000          1\n         1     524288      65536\n"
 
 
 class TestUsernsShape(unittest.TestCase):
@@ -298,6 +302,20 @@ class TestUnmappableUids(unittest.TestCase):
 
     def test_a_uid_above_the_mapped_range_is_reported(self):
         self.assertEqual(self.unmappable(CONTAINER_NS, uid=70000), [70000])
+
+    def test_the_inside_column_is_the_one_compared(self):
+        """Every layout before the rootless container had the two columns
+        equal, so a check against the outside column passed everywhere it
+        was tried and refused every uid the first rootless broker had. The
+        uid a program is told is an inside value; so is what the kernel
+        reports to it."""
+        self.assertEqual(self.unmappable(ROOTLESS_NS, uid=200), [])
+        self.assertEqual(self.unmappable(ROOTLESS_NS, uid=65536), [])
+        self.assertEqual(self.unmappable(ROOTLESS_NS, uid=65537), [65537])
+        # The outside numbering is the parent's; that number means nothing
+        # inside and is not representable there.
+        self.assertEqual(self.unmappable(ROOTLESS_NS, uid=524288), [524288])
+        self.assertEqual(self.unmappable(ROOTLESS_NS, uid=1000), [])
 
     def test_the_module_looks_nothing_up(self):
         """No pwd, no prefix: a uid is compared to a uid. The lookup that

@@ -164,12 +164,21 @@ def peer_uid(locals_, peer):
 
 
 def userns_ranges(uid_map):
-    """The host uid ranges this namespace can represent, as (start, count).
+    """The uid ranges this namespace can represent, as (start, count), in
+    the namespace's OWN numbering.
 
-    /proc/net translates the uid column through the *reader's* namespace, so an
-    owner outside these ranges reads as the overflow uid instead. Enough of
-    those and every caller collapses into one identity, with the broker still
-    serving traffic and no error anywhere.
+    /proc/net translates the uid column through the *reader's* namespace,
+    so an owner outside these ranges reads as the overflow uid instead.
+    Enough of those and every caller collapses into one identity, with the
+    broker still serving traffic and no error anywhere.
+
+    The first column of uid_map, not the second. A line reads
+    `inside outside count`, and the uid a program is told and the uids the
+    kernel reports to it are both inside values; the outside column is the
+    parent's numbering, which nothing here ever sees. The two coincide in
+    the initial namespace and under PrivateUsers=, and differ in a rootless
+    container, where reading the outside column refuses every uid the
+    container has.
     """
     ranges = []
     for line in uid_map.splitlines():
@@ -177,7 +186,7 @@ def userns_ranges(uid_map):
         if len(f) != 3:
             continue
         try:
-            ranges.append((int(f[1]), int(f[2])))
+            ranges.append((int(f[0]), int(f[2])))
         except ValueError:
             continue
     return ranges
