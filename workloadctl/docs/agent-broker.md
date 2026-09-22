@@ -611,8 +611,12 @@ env         = "ANTHROPIC_API_KEY"
 ```
 
 The broker discards whatever arrives in the auth header and sets the real
-value, so the placeholder never reaches the provider. It must not be a real
-key — the broker refuses to start if it equals the decrypted material, which is
+value, so the placeholder never reaches the provider. A request carrying no
+header at all is brokered the same way, and that is not a hole: the guest's
+header is never a credential and is never checked, the policy entry naming
+the credential is the authorisation, and the broker's own key is what goes
+upstream. The placeholder exists for the guest's SDK, not for the broker. It
+must not be a real key — the broker refuses to start if it equals the decrypted material, which is
 the check for one having been pasted into a world-readable `workload.toml`.
 
 A filtered guest does need the inspector's CA, which is a separate matter
