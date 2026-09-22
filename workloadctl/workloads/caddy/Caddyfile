@@ -1,10 +1,17 @@
 # Sample Caddyfile for a per-host workloadctl proxy.
 #
-# Each site block matches a Host header (the .local name published by the
-# avahi workload on this host) and reverse-proxies to the corresponding
-# backend on the host's loopback. Backend ports come from the workload's
-# [network] ports = [...] mapping (e.g., zot-registry maps 5050:5000, so
-# Caddy talks to 127.0.0.1:5050).
+# Each site block matches a Host header and reverse-proxies to the
+# corresponding backend on the host's loopback. Backend ports come from the
+# workload's [network] ports = [...] mapping (e.g., zot-registry maps
+# 5050:5000, so Caddy talks to 127.0.0.1:5050).
+#
+# Every site carries two names. The .local one is published by the avahi
+# workload on this host over mDNS, which is what LAN machines resolve. The
+# .internal twin is for clients that cannot do mDNS -- a VM guest under passt
+# above all (its resolver refuses .local outright; see the [vm.network]
+# section of docs/schema-reference.toml) -- and needs an ordinary A record in
+# the LAN's unicast DNS pointing at this host. Caddy's internal CA issues for
+# both names; the client trusts the same homelab root either way.
 #
 # host networking + ip_unprivileged_port_start=0 (set by hypervisor.Containerfile)
 # lets Caddy bind 80/443 directly as the rootless _wl-caddy user.
@@ -42,11 +49,11 @@
     import /etc/caddy/pki/*.caddyfile
 }
 
-zot.local, registry.local {
+zot.local, registry.local, zot.internal, registry.internal {
     reverse_proxy 127.0.0.1:5050
 }
 
-grafana.local {
+grafana.local, grafana.internal {
     reverse_proxy 127.0.0.1:3000
 }
 
@@ -58,7 +65,7 @@ grafana.local {
 # 404 rather than Caddy's stock empty-200, which is hard to distinguish
 # from "site exists but backend is broken."
 :80 {
-    @dotlocal host *.local
+    @dotlocal host *.local *.internal
 
     route {
         # Serve the homelab CA root cert over plain HTTP so bootstrap clients
@@ -85,8 +92,8 @@ grafana.local {
             respond "registry API is https-only" 404
         }
 
-        # Generic stand-in for the disabled auto-redirects: any *.local
-        # Host goes to HTTPS. Unknown .local names then fail the TLS
+        # Generic stand-in for the disabled auto-redirects: any *.local or
+        # *.internal Host goes to HTTPS. Unknown names then fail the TLS
         # handshake with a clear alert (see README "tlsv1 alert internal
         # error"); everything else falls through to the 404 below.
         handle @dotlocal {

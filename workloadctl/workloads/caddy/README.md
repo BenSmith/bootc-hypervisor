@@ -5,6 +5,13 @@ workloads by `Host` header so clients can use names like `http://zot.local`
 without specifying the backend port. Pairs with the `avahi` workload that
 publishes those names via mDNS.
 
+Each site also answers to a `.internal` twin (`zot.internal`). mDNS never
+reaches a VM guest under passt, and the guest's resolver refuses `.local`
+before asking anyone, so a service known only by its avahi name cannot be
+named from a guest at all. `.internal` is reserved for private use and goes
+through ordinary unicast DNS; add one A record per name to the LAN's DNS
+server (or `/etc/hosts` on the hosts that need it) pointing at this host.
+
 ## Setup
 
 1. **Build the container:**
@@ -49,11 +56,11 @@ publishes those names via mDNS.
 ## Caddyfile pattern
 
 ```caddyfile
-zot.local, registry.local {
+zot.local, registry.local, zot.internal, registry.internal {
     reverse_proxy 127.0.0.1:5050
 }
 
-grafana.local {
+grafana.local, grafana.internal {
     reverse_proxy 127.0.0.1:3000
 }
 
@@ -129,7 +136,10 @@ The `Host` header on the request didn't match any site block in the Caddyfile.
   ```
 - **Site block uses a different name?** Caddyfile labels must match exactly,
   including subdomains. Use commas for aliases:
-  `zot.local, registry.local { ... }`.
+  `zot.local, registry.local, zot.internal, registry.internal { ... }`.
+- **Client is a VM guest?** It cannot resolve `.local` at all; use the
+  `.internal` twin, and check the LAN DNS has a record for it
+  (`dig zot.internal`).
 
 ### Caddy can't bind 80/443 / "permission denied"
 

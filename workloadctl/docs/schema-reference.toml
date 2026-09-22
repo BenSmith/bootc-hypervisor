@@ -301,6 +301,21 @@ name = "schema-reference"
 # The seed names it via the WORKLOADCTL_VM_INSPECT_ADDR magic variable
 # (lib/ensure_vm.py); the forgejo-runner bundle is the worked example.
 #
+# A fourth: **a guest cannot name a `.local` service.** The guest's own
+# systemd-resolved routes `.local` to mDNS and a single-label name to LLMNR
+# (RFC 6762; `ResolveUnicastSingleLabel=no` is the default), and multicast
+# does not cross passt, so both are refused inside the guest before any
+# resolver of ours is asked -- "No appropriate name servers or networks for
+# name found". Every other shape goes to unicast DNS and reaches the
+# synthesising responder normally. So a homelab service published only by
+# avahi is invisible to every guest, and a raw address in [[vm.network.allow]]
+# is the hole people punch for it. Give the service a second name under a
+# reserved private-use domain (`.internal`, the examples below, or
+# `home.arpa`) with a record in the LAN's unicast DNS, and name THAT here.
+# The host resolves it to arm the sets; the guest resolves it to the
+# inspector. The caddy bundle's sample Caddyfile carries the `.internal`
+# twin of every site for this reason.
+#
 # Optional: Host bridge to attach to instead of using passt.
 # Type: string, valid Linux interface name (letters/digits/_/-, max 15 chars)
 # Default: unset — use passt.
@@ -551,7 +566,7 @@ name = "schema-reference"
 # Type: array of [[vm.network.allow]] tables, each with `address` and `reason`
 # Default: []
 # `address` is "<addr>:<port>" ("[<v6addr>]:<port>" for IPv6) or a NAME with a
-# port ("git.local:2222"), resolved on the HOST once at start. `reason` is
+# port ("git.internal:2222"), resolved on the HOST once at start. `reason` is
 # required, like every other bypass in this schema: the entry is a hole opened
 # on purpose, and the operator who later has to decide whether it is still
 # needed is not the one who opened it.
@@ -612,7 +627,7 @@ name = "schema-reference"
 # reason  = "backup target; SSH, so hostname policy cannot carry it"
 #
 # [[vm.network.allow]]
-# address = "git.local:2222"
+# address = "git.internal:2222"
 # reason  = "git-over-SSH to the homelab forge"
 #
 # Optional: allowlisted names that are SUPPOSED to resolve into private
@@ -655,7 +670,7 @@ name = "schema-reference"
 # validate time is not DNS at boot time.
 #
 # [[vm.network.internal]]
-# host   = "git.local"
+# host   = "git.internal"
 # reason = "homelab forge; clone and API over HTTPS"
 #
 # Optional: allowlisted hosts that must NOT be intercepted.

@@ -278,6 +278,16 @@ learns its answer from the inspector rather than from a failed lookup. A
 responder that refused unlisted names would be a different design, and would
 hand a guest a cheap oracle for which names are on the list.
 
+The one refusal that does exist is the guest's own, and it happens before the
+responder is asked. systemd-resolved routes `.local` to mDNS and a single-label
+name to LLMNR, neither of which crosses passt, so `curl https://llama.local`
+fails inside the guest with "No appropriate name servers or networks for name
+found" while `curl https://llama.internal` reaches step 1 above. A service the
+LAN knows only by its avahi name therefore needs a unicast twin — a `.internal`
+record in the LAN's DNS — before any `host` entry here can carry it; the
+`[vm.network]` section of `schema-reference.toml` says the same at the point
+of configuration.
+
 The allowlist match has a trap in it. The patterns are fnmatch, not a DNS suffix
 match, so `*.fedoraproject.org` requires something before the dot and does **not**
 cover the bare `fedoraproject.org`. On the VM above, `download.fedoraproject.org`
