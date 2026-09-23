@@ -111,6 +111,31 @@ def _where(plane="tls", cid="0" * 12):
                          cid=cid, plane=plane)
 
 
+# The real class, kept before any test patches it: inspect_listener's
+# `threading` is this module's, so the patch replaces it everywhere.
+_REAL_THREAD = threading.Thread
+
+
+class _InlineThread:
+    """threading.Thread whose start() runs the target in the caller. The
+    listener looks its caller up in the connection's thread; these tests
+    read the log straight after _handle, so they run that thread inline."""
+
+    def __init__(self, target, args=(), daemon=None):
+        self._target = target
+        self._args = args
+
+    def start(self):
+        self._target(*self._args)
+
+
+def _inline_threads(case):
+    patcher = unittest.mock.patch.object(
+        inspect_listener.threading, "Thread", _InlineThread)
+    patcher.start()
+    case.addCleanup(patcher.stop)
+
+
 def _mock_conn():
     """A stand-in for an accepted socket: records settimeout and close.
 
@@ -224,6 +249,10 @@ class TestExplicitTimeout(unittest.TestCase):
     blocking on a guest that says nothing.
     """
 
+    def setUp(self):
+        _inline_threads(self)
+
+
     def test_the_accepted_socket_is_set_to_the_stated_timeout(self):
         """The FIRST call, not the only one.
 
@@ -260,9 +289,13 @@ class TestCeiling(unittest.TestCase):
 
     §7.7.1: an unbounded accept queue turns a guest's connection storm into
     memory growth; a refused connection is a fast, countable failure. The
-    rejection path runs synchronously in the accept loop, so these drive
-    _handle directly and read the log without a thread race.
+    connection's thread is run inline, so these drive _handle directly and
+    read the log without a thread race.
     """
+
+    def setUp(self):
+        _inline_threads(self)
+
 
     def test_at_the_ceiling_the_next_connection_is_rejected_not_queued(self):
         # limit=0 makes every connection over capacity immediately, so the
@@ -370,6 +403,10 @@ class TestThreadStartFailure(unittest.TestCase):
 class TestRejectionTally(unittest.TestCase):
     """The count is surfaced, because a ceiling nobody can read is
     indistinguishable from one that never fires."""
+
+    def setUp(self):
+        _inline_threads(self)
+
 
     def test_the_shutdown_line_names_the_count(self):
         out = io.StringIO()
@@ -3887,6 +3924,10 @@ class TestCallerIdentity(unittest.TestCase):
     and yields nothing on a listener bound to an address.
     """
 
+    def setUp(self):
+        _inline_threads(self)
+
+
     # The listener admits a caller whose uid equals its OWN, so every case here
     # is relative to that uid -- and it must not be the uid running the tests.
     # A root runner makes the listener's own uid 0, which turns "root is
@@ -3972,6 +4013,62 @@ class TestCallerIdentity(unittest.TestCase):
             listener._handle(_mock_conn(), ("192.0.2.1", 1024),
                              _listener_with(local))
         self.assertEqual(listener.status()["caller_unresolved"], 1)
+
+    def test_the_accept_loop_does_not_wait_on_the_lookup(self):
+        """The lookup reads the kernel's whole socket table. On the accept
+        loop, any local uid connecting in a loop would slow every accept
+        behind it; in the connection's thread it holds only that thread."""
+        local = ("198.18.0.1", CLEARTEXT.inspect_port)
+        listener = Listener([_listener_with(local)], io.StringIO())
+        started, release = threading.Event(), threading.Event()
+
+        def slow_lookup(*_args):
+            started.set()
+            release.wait(5.0)
+            return self.OWN_UID + 1, False
+
+        with unittest.mock.patch.object(inspect_listener.threading, "Thread",
+                                        _REAL_THREAD), \
+                unittest.mock.patch("os.getuid", return_value=self.OWN_UID), \
+                unittest.mock.patch.object(inspect_listener, "peer_caller",
+                                           side_effect=slow_lookup):
+            listener._handle(_mock_conn(), ("192.0.2.1", 1024),
+                             _listener_with(local))
+            self.assertTrue(started.wait(5.0))
+            self.assertEqual(listener._identifying.held, 1)
+            release.set()
+            for _ in range(100):
+                if listener._identifying.held == 0:
+                    break
+                time.sleep(0.01)
+        self.assertEqual(listener._identifying.held, 0)
+        self.assertEqual(listener._ceiling.held, 0,
+                         "a foreign caller took a serving slot")
+
+    def test_the_identifying_slot_comes_back_either_way(self):
+        for caller in (self.OWN_UID, self.OWN_UID + 1, None):
+            with self.subTest(caller=caller):
+                listener, _conn, _log = self._handled(_mod(), caller)
+                self.assertEqual(listener._identifying.held, 0)
+
+    def test_past_the_identifying_bound_a_connection_is_refused(self):
+        """Bounded like everything else a caller can multiply: refused and
+        counted, never queued."""
+        local = ("198.18.0.1", CLEARTEXT.inspect_port)
+        out = io.StringIO()
+        listener = Listener([_listener_with(local)], out)
+        listener._identifying = Ceiling(0)
+        conn = _mock_conn()
+        with unittest.mock.patch.object(inspect_listener, "peer_caller",
+                                        side_effect=AssertionError(
+                                            "looked up past the bound")):
+            listener._handle(conn, ("192.0.2.1", 1024),
+                             _listener_with(local))
+        self.assertIn("connection ceiling reached", out.getvalue())
+        conn.close.assert_called()
+        self.assertEqual(listener.rejected, 1)
+        self.assertEqual(
+            listener.status()["drop_reasons"][DROP_CEILING], 1)
 
     def test_the_check_runs_before_the_ceiling(self):
         """A foreign caller must not be able to spend a slot the workload

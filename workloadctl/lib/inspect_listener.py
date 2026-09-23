@@ -74,6 +74,12 @@ from peer_identity import local_endpoints, peer_caller
 # is refused, not queued.
 MAX_CONNECTIONS = 128
 
+# The ceiling on connections whose caller is still being looked up. Separate
+# from MAX_CONNECTIONS so that a caller refused as foreign never holds a
+# serving slot, and small because a lookup takes milliseconds: past it a
+# connection is refused, like one over the other ceiling.
+MAX_IDENTIFYING = 32
+
 
 
 # How often the accept loop wakes to look for a stop, in seconds. select() is a
@@ -150,6 +156,7 @@ class Listener:
                  broker_endpoint=None):
         self._sockets = list(sockets)
         self._ceiling = Ceiling(limit)
+        self._identifying = Ceiling(MAX_IDENTIFYING)
         self._stop = threading.Event()
         # None means "count but never write", which is what the tests want and
         # also what a listener started without a workload name would do.
@@ -246,6 +253,67 @@ class Listener:
                 f"peer={format_endpoint(peer)} reason='not an inspect port'")
             conn.close()
             return
+        # The caller is looked up in the connection's own thread, not here.
+        # The lookup reads the kernel's whole socket table, milliseconds on
+        # a busy host, and on this loop every one of them is time no other
+        # connection is accepted -- which any local uid could buy by
+        # connecting in a loop. Bounded by MAX_IDENTIFYING meanwhile.
+        if not self._identifying.admit():
+            self._refuse_ceiling(conn, cid, plane, local, peer,
+                                 "connection ceiling reached")
+            return
+        # Daemon, as the broker's ThreadingMixIn: a SIGTERM that stops the
+        # accept loop does not wait on the connections it already took.
+        #
+        # The slot is admitted before the thread exists, so the failure to
+        # start one has to give it back here. Thread.start() raises
+        # RuntimeError when the process cannot get another thread — exactly the
+        # condition a connection storm produces, and exactly when the ceiling
+        # matters. A leaked slot is never returned by anything, so each
+        # failure would lower the ceiling for good and the listener degrade
+        # to refusing every connection while still reporting itself active.
+        try:
+            threading.Thread(
+                target=self._admit, args=(conn, peer, local, plane, cid),
+                daemon=True).start()
+        except RuntimeError as exc:
+            self._identifying.release(refused=True)
+            self._refuse_ceiling(conn, cid, plane, local, peer,
+                                 f"cannot start thread: {exc}")
+
+    def _refuse_ceiling(self, conn, cid, plane, local, peer, reason):
+        self.inspection.log(
+            f"rejected {LOG_ID_FIELD}={cid} plane={plane.label} "
+            f"local={format_endpoint(local)} "
+            f"peer={format_endpoint(peer)} "
+            f"reason='{reason}'")
+        # Counted as a drop as well as a rejection. The guest saw a closed
+        # connection, which is the same thing every other drop reason gives
+        # it, and a disposition total that omitted these would not add up
+        # to the connections that were accepted.
+        self.inspection.counters.record_drop(DROP_CEILING)
+        conn.close()
+
+    def _admit(self, conn, peer, local, plane, cid):
+        """Identify the caller, take a serving slot, and serve: the
+        connection thread's first act."""
+        try:
+            admitted = self._identified(conn, peer, local, plane, cid)
+        finally:
+            self._identifying.release()
+        if not admitted:
+            return
+        if not self._ceiling.admit():
+            # Reject rather than queue: close now and count it.
+            self._refuse_ceiling(conn, cid, plane, local, peer,
+                                 "connection ceiling reached")
+            return
+        self._serve(conn, peer, local, plane, cid)
+
+    def _identified(self, conn, peer, local, plane, cid):
+        """Whether the caller is the one this listener serves. Closes the
+        connection if not.
+        """
         # WHO IS CALLING. Before the ceiling, so a foreign caller cannot spend
         # a slot the workload needs, and before any byte is read.
         #
@@ -285,7 +353,7 @@ class Listener:
                 f"reason='{DROP_CALLER_CLOSED}'")
             self.inspection.counters.record_drop(DROP_CALLER_CLOSED)
             conn.close()
-            return
+            return False
         if caller is not None and caller != os.getuid():
             self.inspection.log(
                 f"rejected {LOG_ID_FIELD}={cid} plane={plane.label} "
@@ -293,7 +361,7 @@ class Listener:
                 f"reason='{DROP_FOREIGN_CALLER}'")
             self.inspection.counters.record_drop(DROP_FOREIGN_CALLER)
             conn.close()
-            return
+            return False
         # `None` means the lookup could not name the owner and found no
         # orphaned row either -- a /proc read that failed, or a translation
         # the endpoints do not cover. Admitted, not refused: failing closed
@@ -306,40 +374,7 @@ class Listener:
             # and it would carry a connection id, putting entries in the log an
             # operator joins on for connections that were served normally.
             self.inspection.counters.record_caller_unresolved()
-        if not self._ceiling.admit():
-            # Reject rather than queue: close now, count it, spawn no thread.
-            self.inspection.log(
-                f"rejected {LOG_ID_FIELD}={cid} plane={plane.label} local={format_endpoint(local)} "
-                f"peer={format_endpoint(peer)} reason='connection ceiling reached'")
-            # Counted as a drop as well as a rejection. The guest saw a closed
-            # connection, which is the same thing every other drop reason gives
-            # it, and a disposition total that omitted these would not add up
-            # to the connections that were accepted.
-            self.inspection.counters.record_drop(DROP_CEILING)
-            conn.close()
-            return
-        # Daemon, as the broker's ThreadingMixIn: a SIGTERM that stops the
-        # accept loop does not wait on the connections it already took.
-        #
-        # The slot is admitted before the thread exists, so the failure to
-        # start one has to give it back here. Thread.start() raises RuntimeError
-        # when the process cannot get another thread — exactly the condition a
-        # connection storm produces, and exactly when the ceiling matters. A
-        # leaked slot is never returned by anything: _serve's release only runs
-        # for a thread that ran, so each failure lowers the effective ceiling
-        # permanently and the listener degrades to refusing every connection
-        # while still reporting itself active.
-        try:
-            threading.Thread(
-                target=self._serve, args=(conn, peer, local, plane, cid),
-                daemon=True).start()
-        except RuntimeError as exc:
-            self._ceiling.release(refused=True)
-            self.inspection.log(
-                f"rejected {LOG_ID_FIELD}={cid} plane={plane.label} local={format_endpoint(local)} "
-                f"peer={format_endpoint(peer)} reason='cannot start thread: {exc}'")
-            self.inspection.counters.record_drop(DROP_CEILING)
-            conn.close()
+        return True
 
     def _serve(self, conn, peer, local, plane, cid):
         # The id LEADS `where`, and `where` is interpolated by every decision
@@ -374,7 +409,7 @@ class Listener:
         has no way to tell a listener that refused 40,000 connections from one
         that was never reached. Reported on shutdown by `log_summary`.
         """
-        return self._ceiling.rejected
+        return self._ceiling.rejected + self._identifying.rejected
 
     def status(self) -> dict:
         """This listener's counters, as they would be written right now."""
