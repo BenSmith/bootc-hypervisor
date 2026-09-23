@@ -27,8 +27,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from egress_ca import CA_ENV_VARS
-from egress_ca import RESERVED_GUEST_ENV
+from guest_ca import CA_ENV_VARS
+from guest_ca import RESERVED_GUEST_ENV
 from broker_config import (BROKER_BIN, vm_broker_command,
                            broker_credential, vm_broker_hosts,
                            vm_broker_upstream_addresses, vm_credential_entries,

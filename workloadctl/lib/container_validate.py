@@ -26,7 +26,7 @@ from container_network_config import (
     container_tls_reason,
 )
 from credential_entries import validate_credential_entries
-from egress_ca import RESERVED_GUEST_ENV
+from guest_ca import RESERVED_GUEST_ENV
 from egress_policy import POLICY_METHODS, POLICY_METHODS_REFUSED
 from inspect_document import hostname_match
 

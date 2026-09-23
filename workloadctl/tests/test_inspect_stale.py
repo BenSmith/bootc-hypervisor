@@ -35,16 +35,16 @@ from types import SimpleNamespace
 from unittest import mock
 
 import diagnose_inspect
+from diagnose_inspect import (
+    CA_EXPIRY_WARN_DAYS, INSPECT_DIGEST_SHORT, inspect_digest_short,
+)
 import inspect_policy
 from egress_policy import vm_inspect_policy_text
 from inspect_document import (
     INSPECT_DIGEST_KEY,
-    INSPECT_DIGEST_SHORT,
-    inspect_digest_short,
     inspect_policy_digest,
 )
 from inspect_policy import Policy, load_policy
-from egress_ca import CA_EXPIRY_WARN_DAYS
 
 from tests.test_inspect_listener import _mod
 

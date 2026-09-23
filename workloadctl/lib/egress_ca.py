@@ -2,15 +2,14 @@
 """The per-workload egress CA, the leaves it signs, and where all of it lives.
 
 One CA per workload rather than one per host, and the directory names, the
-validity windows, the SELinux types of the subtree and the two openssl
-invocations are all here together because they are one decision each spelled
-in several places: the minter creates the directories, the SELinux patterns
-label them (workload_selinux.pki_fcontext_patterns composes the names here
-with the workload's root), `diagnose` reads the certificate back, and the
-seed writes the anchor into the guest (vm_default_seed.vm_ca_env decides
-which guest gets one). A drift between any two of those is a mislabelled
-directory or an untrusted anchor, and both present as a network fault rather
-than as a naming mistake.
+validity windows and the two openssl invocations are all here together
+because they are one decision each spelled in several places: the minter
+creates the directories, the SELinux patterns label them
+(workload_selinux.pki_fcontext_patterns composes the names here with the
+workload's root and its own types), and `diagnose` reads the certificate
+back. A drift between any two of those is a mislabelled directory or an
+untrusted anchor, and both present as a network fault rather than as a
+naming mistake. Where the anchor goes inside the guest is guest_ca's.
 
 Both substrates, despite the `vm_`/`VM_` prefixes -- the container half mints
 against the same CA through the same minter.
@@ -30,42 +29,6 @@ import time
 from pathlib import Path
 
 from inspect_document import normalise_hostname
-
-
-# Where the guest finds the CA whose certificates the inspector's spliced
-# connections are presented under. A guest path, not a host path: the file
-# arrives inside the seed and is written by cloud-init.
-#
-# /usr/local/share/ca-certificates is the directory `update-ca-certificates`
-# consumes on Debian-family guests; Fedora's anchors live elsewhere. The five
-# variables below name the FILE directly rather than relying on either, because
-# the whole point of the block is to work in a guest whose distribution we do
-# not choose.
-CA_BUNDLE_PATH = "/usr/local/share/ca-certificates/workloadctl-egress.crt"
-
-
-# The environment variables that point a guest's HTTP clients at that bundle.
-# Five, because there is no single one: OpenSSL reads SSL_CERT_FILE, Node reads
-# NODE_EXTRA_CA_CERTS, python-requests reads REQUESTS_CA_BUNDLE, git reads
-# GIT_SSL_CAINFO and pip reads PIP_CERT. A guest missing any one of them fails
-# only in that ecosystem, which is the hardest kind of failure to attribute.
-CA_ENV_VARS = (
-    "SSL_CERT_FILE",
-    "NODE_EXTRA_CA_CERTS",
-    "REQUESTS_CA_BUNDLE",
-    "GIT_SSL_CAINFO",
-    "PIP_CERT",
-)
-
-
-# The guest variables workloadctl seeds itself, and therefore the ones a
-# credential's `env` may not be. Derived from the producers rather than listed,
-# so a sixth CA variable cannot leave this behind: the failure a stale copy
-# produces is a silent overwrite in the seed, not an error anywhere.
-#
-# No broker variable is reserved, because nothing seeds one -- the guest is
-# never told a broker address (ADR 007 decision 6).
-RESERVED_GUEST_ENV = frozenset(CA_ENV_VARS)
 
 
 # --- The per-workload egress CA ---
@@ -89,30 +52,11 @@ CA_CERT_NAME = "egress-ca.crt"
 
 # The two leaf caches live beside the CA, under the same state directory, and
 # their names are here rather than in egress_mint because the SELinux patterns
-# below have to name the same three directories the minter creates. A drift
-# between the two spellings is a mislabelled directory, which presents as the
-# inspector failing to mint and not as a naming mistake.
+# in workload_selinux have to name the same three directories the minter
+# creates. A drift between the two spellings is a mislabelled directory, which
+# presents as the inspector failing to mint and not as a naming mistake.
 LEAF_DIR_NAME = "leaves"
 DENIAL_DIR_NAME = "leaves-denied"
-
-
-# THE PKI SUBTREE HAS ITS OWN LABELS, AND THAT IS THE WHOLE POINT
-#
-# `wlinspect_t` is a separate domain from `svirt_t` so that the component
-# terminating guest input cannot reach the workload's disks, volumes or state
-# directory. The inspector reads a private key and writes a leaf cache, and
-# both live in that state directory beside the disk images.
-# Granting the domain `svirt_image_t` would be one rule shorter, would work,
-# and would hand the inspector the guest's disks — so the material moves
-# instead: three directories with labels of their own, and the domain is
-# granted those.
-#
-# Two types, not one, because the permissions genuinely differ. The CA is
-# READ-ONLY to the inspector: an inspector that could rewrite it could replace
-# the anchor the guest was seeded with, which is unrecoverable without a
-# re-provision. The leaves are read-write because minting them is the job.
-CA_SELINUX_TYPE = "wlinspect_ca_t"
-LEAF_SELINUX_TYPE = "wlinspect_leaf_t"
 
 
 # Ten years. The number follows from never rotating rather than from any threat
@@ -137,14 +81,6 @@ CA_VALIDITY_DAYS = 3650
 # is that a pause SHORTER than an hour, and the keeper's own one-minute
 # window after a longer one, cost the guest nothing at all.
 CA_BACKDATE_SECONDS = 3600
-
-
-# The window CA_VALIDITY_DAYS' comment already promised: `diagnose` warns
-# inside the last year. A year rather than a month because the remedy is a
-# RE-PROVISION -- cloud-init runs once per instance-id, so the guest is rebuilt,
-# not restarted -- and a month's notice for that is notice of an outage rather
-# than of a decision.
-CA_EXPIRY_WARN_DAYS = 365
 
 
 def ca_dir(state_dir) -> Path:

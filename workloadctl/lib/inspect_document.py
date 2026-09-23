@@ -207,13 +207,6 @@ def policy_governs(host: str, entries) -> list[VmPolicyEntry]:
 
 # --- The keys the listener reads that are not lists, and the digest ---
 
-# How much of the digest an operator is shown. Twelve hex characters is enough
-# to tell two documents apart by eye in a diagnostic line and short enough to
-# sit inside one; the full value stays in the status file, where the comparison
-# is actually made.
-INSPECT_DIGEST_SHORT = 12
-
-
 # The key the listener echoes its loaded document's digest under. Named here
 # rather than spelled at both ends: the writer is the listener and the reader
 # is `diagnose`, and a typo in either would read as "an older listener that
@@ -238,8 +231,3 @@ def inspect_policy_digest(text: str) -> str:
     value depend on this Python's dict ordering rather than on the file.
     """
     return hashlib.sha256(text.encode()).hexdigest()
-
-
-def inspect_digest_short(digest: str | None) -> str:
-    """A digest as it is shown to a person, or `unknown` for a missing one."""
-    return digest[:INSPECT_DIGEST_SHORT] if digest else "unknown"

@@ -313,7 +313,7 @@ class TestTheCaReachesTheSeed(unittest.TestCase):
             mounts=[], has_data_disk=False, **kw)
 
     def test_the_bundle_is_written_where_the_env_vars_point(self):
-        from egress_ca import CA_BUNDLE_PATH
+        from guest_ca import CA_BUNDLE_PATH
         out = self._render(ca_cert=self.PEM)
         self.assertIn(f"  - path: {CA_BUNDLE_PATH}", out)
         self.assertIn("-----BEGIN CERTIFICATE-----", out)

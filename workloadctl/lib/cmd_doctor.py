@@ -17,7 +17,7 @@ from diagnose_battery import collect_diagnose_checks
 from cmd_drift import collect_drift, collect_policy_drift
 from cmd_validate import report_config_load_failure
 from substrate import get_substrate
-from inspect_document import inspect_digest_short
+from diagnose_inspect import inspect_digest_short
 from inspect_figures import (
     drop_reasons,
     figure_lines,

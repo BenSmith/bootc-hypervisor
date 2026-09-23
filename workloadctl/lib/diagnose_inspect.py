@@ -16,15 +16,13 @@ from container_network_config import (
     container_uses_inspect,
 )
 from diagnose_probe import PROBE
-from egress_ca import CA_EXPIRY_WARN_DAYS, ca_cert_path
+from egress_ca import ca_cert_path
 from egress_mint import pem_fingerprint
 from egress_plane import CLEARTEXT, TLS
 from egress_policy import inspect_policy_path, vm_uses_inspect
 from inspect_document import (
     INSPECT_DIGEST_KEY,
     inspect_policy_digest,
-    inspect_digest_short,
-    INSPECT_DIGEST_SHORT,
     TLS_DEFAULT,
 )
 from egress_record import (
@@ -50,6 +48,26 @@ from nft_constants import (
 from substrate import service_active
 from workload_addr import inspect_address
 from workload_lib import workload_state_dir
+
+
+# The window egress_ca.CA_VALIDITY_DAYS' comment already promised: `diagnose`
+# warns inside the last year. A year rather than a month because the remedy is
+# a RE-PROVISION -- cloud-init runs once per instance-id, so the guest is
+# rebuilt, not restarted -- and a month's notice for that is notice of an
+# outage rather than of a decision.
+CA_EXPIRY_WARN_DAYS = 365
+
+
+# How much of the digest an operator is shown. Twelve hex characters is enough
+# to tell two documents apart by eye in a diagnostic line and short enough to
+# sit inside one; the full value stays in the status file, where the comparison
+# is actually made.
+INSPECT_DIGEST_SHORT = 12
+
+
+def inspect_digest_short(digest: str | None) -> str:
+    """A digest as it is shown to a person, or `unknown` for a missing one."""
+    return digest[:INSPECT_DIGEST_SHORT] if digest else "unknown"
 
 
 # vm_proxy_check lived here, with _proxy_map_keys and _proxy_address_present.

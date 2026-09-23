@@ -21,7 +21,7 @@ from inspect_document import (
     VmPolicyEntry,
 )
 from credential_entries import validate_credential_entries
-from egress_ca import RESERVED_GUEST_ENV
+from guest_ca import RESERVED_GUEST_ENV
 from egress_policy import POLICY_METHODS, POLICY_METHODS_REFUSED
 from vm_defs import EGRESS_DEFAULT, EGRESS_MODES, TLS_UNBUILT
 from vm_network_config import VmAllowEntry, parse_vm_allow

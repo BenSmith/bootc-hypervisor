@@ -22,10 +22,7 @@ from pathlib import Path
 from cli_log import error, info, warn
 from config_parser import workload_root_dir
 from container_network_config import container_uses_inspect
-from egress_ca import (
-    CA_DIR_NAME, CA_SELINUX_TYPE, DENIAL_DIR_NAME, LEAF_DIR_NAME,
-    LEAF_SELINUX_TYPE,
-)
+from egress_ca import CA_DIR_NAME, DENIAL_DIR_NAME, LEAF_DIR_NAME
 from workload_lib import (
     NAME_PATTERN,
     WORKLOAD_BUNDLES_DIR,
@@ -33,6 +30,25 @@ from workload_lib import (
     selinux_type_name,
 )
 from workloadctl_core import WorkloadConfig
+
+
+# THE PKI SUBTREE HAS ITS OWN LABELS, AND THAT IS THE WHOLE POINT
+#
+# `wlinspect_t` is a separate domain from `svirt_t` so that the component
+# terminating guest input cannot reach the workload's disks, volumes or state
+# directory. The inspector reads a private key and writes a leaf cache, and
+# both live in that state directory beside the disk images.
+# Granting the domain `svirt_image_t` would be one rule shorter, would work,
+# and would hand the inspector the guest's disks — so the material moves
+# instead: three directories with labels of their own, and the domain is
+# granted those.
+#
+# Two types, not one, because the permissions genuinely differ. The CA is
+# READ-ONLY to the inspector: an inspector that could rewrite it could replace
+# the anchor the guest was seeded with, which is unrecoverable without a
+# re-provision. The leaves are read-write because minting them is the job.
+CA_SELINUX_TYPE = "wlinspect_ca_t"
+LEAF_SELINUX_TYPE = "wlinspect_leaf_t"
 
 
 def pki_fcontext_patterns(name: str) -> list[tuple[str, str]]:
@@ -47,9 +63,9 @@ def pki_fcontext_patterns(name: str) -> list[tuple[str, str]]:
     Here rather than in egress_ca, whose names these are: egress_ca is on the
     listener's side of the line and takes a state directory it is handed,
     while this function is the one that knows where a WORKLOAD's state
-    directory is. The directory names and the types stay in egress_ca so the
-    minter that creates the directories and the pattern that labels them
-    cannot drift; only the composition with the workload root lives here.
+    directory is. The directory names stay in egress_ca so the minter that
+    creates the directories and the pattern that labels them cannot drift;
+    the composition with the workload root, and the types, live here.
     """
     root = workload_root_dir(name)
     return [

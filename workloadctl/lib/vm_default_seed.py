@@ -13,7 +13,7 @@ Installed to /usr/libexec/workloadctl/vm_default_seed.py.
 
 from pathlib import PurePosixPath
 
-from egress_ca import CA_BUNDLE_PATH, CA_ENV_VARS
+from guest_ca import CA_BUNDLE_PATH, CA_ENV_VARS
 from egress_policy import vm_uses_inspect
 from vm_defs import VM_GUEST_UID, VM_HOME_SELINUX_CONTEXT
 from vm_ptp import vm_ptp_kvm_runcmd_lines, vm_ptp_kvm_seed_files
