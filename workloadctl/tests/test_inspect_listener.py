@@ -3706,6 +3706,19 @@ class TestTargetNormalisation(unittest.TestCase):
             with self.assertRaises(RequestUnreadable, msg=target):
                 self.norm(target)
 
+    def test_a_dot_segment_with_encoded_params_is_refused(self):
+        """`%3B` stays encoded here, so `..%3B` was a name to the matcher --
+        and `..` to an origin that decodes before it strips params:
+        `/v1/files/..%3B/admin` matched `/v1/files/*` and reached
+        `/admin`."""
+        for target in ("/v1/files/..%3B/admin", "/v1/files/..%3bx=1/admin",
+                       "/a/.%3B/b", "/a/%2e%2e%3b/b"):
+            with self.assertRaises(RequestUnreadable, msg=target):
+                self.norm(target)
+
+    def test_encoded_params_on_an_ordinary_segment_are_carried(self):
+        self.assertEqual(self.norm("/a/b%3Bv=1/c"), "/a/b%3Bv=1/c")
+
     def test_a_backslash_is_refused_literal_or_encoded(self):
         """Some origins read it as a separator, and then `..\\..\\admin` is a
         traversal the resolution never saw."""

@@ -153,11 +153,11 @@ def normalise_path(path):
 
     `;params` are left inside their segment for the same reason: stripping them
     is a legacy reading, and this listener does not get to decide that the
-    origin shares it. Except on a dot segment: `..;x` is `..` to an origin
-    that strips params and a name to one that does not, which is the
-    encoded slash's two readings again, and is refused for the same reason.
-    So is a backslash, literal or encoded, which some origins read as a
-    separator.
+    origin shares it. Except on a dot segment: `..;x`, or `..%3Bx`, is `..`
+    to an origin that strips params and a name to one that does not, which
+    is the encoded slash's two readings again, and is refused for the same
+    reason. So is a backslash, literal or encoded, which some origins read
+    as a separator.
     """
     if "#" in path:
         raise RequestUnreadable(
@@ -186,7 +186,9 @@ def _refuse_second_readings(path):
             "separator and some as a byte, so it is not a path this can "
             "authorise")
     for segment in path.split("/"):
-        name, semi, _params = segment.partition(";")
+        # `%3B` as well as `;`: an origin that decodes before it strips
+        # params reads the encoded one as the delimiter.
+        name, semi, _params = segment.replace("%3B", ";").partition(";")
         if semi and name in (".", ".."):
             raise RequestUnreadable(
                 f"the segment {segment!r} is a dot segment to an origin that "
