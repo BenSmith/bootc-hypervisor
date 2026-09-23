@@ -38,14 +38,12 @@ STRIP_FROM_REQUEST = frozenset({
 # a streamed response goes back chunked, so the upstream's number would be a
 # lie about a message it no longer describes.
 #
-# `date` and `server` because BaseHTTPRequestHandler stamps both onto every
-# response it sends. Passing the upstream's through produces two of each, and a
-# client picking the wrong one of two Dates is the mild outcome; header-count
-# mismatches are also the raw material for request-smuggling confusion between
-# intermediaries. Ours are the correct ones to keep: this hop generated this
-# message, and the broker naming itself in `server` beats leaking the shape of
-# the provider's edge into a sandbox.
-DROP_FROM_RESPONSE = HOP_BY_HOP | {"content-length", "date", "server"}
+# `date` and `server` are NOT here, and the handler stamps neither: they go
+# back as the provider sent them. The inspector relays every other host's
+# response head verbatim, so a brokered host that answered with a Server of
+# its own would be the one host whose responses say something else stands
+# in front of it -- the sandbox told it is one, on every brokered request.
+DROP_FROM_RESPONSE = HOP_BY_HOP | {"content-length"}
 
 # Read at most this much request body. Generous enough for a large context
 # window, small enough that a runaway sandbox can't exhaust host memory.

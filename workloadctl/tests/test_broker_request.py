@@ -211,16 +211,19 @@ class TestResponseFraming(unittest.TestCase):
                   ("Content-Type", "application/json")])
         self.assertEqual(passthrough, [("Content-Type", "application/json")])
 
-    def test_headers_the_handler_stamps_itself_do_not_come_back(self):
-        """BaseHTTPRequestHandler writes Date and Server onto every response,
-        so relaying the upstream's produces two of each — a duplicate that a
-        client resolves by picking one, and that intermediaries resolve
-        differently from each other."""
+    def test_the_providers_date_and_server_come_back(self):
+        """The inspector relays an unbrokered host's head verbatim, so a
+        brokered host's must carry the provider's own Date and Server too.
+        These were once dropped for the broker's own, which named the broker
+        on every brokered response the guest read."""
         passthrough, _, _ = broker_request.response_framing(
             200, [("Date", "Mon, 01 Jan 2035 00:00:00 GMT"),
                   ("Server", "upstream-edge/2"),
                   ("Content-Type", "application/json")])
-        self.assertEqual(passthrough, [("Content-Type", "application/json")])
+        self.assertEqual(passthrough,
+                         [("Date", "Mon, 01 Jan 2035 00:00:00 GMT"),
+                          ("Server", "upstream-edge/2"),
+                          ("Content-Type", "application/json")])
 
     def test_204_and_304_carry_no_body(self):
         for status in (204, 304):
@@ -557,9 +560,10 @@ class TestARelayedResponseIsWellFormed(TestAnUpstreamDyingMidResponse):
     """Header hygiene on the wire, where the duplicates actually appear.
 
     response_framing is unit-tested above, but it only decides what is passed
-    *through* — the handler adds Date and Server itself afterwards, so whether
-    the caller ends up with one of each is a property of the two together and
-    cannot be seen from either alone.
+    *through* — BaseHTTPRequestHandler's send_response adds a Date and a
+    Server of its own, so whether the caller ends up with the provider's one
+    of each is a property of the two together and cannot be seen from either
+    alone.
     """
 
     def _headers_of(self, received):
@@ -570,7 +574,7 @@ class TestARelayedResponseIsWellFormed(TestAnUpstreamDyingMidResponse):
             counts[name] = counts.get(name, 0) + 1
         return counts
 
-    def test_the_caller_gets_one_date_and_one_server(self):
+    def test_the_caller_gets_the_providers_date_and_server_once(self):
         received = self._drive(
             200,
             [("Date", "Mon, 01 Jan 2035 00:00:00 GMT"),
@@ -585,9 +589,75 @@ class TestARelayedResponseIsWellFormed(TestAnUpstreamDyingMidResponse):
                          "duplicate Server reached the caller")
         self.assertEqual(counts.get(b"content-length"), 1,
                          "the upstream's length survived the re-framing")
-        self.assertNotIn(b"upstream-edge/2", received,
-                         "the provider's edge is named to the sandbox")
+        self.assertIn(b"Server: upstream-edge/2", received)
+        self.assertIn(b"Date: Mon, 01 Jan 2035 00:00:00 GMT", received)
+        self.assertNotIn(b"customs", received.lower(),
+                         "the broker named itself to the sandbox")
         self.assertTrue(received.endswith(b"{}"))
+
+
+class TestARefusalSaysNothingOfTheBroker(BrokerServerCase):
+    """The inspector relays the broker's answer to the guest as the
+    provider's, so a refusal of the broker's own may carry the status and
+    its phrase and nothing that says a broker is there: no Server, no
+    sentence. The reason is the log line's."""
+
+    def _assert_generic(self, received, status, phrase):
+        head, _, body = received.partition(b"\r\n\r\n")
+        self.assertIn(f" {status} ".encode(), head.split(b"\r\n")[0])
+        self.assertEqual(body, phrase + b"\n")
+        self.assertNotIn(b"\r\nserver:", head.lower())
+        self.assertIn(b"\r\nDate: ", head)
+
+    def test_a_failed_upstream_is_a_bare_502(self):
+        class Unresolvable(DyingUpstream):
+            def request(self, *args, **kwargs):
+                raise OSError(-2, "Name or service not known")
+
+        with mock.patch.object(broker_server.http.client, "HTTPSConnection",
+                               Unresolvable), \
+                mock.patch.object(broker_server, "log") as log:
+            sock = self.connect()
+            sock.sendall(b"GET /v1/messages HTTP/1.1\r\nHost: x\r\n\r\n")
+            received = self.drain(sock)
+        self._assert_generic(received, 502, b"Bad Gateway")
+        log.assert_any_call("upstream-error", sandbox="agent/api.example.com",
+                            path="/v1/messages", error="OSError",
+                            streamed=False)
+
+    def test_an_unconfigured_host_is_a_bare_403(self):
+        with mock.patch.object(broker_server, "log") as log:
+            sock = self.connect()
+            sock.sendall(b"GET / HTTP/1.1\r\nHost: unlisted.example\r\n"
+                         b"\r\n")
+            received = self.drain(sock)
+        self._assert_generic(received, 403, b"Forbidden")
+        log.assert_called_with("deny", reason="host-not-configured",
+                               sandbox="agent", host="unlisted.example")
+
+    def test_a_framing_refusal_keeps_its_reason_in_the_log(self):
+        with mock.patch.object(broker_server, "log") as log:
+            sock = self.connect()
+            sock.sendall(b"POST / HTTP/1.1\r\nHost: x\r\n"
+                         b"Transfer-Encoding: chunked\r\n\r\n0\r\n\r\n")
+            received = self.drain(sock)
+        self._assert_generic(received, 411, b"Length Required")
+        log.assert_called_with(
+            "deny", reason="chunked-request", sandbox="agent/api.example.com",
+            bytes=0,
+            detail="chunked request bodies are not accepted; send "
+                   "Content-Length")
+
+    def test_the_base_classs_own_refusal_is_no_python_page(self):
+        """A method with no do_ is refused by BaseHTTPRequestHandler, whose
+        own answer is an HTML page in Python's words."""
+        with mock.patch.object(broker_server, "log") as log:
+            sock = self.connect()
+            sock.sendall(b"TRACE / HTTP/1.1\r\nHost: x\r\n\r\n")
+            received = self.drain(sock)
+        self._assert_generic(received, 501, b"Not Implemented")
+        self.assertEqual(log.call_args.args, ("deny",))
+        self.assertEqual(log.call_args.kwargs["reason"], "http-501")
 
 
 class TestEveryApiMethodIsRelayed(BrokerServerCase):

@@ -12,6 +12,7 @@ verified TLS out to the provider, and optional TLS in from the guest.
 Used by `libexec/agent-broker`. Installed to /usr/libexec/workloadctl/broker_server.py.
 """
 
+import email.utils
 import http.client
 import http.server
 import socketserver
@@ -83,8 +84,6 @@ class Handler(http.server.BaseHTTPRequestHandler):
     read_timeout = READ_TIMEOUT
 
     protocol_version = "HTTP/1.1"
-    server_version = "agent-broker"
-    sys_version = ""
 
     # Applied to the connection by StreamRequestHandler.setup(). See
     # CONNECTION_TIMEOUT.
@@ -182,8 +181,25 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self.name, self.name
         return None, f"uid:{uid}"
 
-    def _fail(self, status, message):
+    def send_error(self, code, message=None, explain=None):
+        """The base class's refusals -- a request line it cannot parse, a
+        method with no do_ -- answered the way every other refusal here is.
+
+        Its own is an HTML page naming the error in Python's words, which
+        the inspector would relay to the guest as the provider's answer.
+        """
+        log("deny", reason=f"http-{code}", detail=message or "")
+        self._fail(code)
+
+    def _fail(self, status):
         """Answer without forwarding, and end the connection.
+
+        The body is the status's own phrase and nothing else, and there is
+        no Server header. The inspector relays this response to the guest
+        as the provider's, so any sentence of ours in it -- a credential
+        that is not configured, a broker at its limit, an upstream that
+        failed -- tells the guest a broker is there. The reason is in the
+        log line each caller writes before this.
 
         close_connection is set for every refusal, not just politeness in a
         header. A rejected request has left its body unread -- rejected because
@@ -192,9 +208,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
         on desynchronises the connection: measured as a following pipelined
         request that silently received no response at all.
         """
-        body = message.encode()
+        body = f"{http.HTTPStatus(status).phrase}\n".encode()
         self.close_connection = True
-        self.send_response(status)
+        self.send_response_only(status)
+        self.send_header("Date", email.utils.formatdate(usegmt=True))
         self.send_header("Content-Type", "text/plain; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Connection", "close")
@@ -211,7 +228,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         sandbox, label = self._identify()
         if sandbox is None:
             log("deny", reason="unidentified", caller=label)
-            self._fail(403, "caller not registered with the broker\n")
+            self._fail(403)
             return
 
         # The other half of the decision. Resolved from THIS BROKER'S OWN
@@ -224,20 +241,21 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if profile is None:
             log("deny", reason="host-not-configured", sandbox=label,
                 host=host or "")
-            self._fail(403, "no credential is configured for that host\n")
+            self._fail(403)
             return
         sandbox = profile.name
 
         length, rejection = request_framing(self.path, self.headers)
         if rejection is not None:
             status, reason, message = rejection
-            log("deny", reason=reason, sandbox=sandbox, bytes=length)
-            self._fail(status, message)
+            log("deny", reason=reason, sandbox=sandbox, bytes=length,
+                detail=message.strip())
+            self._fail(status)
             return
         if not self.server.reserve_body(length):
             log("deny", reason="inflight-body-limit", sandbox=sandbox,
                 bytes=length)
-            self._fail(503, "broker is at its in-flight request limit\n")
+            self._fail(503)
             return
 
         try:
@@ -298,8 +316,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self.close_connection = True
             else:
                 try:
-                    self._fail(502,
-                               f"upstream request failed: {type(exc).__name__}\n")
+                    self._fail(502)
                 except OSError:
                     pass  # client already gone
         finally:
@@ -317,7 +334,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         passthrough, declared, bodiless = response_framing(
             resp.status, resp.getheaders(), self.command)
 
-        self.send_response(resp.status)
+        # _only: no Server and no Date of ours; the provider's pass through.
+        self.send_response_only(resp.status)
         for k, v in passthrough:
             self.send_header(k, v)
         if bodiless:
