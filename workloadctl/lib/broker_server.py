@@ -66,7 +66,11 @@ def log(event, **fields):
     """One structured line per event, to stderr -> journal. Never logs bodies,
     headers, or anything derived from the credential."""
     parts = " ".join(f"{k}={v}" for k, v in fields.items())
-    print(f"[{time.strftime('%H:%M:%S')}] {event} {parts}", file=sys.stderr, flush=True)
+    # One write, newline included. print() writes the line and its newline
+    # separately, and a handler thread logging between the two joins two
+    # events into one journal line.
+    sys.stderr.write(f"[{time.strftime('%H:%M:%S')}] {event} {parts}\n")
+    sys.stderr.flush()
 
 
 class Handler(http.server.BaseHTTPRequestHandler):

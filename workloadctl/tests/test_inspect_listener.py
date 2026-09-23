@@ -496,6 +496,38 @@ def _grease_extension(value=0x0a0a):
     return value.to_bytes(2, "big") + b"\x00\x00"
 
 
+class _Writes(io.StringIO):
+    """A stream that keeps each write() call apart, so a test can see
+    whether a line and its newline went out together."""
+
+    def __init__(self):
+        super().__init__()
+        self.calls = []
+
+    def write(self, text):
+        self.calls.append(text)
+        return super().write(text)
+
+
+class TestALogLineIsOneWrite(unittest.TestCase):
+    """print() writes a line and its newline in two calls, and a connection
+    thread logging between them joins two decisions into one journal
+    line."""
+
+    def test_a_decision_line_is_one_write(self):
+        out = _Writes()
+        Listener([], out).inspection.log("drop id=1 reason='x'")
+        self.assertEqual(out.calls, ["drop id=1 reason='x'\n"])
+
+    def test_the_record_warning_is_one_write(self):
+        out = _Writes()
+        log = egress_record.RequestLog("/nonexistent/dir/record", out=out)
+        log.write({"a": 1})
+        self.assertEqual(len(out.calls), 1, out.calls)
+        self.assertTrue(out.calls[0].startswith("WARNING:"))
+        self.assertTrue(out.calls[0].endswith("\n"))
+
+
 class TestClientHelloParser(unittest.TestCase):
     """Enough of RFC 8446 §4.1.2 to read a name, and nothing more."""
 

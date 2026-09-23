@@ -59,7 +59,11 @@ class Inspection:
         self.upstream = Upstream(broker_endpoint)
 
     def log(self, line):
-        print(line, file=self.out, flush=True)
+        # One write of the line WITH its newline. print() writes the two
+        # separately, and a connection thread logging between them joins
+        # two decisions into one journal line.
+        self.out.write(line + "\n")
+        self.out.flush()
 
     def connection_record(self, where, mode, *, host=None, decision,
                           reason=None, status=None):

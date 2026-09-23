@@ -514,8 +514,10 @@ class RequestLog:
         if self._warned or self._out is None:
             return
         self._warned = True
-        print(f"WARNING: the per-request record is not being written: "
-              f"{message}", file=self._out, flush=True)
+        # One write, newline included: see Inspection.log.
+        self._out.write(f"WARNING: the per-request record is not being "
+                        f"written: {message}\n")
+        self._out.flush()
 
     def close(self):
         with self._lock:

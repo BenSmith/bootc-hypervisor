@@ -64,6 +64,31 @@ def profile_table(prof=None):
     return {"x": prof, "api.example.com": prof}
 
 
+class _Writes(io.StringIO):
+    """A stream that keeps each write() call apart, so a test can see
+    whether a line and its newline went out together."""
+
+    def __init__(self):
+        super().__init__()
+        self.calls = []
+
+    def write(self, text):
+        self.calls.append(text)
+        return super().write(text)
+
+
+class TestALogLineIsOneWrite(unittest.TestCase):
+    """print() writes a line and its newline in two calls, and a handler
+    thread logging between them joins two events into one journal line."""
+
+    def test_the_line_and_its_newline_are_one_write(self):
+        out = _Writes()
+        with mock.patch("sys.stderr", out):
+            broker_server.log("deny", reason="x")
+        self.assertEqual(len(out.calls), 1, out.calls)
+        self.assertTrue(out.calls[0].endswith("deny reason=x\n"))
+
+
 class TestForwardedHeaders(unittest.TestCase):
 
     def test_the_credential_is_attached(self):
