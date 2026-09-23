@@ -249,6 +249,7 @@ class BrokerServerCase(unittest.TestCase):
     """
 
     handler_timeout = None
+    served_uid = os.getuid()
 
     def setUp(self):
         case = self
@@ -262,7 +263,7 @@ class BrokerServerCase(unittest.TestCase):
             # for its uid -- as the flag would say -- or _identify would
             # refuse it before any of these assertions ran.
             name = "agent"
-            workload_uid = os.getuid()
+            workload_uid = case.served_uid
             if case.handler_timeout is not None:
                 timeout = case.handler_timeout
 
@@ -293,16 +294,43 @@ class BrokerServerCase(unittest.TestCase):
 
 
 class TestOneCallerCannotTakeThePool(BrokerServerCase):
-    """The denial of service the global bound alone permitted.
+    """The served caller is bounded by the pool, and every other caller
+    shares a small bucket.
 
-    MAX_CONCURRENT caps live connections; on its own it is a lever rather than a
-    protection, because one sandbox reaching the cap refuses every other. These
-    connections send no bytes at all — which was enough, and is why the fix is a
-    per-caller ceiling and not a larger pool.
+    The served caller is the inspector, which funnels every brokered
+    request of its workload into one identity, so a per-caller ceiling of
+    a few connections was the workload's whole brokered concurrency: the
+    ninth parallel request was refused. Callers that are not served get
+    nothing but a refusal, and together they cannot hold more than
+    MAX_FOREIGN threads, even with connections that send no bytes.
     """
 
-    def test_a_caller_is_refused_past_its_own_ceiling(self):
-        with mock.patch.object(broker_server, "MAX_PER_CALLER", 2):
+    def test_the_served_caller_is_not_held_to_the_foreign_ceiling(self):
+        with mock.patch.object(broker_server, "MAX_FOREIGN", 1):
+            held = [self.connect() for _ in range(4)]
+            for sock in held:
+                sock.sendall(b"GET /v1/models HTTP/1.1\r\nHost: x\r\n"
+                             b"Transfer-Encoding: chunked\r\n\r\n0\r\n\r\n")
+            for sock in held:
+                self.assertIn(b"411", self.drain(sock))
+
+    def test_the_served_caller_is_refused_past_the_pool(self):
+        with mock.patch.object(broker_server, "MAX_CONCURRENT", 2):
+            held = [self.connect() for _ in range(2)]
+            self.assertTrue(all(s.fileno() >= 0 for s in held))
+            refused = self.connect()
+            self.assertEqual(self.drain(refused, timeout=5), b"",
+                             "past the pool the connection must be closed")
+
+
+class TestOtherCallersShareOneSmallBucket(BrokerServerCase):
+    """The test process is a foreign caller here: the instance serves
+    another uid."""
+
+    served_uid = os.getuid() + 1
+
+    def test_foreign_callers_are_refused_past_their_shared_ceiling(self):
+        with mock.patch.object(broker_server, "MAX_FOREIGN", 2):
             held = [self.connect() for _ in range(2)]
             self.assertTrue(all(s.fileno() >= 0 for s in held))
             refused = self.connect()
@@ -310,15 +338,14 @@ class TestOneCallerCannotTakeThePool(BrokerServerCase):
                              "past the ceiling the connection must be closed")
 
     def test_the_ceiling_is_released_when_a_connection_ends(self):
-        with mock.patch.object(broker_server, "MAX_PER_CALLER", 1):
+        with mock.patch.object(broker_server, "MAX_FOREIGN", 1):
             first = self.connect()
             first.close()
             # A slot freed by the previous caller is usable, not leaked: the
             # bookkeeping is a live count, not a high-water mark.
             second = self.connect()
-            second.sendall(b"GET /v1/models HTTP/1.1\r\nHost: x\r\n"
-                           b"Transfer-Encoding: chunked\r\n\r\n0\r\n\r\n")
-            self.assertIn(b"411", self.drain(second))
+            second.sendall(b"GET /v1/models HTTP/1.1\r\nHost: x\r\n\r\n")
+            self.assertIn(b"403", self.drain(second))
 
 
 class TestAFailedSpawnDoesNotLeakASlot(unittest.TestCase):
@@ -429,10 +456,10 @@ class TestTheBodyBudgetIsShared(BrokerServerCase):
     """The bound the other two limits do not express.
 
     A request body is buffered whole before it is forwarded. MAX_REQUEST_BYTES
-    bounds one of them and MAX_PER_CALLER bounds one caller's connections, so
-    every individual request stays legal while the sum does not: 32 connections
-    each sending 64 MiB reserved 2 GiB. On a hypervisor that is memory the VMs
-    are using.
+    bounds one of them and MAX_CONCURRENT bounds the connections, so
+    every individual request stays legal while the sum does not: 128
+    connections each sending 64 MiB would reserve 8 GiB. On a hypervisor that
+    is memory the VMs are using.
     """
 
     def test_a_request_past_the_shared_budget_is_refused(self):

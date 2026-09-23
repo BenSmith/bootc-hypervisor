@@ -566,11 +566,12 @@ Every refusal closes the connection: a rejected request has left its body
 unread, so the next bytes on the wire are body where a request line should be.
 
 A connection may also be closed with no reply at all. That is the admission
-bound: 32 concurrent connections in total, and 8 for any one caller. The
-per-caller ceiling is the one that matters — without it a single sandbox
-opening 32 sockets, sending nothing, denied the broker to every other sandbox
-on the host. Connections that make no progress for 60 seconds are dropped, so
-holding one open costs a caller something.
+bound: 128 concurrent connections, which the one caller an instance serves --
+its workload's inspector, holding a broker connection for each guest
+connection to a brokered host -- may use in full, and 8 shared by every other
+caller together, so other uids sending nothing on open sockets cannot take
+the pool from the workload. Connections that make no progress for 60 seconds
+are dropped, so holding one open costs a caller something.
 
 Memory is bounded separately from connections, because a request body is
 buffered whole before it goes upstream and neither of the connection limits
