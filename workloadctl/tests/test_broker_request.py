@@ -596,6 +596,32 @@ class TestARelayedResponseIsWellFormed(TestAnUpstreamDyingMidResponse):
         self.assertTrue(received.endswith(b"{}"))
 
 
+class TestAnUnsendableCredentialStaysOutOfTheJournal(BrokerServerCase):
+    """The second line behind build_profiles' refusal at start.
+
+    A header value http.client will not send raises ValueError with the
+    value in its message. Uncaught, the server printed that traceback to
+    stderr -- the journal -- with the credential in it, on every request.
+    """
+
+    def test_it_is_a_bare_502_logged_by_type(self):
+        leaky = profile(auth_value="Bearer sk-first\nsk-second")
+        self.server.RequestHandlerClass.profiles = profile_table(leaky)
+        err = io.StringIO()
+        with mock.patch("sys.stderr", err), \
+                mock.patch.object(broker_server, "log") as log:
+            sock = self.connect()
+            sock.sendall(b"GET /v1/messages HTTP/1.1\r\n"
+                         b"Host: api.example.com\r\n\r\n")
+            received = self.drain(sock)
+        self.assertNotIn("sk-first", err.getvalue())
+        self.assertNotIn("sk-second", err.getvalue())
+        self.assertIn(b" 502 ", received.split(b"\r\n", 1)[0])
+        log.assert_any_call("upstream-error", sandbox="agent/api.example.com",
+                            path="/v1/messages", error="ValueError",
+                            streamed=False)
+
+
 class TestARefusalSaysNothingOfTheBroker(BrokerServerCase):
     """The inspector relays the broker's answer to the guest as the
     provider's, so a refusal of the broker's own may carry the status and

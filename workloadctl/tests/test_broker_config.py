@@ -181,6 +181,34 @@ class TestProfiles(unittest.TestCase):
                           auth_formats=["main-key=Bearer {token}-leaky"])
         self.assertNotIn("leaky", message)
 
+    def test_a_credential_with_a_line_break_is_refused_at_startup(self):
+        """http.client would refuse it on every request with the value in
+        its exception, and the server prints that as a traceback: the key,
+        in the journal. Refused at start instead, naming neither half."""
+        message = refused(build, ["api.example.com=main-key"],
+                          load=lambda cred_id: "sk-first\nsk-second")
+        self.assertIn("U+000A", message)
+        self.assertNotIn("sk-first", message)
+        self.assertNotIn("sk-second", message)
+
+    def test_a_format_with_a_line_break_is_refused_at_startup(self):
+        message = refused(build, ["api.example.com=main-key"],
+                          auth_formats=["main-key=Bearer {secret}\r\nX: y"])
+        self.assertIn("U+000D", message)
+        self.assertNotIn("secret-of-main-key", message)
+
+    def test_a_tab_inside_a_value_is_carried(self):
+        profiles = build(["api.example.com=main-key"],
+                         load=lambda cred_id: "part\tpart")
+        self.assertEqual(profiles["api.example.com"].auth_value, "part\tpart")
+
+    def test_an_auth_header_that_is_not_a_name_is_refused(self):
+        for value in ("X Key", "X-Key: y", ""):
+            with self.subTest(value):
+                message = refused(build, ["api.example.com=main-key"],
+                                  auth_headers=[f"main-key={value}"])
+                self.assertIn("is not a header name", message)
+
     def test_a_description_for_a_credential_no_host_selects_is_refused(self):
         """The generator never emits one, so its presence is a hand-edited
         unit -- and the description that went unapplied may have been meant

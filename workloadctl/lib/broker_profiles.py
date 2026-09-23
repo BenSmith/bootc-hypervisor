@@ -99,6 +99,24 @@ def normalise_host(value):
     return host or None
 
 
+# RFC 9110 §5.6.2 tchar: what a header NAME may be spelled with.
+_TOKEN_CHARS = frozenset(
+    "!#$%&'*+-.^_`|~0123456789"
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ")
+
+
+def _control_character(text):
+    """The first character no header value may carry, or None.
+
+    Tab is a legal separator inside a value; every other control character
+    and DEL are not, and a CR or LF would end the header where it stands.
+    """
+    for ch in text:
+        if ch != "\t" and (ch < " " or ch == "\x7f"):
+            return ch
+    return None
+
+
 def split_pair(value, flag):
     """(key, value) of one `KEY=VALUE` flag argument.
 
@@ -250,11 +268,30 @@ def build_profiles(name, hosts, placeholders=(), auth_headers=(),
             raise BrokerConfigError(
                 f"--auth-format {cred_id}=... is not a usable format string "
                 f"({type(exc).__name__}); it takes exactly {{secret}}")
+        # CHECKED HERE, AT START, because the one place it would otherwise
+        # surface is the worst one. http.client refuses a header value with
+        # a line break in it by raising ValueError with the VALUE in the
+        # message, and a ValueError is a bug to the server, which prints its
+        # traceback to the journal: the credential, in the log, on every
+        # request. A credential file with a second line is enough. Neither
+        # message below names the value or the character's text.
+        auth_header = auth_headers.get(cred_id, BROKER_DEFAULT_AUTH_HEADER)
+        if not auth_header or any(c not in _TOKEN_CHARS for c in auth_header):
+            raise BrokerConfigError(
+                f"--auth-header {cred_id}={auth_header!r} is not a header "
+                f"name")
+        bad = _control_character(auth_value)
+        if bad is not None:
+            raise BrokerConfigError(
+                f"{where}: the {auth_header} value for {cred_id!r} holds "
+                f"U+{ord(bad):04X}, which no header can carry. The "
+                f"credential file has more than one line, or the "
+                f"--auth-format does; neither is shown here")
         profiles[host] = Profile(
             name=f"{name}/{host}",
             host=host,
             port=UPSTREAM_PORT,
-            auth_header=auth_headers.get(cred_id, BROKER_DEFAULT_AUTH_HEADER),
+            auth_header=auth_header,
             auth_format=auth_format,
             secret=secrets[cred_id],
             auth_value=auth_value,

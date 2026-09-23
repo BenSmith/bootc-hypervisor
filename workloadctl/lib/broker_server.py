@@ -295,7 +295,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
             log("ok", sandbox=sandbox, method=method, path=self.path,
                 status=resp.status, bytes=sent,
                 ms=int((time.monotonic() - started) * 1000))
-        except (OSError, http.client.HTTPException) as exc:
+        # ValueError is http.client refusing a header or a target before a
+        # byte is sent, with the offending value in its message. Named here
+        # so it is logged by type like the rest, not printed as a traceback
+        # by the server: one of the values is the credential. build_profiles
+        # refuses such a credential at start; this is the line that holds
+        # if something reaches here anyway.
+        except (OSError, http.client.HTTPException, ValueError) as exc:
             log("upstream-error", sandbox=sandbox, path=self.path,
                 error=type(exc).__name__, streamed=self.response_started)
             if self.response_started:
