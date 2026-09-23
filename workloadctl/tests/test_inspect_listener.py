@@ -961,6 +961,57 @@ class TestPolicyLoading(unittest.TestCase):
                 mod.broker_endpoint(bad)
 
 
+class TestTheRecordHasACap(unittest.TestCase):
+    """A refusal costs a guest almost nothing and writes a line; without a
+    cap, a guest pipelining refused requests fills the host's disk between
+    rotations."""
+
+    def _log(self, max_bytes):
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        path = os.path.join(d, "requests.log")
+        failures = []
+        out = io.StringIO()
+        log = egress_record.RequestLog(
+            path, out=out, on_failure=lambda: failures.append(1),
+            max_bytes=max_bytes)
+        self.addCleanup(log.close)
+        return log, path, failures, out
+
+    def test_past_the_cap_lines_are_dropped_and_counted(self):
+        log, path, failures, out = self._log(max_bytes=100)
+        for i in range(10):
+            log.write({"n": i, "pad": "x" * 20})
+        self.assertLessEqual(os.path.getsize(path), 100)
+        self.assertGreater(len(failures), 0)
+        self.assertIn("reached its cap", out.getvalue())
+        # Whole lines only: the cap never cuts one in half.
+        with open(path) as fh:
+            for line in fh:
+                json.loads(line)
+
+    def test_a_rotation_starts_a_new_allowance(self):
+        log, path, failures, _out = self._log(max_bytes=100)
+        for i in range(10):
+            log.write({"n": i, "pad": "x" * 20})
+        os.rename(path, path + ".1")
+        log.reopen()
+        dropped = len(failures)
+        log.write({"n": "after"})
+        self.assertEqual(len(failures), dropped)
+        with open(path) as fh:
+            self.assertIn('"after"', fh.read())
+
+    def test_the_cap_counts_what_the_file_already_holds(self):
+        """A restart appends to the same file; the allowance is the file's,
+        not the process's."""
+        log, path, failures, _out = self._log(max_bytes=100)
+        with open(path, "w") as fh:
+            fh.write("x" * 95)
+        log.write({"n": 1})
+        self.assertEqual(len(failures), 1)
+
+
 class TestEntrypointWiring(unittest.TestCase):
     """main() past the argv check, with a real Listener and no sockets.
 
@@ -970,6 +1021,27 @@ class TestEntrypointWiring(unittest.TestCase):
     accept loop by attribute, and a wrong attribute there is a listener that
     starts, serves, and then dies on logrotate's HUP or at its own shutdown.
     Only running main() sees that."""
+
+    def test_a_hup_before_the_listener_exists_is_ignored(self):
+        """logrotate's HUP can land while the inspector is still reading its
+        policy; the default action would end the process it meant to keep
+        writing."""
+        mod = _mod()
+        saved = signal.getsignal(signal.SIGHUP)
+        self.addCleanup(signal.signal, signal.SIGHUP, saved)
+        during = []
+
+        def load(path):
+            during.append(signal.getsignal(signal.SIGHUP))
+            raise ValueError("stop here")
+
+        with unittest.mock.patch.object(mod, "load_policy", load), \
+                contextlib.redirect_stderr(io.StringIO()):
+            rc = mod.main(["x", "--name", "wl", "--policy", "/unread",
+                           "--state-dir", "/unread", "--status", "/unread",
+                           "--record", "/unread"])
+        self.assertEqual(rc, 1)
+        self.assertEqual(during, [signal.SIG_IGN])
 
     def test_hup_reopens_the_record_and_exit_closes_it(self):
         mod = _mod()

@@ -157,6 +157,10 @@ def parse_args(argv):
 
 def main(argv=None):
     argv = sys.argv if argv is None else argv
+    # Until the record exists there is nothing to reopen, and a HUP's
+    # default action is to end the process: logrotate's arriving during a
+    # start would kill the inspector it meant to keep writing.
+    signal.signal(signal.SIGHUP, signal.SIG_IGN)
     if len(argv) == 2 and not argv[1].startswith("-"):
         # The shape the unit had before the flags: a bare workload name, with
         # the entrypoint deriving the rest. argparse would report it as five

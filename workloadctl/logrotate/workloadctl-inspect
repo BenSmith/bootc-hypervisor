@@ -22,11 +22,16 @@
 # `delaycompress` because the listener holds the current fd open until its next
 # write: an idle workload does not act on the HUP until a request arrives.
 #
+# The HUP goes to each unit's main process alone: the unit's other processes
+# are openssl mints in flight, and a HUP ends them.
+#
 # THE NUMBERS ARE DEFAULTS TO REVISIT, not settled figures -- there is no
 # measured request rate yet. `maxsize` matters more than `rotate` does: a
 # chatty agent filling /var takes the hypervisor down, where a truncated
 # history only loses evidence. `maxsize` rather than `size` so it rotates on
-# the daily run OR at the cap, whichever comes first.
+# the daily run OR at the cap, whichever comes first -- but only when
+# logrotate runs, so the listener also stops writing a file past 512 MiB
+# until it is rotated, counting each dropped line as a write failure.
 /var/log/workloadctl/egress/*/requests.log {
     su root root
     daily
@@ -38,6 +43,7 @@
     compress
     delaycompress
     postrotate
-        systemctl kill -s HUP 'workload-*-inspect.service' 2>/dev/null || true
+        systemctl kill --kill-whom=main -s HUP 'workload-*-inspect.service' \
+            2>/dev/null || true
     endscript
 }

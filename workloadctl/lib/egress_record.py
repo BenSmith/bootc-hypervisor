@@ -396,6 +396,15 @@ class Record:
         self._log.write(self.fields)
 
 
+# The most one record file holds before its lines are dropped, in bytes,
+# until a rotation reopens it. Every refused request writes a line, and a
+# refusal costs the guest almost nothing -- pipelined down one kept-alive
+# connection, a guest writes megabytes a second into a file on the host's
+# disk. Past the cap the lines are counted as write failures instead, so the
+# loss is visible and the disk is not the guest's to fill.
+RECORD_MAX_BYTES = 512 * 1024 * 1024
+
+
 class RequestLog:
     """The per-request record's file: append, reopen on SIGHUP, never raise.
 
@@ -420,18 +429,22 @@ class RequestLog:
     -- because a warning nobody re-reads is not a signal an operator has.
     """
 
-    def __init__(self, path, out=None, on_failure=None):
+    def __init__(self, path, out=None, on_failure=None,
+                 max_bytes=RECORD_MAX_BYTES):
         self._path = None if path is None else str(path)
+        self._max_bytes = max_bytes
+        self._size = 0
         self._out = out
         self._on_failure = on_failure
         self._fd = None
         self._lock = threading.Lock()
         # Set by the signal handler, acted on by the next write. NOT reopened
-        # in the handler itself: a signal is delivered on whichever thread the
-        # kernel picks, and taking this lock there deadlocks against a thread
-        # already inside write(). The cost is that an idle workload holds the
-        # rotated fd until its next request, which is exactly what the
-        # logrotate snippet's `delaycompress` is for -- the two are a pair.
+        # in the handler itself: Python runs the handler on the main thread
+        # between bytecodes, which may be inside write() holding this lock,
+        # and taking it there again deadlocks. The cost is that an idle
+        # workload holds the rotated fd until its next request, which is
+        # exactly what the logrotate snippet's `delaycompress` is for -- the
+        # two are a pair.
         self._reopen = False
         self._warned = False
 
@@ -457,7 +470,16 @@ class RequestLog:
                 # threads cannot overwrite each other, but it does not make a
                 # partial write atomic -- the lock is what keeps one record on
                 # one line, and it is needed for the reopen regardless.
-                os.write(self._fd, line.encode())
+                data = line.encode()
+                over = self._size + len(data) > self._max_bytes
+                if not over:
+                    os.write(self._fd, data)
+                    self._size += len(data)
+            if over:
+                self._fail(f"{self._path} reached its cap of "
+                           f"{self._max_bytes} bytes; lines are dropped "
+                           "until it is rotated")
+            return
         except OSError as exc:
             self._fail(f"could not write {self._path}: {exc}")
 
@@ -476,10 +498,15 @@ class RequestLog:
         # and the mode is the access decision here, not a nicety.
         try:
             os.fchmod(fd, 0o600)
+            self._size = os.fstat(fd).st_size
         except OSError:
             os.close(fd)
             raise
         self._fd = fd
+        # A new file is a new sink: its first failure is worth a line even if
+        # the last one's was. Only once it is open -- a path that cannot be
+        # opened fails every write the same way, and warns once.
+        self._warned = False
 
     def _fail(self, message):
         if self._on_failure is not None:
