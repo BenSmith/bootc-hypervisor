@@ -230,6 +230,17 @@ class TestResponseFraming(unittest.TestCase):
             _, _, bodiless = broker_request.response_framing(status, [])
             self.assertTrue(bodiless, status)
 
+    def test_a_length_beside_a_transfer_encoding_is_not_declared(self):
+        """The body arrives decoded by the encoding, and the header's number
+        need not be its length: declared, the difference would be read as
+        the next response on the connection. Re-framed as chunked instead."""
+        passthrough, declared, bodiless = broker_request.response_framing(
+            200, [("Transfer-Encoding", "chunked"),
+                  ("Content-Length", "5"), ("X-A", "b")])
+        self.assertIsNone(declared)
+        self.assertFalse(bodiless)
+        self.assertEqual(passthrough, [("X-A", "b")])
+
     def test_a_response_to_head_carries_no_body(self):
         """Its Content-Length describes the GET it stands in for."""
         _, declared, bodiless = broker_request.response_framing(

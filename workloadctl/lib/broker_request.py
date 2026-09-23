@@ -129,7 +129,14 @@ def response_framing(status, headers, method="GET"):
     """
     passthrough = [(k, v) for k, v in headers
                    if k.lower() not in DROP_FROM_RESPONSE]
-    declared = next((v for k, v in headers if k.lower() == "content-length"), None)
+    # A Transfer-Encoding overrides a Content-Length (RFC 9112 §6.3), and
+    # http.client reads the body by the encoding, so an upstream that sends
+    # both has its body decoded to a length the header need not state.
+    # Declaring the header's number over the decoded body would put the
+    # difference into the next response on this connection.
+    chunked = any(k.lower() == "transfer-encoding" for k, _ in headers)
+    declared = None if chunked else next(
+        (v for k, v in headers if k.lower() == "content-length"), None)
     # 204 and 304 must not carry a body; framing them as chunked (even as a bare
     # terminator) is a protocol violation that strict clients reject.
     return passthrough, declared, (status in (204, 304)
