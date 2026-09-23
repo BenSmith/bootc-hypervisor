@@ -215,9 +215,18 @@ def leaf_san(name: str) -> str:
         raise LeafRefused("empty name")
 
     try:
-        return f"IP:{ipaddress.ip_address(name)}"
+        address = ipaddress.ip_address(name)
     except ValueError:
-        pass
+        address = None
+    if address is not None:
+        # A SCOPED ADDRESS IS REFUSED, and not for tidiness. `ip_address`
+        # takes anything after a `%` as an IPv6 scope id and keeps it in
+        # the string, commas included, so `fe80::1%a,DNS:victim.example`
+        # parses as an address and would reach -addext whole. No SAN can
+        # name a scope, so nothing is lost by refusing one.
+        if getattr(address, "scope_id", None):
+            raise LeafRefused(f"a scoped address in {name!r}")
+        return f"IP:{address}"
 
     if len(name) > LEAF_NAME_MAX:
         raise LeafRefused(f"name longer than {LEAF_NAME_MAX} characters")

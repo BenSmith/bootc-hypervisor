@@ -95,6 +95,15 @@ class TestTheNameCheckIsAnAllowlist(unittest.TestCase):
         with self.assertRaises(LeafRefused):
             leaf_san("a" * 64 + ".example.com")
 
+    def test_a_scoped_address_is_refused(self):
+        """`ip_address` keeps everything after a `%` as the scope id,
+        commas included, so a scoped address was the one spelling that
+        carried a comma past the allowlist. openssl happened to reject the
+        result; the boundary is meant to be this function."""
+        for name in ("fe80::1%a,DNS:victim.example", "fe80::1%eth0"):
+            with self.subTest(name), self.assertRaises(LeafRefused):
+                leaf_san(name)
+
     def test_underscores_are_permitted(self):
         # Deliberate: RFC 1035 forbids them in a hostname label, real service
         # names use them anyway, and every client this design faces resolves
@@ -429,6 +438,18 @@ class TestMinting(_MinterCase):
         self.assertEqual(minter.stats["refused"], 1)
         self.assertEqual(minter.stats["failed"], 0)
         self.assertEqual(minter.stats["mints"], 0)
+
+    def test_a_refused_name_spends_no_token(self):
+        """A refusal runs no openssl, so the bucket has nothing to ration --
+        and a guest sending names it knows are refused must not empty the
+        bucket the allowlisted mints behind them wait on."""
+        minter = self.minter(runner=lambda *a, **k: self.fail("openssl ran"))
+        before = minter.bucket.tokens
+        for _ in range(5):
+            with self.assertRaises(LeafRefused):
+                minter.leaf("fe80::1%a,DNS:victim.example", denied=True)
+        self.assertEqual(minter.stats["refused"], 5)
+        self.assertGreaterEqual(minter.bucket.tokens, before)
 
     def test_no_counter_is_left_that_nothing_can_ever_move(self):
         """Every key in `stats` is named somewhere OTHER than its declaration.

@@ -51,7 +51,7 @@ from typing import NamedTuple
 from inspect_document import normalise_hostname
 from egress_ca import (
     DENIAL_DIR_NAME, LEAF_DIR_NAME, LEAF_RENEW_WITHIN_SECONDS, LeafRefused,
-    ca_cert_path, ca_key_path, leaf_openssl_argv,
+    ca_cert_path, ca_key_path, leaf_openssl_argv, leaf_san,
 )
 
 # --- sizes ---
@@ -552,6 +552,25 @@ class Minter:
             self._bump(*(("hits", "denied_hits") if denied else ("hits",)))
             return cached
 
+        # THE NAME IS CHECKED BEFORE THE BUCKET IS ASKED. A refusal runs no
+        # openssl, so it has no cost for a token to ration -- and a name
+        # the guest chose to be refused, sent in a loop, would otherwise
+        # empty the bucket for the allowlisted mints behind it.
+        #
+        # COUNTED HERE OR NOWHERE. `refused` and `failed` are two different
+        # facts -- a name this design will never mint for, against a mint
+        # that broke -- and only the first is guest-chosen, so it is the
+        # figure that moves on a workload being driven at the one boundary
+        # that exists to hold a guest off. The listener's own drop counter
+        # merges both under DROP_MINT_FAILED, which is right for an operator
+        # reading drops and wrong for anyone asking which of the two
+        # happened.
+        try:
+            leaf_san(name)
+        except LeafRefused:
+            self._bump("refused")
+            raise
+
         if denied:
             if not self.bucket.take():
                 self._bump("throttled")
@@ -561,20 +580,7 @@ class Minter:
                 self._bump("throttled")
                 raise MintThrottled(name, denied=False)
 
-        try:
-            leaf = self._mint(name, cache, denied=denied)
-        except LeafRefused:
-            # COUNTED HERE OR NOWHERE. `refused` and `failed` are two different
-            # facts -- a name this design will never mint for, against a mint
-            # that broke -- and only the first is guest-chosen. Left uncounted,
-            # `refused` was a figure structurally incapable of moving: nothing
-            # in this module raised it, so it read 0 on a workload being
-            # driven at the one boundary that exists to hold a guest off.
-            # The listener's own drop counter merges both under
-            # DROP_MINT_FAILED, which is right for an operator reading drops
-            # and wrong for anyone asking which of the two happened.
-            self._bump("refused")
-            raise
+        leaf = self._mint(name, cache, denied=denied)
         cache.put(leaf)
         return leaf
 
