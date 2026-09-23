@@ -21,9 +21,11 @@ from typing import NamedTuple
 
 from inspect_document import (
     TLS_DEFAULT,
+    TLS_MODES,
     hostname_match,
     inspect_policy_digest,
     normalise_hostname,
+    patterns_overlap,
     policy_governs,
     VmPolicyEntry,
 )
@@ -114,12 +116,24 @@ class Policy(NamedTuple):
         """Whether this host is exempt from termination.
 
         True on the whole-workload mode as well as the per-host list, so that
-        every caller asks one question. Splitting it -- `tls == "splice"` in one
-        place and a list check in another -- is how a path gets one of the two
-        and reads correct: the connection is spliced by the mode and terminated
-        by the list, or the reverse, depending on which branch it took.
+        every caller asks one question. Splitting it -- `tls == "splice"` in
+        one place and a list check in another -- is how a path gets one of the
+        two and reads correct: the connection is spliced by the mode and
+        terminated by the list, or the reverse, depending on which branch it
+        took.
+
+        NEVER A HOST A POLICY ENTRY GOVERNS. A spliced connection is never
+        decrypted, so its entry's `methods` and `paths` would never run, and
+        a restriction that is silently not applied is the one failure this
+        reader exists to rule out. load_policy refuses a document whose
+        `splice` and `policy` overlap; this is the half of that rule that
+        holds for the names the overlap test cannot see (two wildcards), and
+        it settles them by inspecting.
         """
-        return self.tls == "splice" or hostname_match(host, self.splice)
+        if self.tls == "splice":
+            return True
+        return (hostname_match(host, self.splice)
+                and not self.governs(host))
 
     def speaks_h2(self, host: str) -> bool:
         """Whether this host is offered h2 and relayed at the frame level.
@@ -127,12 +141,17 @@ class Policy(NamedTuple):
         Asked only of a host that is being TERMINATED, and it does not ask
         about the mode: under `tls = "splice"` no ALPN of ours is offered on
         any connection, so a listener that consulted this there would be
-        answering a question nothing had asked. Validation accepts `http2`
-        entries under that mode for the same reason it accepts `splice` ones --
-        they ask for something already true -- so this list is populated and
-        inert, and the one caller reaches it only past a `splices()` check.
+        answering a question nothing had asked. load_policy accepts `http2`
+        entries under that mode for the same reason it accepts `splice` ones
+        -- they ask for something already true -- so this list is populated
+        and inert, and the one caller reaches it only past a `splices()`
+        check.
+
+        Never a host a policy entry governs, for the reason `splices` gives:
+        an h2 session is relayed with its headers HPACK-compressed, so there
+        is no request line for `methods` and `paths` to match.
         """
-        return hostname_match(host, self.http2)
+        return hostname_match(host, self.http2) and not self.governs(host)
 
     def credential_for(self, host: str):
         """The credstore NAME this host's requests are brokered with, or None.
@@ -181,26 +200,31 @@ def load_policy(path):
     doc = json.loads(text)
     if not isinstance(doc, dict):
         raise ValueError(f"{path}: expected a JSON object, got {type(doc).__name__}")
-    hosts = doc.get("hosts") or []
-    if not isinstance(hosts, list):
-        raise ValueError(f"{path}: 'hosts' is not a list")
-    internal = doc.get("internal") or []
-    if not isinstance(internal, list):
-        raise ValueError(f"{path}: 'internal' is not a list")
+    # THE MODE IS ONE OF TWO WORDS, and anything else is refused rather
+    # than read. Every branch on it asks `== "inspect"` or `== "splice"`, so
+    # an unknown value is neither: it skips the CA check that refuses a start
+    # with no CA, and then splices every connection -- a document asking for
+    # termination loads clean and inspects nothing, with the status file
+    # echoing the misspelling back as though it were a mode.
+    tls = doc.get("tls")
+    if tls is None:
+        tls = TLS_DEFAULT
+    if tls not in TLS_MODES:
+        raise ValueError(
+            f"{path}: 'tls' is {tls!r}; it is one of "
+            + ", ".join(repr(m) for m in TLS_MODES))
+    hosts = _names(doc, "hosts", path)
+    internal = _names(doc, "internal", path)
     # Tolerated absent, unlike `hosts`: a policy document written before this
     # key existed is a policy with no internal entries, which is the common
     # case and not an error. `hosts` gets no such tolerance because there the
     # empty reading and the missing reading are different configurations.
-    splice = doc.get("splice") or []
-    if not isinstance(splice, list):
-        raise ValueError(f"{path}: 'splice' is not a list")
+    splice = _names(doc, "splice", path)
     # NOT normalised here, unlike `internal`: these are fnmatch PATTERNS and
     # hostname_match normalises both sides at the point of comparison.
     # Normalising a pattern early is harmless today and would silently stop
     # being so the moment a pattern could carry something a hostname cannot.
-    http2 = doc.get("http2") or []
-    if not isinstance(http2, list):
-        raise ValueError(f"{path}: 'http2' is not a list")
+    http2 = _names(doc, "http2", path)
     # Unnormalised, like `splice` and for the same reason: these are fnmatch
     # PATTERNS, and hostname_match normalises both sides where they are
     # compared.
@@ -229,6 +253,14 @@ def load_policy(path):
         # permitting it. Fails closed, and therefore in silence.
         methods = item.get("methods")
         paths = item.get("paths")
+        for key, value in (("methods", methods), ("paths", paths)):
+            # A string is refused rather than iterated: `"GET"` read as a
+            # list is the three one-letter methods, a rule that never
+            # matches and says nothing about why.
+            if value is not None and not isinstance(value, list):
+                raise ValueError(
+                    f"{path}: policy entry {item['host']!r}: {key!r} is not "
+                    f"a list or null")
         # `.get`, not `[...]`: the document emits the key only on the entries
         # that carry one (vm_inspect_policy explains why the sparseness is
         # load-bearing there), so absent and null mean the same thing here and
@@ -249,7 +281,58 @@ def load_policy(path):
             paths=None if paths is None else tuple(
                 p for p in paths if isinstance(p, str)),
             credential=credential))
-    return Policy(tls=doc.get("tls") or TLS_DEFAULT, hosts=tuple(hosts),
+    _refuse_inert_entries(path, tls, policy, splice, http2)
+    return Policy(tls=tls, hosts=tuple(hosts),
                   internal=tuple(normalise_hostname(h) for h in internal),
                   splice=tuple(splice), http2=tuple(http2),
                   policy=tuple(policy), digest=digest)
+
+
+def _names(doc, key, path):
+    """One of the document's name lists: absent is empty, and every entry
+    is a non-empty string.
+
+    Checked here, at start, because the first use of an entry is a
+    hostname comparison on a connection thread: a number in `hosts` loads
+    clean and then kills every connection that reaches the matcher, with
+    the listener reporting itself up throughout.
+    """
+    value = doc.get(key) or []
+    if not isinstance(value, list):
+        raise ValueError(f"{path}: {key!r} is not a list")
+    for item in value:
+        if not isinstance(item, str) or not item.strip():
+            raise ValueError(
+                f"{path}: {key!r} holds {item!r}, which is not a host name "
+                f"or pattern")
+    return value
+
+
+def _refuse_inert_entries(path, tls, entries, splice, http2):
+    """Refuse a document whose policy entries could never run.
+
+    `methods` and `paths` are matched against a decrypted HTTP/1.1 request
+    line, and three things in the document leave a host with none: the
+    whole-workload splice, a per-host splice, and h2, whose headers are
+    relayed HPACK-compressed. An entry for such a host is a restriction the
+    file states and the listener would not apply, and a credential on one
+    is never attached. Two intentions that cannot both hold are refused at
+    start, naming both, rather than one of them being picked in silence.
+    """
+    if not entries:
+        return
+    if tls == "splice":
+        raise ValueError(
+            f"{path}: 'policy' entries with tls 'splice': a spliced "
+            f"connection is never decrypted, so no entry's methods, paths "
+            f"or credential could apply. Use tls 'inspect' and splice only "
+            f"the hosts that cannot take the CA, or drop the entries")
+    for key, patterns in (("splice", splice), ("http2", http2)):
+        for entry in entries:
+            for pattern in patterns:
+                if patterns_overlap(entry.host, pattern):
+                    raise ValueError(
+                        f"{path}: policy entry {entry.host!r} overlaps "
+                        f"{key!r} entry {pattern!r}: that host is never "
+                        f"read as an HTTP/1.1 request, so the entry could "
+                        f"never run. Keep one of the two")

@@ -113,6 +113,24 @@ def hostname_match(host: str, patterns) -> bool:
                for p in patterns)
 
 
+def patterns_overlap(a: str, b: str) -> bool:
+    """Whether two fnmatch host patterns can name a host in common.
+
+    Yes when either matches the other read as a literal, which is exact
+    whenever at least one of the two carries no wildcard -- the ordinary
+    case, an entry's host against a list's pattern -- and an approximation
+    when both do: `*.a.example.com` and `*.b.example.com` overlap on nothing
+    and this says so, but two wildcards can share a name neither matches as
+    a literal. A caller that must never let a shared name through checks the
+    name as well, where there is one.
+    """
+    a = normalise_hostname(a)
+    b = normalise_hostname(b)
+    if not a or not b:
+        return False
+    return a == b or fnmatch.fnmatchcase(a, b) or fnmatch.fnmatchcase(b, a)
+
+
 # --- The two TLS modes ---
 # What a filtered workload's redirected TLS connections get.
 #

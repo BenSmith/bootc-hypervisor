@@ -13,11 +13,9 @@ in vm_network_config and container_network_config.
 Installed to /usr/libexec/workloadctl/config_parser.py.
 """
 
-import fnmatch
 import re
 from pathlib import Path
 from egress_plane import CLEARTEXT, TLS
-from inspect_document import normalise_hostname
 
 
 # Persistent workload data directory
@@ -150,30 +148,6 @@ def parse_policy_entries(net: dict, entry_cls) -> list:
 # with the listener about what a name is. It lives at the bottom of the
 # layering because everything above matches against it and nothing here
 # needs anything above.
-
-
-def patterns_overlap(a: str, b: str) -> bool:
-    """Whether two fnmatch host patterns can name a host in common.
-
-    Approximate, and deliberately approximate in the ACCEPTING direction: it
-    answers yes when either pattern matches the other read as a literal, which
-    is exact whenever at least one of the two carries no wildcard and is a
-    good-enough over-approximation when both do. `*.a.example.com` and
-    `*.b.example.com` overlap on nothing and this says so; `*.example.com` and
-    `*.com` overlap and this says so too.
-
-    Used for the "this entry matches no allowlisted name" rules, where the two
-    sides are an entry's `host` and an allowlist pattern and only one of them is
-    ordinarily a wildcard. Wrong in the accepting direction means a dead entry
-    occasionally survives validation; wrong the other way would refuse a config
-    that works, which is the expensive mistake for a rule whose whole job is to
-    catch a typo.
-    """
-    a = normalise_hostname(a)
-    b = normalise_hostname(b)
-    if not a or not b:
-        return False
-    return a == b or fnmatch.fnmatchcase(a, b) or fnmatch.fnmatchcase(b, a)
 
 
 HOST_PATTERN_RE = re.compile(r"^[A-Za-z0-9*?.\[\]!_-]+$")

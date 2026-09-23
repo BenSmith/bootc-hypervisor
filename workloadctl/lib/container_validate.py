@@ -13,7 +13,7 @@ in workload-filter.nft is keyed on. See container_uses_inspect().
 
 Installed to /usr/libexec/workloadctl/container_validate.py.
 """
-from config_parser import patterns_overlap
+from inspect_document import patterns_overlap
 from container_network_config import (
     ContainerCredential,
     ContainerPolicyEntry,

@@ -25,6 +25,7 @@ from pathlib import Path
 
 from tests import load_script
 from inspect_document import (
+    TLS_DEFAULT,
     hostname_match,
     normalise_hostname,
     VmPolicyEntry,
@@ -595,6 +596,102 @@ class TestHostnameMatching(unittest.TestCase):
 
     def test_an_empty_list_authorises_nothing(self):
         self.assertFalse(hostname_match("example.com", []))
+
+
+class TestPolicyRefusals(unittest.TestCase):
+    """What load_policy refuses at start rather than reading.
+
+    Every case here is a document that loaded clean and then did something
+    other than it says: spliced everything under a misspelled mode, relayed
+    a policed host without reading a request, or killed each connection on
+    the first hostname comparison. The reader is the only check between a
+    hand-written document and the listener, so each is refused, naming
+    what it found.
+    """
+
+    def _load(self, doc):
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d)
+        path = os.path.join(d, "inspect.json")
+        with open(path, "w") as f:
+            json.dump(doc, f)
+        return load_policy(path)
+
+    def _refused(self, doc, *words):
+        with self.assertRaises(ValueError) as ctx:
+            self._load(doc)
+        for word in words:
+            self.assertIn(word, str(ctx.exception))
+
+    def test_an_unknown_tls_is_refused_naming_it(self):
+        """The case that splices everything: `tls != "inspect"` skips the
+        missing-CA refusal and then takes the splice branch."""
+        for tls in ("Inspect", "inspct", "", 5, True):
+            with self.subTest(tls=tls):
+                self._refused({"tls": tls, "hosts": []}, repr(tls))
+
+    def test_an_absent_tls_is_the_default(self):
+        self.assertEqual(self._load({"hosts": []}).tls, TLS_DEFAULT)
+
+    def test_a_name_list_holding_a_non_string_is_refused(self):
+        for key in ("hosts", "internal", "splice", "http2"):
+            for bad in (443, None, "", "  ", ["a.example"]):
+                with self.subTest(key=key, bad=bad):
+                    self._refused({"tls": "splice", key: [bad]},
+                                  repr(key), repr(bad))
+
+    def test_methods_or_paths_as_a_string_is_refused(self):
+        for key in ("methods", "paths"):
+            with self.subTest(key=key):
+                self._refused(
+                    {"tls": "inspect",
+                     "policy": [{"host": "a.example", key: "GET"}]},
+                    repr(key))
+
+    def test_policy_entries_under_whole_workload_splice_are_refused(self):
+        self._refused({"tls": "splice",
+                       "policy": [{"host": "a.example"}]}, "splice")
+
+    def test_a_policy_host_in_the_splice_list_is_refused(self):
+        for pattern in ("a.example", "*.example", "A.Example."):
+            with self.subTest(pattern=pattern):
+                self._refused(
+                    {"tls": "inspect", "splice": [pattern],
+                     "policy": [{"host": "a.example",
+                                 "methods": ["GET"]}]},
+                    "'a.example'", repr(pattern), "'splice'")
+
+    def test_a_policy_host_in_the_http2_list_is_refused(self):
+        """The h2 relay never calls permits(): a GET-only entry beside an
+        `http2` entry let every method through."""
+        self._refused(
+            {"tls": "inspect", "http2": ["api.example.com"],
+             "policy": [{"host": "api.example.com", "methods": ["GET"]}]},
+            "'api.example.com'", "'http2'")
+
+    def test_lists_that_do_not_overlap_the_policy_still_load(self):
+        policy = self._load(
+            {"tls": "inspect", "splice": ["cdn.example"],
+             "http2": ["grpc.example"],
+             "policy": [{"host": "api.example", "methods": ["GET"]}]})
+        self.assertTrue(policy.splices("cdn.example"))
+        self.assertTrue(policy.speaks_h2("grpc.example"))
+        self.assertFalse(policy.splices("api.example"))
+
+    def test_a_governed_host_is_never_spliced_or_relayed_as_h2(self):
+        """The guard for what the overlap test cannot see. Two wildcards
+        that match each other as literals in neither direction still share
+        `ab.example.com`; the document loads, and the governed name is
+        terminated and policed rather than spliced or relayed."""
+        policy = self._load(
+            {"tls": "inspect", "splice": ["*b.example.com"],
+             "http2": ["*b.example.com"],
+             "policy": [{"host": "a*.example.com", "methods": ["GET"]}]})
+        self.assertTrue(policy.governs("ab.example.com"))
+        self.assertFalse(policy.splices("ab.example.com"))
+        self.assertFalse(policy.speaks_h2("ab.example.com"))
+        self.assertTrue(policy.splices("xb.example.com"))
+        self.assertTrue(policy.speaks_h2("xb.example.com"))
 
 
 class TestPolicyLoading(unittest.TestCase):

@@ -12,12 +12,13 @@ Installed to /usr/libexec/workloadctl/vm_egress_validate.py.
 """
 
 from broker_config import VmCredential
-from config_parser import patterns_overlap, validate_host_pattern
+from config_parser import validate_host_pattern
 from inspect_document import (
     TLS_DEFAULT,
     TLS_MODES,
     hostname_match,
     normalise_hostname,
+    patterns_overlap,
     VmPolicyEntry,
 )
 from credential_entries import validate_credential_entries
