@@ -570,7 +570,7 @@ class TestClientHelloParser(unittest.TestCase):
 
     def test_a_plain_hello_yields_its_server_name(self):
         raw = _hello_bytes()
-        _, hello = read_client_hello(_FakeSocket([raw]))
+        hello = read_client_hello(_FakeSocket([raw]))
         self.assertEqual(hello.server_name, "example.com")
 
     def test_a_grease_hello_parses(self):
@@ -579,7 +579,7 @@ class TestClientHelloParser(unittest.TestCase):
         any other. Code that enumerated the reserved values could get the list
         wrong; code that ignores them cannot."""
         raw = _hello_bytes(_grease_extension() + _grease_extension(0x1a1a))
-        _, hello = read_client_hello(_FakeSocket([raw]))
+        hello = read_client_hello(_FakeSocket([raw]))
         self.assertEqual(hello.server_name, "example.com")
         self.assertIn(0x0a0a, hello.extensions)
 
@@ -589,7 +589,7 @@ class TestClientHelloParser(unittest.TestCase):
         spans more than one TLS record."""
         big = b"\x00\x2a" + (300).to_bytes(2, "big") + b"\x00" * 300
         raw = _hello_bytes(big)
-        _, hello = read_client_hello(_FakeSocket([raw]))
+        hello = read_client_hello(_FakeSocket([raw]))
         self.assertEqual(hello.server_name, "example.com")
 
     def test_a_hello_split_across_reads_is_reassembled(self):
@@ -598,14 +598,13 @@ class TestClientHelloParser(unittest.TestCase):
         large ones above."""
         raw = _hello_bytes(b"\x00\x2a" + (300).to_bytes(2, "big") + b"\x00" * 300)
         sock = _FakeSocket([raw[:20], raw[20:100], raw[100:]])
-        got, hello = read_client_hello(sock)
+        hello = read_client_hello(sock)
         self.assertEqual(hello.server_name, "example.com")
-        self.assertEqual(got, raw)
 
     def test_a_hello_with_no_sni_reads_but_names_nothing(self):
         """Legal TLS, and simply unallowlistable: there is no name to match."""
         raw = _hello_bytes(server_name=None)
-        _, hello = read_client_hello(_FakeSocket([raw]))
+        hello = read_client_hello(_FakeSocket([raw]))
         self.assertIsNone(hello.server_name)
 
     def test_a_truncated_length_is_refused_not_silently_short(self):
@@ -617,7 +616,7 @@ class TestClientHelloParser(unittest.TestCase):
         cut = raw[:5] + raw[5:20]
         cut = cut[:3] + (15).to_bytes(2, "big") + cut[5:]
         with self.assertRaises(HelloUnreadable):
-            read_client_hello(_FakeSocket([cut]))
+            read_client_hello(_FakeSocket([cut], timeout=0.2))
 
     def test_a_non_handshake_first_byte_is_refused(self):
         with self.assertRaises(HelloUnreadable):
@@ -633,16 +632,23 @@ class TestClientHelloParser(unittest.TestCase):
 
 class _FakeSocket:
     """A socket that yields a fixed script of reads. Returns b"" when spent,
-    which is what a real socket does at EOF."""
+    which is what a real socket does at EOF. A peek sees every chunk
+    arrived so far, one more per peek, and consumes none."""
 
-    def __init__(self, chunks):
+    def __init__(self, chunks, timeout=None):
         self._chunks = list(chunks)
+        self._queued = b""
+        self._timeout = timeout
 
-    def recv(self, _n):
+    def recv(self, n, flags=0):
+        if flags & socket.MSG_PEEK:
+            if self._chunks:
+                self._queued += self._chunks.pop(0)
+            return self._queued[:n]
         return self._chunks.pop(0) if self._chunks else b""
 
     def gettimeout(self):
-        return None                     # a blocking socket: no deadline
+        return self._timeout            # None: a blocking socket, no deadline
 
 
 class TestHostnameMatching(unittest.TestCase):
@@ -1726,7 +1732,7 @@ class TestLogInjection(unittest.TestCase):
                             server_name=f"a{ch}b.example")]))
 
     def test_an_ordinary_name_in_any_case_still_parses(self):
-        _, hello = read_client_hello(
+        hello = read_client_hello(
             _FakeSocket([_hello_bytes(server_name="Svc_1.Example-A.com.")]))
         self.assertEqual(hello.server_name, "Svc_1.Example-A.com.")
 
@@ -1742,7 +1748,7 @@ class TestLogInjection(unittest.TestCase):
 
     def test_an_ordinary_name_still_reads(self):
         """The guard must not cost the names that are not attacks."""
-        _, hello = read_client_hello(
+        hello = read_client_hello(
             _FakeSocket([_hello_bytes(server_name="Fine-Name.EXAMPLE.com")]))
         self.assertEqual(hello.server_name, "Fine-Name.EXAMPLE.com")
 
@@ -3230,18 +3236,18 @@ class TestEchFixture(unittest.TestCase):
 
     def test_it_parses_to_the_cover_name(self):
         raw = self.FIXTURE.read_bytes()
-        _, hello = read_client_hello(_FakeSocket([raw]))
+        hello = read_client_hello(_FakeSocket([raw]))
         self.assertEqual(hello.server_name, "cloudflare-ech.com")
 
     def test_it_carries_the_ech_extension(self):
-        _, hello = read_client_hello(_FakeSocket([self.FIXTURE.read_bytes()]))
+        hello = read_client_hello(_FakeSocket([self.FIXTURE.read_bytes()]))
         self.assertIn(TLS_EXT_ECH, hello.extensions)
 
     def test_the_parser_does_not_decrypt_or_special_case_it(self):
         """The ECH extension must be skipped by its length like every other.
         A parser that reached inside it would be a TLS implementation, which
         the peek must not become."""
-        _, hello = read_client_hello(_FakeSocket([self.FIXTURE.read_bytes()]))
+        hello = read_client_hello(_FakeSocket([self.FIXTURE.read_bytes()]))
         # Every extension after the ECH one is still recovered, which is only
         # true if it was skipped correctly rather than terminating the walk.
         self.assertGreater(len(hello.extensions),

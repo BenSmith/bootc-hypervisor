@@ -4,25 +4,13 @@ Reading a server name out of a TLS ClientHello, and no more.
 Enough of RFC 8446 §4.1.2 to read the server name and see which extensions are
 present. It is not a TLS implementation and must not become one: every field
 it does not need is skipped by its length, so an extension shape it has never
-seen costs it nothing. The egress inspector runs this at the front of every
-connection on its TLS plane, and the ECH tripwire reads the extension list it
-returns; nothing else consults a parse. The raw bytes are returned alongside
-because under `tls = "splice"` they are what travels upstream -- a ClientHello
-re-serialised from a parse is a different ClientHello (different extension
-order, different GREASE, a different JA3), so the parse is only ever consulted
-for a decision.
+seen costs it nothing.
 
-WHY THE INSPECT PEEK USES MSG_PEEK AND THE SPLICE PEEK DOES NOT
-
-A terminated connection's ClientHello must still be there for the TLS engine to
-consume — Python's ssl wraps a SOCKET and cannot be handed bytes already read
-off one. So the inspect path peeks: the same reader, with MSG_PEEK|MSG_WAITALL,
-leaving every byte in the kernel receive buffer for wrap_socket to find. That
-bounds a hello at what the receive buffer holds rather than at what we are
-willing to read, which is why CLIENTHELLO_MAX (16 KiB) matters twice over — it
-is comfortably inside a default rmem, and a hello larger than the buffer would
-peek forever without progressing. The deadline in `_recv_at_least` is what
-turns that into a refusal instead of a spin.
+The hello is PEEKED, never consumed. A terminated connection's hello must
+still be on the socket for ssl's wrap_socket, and a spliced one is relayed
+from the socket unchanged, so neither path wants the bytes taken off it. A
+peek is bounded by the receive buffer, which CLIENTHELLO_MAX sits well
+inside.
 """
 
 import socket
@@ -51,12 +39,6 @@ CLIENTHELLO_MAX = 16384
 # once for the hello rather than per read, so a dribbling peer holds its
 # slot for one timeout and no longer.
 PEEK_POLL = 0.01
-
-# How much a consuming (non-peek) read asks for at a time. Only the splice path
-# consumes, and whatever lands past the end of the hello is the guest's own next
-# bytes in order, replayed upstream unchanged -- so the size only sets how much
-# of that surplus one read may pull in.
-READ_CHUNK = 65536
 
 TLS_HANDSHAKE = 0x16
 TLS_CLIENT_HELLO = 0x01
@@ -209,53 +191,26 @@ def parse_client_hello(msg: bytes) -> ClientHello:
     return ClientHello(name, tuple(seen))
 
 
-def read_client_hello(conn, max_bytes=CLIENTHELLO_MAX, *, peek=False):
-    """Read until a whole ClientHello is in hand. Returns (raw, hello).
-
-    `peek` leaves every byte where it was. The splice path consumes the hello
-    because it replays it upstream itself; the inspect path must not, because
-    the bytes have to still be in the kernel receive buffer when ssl's
-    wrap_socket runs the handshake. See the module docstring on the bound that
-    imposes.
-
-    `raw` is every byte read off the socket, record headers included and
-    unmodified — that is what gets replayed upstream, and it is returned rather
-    than rebuilt because a re-serialised hello is a different hello. It may run
-    slightly past the end of the ClientHello if the peer coalesced more into the
-    same segment; replaying the surplus is correct, since it is the guest's own
-    next bytes in order.
+def read_client_hello(conn, max_bytes=CLIENTHELLO_MAX):
+    """Peek until a whole ClientHello is on the socket, and parse it.
 
     The handshake message is reassembled across records: a large hello (a
-    post-quantum key share, say) legitimately spans more than one TLS record,
-    and a parser that read only the first record would fail exactly the clients
-    that are becoming the common case.
+    post-quantum key share, say) legitimately spans more than one TLS
+    record. The socket's timeout bounds the whole read, not each peek.
     """
-    # The socket's timeout bounds the WHOLE hello, not each read: a peer
-    # that dribbles a byte inside every timeout would otherwise hold its
-    # slot for as many timeouts as CLIENTHELLO_MAX has bytes.
     timeout = conn.gettimeout()
     deadline = None if timeout is None else time.monotonic() + timeout
-    try:
-        return _read_client_hello(conn, max_bytes, peek, deadline)
-    finally:
-        if timeout is not None and not peek:
-            conn.settimeout(timeout)
-
-
-def _read_client_hello(conn, max_bytes, peek, deadline):
     raw = b""
     pos = 0          # how much of `raw` has been consumed as complete records
     body = b""       # handshake bytes, record framing stripped
     want = None      # the handshake message length, once its header is in hand
     while True:
-        raw = _recv_at_least(conn, raw, pos + 5, max_bytes, peek=peek,
-                             deadline=deadline)
+        raw = _peek_at_least(conn, raw, pos + 5, max_bytes, deadline)
         if raw[pos] != TLS_HANDSHAKE:
             raise HelloUnreadable(
                 f"record type 0x{raw[pos]:02x} is not a TLS handshake record")
         length = int.from_bytes(raw[pos + 3:pos + 5], "big")
-        raw = _recv_at_least(conn, raw, pos + 5 + length, max_bytes,
-                             peek=peek, deadline=deadline)
+        raw = _peek_at_least(conn, raw, pos + 5 + length, max_bytes, deadline)
         body += raw[pos + 5:pos + 5 + length]
         pos += 5 + length
         if want is None and len(body) >= 4:
@@ -264,49 +219,31 @@ def _read_client_hello(conn, max_bytes, peek, deadline):
                     f"handshake type 0x{body[0]:02x} is not a ClientHello")
             want = int.from_bytes(body[1:4], "big")
         if want is not None and len(body) >= 4 + want:
-            return raw, parse_client_hello(body[4:4 + want])
+            return parse_client_hello(body[4:4 + want])
 
 
-def _recv_at_least(conn, raw, n, max_bytes, *, peek=False, deadline=None):
-    """Read until `raw` holds at least n bytes, or fail closed.
+def _peek_at_least(conn, raw, n, max_bytes, deadline):
+    """The socket's queue from its start, once it holds at least n bytes.
 
-    In `peek` mode every call re-reads the queue from its start with
-    MSG_PEEK|MSG_WAITALL, so `raw` is REPLACED rather than appended to and the
-    socket is left exactly as it was found. A peek that comes back no longer
-    than what we already had is the rest of the hello not having arrived yet
-    (see PEEK_POLL): it is asked again until `deadline`, a monotonic time, and
-    refused past it. A hello larger than the receive buffer ends the same
-    way, since no amount of waiting makes it fit. A consuming read waits no
-    longer than what is left before `deadline`.
+    A peek that comes back no longer than `raw` is the rest of the hello not
+    having arrived yet (see PEEK_POLL), and is asked again until `deadline`.
+    A peer that closed mid-hello looks the same and ends the same way.
     """
     while len(raw) < n:
         if n > max_bytes:
             raise HelloUnreadable(
                 f"a ClientHello over {max_bytes} bytes is not one we read")
         try:
-            if peek:
-                chunk = conn.recv(n, socket.MSG_PEEK | socket.MSG_WAITALL)
-            else:
-                if deadline is not None:
-                    left = deadline - time.monotonic()
-                    if left <= 0:
-                        raise HelloUnreadable(
-                            "the ClientHello did not arrive whole in time")
-                    conn.settimeout(left)
-                chunk = conn.recv(READ_CHUNK)
+            chunk = conn.recv(n, socket.MSG_PEEK | socket.MSG_WAITALL)
         except OSError as exc:
             raise HelloUnreadable(f"read failed: {exc}") from None
         if not chunk:
             raise HelloUnreadable("the connection closed mid-ClientHello")
-        if peek:
-            if len(chunk) <= len(raw):
-                if deadline is not None and time.monotonic() >= deadline:
-                    raise HelloUnreadable(
-                        "the ClientHello did not arrive whole in the receive "
-                        "buffer")
-                time.sleep(PEEK_POLL)
-                continue
-            raw = chunk
-        else:
-            raw += chunk
+        if len(chunk) <= len(raw):
+            if deadline is not None and time.monotonic() >= deadline:
+                raise HelloUnreadable(
+                    "the ClientHello did not arrive whole in time")
+            time.sleep(PEEK_POLL)
+            continue
+        raw = chunk
     return raw

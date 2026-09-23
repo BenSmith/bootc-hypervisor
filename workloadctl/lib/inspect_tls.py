@@ -6,13 +6,10 @@ against this workload's `hosts`. What happens next is the mode the policy
 names, and every decision is made against the workload's Inspection
 (lib/inspect_scope.py), which every function here takes first.
 
-TWO TLS MODES, AND THE PEEK IS THE SAME PEEK
+TWO TLS MODES
 
-`tls = "splice"` decrypts nothing: the bytes read to find the name are the bytes
-replayed upstream, verbatim, headers included. A ClientHello reconstructed from
-a parse is a different ClientHello — different extension order, different
-GREASE, a different JA3 — so the raw buffer is what travels and the parse is
-only ever consulted for a decision.
+`tls = "splice"` decrypts nothing: the hello is peeked for its name and then
+relayed from the socket, byte for byte, with everything after it.
 
 `tls = "inspect"` (the default) TERMINATES. The same peek takes the
 same decision, and then this process completes the guest's handshake itself with
@@ -22,8 +19,7 @@ cleartext plane uses. The allowlist means the same thing on both planes only
 under termination: spliced, a name is checked once at the front of a connection
 whose contents nothing can see.
 
-The reader itself is `lib/tls_hello.py`, and so is why the inspect path
-peeks with MSG_PEEK where the splice path consumes.
+The reader itself is `lib/tls_hello.py`.
 
 BUMP-THEN-ANSWER
 
@@ -76,13 +72,6 @@ def serve_tls(insp, conn, where):
     broken resolver from something speaking a non-TLS protocol at the TLS
     port.
     """
-    # Whether this LISTENER can terminate at all, which is the mode. Which
-    # of its connections it actually terminates is a per-host question
-    # taken below, once there is a name -- so the hello is PEEKED whenever
-    # the mode allows termination, not only when this connection will get
-    # it. A consuming read here would leave a spliced host's own hello
-    # already off the socket, and the splice property is that the origin
-    # completes its handshake with the guest's bytes.
     inspect = insp.policy.tls == "inspect"
     if inspect and insp.minter is None:
         # Unreachable through the entrypoint, which refuses to start in
@@ -98,7 +87,7 @@ def serve_tls(insp, conn, where):
                             f"listener has no minter'")
         return
     try:
-        raw, hello = read_client_hello(conn, peek=inspect)
+        hello = read_client_hello(conn)
     except HelloUnreadable as exc:
         insp.counters.record_unreadable_hello()
         insp.counters.record_drop(DROP_NO_NAME)
@@ -158,19 +147,8 @@ def serve_tls(insp, conn, where):
         insp.log(f"drop {where} host={host} reason='{reason}: {exc}'")
         return
     try:
-        # The buffered hello, unmodified and before anything else. This is
-        # the splice property: the server sees the guest's own ClientHello,
-        # so the handshake it completes is with the guest, and this process
-        # never holds a key to it.
-        #
-        # Nothing to replay when the hello was PEEKED -- a per-host splice
-        # on a terminating listener -- because the bytes are still on the
-        # socket and the relay below reads them first. Sending `raw` there
-        # too would deliver the hello TWICE and the origin would fail the
-        # handshake on the duplicate, which presents as the spliced host
-        # being broken by the exemption that was supposed to fix it.
-        if not inspect:
-            upstream.sendall(raw)
+        # The hello is still on the socket, so the relay sends it first and
+        # the origin completes its handshake with the guest's own bytes.
         insp.counters.record_splice()
         insp.log(f"splice {where} host={host}"
                             f"{' per-host' if inspect else ''}")

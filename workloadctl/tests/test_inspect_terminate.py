@@ -1233,20 +1233,10 @@ class TestThePeekLeavesTheHelloWhereItWas(unittest.TestCase):
     def test_peeking_reads_the_name_and_consumes_nothing(self):
         conn = self._hello()
         self.addCleanup(conn.close)
-        raw, hello = read_client_hello(conn, peek=True)
+        hello = read_client_hello(conn)
         self.assertEqual(hello.server_name, "peek.example")
-        again, _ = read_client_hello(conn, peek=True)
-        self.assertEqual(again[:len(raw)], raw,
+        self.assertEqual(read_client_hello(conn).server_name, "peek.example",
                          "a peek that consumed would not find it twice")
-
-    def test_the_splice_reader_consumes_what_it_reads(self):
-        conn = self._hello()
-        self.addCleanup(conn.close)
-        raw, hello = read_client_hello(conn)
-        self.assertEqual(hello.server_name, "peek.example")
-        conn.settimeout(0.3)
-        with self.assertRaises(HelloUnreadable):
-            read_client_hello(conn)
 
     def test_a_hello_that_never_arrives_whole_is_refused_not_spun_on(self):
         """MSG_WAITALL is advisory under a socket timeout, so a dribbling peer
@@ -1259,7 +1249,7 @@ class TestThePeekLeavesTheHelloWhereItWas(unittest.TestCase):
         guest.sendall(bytes([0x16, 0x03, 0x01, 0x40, 0x00]))   # 16 KiB claimed
         started = time.monotonic()
         with self.assertRaises(HelloUnreadable):
-            read_client_hello(ours, peek=True)
+            read_client_hello(ours)
         self.assertLess(time.monotonic() - started, 10.0)
 
     def test_a_hello_split_across_segments_is_waited_for(self):
@@ -1273,7 +1263,8 @@ class TestThePeekLeavesTheHelloWhereItWas(unittest.TestCase):
         self.addCleanup(guest.close)
         hello = self._hello()
         self.addCleanup(hello.close)
-        raw, _ = read_client_hello(hello)
+        read_client_hello(hello)
+        raw = hello.recv(65536)
         half = len(raw) // 2
         ours.settimeout(5.0)
         guest.sendall(raw[:half])
@@ -1283,14 +1274,14 @@ class TestThePeekLeavesTheHelloWhereItWas(unittest.TestCase):
             guest.sendall(raw[half:])
 
         threading.Thread(target=rest, daemon=True).start()
-        _, parsed = read_client_hello(ours, peek=True)
+        parsed = read_client_hello(ours)
         self.assertEqual(parsed.server_name, "peek.example")
 
 
 class TestADribbledReadIsBoundedAsAWhole(unittest.TestCase):
     """A peer that sends one byte inside every timeout never trips a
-    per-read bound, so the timeout has to bound the whole read: the hello
-    on the splice path, and a guest's request head."""
+    per-read bound, so the timeout has to bound the whole read: the hello,
+    and a guest's request head."""
 
     def _dribble(self, guest, data, every=0.05):
         stop = threading.Event()
@@ -1307,7 +1298,7 @@ class TestADribbledReadIsBoundedAsAWhole(unittest.TestCase):
         threading.Thread(target=run, daemon=True).start()
         self.addCleanup(stop.set)
 
-    def test_a_dribbled_hello_on_the_splice_path_is_refused_in_time(self):
+    def test_a_dribbled_hello_is_refused_in_time(self):
         ours, guest = _tcp_pair()
         self.addCleanup(ours.close)
         self.addCleanup(guest.close)
@@ -1318,8 +1309,6 @@ class TestADribbledReadIsBoundedAsAWhole(unittest.TestCase):
         with self.assertRaises(HelloUnreadable):
             read_client_hello(ours)
         self.assertLess(time.monotonic() - started, 1.0)
-        self.assertEqual(ours.gettimeout(), 0.3,
-                         "the socket's own timeout was not put back")
 
     def test_a_dribbled_request_head_times_out_in_time(self):
         ours, guest = _tcp_pair()
