@@ -227,6 +227,16 @@ class TestResponseFraming(unittest.TestCase):
             _, _, bodiless = broker_request.response_framing(status, [])
             self.assertTrue(bodiless, status)
 
+    def test_a_response_to_head_carries_no_body(self):
+        """Its Content-Length describes the GET it stands in for."""
+        _, declared, bodiless = broker_request.response_framing(
+            200, [("content-length", "5")], "HEAD")
+        self.assertTrue(bodiless)
+        self.assertEqual(declared, "5")
+        _, _, bodiless = broker_request.response_framing(
+            200, [("content-length", "5")], "GET")
+        self.assertFalse(bodiless)
+
 
 class BrokerServerCase(unittest.TestCase):
     """A real broker on loopback, for the checks that are about connections.
@@ -578,6 +588,74 @@ class TestARelayedResponseIsWellFormed(TestAnUpstreamDyingMidResponse):
         self.assertNotIn(b"upstream-edge/2", received,
                          "the provider's edge is named to the sandbox")
         self.assertTrue(received.endswith(b"{}"))
+
+
+class TestEveryApiMethodIsRelayed(BrokerServerCase):
+    """The broker serves the methods an HTTP API uses, not a subset.
+
+    Which method a request may use is the inspector's policy, applied
+    before the request is sent here. A method this handler has no do_ for
+    is answered 501 by the base class, so a policy permitting PATCH on a
+    brokered host got a 501 from the broker, after the policy said yes.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.seen = []
+        case = self
+
+        class Recording(DyingUpstream):
+            def request(self, method, path, body=None, headers=None):
+                case.seen.append((method, dict(headers or {})))
+                self._method = method
+
+            def getresponse(self):
+                body = [] if self._method == "HEAD" else [b"ok"]
+                return StubResponse(200, [("content-length", "2")], body,
+                                    die=False)
+
+        self.enterContext(mock.patch.object(
+            broker_server.http.client, "HTTPSConnection", Recording))
+
+    def _send(self, method):
+        sock = self.connect()
+        sock.sendall(method.encode() + b" /v1/x HTTP/1.1\r\nHost: x\r\n"
+                     b"Content-Length: 0\r\nConnection: close\r\n\r\n")
+        return self.drain(sock)
+
+    def test_each_method_reaches_the_upstream_with_the_credential(self):
+        for method in ("GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"):
+            with self.subTest(method=method):
+                received = self._send(method)
+                self.assertIn(b" 200 ", received.split(b"\r\n")[0])
+                self.assertTrue(received.endswith(b"ok"))
+                self.assertEqual(self.seen[-1][0], method)
+                self.assertEqual(self.seen[-1][1]["x-api-key"],
+                                 "REAL-SECRET")
+
+    def test_head_is_relayed_with_its_length_and_no_body(self):
+        received = self._send("HEAD")
+        head, _, body = received.partition(b"\r\n\r\n")
+        self.assertIn(b" 200 ", head.split(b"\r\n")[0])
+        self.assertIn(b"Content-Length: 2", head)
+        self.assertNotIn(b"chunked", head.lower())
+        self.assertEqual(body, b"")
+        self.assertEqual(self.seen[-1][0], "HEAD")
+
+    def test_a_refused_head_carries_no_body(self):
+        sock = self.connect()
+        sock.sendall(b"HEAD /v1/x HTTP/1.1\r\nHost: unlisted.example\r\n"
+                     b"Connection: close\r\n\r\n")
+        head, _, body = self.drain(sock).partition(b"\r\n\r\n")
+        self.assertIn(b" 403 ", head.split(b"\r\n")[0])
+        self.assertEqual(body, b"")
+
+    def test_connect_and_trace_are_still_refused(self):
+        for method in ("CONNECT", "TRACE"):
+            with self.subTest(method=method):
+                received = self._send(method)
+                self.assertIn(b" 501 ", received.split(b"\r\n")[0])
+        self.assertEqual(self.seen, [])
 
 
 class TestTheHostSelectsTheCredential(BrokerServerCase):

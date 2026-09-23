@@ -123,15 +123,32 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         pass  # replaced by explicit structured logging in _forward
 
-    # Every method the provider APIs use lands in one place.
+    # Every method an HTTP API uses lands in one place. Which of them a
+    # request may use is the inspector's policy, applied before the request
+    # is sent here; a method missing from this list is answered 501 by the
+    # base class, after that policy permitted it. CONNECT and TRACE are not
+    # here: one asks a proxy to open a tunnel and the other echoes the
+    # request back, credential and all.
     def do_GET(self):
         self._forward("GET")
+
+    def do_HEAD(self):
+        self._forward("HEAD")
 
     def do_POST(self):
         self._forward("POST")
 
+    def do_PUT(self):
+        self._forward("PUT")
+
+    def do_PATCH(self):
+        self._forward("PATCH")
+
     def do_DELETE(self):
         self._forward("DELETE")
+
+    def do_OPTIONS(self):
+        self._forward("OPTIONS")
 
     def _identify(self):
         """(sandbox, label) for this caller; sandbox is None if it gets nothing.
@@ -182,7 +199,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Connection", "close")
         self.end_headers()
-        self.wfile.write(body)
+        if self.command != "HEAD":
+            self.wfile.write(body)
 
     def _forward(self, method):
         started = time.monotonic()
@@ -297,13 +315,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
         the interaction feels broken. read1() returns whatever has arrived.
         """
         passthrough, declared, bodiless = response_framing(
-            resp.status, resp.getheaders())
+            resp.status, resp.getheaders(), self.command)
 
         self.send_response(resp.status)
         for k, v in passthrough:
             self.send_header(k, v)
         if bodiless:
-            pass
+            # A HEAD answer keeps the length a GET would have had: it is the
+            # thing a HEAD is sent to learn. 204 and 304 have none to keep.
+            if self.command == "HEAD" and declared is not None:
+                self.send_header("Content-Length", declared)
         elif declared is not None:
             self.send_header("Content-Length", declared)
         else:

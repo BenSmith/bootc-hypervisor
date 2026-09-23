@@ -122,11 +122,18 @@ def request_framing(path, headers):
     return length, None
 
 
-def response_framing(status, headers):
-    """(headers to pass back, declared length, whether a body is forbidden)."""
+def response_framing(status, headers, method="GET"):
+    """(headers to pass back, declared length, whether a body is forbidden).
+
+    A response to HEAD carries the headers a GET would have had and no
+    body, so its Content-Length describes bytes that never follow. Framing
+    it as a body -- or, with no length, as chunked with a terminator -- puts
+    bytes on the wire the client reads as the start of the next response.
+    """
     passthrough = [(k, v) for k, v in headers
                    if k.lower() not in DROP_FROM_RESPONSE]
     declared = next((v for k, v in headers if k.lower() == "content-length"), None)
     # 204 and 304 must not carry a body; framing them as chunked (even as a bare
     # terminator) is a protocol violation that strict clients reject.
-    return passthrough, declared, status in (204, 304)
+    return passthrough, declared, (status in (204, 304)
+                                   or method == "HEAD")
