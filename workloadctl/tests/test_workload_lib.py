@@ -61,6 +61,7 @@ from nft_elements import (
 )
 from egress_policy import container_inspect_policy, container_inspect_policy_text
 from container_validate import validate_container_network
+from inspect_policy import load_policy
 from vm_defs import parse_memory_mib, mac_address, mac_collisions
 from validation import (
     validate_workload_name, validate_workload_config,
@@ -2701,6 +2702,32 @@ class TestValidateContainerNetwork(unittest.TestCase):
         net = {"hosts": ["a.com"], "splice": [{"host": "b.com", "reason": "cert pinning"}]}
         errors = validate_container_network(net)
         self.assertTrue(any("matches no allowlisted name" in e for e in errors), errors)
+
+    def test_splice_entry_overlapping_a_policy_entry_is_error(self):
+        """The inspector refuses a document naming a host in both, so the
+        validator has to: a config it passed would otherwise render a policy
+        whose inspector does not start."""
+        for spliced in ("api.example.com", "*.example.com"):
+            net = {"hosts": ["a.com"],
+                   "splice": [{"host": spliced, "reason": "pinning"}],
+                   "policy": [{"host": "api.example.com"}],
+                   "ca_delivery": "env"}
+            errors = validate_container_network(net)
+            self.assertTrue(any("is also in .splice" in e for e in errors),
+                            (spliced, errors))
+            with tempfile.TemporaryDirectory() as tmp:
+                path = os.path.join(tmp, "policy.json")
+                with open(path, "w") as f:
+                    f.write(container_inspect_policy_text(net))
+                with self.assertRaises(ValueError):
+                    load_policy(path)
+
+    def test_splice_entry_beside_a_policy_entry_is_clean(self):
+        net = {"hosts": ["a.com"],
+               "splice": [{"host": "a.com", "reason": "pinning"}],
+               "policy": [{"host": "api.example.com"}],
+               "ca_delivery": "env"}
+        self.assertEqual(validate_container_network(net), [])
 
     def test_v16_policy_without_ca_delivery_is_error(self):
         net = {"hosts": ["a.com"], "policy": [{"host": "a.com"}]}

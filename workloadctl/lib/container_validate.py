@@ -242,7 +242,8 @@ def validate_container_network(net: dict, config: dict | None = None) -> list[st
         # policy entry already allowlists its own host (V1), so unlike
         # `internal` below this does not also check policy_hosts: exempting a
         # host from inspection that a policy entry intends to inspect is a
-        # contradiction, not redundancy.
+        # contradiction, not redundancy, and is refused with the policy
+        # entries below.
         if not any(patterns_overlap(host, pattern) for pattern in hosts):
             errors.append(
                 f"[network].splice: {host!r} matches no allowlisted name -- "
@@ -424,6 +425,22 @@ def validate_container_network(net: dict, config: dict | None = None) -> list[st
                 "computed automatically once a policy entry exists), or "
                 "drop the policy entries and keep the name allowlist in "
                 ".hosts")
+
+        # A name in both `splice` and `policy`: the policy could never run,
+        # and the file states two intentions that cannot both hold. The
+        # inspector refuses the rendered document for the same reason, so
+        # this is where the operator hears it rather than at the restart.
+        for entry in vm_policy_entries:
+            for spliced in splice_hosts:
+                if patterns_overlap(entry.host, spliced):
+                    errors.append(
+                        f"[network].policy: {entry.host!r} is also in "
+                        f".splice ({spliced!r}) -- a spliced connection is "
+                        f"never decrypted, so the method and path rules "
+                        f"could never run. Keep one: splice the host and "
+                        f"drop the policy entry, or drop the splice entry "
+                        f"and let the host be inspected")
+                    break
 
         # V3: where more than one entry matches a host by pattern, every one
         # of those entries must state both `methods` and `paths`.
