@@ -21,11 +21,12 @@ leaving every byte in the kernel receive buffer for wrap_socket to find. That
 bounds a hello at what the receive buffer holds rather than at what we are
 willing to read, which is why CLIENTHELLO_MAX (16 KiB) matters twice over — it
 is comfortably inside a default rmem, and a hello larger than the buffer would
-peek forever without progressing. The no-progress guard in `_recv_at_least` is
-what turns that into a refusal instead of a spin.
+peek forever without progressing. The deadline in `_recv_at_least` is what
+turns that into a refusal instead of a spin.
 """
 
 import socket
+import time
 from typing import NamedTuple
 
 from inspect_document import hostname_control_character
@@ -38,12 +39,16 @@ from inspect_document import hostname_control_character
 # the idle timeout allows.
 CLIENTHELLO_MAX = 16384
 
-# How many MSG_PEEK attempts a single ClientHello read may make before it is
-# refused. MSG_WAITALL is advisory under a socket timeout -- Linux returns a
-# short read rather than raising -- so a peer dribbling one byte per timeout
-# would otherwise hold a ceiling slot for attempts * CONNECTION_TIMEOUT. An
-# honest hello needs one attempt, occasionally two.
-PEEK_ATTEMPTS_MAX = 16
+# How long a peek that found nothing new waits before asking again, in
+# seconds. A socket with a timeout is non-blocking underneath, so MSG_WAITALL
+# does not wait: while part of the hello is already buffered, poll() reports
+# the socket readable and the peek returns that same part at once. A hello
+# larger than one segment -- the default post-quantum hello is, at 1500 MTU
+# -- is routinely caught between its segments, so no progress means "wait",
+# not "refuse". The whole read is bounded by the socket's own timeout, taken
+# once for the hello rather than per peek, so a dribbling peer holds its
+# slot for one timeout and no longer.
+PEEK_POLL = 0.01
 
 # How much a consuming (non-peek) read asks for at a time. Only the splice path
 # consumes, and whatever lands past the end of the hello is the guest's own next
@@ -216,18 +221,23 @@ def read_client_hello(conn, max_bytes=CLIENTHELLO_MAX, *, peek=False):
     and a parser that read only the first record would fail exactly the clients
     that are becoming the common case.
     """
+    # Only a peek waits on its own; a consuming read blocks in recv under
+    # the socket's timeout.
+    timeout = conn.gettimeout() if peek else None
+    deadline = None if timeout is None else time.monotonic() + timeout
     raw = b""
     pos = 0          # how much of `raw` has been consumed as complete records
     body = b""       # handshake bytes, record framing stripped
     want = None      # the handshake message length, once its header is in hand
     while True:
-        raw = _recv_at_least(conn, raw, pos + 5, max_bytes, peek=peek)
+        raw = _recv_at_least(conn, raw, pos + 5, max_bytes, peek=peek,
+                             deadline=deadline)
         if raw[pos] != TLS_HANDSHAKE:
             raise HelloUnreadable(
                 f"record type 0x{raw[pos]:02x} is not a TLS handshake record")
         length = int.from_bytes(raw[pos + 3:pos + 5], "big")
         raw = _recv_at_least(conn, raw, pos + 5 + length, max_bytes,
-                             peek=peek)
+                             peek=peek, deadline=deadline)
         body += raw[pos + 5:pos + 5 + length]
         pos += 5 + length
         if want is None and len(body) >= 4:
@@ -239,17 +249,17 @@ def read_client_hello(conn, max_bytes=CLIENTHELLO_MAX, *, peek=False):
             return raw, parse_client_hello(body[4:4 + want])
 
 
-def _recv_at_least(conn, raw, n, max_bytes, *, peek=False):
+def _recv_at_least(conn, raw, n, max_bytes, *, peek=False, deadline=None):
     """Read until `raw` holds at least n bytes, or fail closed.
 
     In `peek` mode every call re-reads the queue from its start with
     MSG_PEEK|MSG_WAITALL, so `raw` is REPLACED rather than appended to and the
     socket is left exactly as it was found. A peek that comes back no longer
-    than what we already had is refused rather than retried forever: it means
-    the hello is larger than the receive buffer can hold, and no number of
-    further attempts changes that.
+    than what we already had is the rest of the hello not having arrived yet
+    (see PEEK_POLL): it is asked again until `deadline`, a monotonic time, and
+    refused past it. A hello larger than the receive buffer ends the same
+    way, since no amount of waiting makes it fit.
     """
-    attempts = 0
     while len(raw) < n:
         if n > max_bytes:
             raise HelloUnreadable(
@@ -264,11 +274,13 @@ def _recv_at_least(conn, raw, n, max_bytes, *, peek=False):
         if not chunk:
             raise HelloUnreadable("the connection closed mid-ClientHello")
         if peek:
-            attempts += 1
-            if len(chunk) <= len(raw) or attempts > PEEK_ATTEMPTS_MAX:
-                raise HelloUnreadable(
-                    "the ClientHello did not arrive whole in the receive "
-                    "buffer")
+            if len(chunk) <= len(raw):
+                if deadline is not None and time.monotonic() >= deadline:
+                    raise HelloUnreadable(
+                        "the ClientHello did not arrive whole in the receive "
+                        "buffer")
+                time.sleep(PEEK_POLL)
+                continue
             raw = chunk
         else:
             raw += chunk

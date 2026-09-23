@@ -1259,6 +1259,30 @@ class TestThePeekLeavesTheHelloWhereItWas(unittest.TestCase):
             read_client_hello(ours, peek=True)
         self.assertLess(time.monotonic() - started, 10.0)
 
+    def test_a_hello_split_across_segments_is_waited_for(self):
+        """A socket with a timeout is non-blocking underneath, so while half a
+        hello is buffered the peek returns that half at once. The default
+        post-quantum hello is larger than a 1500-MTU segment, so a peek that
+        took "no progress" for "too big" refused real clients whenever it woke
+        between the two segments."""
+        ours, guest = _tcp_pair()
+        self.addCleanup(ours.close)
+        self.addCleanup(guest.close)
+        hello = self._hello()
+        self.addCleanup(hello.close)
+        raw, _ = read_client_hello(hello)
+        half = len(raw) // 2
+        ours.settimeout(5.0)
+        guest.sendall(raw[:half])
+
+        def rest():
+            time.sleep(0.2)
+            guest.sendall(raw[half:])
+
+        threading.Thread(target=rest, daemon=True).start()
+        _, parsed = read_client_hello(ours, peek=True)
+        self.assertEqual(parsed.server_name, "peek.example")
+
 
 class TestWhatCountsAsTheStartOfARequest(unittest.TestCase):
     """The predicate on its own. Three-valued, and each value earns its place.
