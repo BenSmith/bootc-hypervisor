@@ -74,6 +74,12 @@ DROP_CEILING = "connection ceiling reached"
 # peer_identity, `workload_filter` is the primary control and this is the
 # layer behind it.
 DROP_FOREIGN_CALLER = "caller is not this workload"
+# The same layer, for a caller that wrote and closed before it could be
+# identified. Its row is still in the socket table, owned by no socket, so
+# who sent the bytes waiting on the connection is unknowable -- and closing
+# first is something any local uid can choose to do, which is what makes it
+# a refusal rather than the routine race an absent row is.
+DROP_CALLER_CLOSED = "caller closed before it was identified"
 DROP_RELAY_FAILED = "relay failed"
 DROP_TIMED_OUT = "timed out"
 DROP_UNVERIFIED = "upstream certificate unverified"
@@ -139,6 +145,7 @@ DROP_REASONS = (
     DROP_INTERNAL,
     DROP_CEILING,
     DROP_FOREIGN_CALLER,
+    DROP_CALLER_CLOSED,
     DROP_RELAY_FAILED,
     DROP_TIMED_OUT,
     DROP_UNVERIFIED,

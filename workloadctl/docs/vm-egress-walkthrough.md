@@ -478,7 +478,10 @@ Two things bound what rule 16 now admits, and neither is rule 16:
   admits the connection and increments `caller_unresolved` in the status file,
   because the row can leave the table before it is read and failing closed
   there would drop the workload's own traffic under exactly the load that
-  makes the table churn. A refusal counts `caller is not this workload`.
+  makes the table churn. A refusal counts `caller is not this workload`. A
+  peer whose row is there with no socket behind it -- it wrote and closed
+  before the lookup, which any local uid can choose to do -- is refused
+  instead, and counts `caller closed before it was identified`.
 
 The invariant behind that ordering is enforced rather than assumed: an `allow`
 entry naming an address inside a listener range is refused, in both families,

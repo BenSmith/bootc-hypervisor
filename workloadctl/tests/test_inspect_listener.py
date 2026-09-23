@@ -60,6 +60,7 @@ from egress_upstream import (
 from egress_record import (
     DROP_CEILING,
     DROP_CLIENT_CERT,
+    DROP_CALLER_CLOSED,
     DROP_FOREIGN_CALLER,
     DROP_MISDIRECTED,
     DROP_MISDIRECTED_LISTED,
@@ -3514,15 +3515,15 @@ class TestCallerIdentity(unittest.TestCase):
     # the opposite. Pinned to a synthetic workload uid instead.
     OWN_UID = 10007
 
-    def _handled(self, mod, caller_uid, own_uid=OWN_UID):
+    def _handled(self, mod, caller_uid, own_uid=OWN_UID, orphaned=False):
         """Drive one connection with the caller lookup answering `caller_uid`."""
         local = ("198.18.0.1", CLEARTEXT.inspect_port)
         out = io.StringIO()
         listener = Listener([_listener_with(local)], out)
         conn = _mock_conn()
         with unittest.mock.patch("os.getuid", return_value=own_uid), \
-                unittest.mock.patch.object(inspect_listener, "peer_uid",
-                                           return_value=caller_uid):
+                unittest.mock.patch.object(inspect_listener, "peer_caller",
+                                           return_value=(caller_uid, orphaned)):
             listener._handle(conn, ("192.0.2.1", 1024), _listener_with(local))
         return listener, conn, out.getvalue()
 
@@ -3567,12 +3568,27 @@ class TestCallerIdentity(unittest.TestCase):
         # Admitted means no connection id was logged for a refusal...
         self.assertNotIn("rejected", log)
 
+    def test_a_caller_that_closed_before_the_lookup_is_refused(self):
+        """Its row is still in the table, owned by no socket, and its bytes
+        are still readable. Admitting that as unresolved let any local uid
+        have a request forwarded -- brokered, where the policy says so -- by
+        closing before the listener looked."""
+        mod = _mod()
+        listener, conn, log = self._handled(mod, None, orphaned=True)
+        self.assertIn(DROP_CALLER_CLOSED, log)
+        self.assertIn("rejected", log)
+        conn.close.assert_called()
+        conn.recv.assert_not_called()
+        snap = listener.status()
+        self.assertEqual(snap["drop_reasons"][DROP_CALLER_CLOSED], 1)
+        self.assertEqual(snap["caller_unresolved"], 0)
+
     def test_a_raising_lookup_does_not_take_the_connection_path_down(self):
         """A hardening check that can throw is worse than one that fails soft:
         it would turn this layer into an outage for the traffic it protects."""
         local = ("198.18.0.1", CLEARTEXT.inspect_port)
         listener = Listener([_listener_with(local)], io.StringIO())
-        with unittest.mock.patch.object(inspect_listener, "peer_uid",
+        with unittest.mock.patch.object(inspect_listener, "peer_caller",
                                         side_effect=RuntimeError("boom")):
             listener._handle(_mock_conn(), ("192.0.2.1", 1024),
                              _listener_with(local))
@@ -3586,8 +3602,9 @@ class TestCallerIdentity(unittest.TestCase):
         out = io.StringIO()
         listener = Listener([_listener_with(local)], out, limit=0)
         with unittest.mock.patch("os.getuid", return_value=self.OWN_UID), \
-                unittest.mock.patch.object(inspect_listener, "peer_uid",
-                                           return_value=self.OWN_UID + 1):
+                unittest.mock.patch.object(inspect_listener, "peer_caller",
+                                           return_value=(self.OWN_UID + 1,
+                                                         False)):
             listener._handle(_mock_conn(), ("192.0.2.1", 1024),
                              _listener_with(local))
         snap = listener.status()

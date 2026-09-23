@@ -102,25 +102,26 @@ def local_endpoints(sock):
     return endpoints
 
 
-def peer_uid_from(rows, locals_, peer):
-    """uid owning `peer`'s socket, given /proc/net/tcp data lines, or None.
+def _peer_rows(rows, locals_, peer):
+    """(uid, inode) of every row that is `peer`'s end of this connection.
 
-    The peer's row is this connection mirrored: its local address is our remote
-    and its remote is our local. `locals_` is every endpoint that "our local"
-    may be recorded as -- see local_endpoints, which explains why there is more
-    than one.
+    The peer's row is this connection mirrored: its local address is our
+    remote and its remote is our local. `locals_` is every endpoint that
+    "our local" may be recorded as -- see local_endpoints, which explains
+    why there is more than one.
 
-    The port test before the split is a filter, not a shortcut: the row we want
-    carries the peer's port in its local column, so a line without that hex
-    anywhere cannot be it. The peer's port is ephemeral and therefore nearly
-    unique, so `in` -- which runs in C -- rejects almost every row before Python
-    touches it. Measured over a 1638-row table: 1.188ms to split and hex-decode
-    every row, 0.034ms with the filter, same uid. 34x, and it scales with the
-    host's socket count, which is not something a caller should be able to make
-    a listener pay per connection.
+    The port test before the split is a filter, not a shortcut: the row we
+    want carries the peer's port in its local column, so a line without
+    that hex anywhere cannot be it. The peer's port is ephemeral and
+    therefore nearly unique, so `in` -- which runs in C -- rejects almost
+    every row before Python touches it. Measured over a 1638-row table:
+    1.188ms to split and hex-decode every row, 0.034ms with the filter,
+    same uid. 34x, and it scales with the host's socket count, which is
+    not something a caller should be able to make a listener pay per
+    connection.
 
-    The survivors are checked in full. This narrows the work without widening
-    the match.
+    The survivors are checked in full. This narrows the work without
+    widening the match.
     """
     want_local = (_norm(peer[0]), peer[1])
     want_remotes = {(_norm(host), port) for host, port in locals_}
@@ -136,31 +137,75 @@ def peer_uid_from(rows, locals_, peer):
             if (_proc_addr(local_host), int(local_port, 16)) != want_local:
                 continue
             remote_host, remote_port = f[2].split(":")
-            if (_proc_addr(remote_host), int(remote_port, 16)) not in want_remotes:
+            remote = (_proc_addr(remote_host), int(remote_port, 16))
+            if remote not in want_remotes:
                 continue
-            # inode 0 is a socket with no owning process -- a TIME_WAIT remnant,
-            # which the kernel reports with uid 0. Reading that as identity
-            # would silently attribute the request to root.
-            if int(f[9]) == 0:
-                continue
-            return int(f[7])
+            yield int(f[7]), int(f[9])
         except ValueError:
             continue
+
+
+def peer_uid_from(rows, locals_, peer):
+    """uid owning `peer`'s socket, given /proc/net/tcp data lines, or None.
+
+    inode 0 is a socket with no owning process -- a TIME_WAIT remnant,
+    which the kernel reports with uid 0, or a socket its owner has closed.
+    Reading that as identity would silently attribute the request to root,
+    so such a row names nobody.
+    """
+    for uid, inode in _peer_rows(rows, locals_, peer):
+        if inode != 0:
+            return uid
     return None
+
+
+def peer_orphaned_from(rows, locals_, peer):
+    """Whether `peer`'s row is there and owned by no socket.
+
+    A peer that wrote its request and closed before we looked leaves its
+    end as an orphan: the kernel keeps the row, with inode 0, until the
+    close completes. Its data is still ours to read, and nothing says who
+    sent it -- a state a caller can put itself in on purpose, so it is
+    told apart from a row that is merely absent.
+    """
+    found = list(_peer_rows(rows, locals_, peer))
+    return bool(found) and all(inode == 0 for _uid, inode in found)
+
+
+def _proc_tables():
+    """The data lines of each /proc/net table that can be read."""
+    for path in PROC_NET_TCP:
+        try:
+            with open(path) as fh:
+                yield fh.readlines()[1:]
+        except OSError:
+            continue
 
 
 def peer_uid(locals_, peer):
     """uid owning the far end of an accepted connection, or None."""
-    for path in PROC_NET_TCP:
-        try:
-            with open(path) as fh:
-                rows = fh.readlines()[1:]
-        except OSError:
-            continue
+    for rows in _proc_tables():
         uid = peer_uid_from(rows, locals_, peer)
         if uid is not None:
             return uid
     return None
+
+
+def peer_caller(locals_, peer):
+    """(uid or None, orphaned) for the far end of an accepted connection.
+
+    One read of each table for both answers. `orphaned` is True when the
+    peer's row is there and no socket owns it: the caller closed before it
+    could be identified. See peer_orphaned_from for why that is not the
+    same as a row that could not be found.
+    """
+    orphaned = False
+    for rows in _proc_tables():
+        uid = peer_uid_from(rows, locals_, peer)
+        if uid is not None:
+            return uid, False
+        orphaned = orphaned or peer_orphaned_from(rows, locals_, peer)
+    return None, orphaned
 
 
 def userns_ranges(uid_map):

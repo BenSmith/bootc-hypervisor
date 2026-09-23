@@ -249,6 +249,35 @@ class TestPeerUidLive(unittest.TestCase):
         for sock in held:
             sock.close()
 
+    def test_a_peer_that_closed_before_the_lookup_is_orphaned(self):
+        """Written, closed, and only then accepted: the row is still in the
+        table with no socket behind it, so it names nobody -- and says so,
+        rather than reading as a row that could not be found."""
+        import os
+
+        srv = socket.socket()
+        self.addCleanup(srv.close)
+        srv.bind(("127.0.0.1", 0))
+        srv.listen(1)
+        client = socket.create_connection(srv.getsockname())
+        client.sendall(b"GET / HTTP/1.1\r\nHost: x\r\n\r\n")
+        client.close()
+        conn, peer = srv.accept()
+        self.addCleanup(conn.close)
+
+        endpoints = peer_identity.local_endpoints(conn)
+        self.assertEqual(peer_identity.peer_caller(endpoints, peer[:2]),
+                         (None, True))
+
+        live = socket.create_connection(srv.getsockname())
+        self.addCleanup(live.close)
+        conn2, peer2 = srv.accept()
+        self.addCleanup(conn2.close)
+        self.assertEqual(
+            peer_identity.peer_caller(peer_identity.local_endpoints(conn2),
+                                      peer2[:2]),
+            (os.getuid(), False))
+
 
 INITIAL_NS = "         0          0 4294967295\n"
 # What `unshare -Ur` produces: one uid mapped, everything else invisible.
