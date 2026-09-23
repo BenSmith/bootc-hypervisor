@@ -1318,7 +1318,7 @@ class TestADribbledReadIsBoundedAsAWhole(unittest.TestCase):
         self._dribble(guest, b"GET / HTTP/1.1\r\nHost: " + b"a" * 200)
         started = time.monotonic()
         with self.assertRaises(ReadTimedOut) as caught:
-            _Stream(ours).read_head(whole=True)
+            _Stream(ours).read_head()
         self.assertFalse(caught.exception.idle,
                          "a head that was started is not an idle connection")
         self.assertLess(time.monotonic() - started, 1.0)
@@ -1330,7 +1330,7 @@ class TestADribbledReadIsBoundedAsAWhole(unittest.TestCase):
         ours.settimeout(2.0)
         self._dribble(guest, b"GET / HTTP/1.1\r\nHost: a\r\n\r\n",
                       every=0.01)
-        head = _Stream(ours).read_head(whole=True)
+        head = _Stream(ours).read_head()
         self.assertTrue(head.endswith(b"\r\n\r\n"))
 
 

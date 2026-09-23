@@ -191,8 +191,7 @@ class _Stream:
         self._buf += chunk
         return True
 
-    def read_head(self, max_bytes=MESSAGE_HEAD_MAX, idle_timeout=None, *,
-                  whole=False):
+    def read_head(self, max_bytes=MESSAGE_HEAD_MAX, idle_timeout=None):
         """A whole message head, or b"" if the peer closed cleanly first.
 
         The terminator is CRLFCRLF and only that. A bare-LF head is refused by
@@ -200,20 +199,11 @@ class _Stream:
         parsers disagree about: accept them here and a request the origin reads
         as one message can be read as two.
 
-        `idle_timeout`, when given, bounds the wait for the FIRST byte only --
-        the socket's own timeout still bounds the rest. That is what lets a
-        kept-alive connection sit idle between requests for as long as a tunnel
-        may while a guest that has started a head still has to finish it inside
-        the decision timeout. One number for both would either cut keep-alive
-        at five seconds or hand a dribbling peer a 128th of the ceiling for two
-        minutes.
-
-        `whole` makes the socket's timeout bound the rest of the head as one
-        wait, from its first byte, rather than each read of it. Without it a
-        peer sending a byte inside every timeout holds its slot for as many
-        timeouts as MESSAGE_HEAD_MAX has bytes. Asked for on the guest's
-        reads; an origin's head is bounded by the idle timeout, like the
-        rest of its answer.
+        `idle_timeout`, when given, bounds the wait for the first byte, which
+        is how a kept-alive connection may sit idle between requests. From the
+        first byte the socket's own timeout bounds the rest of the head as one
+        wait, not each read, so a peer sending a byte at a time cannot hold
+        the connection past it.
         """
         deadline = None
         while True:
@@ -226,7 +216,7 @@ class _Stream:
                     f"a message head over {max_bytes} bytes is not one we read")
             if not self._buf:
                 got = self._fill(idle_timeout, idle=idle_timeout is not None)
-            elif whole:
+            else:
                 limit = self.sock.gettimeout()
                 if deadline is None and limit is not None:
                     deadline = time.monotonic() + limit
@@ -237,8 +227,6 @@ class _Stream:
                         raise ReadTimedOut(
                             f"the head did not arrive whole within {limit}s")
                 got = self._fill(left)
-            else:
-                got = self._fill()
             if not got:
                 if not self._buf:
                     return b""

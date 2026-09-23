@@ -440,7 +440,7 @@ def _bump_answer(tls_conn, status, phrase):
     nothing: the answer goes out either way.
     """
     try:
-        _Stream(tls_conn).read_head(whole=True)
+        _Stream(tls_conn).read_head()
     except (RequestUnreadable, OSError):
         pass
     send_response(tls_conn, status, phrase, close=True)
