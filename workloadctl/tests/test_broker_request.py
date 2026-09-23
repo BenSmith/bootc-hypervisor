@@ -198,6 +198,20 @@ class TestRequestFraming(unittest.TestCase):
             "/v1/messages", headers(Content_Length="-1"))
         self.assertEqual(rejection[0], 400)
 
+    def test_only_plain_ascii_digits_are_a_length(self):
+        """int() also takes a sign, an underscore and non-ASCII digits,
+        which another parser on the path reads as a different number or
+        none at all."""
+        for raw in ("+10", "1_0", "\u0661\u0660", "0x10", "1 0"):
+            with self.subTest(raw=raw):
+                _, rejection = broker_request.request_framing(
+                    "/v1/messages", headers(Content_Length=raw))
+                self.assertEqual(rejection[:2], (400, "bad-content-length"))
+
+    def test_surrounding_whitespace_is_still_a_length(self):
+        self.assertEqual(broker_request.request_framing(
+            "/v1/messages", headers(Content_Length=" 12 ")), (12, None))
+
     def test_an_oversized_body_is_refused(self):
         length, rejection = broker_request.request_framing(
             "/v1/messages",
