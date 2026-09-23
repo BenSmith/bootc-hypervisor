@@ -173,8 +173,7 @@ def main(argv=None):
         args = parse_args(argv)
     except SystemExit as exc:
         # argparse's own usage line is already on stderr; what is ours is the
-        # exit status, which is 2 for a bad invocation as it always was and
-        # 0 for --help.
+        # exit status, which is 2 for a bad invocation and 0 for --help.
         return int(exc.code or 0)
     name = args.name
     policy_path = args.policy

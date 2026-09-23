@@ -53,12 +53,11 @@ MAX_REQUEST_BYTES = 64 * 1024 * 1024
 def forwarded_headers(incoming, profile):
     """The headers to send upstream, given the ones the caller sent.
 
-    The configured auth header is stripped by name as well as by the fixed list.
-    STRIP_FROM_REQUEST is matched case-insensitively but the outgoing dict is
-    keyed by whatever case the *caller* used, so with a custom auth_header a
-    caller sending `x-custom-key` and a broker adding `X-Custom-Key` produced
-    two distinct keys and both went upstream. Measured, with the caller's value
-    arriving intact beside the real credential.
+    The configured auth header is stripped by name as well as by the fixed
+    list, and both are compared lowercased. The outgoing dict is keyed by
+    whatever case the *caller* used, so a caller's `x-custom-key` and the
+    broker's `X-Custom-Key` would otherwise be two keys, and the caller's
+    value would go upstream beside the real credential.
     """
     strip = STRIP_FROM_REQUEST | HOP_BY_HOP | {profile.auth_header.lower()}
     headers = {k: v for k, v in incoming.items() if k.lower() not in strip}

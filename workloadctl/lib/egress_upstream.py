@@ -46,7 +46,7 @@ UPSTREAMS_MAX = 8
 # it cannot collide with the ORIGIN connection to the same host. A NUL is used
 # because it cannot occur in a hostname -- validation refuses far more than
 # that -- so no host, however chosen by a guest, can name the brokered slot.
-# See connection_for's `key` argument for what went wrong without it.
+# See connection_for's `key` argument for why the two must not share one.
 BROKER_UPSTREAM_KEY = "broker\x00"
 
 # What the inspector offers upstream, and what it offers the guest. One
@@ -202,12 +202,12 @@ class Upstream:
 
         `key` SEPARATES THE POOL SLOT FROM THE NAME DIALLED, because with a
         broker leg those are not the same thing: two connections for one host
-        go to two different places, and the origin one is already in this map
-        before the first request is read. A
-        pool keyed by the name alone hands a brokered request the origin socket
-        and never calls `dial` -- silently, because everything downstream is
-        identical and the record has already been told a credential is
-        attached. Defaults to the host, so every other caller is unchanged.
+        go to two different places, and the origin one can already be in this
+        map before the first request is read. A pool keyed by the name alone
+        would hand a brokered request the origin socket and never call `dial`
+        -- silently, because everything downstream is identical and the
+        record has already been told a credential is attached. Defaults to
+        the host.
         """
         slot = key or host
         up = upstreams.pop(slot, None)

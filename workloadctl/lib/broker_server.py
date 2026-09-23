@@ -27,12 +27,11 @@ from peer_identity import local_endpoints, peer_uid
 
 # At most this much request body summed over every connection at once. The
 # request is buffered whole before it is forwarded, and broker_request's
-# MAX_REQUEST_BYTES bounds only one of them: with MAX_CONCURRENT connections
-# each sending a legal 64 MiB body, the
-# broker reserved 2 GiB of host RAM. Neither the per-request nor the per-caller
-# limit helps, because no single request and no single caller exceeds its own
-# share -- the sum is the whole problem, and it is not a limit either of them
-# expresses.
+# MAX_REQUEST_BYTES bounds only one of them: MAX_CONCURRENT connections each
+# sending a legal 64 MiB body would reserve 2 GiB of host RAM. Neither the
+# per-request nor the per-caller limit helps, because no single request and
+# no single caller exceeds its own share -- the sum is the whole problem, and
+# it is not a limit either of them expresses.
 #
 # It matters more here than it would elsewhere: this runs on a hypervisor, so
 # the memory in question is memory the VMs are using, and a sandboxed agent
@@ -54,7 +53,7 @@ CHUNK = 64 * 1024
 # How long a connection may make no progress before it is dropped. Without one,
 # a caller that opens a socket and sends nothing holds its handler thread for
 # ever -- and with a bounded pool, enough of those deny the broker to every
-# other sandbox. Measured: 32 silent connections were sufficient.
+# other sandbox. MAX_CONCURRENT silent connections are enough.
 #
 # It bounds each blocking operation, not the request, so a client trickling
 # bytes is not caught by this; MAX_PER_CALLER is what stops one caller taking
@@ -97,11 +96,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
         _identify then uses without scanning the socket tables again.
 
         TLS to the guest is also completed here rather than on the listening
-        socket. Wrapping the listener made accept() perform the handshake, so a
-        caller that connected and then stalled it blocked the accept loop for
-        every other sandbox -- a denial of service that MAX_CONCURRENT does not
-        bound, because the connection never reaches a handler at all. In this
-        thread the same stall costs one slot and expires on the timeout.
+        socket. Wrapping the listener makes accept() perform the handshake, so
+        a caller that connected and then stalled it would block the accept
+        loop for every other sandbox -- a denial of service that
+        MAX_CONCURRENT does not bound, because the connection never reaches a
+        handler at all. In this thread the same stall costs one slot and
+        expires on the timeout.
         """
         try:
             self.caller_uid = peer_uid(local_endpoints(self.request),
@@ -205,8 +205,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         header. A rejected request has left its body unread -- rejected because
         it was unreadable, in the chunked and bad-length cases -- so the next
         thing on the wire is body bytes where a request line should be. Reading
-        on desynchronises the connection: measured as a following pipelined
-        request that silently received no response at all.
+        on desynchronises the connection: a following pipelined request
+        silently receives no response at all.
         """
         body = f"{http.HTTPStatus(status).phrase}\n".encode()
         self.close_connection = True
@@ -388,8 +388,8 @@ MAX_CONCURRENT = 32
 # ...and how many of those one caller may hold. The global bound alone is a
 # denial-of-service lever rather than a protection: a single hostile sandbox
 # opening MAX_CONCURRENT connections takes the whole pool and every other
-# sandbox is refused. Measured, with nothing more exotic than 32 sockets that
-# connect and send no bytes at all.
+# sandbox is refused -- with nothing more exotic than sockets that connect
+# and send no bytes at all.
 #
 # Sandboxes do not share a budget, so one in a loop cannot reach past its own.
 # Eight concurrent streams is generous for an agent; past it the connection is
@@ -473,11 +473,10 @@ class Server(socketserver.ThreadingMixIn, http.server.HTTPServer):
         placement is measured rather than tasteful. Resolving a caller means
         reading /proc/net/tcp, which the kernel generates on demand: 3.8ms per
         connection with ~1300 sockets on the host, and it grows with that
-        number. In the accept loop -- where the first version of this put it --
-        every one of those milliseconds is time no other caller can be accepted,
-        which hands a caller a way to slow the whole broker down by connecting
-        in a loop. A quieter version of the denial of service the ceiling exists
-        to stop.
+        number. In the accept loop every one of those milliseconds is time no
+        other caller can be accepted, which hands a caller a way to slow the
+        whole broker down by connecting in a loop. A quieter version of the
+        denial of service the ceiling exists to stop.
 
         In the handler it costs a thread, which is what MAX_CONCURRENT bounds,
         and the thread is released as soon as the refusal is raised. A caller
@@ -513,8 +512,7 @@ class Server(socketserver.ThreadingMixIn, http.server.HTTPServer):
         # BaseServer._handle_request_noblock already calls shutdown_request on
         # any exception out of process_request. Releasing it here as well is a
         # double release, which a BoundedSemaphore turns into "Semaphore
-        # released too many times" at the worst possible moment. Written that
-        # way first; TestAFailedSpawnDoesNotLeakASlot caught it.
+        # released too many times" at the worst possible moment.
         super().process_request(request, client_address)
 
     def shutdown_request(self, request):

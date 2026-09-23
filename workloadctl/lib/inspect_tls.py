@@ -230,18 +230,18 @@ def _serve_tls_inspect(insp, conn, where, host, allowed):
     # `credential` with `http2` on one host is a validation error, so there
     # is no h2 session to relay and never was.
     #
-    # WHAT THE DIAL WAS DOING FOR A BROKERED HOST WAS NOTHING GOOD. The
-    # request goes to the broker, so the origin connection was opened,
-    # verified, put in the pool and never written to. Its three purposes all
-    # belong to the origin: hold the upstream leg open before the mint (the
-    # broker leg is opened per request and has its own reason), check that
-    # the origin took an h2 offer (there is no h2 here), and fail early if
-    # the origin is unreachable. That last one is the harm: it made the
+    # AN ORIGIN DIAL HERE WOULD DO NOTHING GOOD. The request goes to the
+    # broker, so an origin connection would be opened, verified, put in the
+    # pool and never written to. Its three purposes all belong to the
+    # origin: hold the upstream leg open before the mint (the broker leg is
+    # opened per request and has its own reason), check that the origin
+    # took an h2 offer (there is no h2 here), and fail early if the origin
+    # is unreachable. That last one would be the harm: it makes the
     # ORIGIN's reachability and certificate a prerequisite for a request
-    # that never goes there, and reported the failure against the origin's
-    # name. A provider having an outage failed brokered requests that would
-    # have reached the broker fine, and a private origin behind a CA this
-    # host does not hold failed them permanently.
+    # that never goes there, and reports the failure against the origin's
+    # name -- a provider outage failing brokered requests that would reach
+    # the broker fine, and a private origin behind a CA this host does not
+    # hold failing them permanently.
     #
     # The mint does not need it either: `insp.minter.leaf(host, ...)` takes
     # the name and nothing else.
@@ -626,8 +626,8 @@ def serve_terminated(insp, tls_conn, where, host, upstream):
     # `upstream` is None for a brokered host: nothing was dialled at
     # connection time, because the request goes to this workload's broker
     # and not to the origin (see _serve_tls_inspect). Seeding the pool with
-    # None would hand the first request a non-socket; seeding it with the
-    # origin is what made the broker unreachable in the first place.
+    # None would hand the first request a non-socket, and seeding it with
+    # the origin would hand a brokered request the origin socket.
     upstreams = {host: upstream} if upstream is not None else {}
     try:
         if not _is_http(insp, client, tls_conn, where, host):

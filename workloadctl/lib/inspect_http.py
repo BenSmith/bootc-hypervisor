@@ -250,12 +250,11 @@ def serve_request(insp, client, conn, where, upstreams, first, rec, *,
             # A KEY OF ITS OWN FOR THE BROKER LEG, and this is not tidiness.
             # `inspect_tls.serve_terminated` seeds the pool with the ORIGIN
             # connection it opened before the request was read, keyed by the
-            # host. Under that key a brokered request is handed the origin
-            # and `dial` is never called: the credential is recorded as
-            # attached and is not, and the request reaches the provider
-            # carrying whatever the guest held -- for a real client, the
-            # placeholder. No unit test seeds the pool the way a terminated
-            # session does, so only a real guest sees it.
+            # host. Were a brokered request looked up under that key it would
+            # be handed the origin and `dial` never called: the credential
+            # recorded as attached and not, and the request reaching the
+            # provider carrying whatever the guest held -- for a real client,
+            # the placeholder.
             key=BROKER_UPSTREAM_KEY + req.host if credential else req.host,
             dial=insp.upstream.dial_broker if credential
             else (insp.upstream.dial_tls if pinned_host is not None

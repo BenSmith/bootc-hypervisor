@@ -38,7 +38,7 @@ IPV6_ORIGINAL_DST = 80
 # Asked for as socket.IPPROTO_IPV6, never socket.SOL_IPV6: Python defines no
 # such name, so writing it raises AttributeError -- which, swallowed by the
 # tolerant except around the lookup, would leave the v6 branch inert in exactly
-# the way it was written to fix. Caught by a test, not by reading it.
+# the way it exists to prevent -- and reads as correct.
 
 
 def _norm(addr):
@@ -119,8 +119,8 @@ def peer_uid_from(rows, locals_, peer):
     host's socket count, which is not something a caller should be able to make
     a listener pay per connection.
 
-    The survivors are checked exactly as before. This narrows the work without
-    widening the match.
+    The survivors are checked in full. This narrows the work without widening
+    the match.
     """
     want_local = (_norm(peer[0]), peer[1])
     want_remotes = {(_norm(host), port) for host, port in locals_}

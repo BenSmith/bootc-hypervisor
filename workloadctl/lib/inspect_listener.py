@@ -261,7 +261,7 @@ class Listener:
         # refused: the nft guard is the control that must hold, this layer
         # cannot distinguish "hostile" from "raced", and failing closed on an
         # unresolvable read would drop the workload's OWN traffic under exactly
-        # the load that makes the table churn. Logged so the silence is
+        # the load that makes the table churn. Counted so the silence is
         # visible rather than assumed absent.
         if caller is None:
             # Counted, not logged. A line per connection would be noise for a

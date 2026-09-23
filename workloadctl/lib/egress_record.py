@@ -58,8 +58,8 @@ def format_endpoint(addr):
 # renders identically to a guest that never hit that refusal, so `--reason
 # "not allowed"` for `not allowlisted` would print an empty report and an
 # operator would conclude the denial never happened. Validated, it is an
-# argparse error naming the valid values instead. This matters more since the
-# guest-facing refusal body was made generic: the guest is told nothing about
+# argparse error naming the valid values instead. It matters because the
+# guest-facing refusal is the bare status: the guest is told nothing about
 # WHY, so `reason` in the record is the only place a not-allowlisted denial is
 # distinguishable from a not-permitted one.
 DROP_NOT_ALLOWLISTED = "not allowlisted"
@@ -93,7 +93,7 @@ DROP_MISDIRECTED = "host does not match the server name"
 # client as an intrusion, which is how an alarm stops being read.
 #
 # Both strings begin "host does not match the server name" so a grep for the
-# reason still finds both, the convention `not HTTP` set one tier earlier.
+# reason still finds both, the convention `not HTTP` follows too.
 #
 # The guest is told the same thing either way -- a bare 421 -- because the
 # split is FOR THE OPERATOR and changing the answer would only tell the guest

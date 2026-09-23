@@ -345,11 +345,11 @@ def _split_response_head(head):
     parse it at all is narrow: to learn where the body ends, which is what says
     whether the next request can be read from this connection.
 
-    Applying the request parser here made the listener stricter than the web.
+    The request parser here would make the listener stricter than the web.
     A raw UTF-8 byte in a filename (`Content-Disposition: attachment;
     filename="cafe\u0301.pdf"`), a folded header, a header name with a byte
     outside tchar: each is something real servers emit, none of them changes
-    where the body ends, and each aborted an authorised exchange as
+    where the body ends, and each would abort an authorised exchange as
     `relay failed` -- a dead connection on a request the policy allowed.
 
     So: latin-1, which cannot fail and preserves every byte's identity for the
@@ -388,13 +388,14 @@ def _is_count(text):
     NOT `str.isdigit()`, which is the obvious spelling and is wrong on the
     response path. That head is decoded latin-1 -- deliberately, so a raw byte
     in a filename cannot kill an authorised exchange -- and latin-1 carries the
-    superscripts. `"\u00b2".isdigit()` is True and `int("\u00b2")` raises, so a
-    `Content-Length: \u00b2` or a status line of `\u00b200` passed the guard and
-    then raised ValueError out of a call site that catches RequestUnreadable and
-    OSError: the connection thread died with a traceback and no counter moved,
-    in a file whose whole discipline is that every disposition is counted.
+    superscripts. `"\u00b2".isdigit()` is True and `int("\u00b2")` raises, so
+    under isdigit a `Content-Length: \u00b2` or a status line of `\u00b200`
+    would pass the guard and then raise ValueError out of a call site that
+    catches RequestUnreadable and OSError: the connection thread dying with a
+    traceback and no counter moving, in a file whose whole discipline is that
+    every disposition is counted.
 
-    The request side never had the hole -- that head is decoded ASCII, so a
+    The request side cannot reach that -- its head is decoded ASCII, so a
     non-ASCII byte is refused several steps earlier -- and uses this anyway.
     The guarantee that makes it safe lives two functions away, and a check
     written to depend on it is one refactor from being wrong.
@@ -447,12 +448,13 @@ def is_http_request_start(start):
     the whole request line and a 400 to say so with. Only a byte that no method
     is spelled with, or a run of them longer than any method is, is a no.
 
-    WHY THIS EXISTS AT ALL. Before termination, a connection on 443 that was
-    not HTTP was spliced and neither end noticed. Now the listener has
-    completed the handshake and is the one reading, so a guest speaking
-    anything else over 443 -- a database wire protocol, a tunnel, gRPC that
-    ignored the ALPN it was offered -- is read as a request that will never
-    arrive, and it holds a slot until the head ceiling or the clock ends it.
+    WHY THIS EXISTS AT ALL. A spliced connection that is not HTTP is
+    relayed and neither end notices. A terminated one has had its handshake
+    completed by the listener, which is then the one reading, so a guest
+    speaking anything else over 443 -- a database wire protocol, a tunnel,
+    gRPC that ignored the ALPN it was offered -- is read as a request that
+    will never arrive, and it holds a slot until the head ceiling or the
+    clock ends it.
     Answering it 400 is worse than closing: those bytes are an HTTP response
     written into a protocol that is not HTTP, and what the peer makes of them
     is anyone's guess.
