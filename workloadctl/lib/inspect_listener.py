@@ -250,17 +250,25 @@ class Listener:
             # there is no plane to serve it on and none a record could name.
             self.inspection.log(
                 f"rejected {LOG_ID_FIELD}={cid} local={format_endpoint(local)} "
-                f"peer={format_endpoint(peer)} reason='not an inspect port'")
+                f"peer={format_endpoint(peer)} "
+                f"reason=\"not an inspect port\"")
             conn.close()
             return
+        # The id leads `where`, which every decision line and record
+        # carries, so one field joins them all. `peer=` cannot: a port
+        # repeats across a keep-alive connection's requests and is reused
+        # by the kernel after close.
+        where = Where(f"{LOG_ID_FIELD}={cid} plane={plane.label} "
+                      f"local={format_endpoint(local)} "
+                      f"peer={format_endpoint(peer)}",
+                      cid=cid, plane=plane.label)
         # The caller is looked up in the connection's own thread, not here.
         # The lookup reads the kernel's whole socket table, milliseconds on
         # a busy host, and on this loop every one of them is time no other
         # connection is accepted -- which any local uid could buy by
         # connecting in a loop. Bounded by MAX_IDENTIFYING meanwhile.
         if not self._identifying.admit():
-            self._refuse_ceiling(conn, cid, plane, local, peer,
-                                 "connection ceiling reached")
+            self._refuse_ceiling(conn, where, plane)
             return
         # Daemon, as the broker's ThreadingMixIn: a SIGTERM that stops the
         # accept loop does not wait on the connections it already took.
@@ -274,43 +282,39 @@ class Listener:
         # to refusing every connection while still reporting itself active.
         try:
             threading.Thread(
-                target=self._admit, args=(conn, peer, local, plane, cid),
+                target=self._admit, args=(conn, peer, where, plane),
                 daemon=True).start()
         except RuntimeError as exc:
             self._identifying.release(refused=True)
-            self._refuse_ceiling(conn, cid, plane, local, peer,
+            self._refuse_ceiling(conn, where, plane,
                                  f"cannot start thread: {exc}")
 
-    def _refuse_ceiling(self, conn, cid, plane, local, peer, reason):
-        self.inspection.log(
-            f"rejected {LOG_ID_FIELD}={cid} plane={plane.label} "
-            f"local={format_endpoint(local)} "
-            f"peer={format_endpoint(peer)} "
-            f"reason='{reason}'")
-        # Counted as a drop as well as a rejection. The guest saw a closed
-        # connection, which is the same thing every other drop reason gives
-        # it, and a disposition total that omitted these would not add up
-        # to the connections that were accepted.
-        self.inspection.counters.record_drop(DROP_CEILING)
+    def _refuse_ceiling(self, conn, where, plane, detail=None):
+        # Counted as a drop as well as a rejection: the guest saw a closed
+        # connection, as every other drop gives it, and a disposition total
+        # without these would not add up to the connections accepted.
+        mode = ("forward" if plane is not TLS
+                else "terminate" if self.inspection.policy.tls == "inspect"
+                else "splice")
+        self.inspection.drop(where, DROP_CEILING, detail, mode=mode,
+                             verb="rejected")
         conn.close()
 
-    def _admit(self, conn, peer, local, plane, cid):
+    def _admit(self, conn, peer, where, plane):
         """Identify the caller, take a serving slot, and serve: the
         connection thread's first act."""
         try:
-            admitted = self._identified(conn, peer, local, plane, cid)
+            admitted = self._identified(conn, peer, where)
         finally:
             self._identifying.release()
         if not admitted:
             return
         if not self._ceiling.admit():
-            # Reject rather than queue: close now and count it.
-            self._refuse_ceiling(conn, cid, plane, local, peer,
-                                 "connection ceiling reached")
+            self._refuse_ceiling(conn, where, plane)
             return
-        self._serve(conn, peer, local, plane, cid)
+        self._serve(conn, where, plane)
 
-    def _identified(self, conn, peer, local, plane, cid):
+    def _identified(self, conn, peer, where):
         """Whether the caller is the one this listener serves. Closes the
         connection if not.
         """
@@ -346,20 +350,12 @@ class Listener:
             # local uid have a request served by closing first -- a request
             # it cannot read the answer to, but one that is forwarded, and
             # brokered where the policy says so.
-            self.inspection.log(
-                f"rejected {LOG_ID_FIELD}={cid} plane={plane.label} "
-                f"local={format_endpoint(local)} "
-                f"peer={format_endpoint(peer)} "
-                f"reason='{DROP_CALLER_CLOSED}'")
-            self.inspection.counters.record_drop(DROP_CALLER_CLOSED)
+            self.inspection.drop(where, DROP_CALLER_CLOSED, verb="rejected")
             conn.close()
             return False
         if caller is not None and caller != os.getuid():
-            self.inspection.log(
-                f"rejected {LOG_ID_FIELD}={cid} plane={plane.label} "
-                f"local={format_endpoint(local)} peer={format_endpoint(peer)} caller_uid={caller} "
-                f"reason='{DROP_FOREIGN_CALLER}'")
-            self.inspection.counters.record_drop(DROP_FOREIGN_CALLER)
+            self.inspection.drop(where, DROP_FOREIGN_CALLER, verb="rejected",
+                                 caller_uid=caller)
             conn.close()
             return False
         # `None` means the lookup could not name the owner and found no
@@ -376,19 +372,7 @@ class Listener:
             self.inspection.counters.record_caller_unresolved()
         return True
 
-    def _serve(self, conn, peer, local, plane, cid):
-        # The id LEADS `where`, and `where` is interpolated by every decision
-        # path in this file -- so one field here is what puts a join key on
-        # `drop`, `splice`, `bump`, `terminate`, `forward`, `close` and
-        # `upgrade` at once, rather than on the subset someone remembered.
-        #
-        # `peer=` cannot serve as that key and this does not replace it: a
-        # port repeats across the requests on one keep-alive connection and is
-        # reused by the kernel after close, so it groups the wrong things
-        # together and separates the right ones.
-        where = Where(f"{LOG_ID_FIELD}={cid} plane={plane.label} "
-                       f"local={format_endpoint(local)} peer={format_endpoint(peer)}",
-                       cid=cid, plane=plane.label)
+    def _serve(self, conn, where, plane):
         try:
             if plane is TLS:
                 inspect_tls.serve_tls(self.inspection, conn, where)

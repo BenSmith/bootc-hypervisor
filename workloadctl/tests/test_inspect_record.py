@@ -40,6 +40,8 @@ from egress_record import (
     RECORD_FIELDS,
     RECORD_MODES,
     RequestLog,
+    Where,
+    format_endpoint,
 )
 from egress_plane import CLEARTEXT, TLS, plane_for_port
 from inspect_policy import Policy
@@ -81,6 +83,17 @@ def _listener_with(local):
     return m
 
 
+def _where(local, peer):
+    """(where, plane) as _handle builds them for a fresh connection."""
+    plane = plane_for_port(local[1])
+    cid = secrets.token_hex(6)
+    where = Where(f"{LOG_ID_FIELD}={cid} plane={plane.label} "
+                  f"local={format_endpoint(local)} "
+                  f"peer={format_endpoint(peer)}",
+                  cid=cid, plane=plane.label)
+    return where, plane
+
+
 class _Harness(unittest.TestCase):
 
     def _pair(self):
@@ -103,8 +116,7 @@ class _Harness(unittest.TestCase):
         ours, guest = self._pair()
         guest.sendall(feed)
         guest.shutdown(socket.SHUT_WR)
-        listener._serve(ours, peer, local, plane_for_port(local[1]),
-                        secrets.token_hex(6))
+        listener._serve(ours, *_where(local, peer))
         return out.getvalue()
 
     def _lines(self, log):
@@ -659,8 +671,7 @@ class _Records(_Harness):
                    socket, "create_connection", side_effect=origin)
                if origin else contextlib.nullcontext())
         with ctx:
-            listener._serve(ours, peer, local, plane_for_port(local[1]),
-                            secrets.token_hex(6))
+            listener._serve(ours, *_where(local, peer))
         listener.inspection.record.close()
         return out.getvalue(), self._records()
 
@@ -889,8 +900,7 @@ class TestTheConnectionLevelRecords(_Records):
         guest.shutdown(socket.SHUT_WR)
         with unittest.mock.patch.object(
                 socket, "create_connection", side_effect=self._origin(b"")):
-            listener._serve(ours, ("192.0.2.1", 1024), TLS_LOCAL, TLS,
-                            secrets.token_hex(6))
+            listener._serve(ours, *_where(TLS_LOCAL, ("192.0.2.1", 1024)))
         listener.inspection.record.close()
         records = self._records()
         self.assertEqual(len(records), 1, records)
@@ -907,8 +917,7 @@ class TestTheConnectionLevelRecords(_Records):
         ours, guest = self._pair()
         guest.sendall(b"\x16\x03\x01\x00\x05rubbish")
         guest.shutdown(socket.SHUT_WR)
-        listener._serve(ours, ("192.0.2.1", 1024), TLS_LOCAL, TLS,
-                        secrets.token_hex(6))
+        listener._serve(ours, *_where(TLS_LOCAL, ("192.0.2.1", 1024)))
         listener.inspection.record.close()
         records = self._records()
         self.assertEqual(len(records), 1, records)
@@ -961,7 +970,7 @@ class TestTheRecordNeverKillsARequest(_Records):
         guest.shutdown(socket.SHUT_WR)
         with unittest.mock.patch.object(
                 socket, "create_connection", side_effect=self._origin()):
-            listener._serve(ours, ("192.0.2.1", 1024), CLEARTEXT_LOCAL, CLEARTEXT,
-                            secrets.token_hex(6))
+            listener._serve(
+                ours, *_where(CLEARTEXT_LOCAL, ("192.0.2.1", 1024)))
         self.assertIn("forward ", out.getvalue())
         self.assertEqual(listener.inspection.counters.record_failures, 1)

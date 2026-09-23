@@ -222,15 +222,6 @@ class Counters:
             if not on_a_list:
                 self.ech_alarm += 1
 
-    def record_unreadable_hello(self) -> None:
-        """A hello that could not be parsed at all.
-
-        No ECH figure moves here, and that is not an oversight: the extension
-        list comes FROM the parse, so a hello that did not parse has no
-        extensions to have seen. Guessing would put unparseable bytes in the
-        capability count and make the alarm's denominator a fiction.
-        """
-
     def record_splice(self) -> None:
         with self._lock:
             self.dispositions["spliced"] += 1

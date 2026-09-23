@@ -651,7 +651,7 @@ class TestTheClientCertificateCase(TerminationCase):
         self.assertTrue(response.endswith(b"\r\n\r\nBad Gateway\n"),
                         response)
         self.assertIn("client certificate", out.getvalue())
-        self.assertIn('tls = "splice"', out.getvalue())
+        self.assertIn('tls = \\"splice\\"', out.getvalue())
         self.assertEqual(origin.requests, [],
                          "the request must not reach an origin that will "
                          "refuse the session")
@@ -1406,7 +1406,7 @@ class TestNonHttpInsideATerminatedSessionIsClosed(TerminationCase):
                          "a close, not an HTTP response written into a "
                          "protocol that is not HTTP")
         self.assertEqual(origin.requests, [])
-        self.assertIn("reason='not HTTP", out.getvalue())
+        self.assertIn('reason="not HTTP', out.getvalue())
 
     def test_it_is_counted_as_not_http_and_not_as_an_unreadable_request(self):
         origin = _Origin(self.origin_pem)
@@ -2159,4 +2159,4 @@ class TestARedialThatCannotBeVerifiedSaysSo(TerminationCase):
         self.assertTrue(response.endswith(b"\r\n\r\nBad Gateway\n"),
                         response)
         self.assertIn("was not delivered", out.getvalue())
-        self.assertIn('tls = "splice"', out.getvalue())
+        self.assertIn('tls = \\"splice\\"', out.getvalue())

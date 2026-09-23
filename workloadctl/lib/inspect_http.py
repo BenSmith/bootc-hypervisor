@@ -37,6 +37,7 @@ from http_framing import (
 )
 from http_request import parse_request, rebuild_request
 from http_target import SCHEME_HTTP, redirect_target
+from inspect_scope import quoted
 
 
 # How many 1xx interim responses one request may collect before the exchange is
@@ -149,16 +150,12 @@ def serve_request(insp, client, conn, where, upstreams, first, rec, *,
             # connection nobody was using. Logged all the same -- the guest
             # sees a closed connection either way, and an operator staring
             # at one wants to know which end let go and why.
-            insp.log(f"close {where} reason='{exc}'")
+            insp.log(f"close {where} reason={quoted(exc)}")
             return False
-        insp.counters.record_drop(DROP_TIMED_OUT)
-        rec.set(decision="drop", reason=DROP_TIMED_OUT)
-        insp.log(f"drop {where} reason='timed out: {exc}'")
+        insp.drop(where, DROP_TIMED_OUT, exc, rec=rec)
         return False
     except RequestUnreadable as exc:
-        insp.counters.record_drop(DROP_UNREADABLE_REQUEST)
-        rec.set(decision="drop", reason=DROP_UNREADABLE_REQUEST)
-        insp.log(f"drop {where} reason='unreadable request: {exc}'")
+        insp.drop(where, DROP_UNREADABLE_REQUEST, exc, rec=rec)
         return False
     if not head:
         return False                # the guest closed between requests
@@ -171,12 +168,7 @@ def serve_request(insp, client, conn, where, upstreams, first, rec, *,
         # No 403 here and no host in the line: this is not a policy
         # decision, and reporting it as one would put a name we could not
         # read into the same bucket as a name we refused.
-        insp.counters.record_drop(DROP_UNREADABLE_REQUEST)
-        # No host, no method and no path: the head is exactly what could
-        # not be read, so the record says so by carrying none of them
-        # rather than by guessing at a name out of bytes we refused.
-        rec.set(decision="drop", reason=DROP_UNREADABLE_REQUEST, status=400)
-        insp.log(f"drop {where} reason='unreadable request: {exc}'")
+        insp.drop(where, DROP_UNREADABLE_REQUEST, exc, rec=rec, answered=400)
         send_response(conn, 400, "Bad Request", close=True)
         return False
     if pinned_host is not None and req.host != pinned_host:
@@ -186,14 +178,10 @@ def serve_request(insp, client, conn, where, upstreams, first, rec, *,
         # that -- the client reopens to the right origin and is checked
         # there on its own merits.
         #
-        reason = _binding_reason(insp, req.host)
-        insp.counters.record_drop(reason, req.host)
         rec.request(req)
-        rec.set(decision="drop", reason=reason, status=421)
-        listed = " (allowlisted)" if (
-            reason is DROP_MISDIRECTED_LISTED) else ""
-        insp.log(f"drop {where} host={req.host} reason='host does not "
-                            f"match the server name {pinned_host}{listed}'")
+        insp.drop(where, _binding_reason(insp, req.host),
+                  f"the session is for {pinned_host}", host=req.host,
+                  rec=rec, answered=421)
         return _refuse(client, conn, req, 421, "Misdirected Request")
     if not insp.policy.admits(req.host):
         # A STATUS is speakable on 80, unlike 443 -- there is no session to
@@ -202,10 +190,9 @@ def serve_request(insp, client, conn, where, upstreams, first, rec, *,
         # body naming the host or the allowlist: that reason is recorded for
         # the operator (the journal line and the record below), never handed
         # to the guest, whose only use for it is to learn it is filtered.
-        insp.counters.record_drop(DROP_NOT_ALLOWLISTED, req.host)
         rec.request(req)
-        rec.set(decision="drop", reason=DROP_NOT_ALLOWLISTED, status=403)
-        insp.log(f"drop {where} host={req.host} reason='not allowlisted'")
+        insp.drop(where, DROP_NOT_ALLOWLISTED, host=req.host, rec=rec,
+                  answered=403)
         return _refuse(client, conn, req, 403, "Forbidden")
     if not insp.policy.permits(req.host, req.method, req.path):
         # A SECOND refusal and a second reason, never merged into the one
@@ -216,11 +203,9 @@ def serve_request(insp, client, conn, where, upstreams, first, rec, *,
         # guest is told neither: it gets the same generic 403 as an unlisted
         # host, because the one thing it could do with the distinction is
         # learn it is behind a policy and start mapping the shape of it.
-        insp.counters.record_drop(DROP_NOT_PERMITTED, req.host)
         rec.request(req)
-        rec.set(decision="drop", reason=DROP_NOT_PERMITTED, status=403)
-        insp.log(f"drop {where} host={req.host} method={req.method} "
-                            f"reason='not permitted by policy'")
+        insp.drop(where, DROP_NOT_PERMITTED, host=req.host, rec=rec,
+                  answered=403, method=req.method)
         return _refuse(client, conn, req, 403, "Forbidden")
     # An HTTP/1.0 request is the one we tell the origin to close (see
     # rebuild_request), so its upstream is opened for this request alone
@@ -271,10 +256,7 @@ def serve_request(insp, client, conn, where, upstreams, first, rec, *,
         # same sentence -- the one naming the host's own trust anchor,
         # which is the only thing an operator can act on.
         reason, text = tls_failure(req.host, exc)
-        insp.counters.record_drop(reason, req.host)
-        rec.set(decision="drop", reason=reason, status=502)
-        insp.log(f"drop {where} host={req.host} "
-                            f"reason='{reason}: {text}'")
+        insp.drop(where, reason, text, host=req.host, rec=rec, answered=502)
         return _refuse(client, conn, req, 502, "Bad Gateway")
     except OSError as exc:
         # THE BROKER LEG GETS ITS OWN REASON AND ITS OWN SENTENCE, and does
@@ -296,10 +278,7 @@ def serve_request(insp, client, conn, where, upstreams, first, rec, *,
             reason = dial_failure_reason(
                 req.host, insp.policy.internal)
             text = f"{req.host} could not be reached: {exc}"
-        insp.counters.record_drop(reason, req.host)
-        rec.set(decision="drop", reason=reason, status=502)
-        insp.log(f"drop {where} host={req.host} "
-                            f"reason='{reason}: {text}'")
+        insp.drop(where, reason, text, host=req.host, rec=rec, answered=502)
         return _refuse(client, conn, req, 502, "Bad Gateway")
     if credential:
         # After the dial and not before it: a request whose broker never
@@ -349,10 +328,8 @@ def serve_request(insp, client, conn, where, upstreams, first, rec, *,
             # possibility without asserting it, which is the same choice the
             # TLS 1.2 arm of tls_failure makes for the same
             # reason.
-            insp.counters.record_drop(DROP_RELAY_FAILED, req.host)
-            rec.set(decision="drop", reason=DROP_RELAY_FAILED, status=502)
-            insp.log(
-                f"drop {where} host={req.host} reason='{DROP_RELAY_FAILED}: "
+            insp.drop(
+                where, DROP_RELAY_FAILED,
                 f"the request to {req.host} was not delivered: the "
                 f"upstream connection failed before its head could be "
                 f"sent ({exc}). If {req.host} requires a client "
@@ -361,7 +338,7 @@ def serve_request(insp, client, conn, where, upstreams, first, rec, *,
                 f"succeeded, leaving a reset rather than a named alert -- "
                 f"and it must then be spliced: set tls = \"splice\" for "
                 f"this workload so the guest's own handshake reaches "
-                f"{req.host}.'")
+                f"{req.host}.", host=req.host, rec=rec, answered=502)
             return _refuse(client, conn, req, 502, "Bad Gateway")
         if req.expects_continue:
             # AFTER policy, and by us. The natural implementation answers a
@@ -395,16 +372,10 @@ def serve_request(insp, client, conn, where, upstreams, first, rec, *,
             insp.counters.record_credential_unauthorized()
         return keep
     except (RequestUnreadable, OSError) as exc:
-        insp.counters.record_drop(DROP_RELAY_FAILED, req.host)
-        # OVERWRITES the `forward` set above, and follows the counter,
-        # which does the same. A relay that broke mid-exchange is counted
-        # as a drop, so recording it as a forward would put the record and
-        # every figure derived from it into disagreement. `status` survives
-        # if a head had already come back, which is how a reader tells a
-        # relay that failed before the answer from one that failed after.
-        rec.set(decision="drop", reason=DROP_RELAY_FAILED)
-        insp.log(f"drop {where} host={req.host} "
-                            f"reason='relay failed: {exc}'")
+        # Overwrites the `forward` set above. `status` survives if a head
+        # had already come back, which tells a relay that failed before the
+        # answer from one that failed after.
+        insp.drop(where, DROP_RELAY_FAILED, exc, host=req.host, rec=rec)
         return False
     finally:
         # A transient upstream is in no map, so serve_cleartext's own
@@ -464,9 +435,9 @@ def _relay_response(insp, up, client, conn, req, where="", rec=None):
             # lost. Logged all the same, because "policy stopped applying
             # here" is not something an operator should have to infer from
             # a byte count.
-            insp.log(f"upgrade {where} host={req.host} "
-                                f"reason='switched protocols; per-request policy no "
-                                f"longer applies to this connection'")
+            insp.log(f"upgrade {where} host={req.host} reason="
+                     + quoted("switched protocols; per-request policy no "
+                              "longer applies to this connection"))
             # Anything EITHER side read past the message boundary belongs
             # to the tunnel and goes across before the relay starts, or the
             # stream is delivered out of order. Both directions: a guest
@@ -534,8 +505,9 @@ def _note_redirect(insp, status, headers, req, where):
         # by a `policy` entry is allowlisted, and a note saying otherwise
         # would send the operator to add a name that is already there.
         if not insp.policy.admits(target):
-            insp.log(f"note {where} host={req.host} reason='redirected to "
-                                f"{target}, which is not allowlisted'")
+            insp.log(f"note {where} host={req.host} reason="
+                     + quoted(f"redirected to {target}, which is not "
+                              f"allowlisted"))
         elif path is not None and insp.policy.governs(target):
             _note_policy_redirect(insp, status, target, path, req, where)
 
@@ -577,9 +549,9 @@ def _note_policy_redirect(insp, status, target, path, req, where):
     if any(insp.policy.permits(target, method, path)
            for method in set(methods)):
         return
-    insp.log(f"note {where} host={req.host} reason='redirected to "
-                        f"{target}{path}, which its [[vm.network.policy]] entry does "
-                        f"not permit'")
+    insp.log(f"note {where} host={req.host} reason="
+             + quoted(f"redirected to {target}{path}, which its "
+                      f"[[vm.network.policy]] entry does not permit"))
 
 
 def _binding_reason(insp, host):

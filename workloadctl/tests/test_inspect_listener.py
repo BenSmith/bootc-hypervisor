@@ -75,6 +75,7 @@ from egress_record import (
     LOG_ID_FIELD,
     PER_HOST_REASONS,
     Where,
+    format_endpoint,
 )
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -185,7 +186,11 @@ def _serve_line(test, local, peer=("192.0.2.1", 1024)):
     guest.sendall(b"GET / HTTP/1.1\r\nHost: nobody.example\r\n\r\n")
     guest.shutdown(socket.SHUT_WR)
     plane = plane_for_port(local[1])
-    listener._serve(ours, peer, local, plane, "0" * 12)
+    where = Where(f"id={'0' * 12} plane={plane.label} "
+                  f"local={format_endpoint(local)} "
+                  f"peer={format_endpoint(peer)}",
+                  cid="0" * 12, plane=plane.label)
+    listener._serve(ours, where, plane)
     return out.getvalue()
 
 
@@ -221,7 +226,7 @@ class TestPlaneDetection(unittest.TestCase):
         listener._handle(conn, ("192.0.2.1", 1024),
                          _listener_with(("198.18.0.1", 9999)))
         self.assertIn("rejected", out.getvalue())
-        self.assertIn("reason='not an inspect port'", out.getvalue())
+        self.assertIn('reason="not an inspect port"', out.getvalue())
         self.assertIn("local=198.18.0.1:9999", out.getvalue())
         conn.close.assert_called_once()
         conn.recv.assert_not_called()
@@ -328,6 +333,21 @@ class TestCeiling(unittest.TestCase):
         self.assertEqual(snap["dispositions"]["dropped"], 2)
         self.assertEqual(snap["drop_reasons"]["connection ceiling reached"], 2)
         self.assertEqual(snap["concurrency"]["refused"], 2)
+
+    def test_a_rejected_connection_leaves_a_record_line(self):
+        """Counted and not recorded, the record would hold fewer refusals
+        than the status file, with nothing to say which were missing."""
+        record = Path(tempfile.mkdtemp()) / "requests.log"
+        self.addCleanup(shutil.rmtree, record.parent)
+        local = ("198.18.0.1", CLEARTEXT.inspect_port)
+        listener = Listener([_listener_with(local)], io.StringIO(), limit=0,
+                            record_path=record)
+        listener._handle(_mock_conn(), ("192.0.2.1", 1024),
+                         _listener_with(local))
+        listener.inspection.record.close()
+        [line] = [json.loads(x) for x in record.read_text().splitlines()]
+        self.assertEqual((line["decision"], line["reason"], line["mode"]),
+                         ("drop", "connection ceiling reached", "forward"))
 
     def test_releasing_an_admission_opens_a_slot(self):
         ceiling = Ceiling(1)
@@ -1691,7 +1711,7 @@ class TestLogInjection(unittest.TestCase):
         ours.settimeout(2.0)
         serve_tls(listener.inspection, ours, _where("tls"))
         self.assertNotIn("evil.example", out.getvalue())
-        self.assertIn(repr("\n"), out.getvalue())
+        self.assertIn(json.dumps(repr("\n"))[1:-1], out.getvalue())
 
     def test_a_forged_sni_never_reaches_the_status_document(self):
         """`unlisted_names` is rendered by diagnose, so a name that got as far
@@ -2105,6 +2125,20 @@ class TestCleartextAuthorisation(unittest.TestCase):
         self.assertIn(b"HTTP/1.1 200 OK", got)
         self.assertIn("forward", log)
 
+    def test_what_the_guest_wrote_cannot_forge_a_field(self):
+        """A refusal repeats what it could not read, and that text used to
+        sit in a single-quoted field: a quote in it closed the field, and
+        the rest read as fields of the line's own."""
+        import shlex
+        log, _, _ = self._run(
+            ["good.example"],
+            b"GET / HTTP/1.1\r\nHost: good.example:1' host=evil.example "
+            b"x='\r\n\r\n")
+        fields = shlex.split(log.splitlines()[0])
+        self.assertFalse([f for f in fields if f.startswith("host=")],
+                         fields)
+        self.assertIn("host=evil.example", fields[-1])
+
     def test_an_unlisted_host_gets_a_generic_403_and_no_upstream(self):
         log, got, ups = self._run(
             ["a.example"], b"GET / HTTP/1.1\r\nHost: denied.example\r\n\r\n")
@@ -2114,7 +2148,7 @@ class TestCleartextAuthorisation(unittest.TestCase):
         # the guest-facing body, which would tell the guest it is filtered.
         self.assertNotIn(b"denied.example", got)
         self.assertNotIn(b"workloadctl", got)
-        self.assertIn("host=denied.example reason='not allowlisted'", log)
+        self.assertIn('host=denied.example reason="not allowlisted"', log)
 
     def test_the_matcher_is_the_one_the_tls_plane_uses(self):
         """One matcher, not two. The apex trap has to be preserved here for
@@ -2469,7 +2503,7 @@ class TestCleartextPerRequest(unittest.TestCase):
         self.assertEqual([addr for addr, _ in ups], [("a.example", 80)])
         self.assertNotIn(b"/two", ups[0][1])
         self.assertIn("forward", log)
-        self.assertIn("host=denied.example reason='not allowlisted'", log)
+        self.assertIn('host=denied.example reason="not allowlisted"', log)
         self.assertIn(b"200 OK", got)
         self.assertIn(b"403 Forbidden", got)
 
@@ -3338,6 +3372,10 @@ class TestEchTripwire(unittest.TestCase):
         self.assertEqual(listener.inspection.counters.ech_alarm, 1)
 
 
+# The reason argument of a refusal: Inspection.drop's second.
+_DROP_CALL = r"\.drop\(\s*[^,()]+,\s*([^,)]+)"
+
+
 class TestCounters(unittest.TestCase):
     """The rung's figures, emitted rather than rendered."""
 
@@ -3413,11 +3451,11 @@ class TestCounters(unittest.TestCase):
         import re
         source = "\n".join(
             f.read_text() for f in (LISTENER_LIB, TLS_LIB, HTTP_LIB))
-        calls = re.findall(r"record_drop\(\s*([^,)]+)", source)
+        calls = re.findall(_DROP_CALL, source)
         self.assertGreater(len(calls), 5)
         for arg in calls:
             arg = arg.strip()
-            if arg == "reason":
+            if arg == "reason" or "(" in arg:
                 continue          # chosen above the call site, by name
             self.assertFalse(arg.startswith(('"', "'")),
                              f"record_drop called with the literal {arg}")
@@ -3449,8 +3487,7 @@ class TestCounters(unittest.TestCase):
             for f in (LISTENER_LIB, TLS_LIB, HTTP_LIB,
                       ROOT / "lib" / "egress_upstream.py"))
         self.assertNotIn("from egress_record import (", source)
-        named = {arg.strip() for arg in
-                 re.findall(r"record_drop\(\s*([^,)]+)", source)
+        named = {arg.strip() for arg in re.findall(_DROP_CALL, source)
                  if arg.strip().startswith("DROP_")}
         named |= set(re.findall(r"return (DROP_\w+)", source))
         # A reason chosen well before the call site that spends it -- the

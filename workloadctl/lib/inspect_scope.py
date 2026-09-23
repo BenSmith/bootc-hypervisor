@@ -13,6 +13,7 @@ The two behaviours the bundle has are the two every path needs: a log line,
 and a record for a whole connection where there are no requests.
 """
 
+import json
 import sys
 
 from egress_record import Record, RequestLog
@@ -65,18 +66,38 @@ class Inspection:
         self.out.write(line + "\n")
         self.out.flush()
 
-    def connection_record(self, where, mode, *, host=None, decision,
-                          reason=None, status=None):
-        """One record for a whole connection, where there are no requests.
+    def drop(self, where, reason, detail=None, *, host=None, mode=None,
+             rec=None, answered=None, verb="drop", **fields):
+        """One refusal: counted, recorded, and logged.
 
-        THE RECORD'S COVERAGE IS THE COUNTERS' COVERAGE. Every path that calls
-        record_drop, record_splice or record_termination writes a line, or the
-        file answers "what did this guest do" with a subset and a reader has no
-        way to know which subset. Two of these are the paths §11 names --
-        `splice` and `h2` relay bytes this process never decodes -- and the
-        rest are decisions taken at the front of a TLS connection, before there
-        is a request to attach anything to.
+        The record line is `rec`, the request's own, or else a line for the
+        whole connection in `mode`; with neither, none is written, which is
+        right only for a caller that is not this workload. `answered` is the
+        status the guest was given, if any. The journal line's reason begins
+        with the reason as counted, so a grep for one finds the other.
         """
-        rec = Record(self.record, where, mode, host=host)
-        rec.set(decision=decision, reason=reason, status=status)
-        rec.emit()
+        self.counters.record_drop(reason, host)
+        if rec is not None:
+            rec.set(decision="drop", reason=reason)
+            if answered is not None:
+                rec.set(status=answered)
+        elif mode is not None:
+            line = Record(self.record, where, mode, host=host)
+            line.set(decision="drop", reason=reason, status=answered)
+            line.emit()
+        text = reason if detail is None else f"{reason}: {detail}"
+        named = "".join(f" {k}={v}" for k, v in
+                        ((("host", host),) + tuple(fields.items()))
+                        if v is not None)
+        self.log(f"{verb} {where}{named} reason={quoted(text)}")
+
+
+def quoted(text):
+    """`text` as one journal field: double-quoted, with the quote, the
+    backslash and every control character escaped.
+
+    Guest bytes reach these lines, through a name or an error that repeats
+    what it could not read. Escaped, nothing in them can end the field and
+    be read as a field of its own.
+    """
+    return json.dumps(str(text), ensure_ascii=False)
