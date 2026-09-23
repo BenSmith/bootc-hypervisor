@@ -64,6 +64,16 @@ DRAIN_MAX = 1 << 20
 _BODYLESS_STATUSES = frozenset((204, 304))
 
 
+# The largest length this relay re-emits: a Content-Length, or one chunk's
+# size. The number is written back out as it was read, and an origin that
+# parses it into a fixed-width integer -- or into a double, as JavaScript
+# does -- reads a different length from a larger one. The difference is the
+# body's tail read as the next request on a pooled connection, one the
+# policy never saw. 2^53 - 1 is exact in every representation an origin
+# uses and far past any body anyone sends.
+LENGTH_MAX = (1 << 53) - 1
+
+
 # The ceiling on trailer lines after a zero chunk. Trailers are read and
 # discarded, and "read until a blank line" is a loop a guest drives: without a
 # bound it can hold a slot writing well-formed lines forever.
@@ -433,6 +443,10 @@ def request_framing(headers):
         if not _is_count(value):
             raise RequestUnreadable(
                 f"Content-Length {value!r} is not a plain decimal count")
+        if int(value) > LENGTH_MAX:
+            raise RequestUnreadable(
+                f"a Content-Length over {LENGTH_MAX} is read as another "
+                "number by an origin that parses it into a fixed width")
         return Framing("length", int(value))
     return Framing("none")
 
@@ -524,6 +538,10 @@ def copy_chunked(src, dst):
             raise RequestUnreadable(
                 f"chunk size {size_field!r} is not plain hex")
         size = int(size_field, 16)
+        if size > LENGTH_MAX:
+            raise RequestUnreadable(
+                f"a chunk size over {LENGTH_MAX} is read as another number "
+                "by an origin that parses it into a fixed width")
         if size == 0:
             for _ in range(MAX_TRAILER_LINES):
                 if not src.read_line():

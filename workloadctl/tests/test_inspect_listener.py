@@ -2042,6 +2042,30 @@ class TestCleartextFraming(unittest.TestCase):
             [_OK])
         self.assertEqual(len(ups), 1)
 
+    def test_a_content_length_past_what_every_origin_reads_is_refused(self):
+        """Re-emitted as read, 2^64 + 5 is 5 to an origin that parses into
+        64 bits, and the body's tail is the next request on the pooled
+        connection -- one the policy never saw."""
+        log, got, ups = self._run(
+            ["a.example"],
+            b"POST / HTTP/1.1\r\nHost: a.example\r\n"
+            b"Content-Length: 18446744073709551621\r\n\r\nhello")
+        self.assertEqual(ups, [])
+        self.assertIn("Content-Length over", log)
+        self.assertIn(b"400", got)
+
+    def test_a_chunk_size_past_what_every_origin_reads_never_leaves(self):
+        _, _, ups = self._run(
+            ["a.example"],
+            b"POST / HTTP/1.1\r\nHost: a.example\r\n"
+            b"Transfer-Encoding: chunked\r\n\r\n"
+            b"10000000000000005\r\nhello\r\n0\r\n\r\n"
+            b"DELETE /admin HTTP/1.1\r\nHost: a.example\r\n\r\n",
+            [_OK])
+        sent = b"".join(body for _addr, body in ups)
+        self.assertNotIn(b"10000000000000005", sent)
+        self.assertNotIn(b"/admin", sent)
+
     def test_one_declared_chunk_does_not_set_this_processs_footprint(self):
         """The chunk size is a hex number the PEER writes. Reading a whole
         chunk before forwarding any of it lets one line of guest input decide
