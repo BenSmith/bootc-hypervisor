@@ -641,6 +641,31 @@ class TestPolicyRefusals(unittest.TestCase):
                     self._refused({"tls": "splice", key: [bad]},
                                   repr(key), repr(bad))
 
+    def test_a_list_key_of_the_wrong_type_is_refused_even_when_falsy(self):
+        """`{}`, `""`, `0` and `false` were read as an empty list."""
+        for key in ("hosts", "internal", "splice", "http2", "policy"):
+            for bad in ({}, "", 0, False):
+                with self.subTest(key=key, bad=bad):
+                    self._refused({"tls": "inspect", key: bad}, repr(key))
+
+    def test_an_absent_or_null_list_is_empty(self):
+        policy = self._load({"hosts": None, "policy": None})
+        self.assertEqual((policy.hosts, policy.policy), ((), ()))
+
+    def test_a_non_string_method_or_path_is_refused(self):
+        """Dropped in silence, `["GET", 1]` read as `["GET"]` and `[1]` as
+        `[]`, an entry permitting nothing."""
+        for key, bad in (("methods", 1), ("methods", ""), ("paths", None),
+                         ("paths", ["/a"])):
+            with self.subTest(key=key, bad=bad):
+                self._refused(
+                    {"tls": "inspect",
+                     "policy": [{"host": "a.example", key: ["x", bad]}]},
+                    repr(key), repr(bad))
+
+    def test_an_entry_with_an_empty_host_is_refused(self):
+        self._refused({"tls": "inspect", "policy": [{"host": " "}]}, "host")
+
     def test_methods_or_paths_as_a_string_is_refused(self):
         for key in ("methods", "paths"):
             with self.subTest(key=key):
@@ -881,18 +906,18 @@ class TestPolicyLoading(unittest.TestCase):
         self.assertEqual(policy.policy[0].methods, ("GET",))
         self.assertTrue(policy.permits("a.example", "GET", "/v1/x"))
 
-    def test_a_non_string_in_methods_or_paths_is_dropped_not_carried(self):
+    def test_a_non_string_in_methods_or_paths_is_refused_not_carried(self):
         """Carried, it reaches fnmatchcase and raises TypeError out of the
-        request path -- one guest request killing the connection on a
-        malformed line in a file, rather than being ignored the way every
-        other reader here ignores a shape validation owns."""
+        request path; dropped, it narrows the entry to something the file
+        does not say. Refused at start, naming it, like every other key of
+        the wrong type."""
         path = self._write(json.dumps({
             "tls": "inspect", "hosts": ["a.example"],
             "policy": [{"host": "a.example", "methods": ["GET", 7],
-                        "paths": ["/v1/*", None]}]}))
-        entry, = load_policy(path).policy
-        self.assertEqual(entry.methods, ("GET",))
-        self.assertEqual(entry.paths, ("/v1/*",))
+                        "paths": ["/v1/*"]}]}))
+        with self.assertRaises(ValueError) as caught:
+            load_policy(path)
+        self.assertIn("7", str(caught.exception))
 
     def test_an_absent_key_survives_the_normalisation(self):
         """None and () are still different after it. A normaliser that turned
