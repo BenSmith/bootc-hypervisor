@@ -10,6 +10,7 @@ spellings of one host -- each now asserted on the flag it moved to.
 import contextlib
 import io
 import os
+import tempfile
 import unittest
 from unittest import mock
 
@@ -330,6 +331,36 @@ class TestEntrypointWiring(unittest.TestCase):
         with self.assertRaises(SystemExit) as caught:
             self._run(argv)
         self.assertIn("binds every address", str(caught.exception))
+
+    def test_the_env_fallback_refuses_a_second_credential(self):
+        """AGENT_BROKER_SECRET is one value, and load_credential gives it
+        for every id: two ids under it sent one provider's key to the other
+        provider's host."""
+        with self.assertRaises(SystemExit) as caught:
+            self._run(self.MINIMAL + ["--host", "api.github.com=gh-key"])
+        self.assertIn("AGENT_BROKER_SECRET", str(caught.exception))
+        self.assertIn("gh-key", str(caught.exception))
+        self.assertIn("main-key", str(caught.exception))
+
+    def test_the_env_fallback_serves_one_credential_on_two_hosts(self):
+        """The refusal counts credentials, not hosts: one key on two names
+        of one provider is what the fallback is for."""
+        self._run(self.MINIMAL + ["--host", "api2.example.com=main-key"])
+        self.assertEqual(sorted(broker_server.Handler.profiles),
+                         ["api.example.com", "api2.example.com"])
+
+    def test_a_credentials_directory_serves_two_credentials(self):
+        with tempfile.TemporaryDirectory() as d:
+            for name, secret in (("main-key", "sk-main\n"),
+                                 ("gh-key", "sk-gh\n")):
+                with open(os.path.join(d, name), "w") as f:
+                    f.write(secret)
+            with mock.patch.dict(os.environ, {"CREDENTIALS_DIRECTORY": d}):
+                self._run(self.MINIMAL + ["--host", "api.github.com=gh-key"])
+        self.assertEqual(
+            {h: p.auth_value
+             for h, p in broker_server.Handler.profiles.items()},
+            {"api.example.com": "sk-main", "api.github.com": "sk-gh"})
 
     def test_an_unmappable_caller_refuses_to_start(self):
         with self.assertRaises(SystemExit) as caught:
