@@ -40,7 +40,9 @@ from http_framing import RELAY_CHUNK, _Stream
 # reuse is a property of the few names a real client actually alternates
 # between; past this many the least recently used is closed, which costs a
 # redial rather than an error. Eight is well above any honest fan-out on one
-# connection and far below anything that threatens the fd table.
+# connection. Across MAX_CONNECTIONS it is over a thousand descriptors,
+# which is why workload-inspect-listener raises its soft RLIMIT_NOFILE to
+# the hard one at start.
 UPSTREAMS_MAX = 8
 
 # The prefix that gives a host's BROKER connection a pool slot of its own, so

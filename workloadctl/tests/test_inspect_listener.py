@@ -961,6 +961,56 @@ class TestPolicyLoading(unittest.TestCase):
                 mod.broker_endpoint(bad)
 
 
+class TestAnFdShortageIsWaitedOut(unittest.TestCase):
+    """accept() failing with EMFILE leaves the connection queued, so the
+    listener stays readable and select() returns at once: the loop spun a
+    core retrying it."""
+
+    def test_the_loop_does_not_spin_on_emfile(self):
+        import errno as errno_mod
+        calls = []
+
+        class Starved(socket.socket):
+            def accept(self):
+                calls.append(1)
+                raise OSError(errno_mod.EMFILE, "Too many open files")
+
+        srv = Starved(socket.AF_INET, socket.SOCK_STREAM)
+        self.addCleanup(srv.close)
+        srv.bind(("127.0.0.1", 0))
+        srv.listen(4)
+        client = socket.create_connection(srv.getsockname())
+        self.addCleanup(client.close)
+        out = io.StringIO()
+        listener = Listener([srv], out)
+        loop = threading.Thread(target=listener.accept_loop, daemon=True)
+        loop.start()
+        time.sleep(0.5)
+        listener.stop()
+        loop.join(5)
+        self.assertFalse(loop.is_alive())
+        self.assertLess(len(calls), 20, "the accept loop spun on EMFILE")
+        self.assertEqual(out.getvalue().count("cannot accept"), 1)
+
+    def test_the_entrypoint_raises_its_soft_fd_limit(self):
+        mod = _mod()
+        with unittest.mock.patch.object(
+                mod.resource, "getrlimit", return_value=(1024, 524288)), \
+                unittest.mock.patch.object(mod.resource,
+                                           "setrlimit") as setrlimit:
+            mod.raise_fd_limit()
+        setrlimit.assert_called_once_with(mod.resource.RLIMIT_NOFILE,
+                                          (524288, 524288))
+
+    def test_a_limit_that_cannot_be_raised_is_left_alone(self):
+        mod = _mod()
+        with unittest.mock.patch.object(
+                mod.resource, "getrlimit", return_value=(1024, 4096)), \
+                unittest.mock.patch.object(mod.resource, "setrlimit",
+                                           side_effect=ValueError("no")):
+            mod.raise_fd_limit()   # must not raise
+
+
 class TestTheRecordHasACap(unittest.TestCase):
     """A refusal costs a guest almost nothing and writes a line; without a
     cap, a guest pipelining refused requests fills the host's disk between

@@ -68,6 +68,7 @@ failure, never a second path.
 
 import argparse
 import os
+import resource
 import signal
 import sys
 
@@ -122,6 +123,22 @@ def broker_endpoint(value):
     except ValueError:
         raise argparse.ArgumentTypeError(
             f"{value!r}: port is not a number") from None
+
+
+def raise_fd_limit():
+    """The soft RLIMIT_NOFILE raised to the hard one.
+
+    Each of MAX_CONNECTIONS guest connections may hold UPSTREAMS_MAX
+    upstreams beside itself, which is more than the 1024 a service's soft
+    limit defaults to; the hard limit is the process's to take. Best
+    effort: a limit that cannot be raised leaves the listener as it was.
+    """
+    try:
+        soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+        if hard == resource.RLIM_INFINITY or soft < hard:
+            resource.setrlimit(resource.RLIMIT_NOFILE, (hard, hard))
+    except (OSError, ValueError):
+        pass
 
 
 def parse_args(argv):
@@ -198,6 +215,7 @@ def main(argv=None):
         # reporting itself up.
         print(f"error: {exc}", file=sys.stderr)
         return 1
+    raise_fd_limit()
     try:
         sockets = inherited_listening_sockets()
     except NotSocketActivated as exc:

@@ -42,6 +42,7 @@ be one number and which wait on the cleartext plane takes which.
 Installed to /usr/libexec/workloadctl/inspect_listener.py.
 """
 
+import errno
 import os
 import secrets
 import selectors
@@ -189,11 +190,33 @@ class Listener:
                 for key, _ in events:
                     try:
                         conn, peer = key.fileobj.accept()
-                    except OSError:
+                    except OSError as exc:
+                        if exc.errno in (errno.EMFILE, errno.ENFILE):
+                            self._out_of_fds(exc)
                         continue
+                    self._fds_short = False
                     self._handle(conn, peer, key.fileobj)
         finally:
             sel.close()
+
+    # Whether the last accept failed for want of a file descriptor, so the
+    # line saying so is written once per shortage rather than per attempt.
+    _fds_short = False
+
+    def _out_of_fds(self, exc):
+        """Wait out a shortage of file descriptors, rather than spin on it.
+
+        The connection is still queued, so the listener stays readable and
+        select() returns at once: without a pause the loop turns an fd
+        shortage into a core spent retrying accept(). The pause is the
+        loop's poll interval, and a stop still ends it.
+        """
+        if not self._fds_short:
+            self._fds_short = True
+            self.inspection.log(
+                f"WARNING: cannot accept: {exc.strerror}; connections wait "
+                f"in the queue until a descriptor is free")
+        self._stop.wait(_ACCEPT_POLL)
 
     def _handle(self, conn, peer, listen_sock):
         # Set the timeout before doing anything with the accepted socket —
