@@ -379,6 +379,32 @@ class TestMinting(_MinterCase):
         self.assertEqual(second.stats["mints"], 0)
         self.assertEqual(second.stats["hits"], 1)
 
+    def test_a_restart_under_a_new_ca_re_mints_rather_than_adopts(self):
+        """The rig found this: a CA removed and minted again, with the
+        same name, and a restart that adopted every cached leaf the old
+        key signed. The guest, holding a bundle with the new CA, got a
+        verify failure for each of them. Both caches, since both adopt."""
+        first = self.minter()
+        first.leaf("example.com", denied=False)
+        first.leaf("refused.example", denied=True)
+        for path in (egress_ca.ca_key_path(self.state),
+                     egress_ca.ca_cert_path(self.state)):
+            path.unlink()
+        _mint_ca(self.state)
+        second = self.minter()
+        for name, denied in (("example.com", False),
+                             ("refused.example", True)):
+            with self.subTest(name=name):
+                leaf = second.leaf(name, denied=denied)
+                verify = subprocess.run(
+                    ["openssl", "verify", "-CAfile",
+                     str(egress_ca.ca_cert_path(self.state)), str(leaf.path)],
+                    capture_output=True, text=True)
+                self.assertEqual(verify.returncode, 0,
+                                 verify.stdout + verify.stderr)
+        self.assertEqual(second.stats["hits"], 0)
+        self.assertEqual(second.stats["mints"], 2)
+
     def test_a_refused_name_never_reaches_openssl(self):
         ran = []
         minter = self.minter(runner=lambda *a, **k: ran.append(a))
@@ -819,4 +845,3 @@ class TestTheCountersAreWrittenUnderTheLockTheyAreReadWith(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

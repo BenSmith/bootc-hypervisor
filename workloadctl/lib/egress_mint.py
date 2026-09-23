@@ -227,9 +227,12 @@ class LeafCache:
     directories, and the class cannot be constructed without one.
     """
 
-    def __init__(self, capacity: int, directory: Path):
+    def __init__(self, capacity: int, directory: Path, issuer=None):
         self.capacity = capacity
         self.directory = Path(directory)
+        # A zero-argument callable giving the key id of the CA leaves must
+        # chain to, or None to adopt without asking. See _adopt.
+        self._issuer = issuer
         self._entries: OrderedDict[str, Leaf] = OrderedDict()
         self._lock = threading.RLock()
         self.directory.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -285,12 +288,23 @@ class LeafCache:
         first connection, and the names are hashed so the mapping cannot be
         recovered from the directory anyway. A miss already costs a mint, so
         checking one path first is free by comparison.
+
+        ONLY A LEAF THE CURRENT CA SIGNED. The directory outlives the CA:
+        a CA removed and minted again leaves every cached leaf signed by a
+        key nothing trusts any more, and adopting them serves a guest that
+        trusts the new CA a certificate error for each of its usual hosts
+        until the leaf expires, a month later. The subject cannot tell the
+        two CAs apart -- a re-mint carries the same name -- so the check is
+        the leaf's authority key id against the CA's subject key id, read
+        by the same openssl call that reads the expiry.
         """
         path = self.path_for(name)
         if not path.exists():
             return None
-        not_after = pem_not_after(path)
-        if not_after is None:
+        not_after, authority = pem_leaf_facts(path)
+        if not_after is None or (
+                self._issuer is not None
+                and (authority is None or authority != self._issuer())):
             path.unlink(missing_ok=True)
             return None
         leaf = Leaf(name=name, path=path, not_after=not_after)
@@ -360,6 +374,63 @@ def pem_fingerprint(path: Path) -> str | None:
     return ":".join(digest[i:i + 2] for i in range(0, len(digest), 2))
 
 
+def _key_id(text: str, extension: str) -> str | None:
+    """The key id `openssl x509 -ext` printed under `extension`, or None.
+
+    The value is the indented line after the extension's name; older
+    openssl prefixes an authority key id with `keyid:`, which is dropped
+    so the two ids compare as the same spelling.
+    """
+    lines = text.splitlines()
+    for i, line in enumerate(lines):
+        if line.strip().startswith(extension) and i + 1 < len(lines):
+            value = lines[i + 1].strip().removeprefix("keyid:")
+            return value.upper() or None
+    return None
+
+
+def pem_leaf_facts(path: Path) -> tuple[float | None, str | None]:
+    """(notAfter, authority key id) of the certificate in a PEM, either of
+    them None where it cannot be read. One openssl call for both, which is
+    the one adoption already paid for the expiry."""
+    try:
+        result = subprocess.run(
+            ["openssl", "x509", "-in", str(path), "-noout", "-enddate",
+             "-ext", "authorityKeyIdentifier"],
+            capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return None, None
+    if result.returncode != 0:
+        return None, None
+    first, _, _rest = result.stdout.partition("\n")
+    return (_parse_not_after(first),
+            _key_id(result.stdout, "X509v3 Authority Key Identifier"))
+
+
+def pem_subject_key_id(path: Path) -> str | None:
+    """The subject key id of the certificate in a PEM, or None."""
+    try:
+        result = subprocess.run(
+            ["openssl", "x509", "-in", str(path), "-noout",
+             "-ext", "subjectKeyIdentifier"],
+            capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    return _key_id(result.stdout, "X509v3 Subject Key Identifier")
+
+
+def _parse_not_after(line: str) -> float | None:
+    """`notAfter=...` as openssl prints it, as a unix timestamp."""
+    _, _, when = line.strip().partition("=")
+    try:
+        import ssl
+        return float(ssl.cert_time_to_seconds(when))
+    except (ValueError, OSError):
+        return None
+
+
 def pem_not_after(path: Path) -> float | None:
     """The notAfter of the certificate in a PEM, as a unix timestamp.
 
@@ -376,12 +447,7 @@ def pem_not_after(path: Path) -> float | None:
         return None
     if result.returncode != 0:
         return None
-    _, _, when = result.stdout.strip().partition("=")
-    try:
-        import ssl
-        return float(ssl.cert_time_to_seconds(when))
-    except (ValueError, OSError):
-        return None
+    return _parse_not_after(result.stdout)
 
 
 class Minter:
@@ -409,12 +475,15 @@ class Minter:
         self._clock = clock
         self._runner = runner
         self.bucket = bucket if bucket is not None else TokenBucket()
+        self._ca_key_id = None
         self.working_set = LeafCache(
-            LEAF_CACHE_MAX, self.state_dir / LEAF_DIR_NAME)
+            LEAF_CACHE_MAX, self.state_dir / LEAF_DIR_NAME,
+            issuer=self._issuer_key_id)
         # Its own directory, which is what keeps the two sets unable to evict
         # each other. See the class docstring on LeafCache.
         self.denials = LeafCache(
-            DENIAL_CACHE_MAX, self.state_dir / DENIAL_DIR_NAME)
+            DENIAL_CACHE_MAX, self.state_dir / DENIAL_DIR_NAME,
+            issuer=self._issuer_key_id)
         # THE DENIAL FIGURES ARE SUBSETS, not a second dimension: `mints` and
         # `hits` count both caches, and `denied_mints`/`denied_hits` count the
         # denial-only half of the same events. Reporting them as disjoint pairs
@@ -430,6 +499,14 @@ class Minter:
         }
         self._lock = threading.Lock()
         self._ca_identity = None
+
+    def _issuer_key_id(self) -> str | None:
+        """The CA's subject key id, read once. The CA does not change
+        under a running inspector: a new one needs a new trust bundle in
+        the guest, and the inspector is restarted with it."""
+        if self._ca_key_id is None:
+            self._ca_key_id = pem_subject_key_id(ca_cert_path(self.state_dir))
+        return self._ca_key_id
 
     def _bump(self, *names: str) -> None:
         """Add one to each named counter, under the lock `snapshot` reads with.
