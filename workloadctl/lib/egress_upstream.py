@@ -262,8 +262,13 @@ def gone_while_idle(stream):
     session ticket arriving late -- reads as nothing and leaves it usable.
     """
     sock = stream.sock
+    # poll, not select: select refuses a descriptor past FD_SETSIZE, and
+    # this process raises its fd limit well past that, so under load every
+    # pooled connection would read as gone and be redialled.
+    poller = select.poll()
     try:
-        readable, _, _ = select.select([sock], [], [], 0)
+        poller.register(sock, select.POLLIN)
+        readable = poller.poll(0)
     except (OSError, ValueError):
         return True
     if not readable and not (getattr(sock, "pending", None)

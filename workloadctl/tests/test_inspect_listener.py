@@ -14,6 +14,7 @@ import io
 import json
 import os
 import shutil
+import resource
 import signal
 import socket
 import tempfile
@@ -2546,6 +2547,34 @@ class TestCleartextPerRequest(unittest.TestCase):
         listener = Listener([], io.StringIO())
         near, far = self._pair()
         self.addCleanup(far.close)
+        upstreams = {"a.example": _Stream(near)}
+
+        def dial(host):
+            raise AssertionError("a live connection was redialled")
+
+        up = listener.inspection.upstream.connection_for(
+            "a.example", upstreams, dial=dial)
+        self.assertIs(up.sock, near)
+
+    def test_a_quiet_connection_on_a_high_descriptor_is_reused(self):
+        """customs-inspect raises its fd limit past FD_SETSIZE, so under load
+        a pooled connection sits on a descriptor over 1023. select() refuses
+        those, and the check read every such connection as gone: the pool
+        redialled everything, the origin leg opened before the guest's
+        handshake included, and nothing counted it."""
+        soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+        if hard != resource.RLIM_INFINITY and hard < 1600:
+            self.skipTest(f"the hard fd limit is {hard}")
+        resource.setrlimit(resource.RLIMIT_NOFILE, (1600, hard))
+        self.addCleanup(resource.setrlimit, resource.RLIMIT_NOFILE,
+                        (soft, hard))
+        listener = Listener([], io.StringIO())
+        near, far = self._pair()
+        self.addCleanup(far.close)
+        high = os.dup2(near.fileno(), 1500)
+        near.close()
+        near = socket.socket(fileno=high)
+        self.addCleanup(near.close)
         upstreams = {"a.example": _Stream(near)}
 
         def dial(host):
