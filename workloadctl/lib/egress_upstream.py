@@ -17,6 +17,7 @@ Installed to /usr/libexec/workloadctl/egress_upstream.py.
 """
 
 import ipaddress
+import select
 import socket
 import ssl
 
@@ -211,6 +212,18 @@ class Upstream:
         """
         slot = key or host
         up = upstreams.pop(slot, None)
+        if up is not None and gone_while_idle(up):
+            # The far end let go between requests -- an origin's keep-alive
+            # timeout, the broker's idle bound -- and nothing told the
+            # guest, whose own connection is still open. Reused, the
+            # request would be written into a closed socket and the guest's
+            # connection closed unanswered. Nothing has been sent on it, so
+            # a fresh dial is the whole remedy.
+            try:
+                up.sock.close()
+            except OSError:
+                pass
+            up = None
         if up is None:
             up = (dial or self.dial_cleartext)(host)
         if not reusable:
@@ -235,6 +248,39 @@ class Upstream:
             except OSError:
                 pass
         return up
+
+
+def gone_while_idle(stream):
+    """Whether a pooled connection closed, or spoke unasked, while idle.
+
+    Asked before a pooled connection is reused. An idle connection has
+    nothing to say, so the socket being readable at all means the far end
+    closed it or sent bytes no request asked for; either way it is not one
+    to send the next request down. A TLS record that carries no data -- a
+    session ticket arriving late -- reads as nothing and leaves it usable.
+    """
+    sock = stream.sock
+    try:
+        readable, _, _ = select.select([sock], [], [], 0)
+    except (OSError, ValueError):
+        return True
+    if not readable and not (getattr(sock, "pending", None)
+                             and sock.pending()):
+        return False
+    previous = sock.gettimeout()
+    sock.settimeout(0)
+    try:
+        sock.recv(RELAY_CHUNK)
+    except (ssl.SSLWantReadError, BlockingIOError):
+        return False
+    except OSError:
+        return True
+    finally:
+        try:
+            sock.settimeout(previous)
+        except OSError:
+            pass
+    return True
 
 
 def early_bytes(ssock):

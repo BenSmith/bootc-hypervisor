@@ -2348,6 +2348,63 @@ class TestCleartextPerRequest(unittest.TestCase):
         self.assertEqual(dialled, ["a.example"])
         self.assertIs(first.sock, second.sock)
 
+    def test_a_pooled_connection_the_far_end_closed_is_redialled(self):
+        """An origin's keep-alive timeout, or the broker's idle bound, closes
+        a pooled connection while the guest's own stays open. Written into,
+        it answered with EOF and the guest's connection closed unanswered;
+        nothing has been sent on it, so it is dialled again instead."""
+        listener = Listener([], io.StringIO())
+        near, far = self._pair()
+        far.close()
+        upstreams = {"a.example": _Stream(near)}
+        dialled = []
+
+        def dial(host):
+            fresh, keep = self._pair()
+            self.addCleanup(keep.close)
+            dialled.append(host)
+            return _Stream(fresh)
+
+        up = listener.inspection.upstream.connection_for(
+            "a.example", upstreams, dial=dial)
+        self.assertEqual(dialled, ["a.example"])
+        self.assertIsNot(up.sock, near)
+        self.assertEqual(near.fileno(), -1, "the dead one was not closed")
+
+    def test_a_pooled_connection_that_is_quiet_is_reused(self):
+        listener = Listener([], io.StringIO())
+        near, far = self._pair()
+        self.addCleanup(far.close)
+        upstreams = {"a.example": _Stream(near)}
+
+        def dial(host):
+            raise AssertionError("a live connection was redialled")
+
+        up = listener.inspection.upstream.connection_for(
+            "a.example", upstreams, dial=dial)
+        self.assertIs(up.sock, near)
+
+    def test_a_pooled_connection_that_spoke_unasked_is_redialled(self):
+        """Bytes on an idle connection answer no request; the next response
+        would be read out of them."""
+        listener = Listener([], io.StringIO())
+        near, far = self._pair()
+        self.addCleanup(far.close)
+        far.sendall(b"HTTP/1.1 200 OK\r\n")
+        time.sleep(0.05)
+        upstreams = {"a.example": _Stream(near)}
+        dialled = []
+
+        def dial(host):
+            fresh, keep = self._pair()
+            self.addCleanup(keep.close)
+            dialled.append(host)
+            return _Stream(fresh)
+
+        listener.inspection.upstream.connection_for(
+            "a.example", upstreams, dial=dial)
+        self.assertEqual(dialled, ["a.example"])
+
     def test_the_brokered_slot_is_not_nameable_by_a_guest(self):
         """The separation is only a separation while no host can spell it. A
         NUL cannot appear in a hostname, which is why the prefix carries one."""
