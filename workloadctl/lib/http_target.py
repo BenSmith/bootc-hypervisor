@@ -19,9 +19,10 @@ the request arrived on -- `Scheme` says which port that plane is, so that
 the other.
 """
 
+import ipaddress
 from typing import NamedTuple
 
-from inspect_document import normalise_hostname
+from inspect_document import hostname_bad_character, normalise_hostname
 from egress_plane import CLEARTEXT, TLS
 from http_framing import RequestUnreadable
 
@@ -270,6 +271,23 @@ def host_from_authority(authority, scheme=SCHEME_HTTP):
     host = normalise_hostname(host)
     if not host:
         raise RequestUnreadable(f"authority {authority!r} names no host")
+    if host.startswith("["):
+        # A bracketed literal is an IPv6 address and nothing else. No scope
+        # id: `%` is no part of a name, and it carries whatever follows it.
+        try:
+            if "%" in host:
+                raise ValueError(host)
+            ipaddress.IPv6Address(host[1:-1])
+        except ValueError:
+            raise RequestUnreadable(
+                "the authority's bracketed literal is not an IPv6 "
+                "address") from None
+    else:
+        ch = hostname_bad_character(host)
+        if ch is not None:
+            raise RequestUnreadable(
+                f"the authority carries {ch!r}, which no host name is "
+                "spelled with")
     # A plane is reached by a redirect keyed on one dport and it dials that
     # same port, so an authority naming any other port describes a destination
     # that is not the one either end is on. Refused rather than ignored: the

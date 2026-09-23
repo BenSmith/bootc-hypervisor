@@ -242,7 +242,8 @@ class TestHostKeysAreNormalised(unittest.TestCase):
                 self.assertEqual(broker_profiles.normalise_host(raw), "api.example.com")
 
     def test_an_unusable_value_is_none_and_never_a_fallback(self):
-        for raw in (None, "", "   ", 7, ":443", "[unterminated"):
+        for raw in (None, "", "   ", 7, ":443", "[unterminated",
+                    "a b.example.com", "a'b.example.com", "[::1 x]"):
             with self.subTest(raw=raw):
                 self.assertIsNone(broker_profiles.normalise_host(raw))
 

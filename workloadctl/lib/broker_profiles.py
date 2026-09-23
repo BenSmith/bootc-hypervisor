@@ -79,7 +79,8 @@ def normalise_host(value):
     config looked right.
 
     Returns None for anything that is not a usable host, which is a REFUSAL and
-    never a fallback: the profile is selected by this value.
+    never a fallback: the profile is selected by this value. That includes a
+    name with a character no host name is spelled with.
     """
     if not isinstance(value, str):
         return None
@@ -96,7 +97,19 @@ def normalise_host(value):
     elif ":" in host:
         host = host.split(":", 1)[0]
     host = host.rstrip(".")
+    # Spelled with what a name or an address is spelled with, or it is not
+    # a host: this value is logged as `host=` on a refusal, and a space or a
+    # quote in it would forge a field of that line.
+    if not set(host) <= (_LITERAL_CHARS if host.startswith("[")
+                         else _HOST_CHARS):
+        return None
     return host or None
+
+
+# What normalise_host lets through: a DNS name or an IPv4 literal, and the
+# inside of a bracketed IPv6 one.
+_HOST_CHARS = frozenset("abcdefghijklmnopqrstuvwxyz0123456789-_.")
+_LITERAL_CHARS = frozenset("0123456789abcdef:.[]")
 
 
 # RFC 9110 §5.6.2 tchar: what a header NAME may be spelled with.

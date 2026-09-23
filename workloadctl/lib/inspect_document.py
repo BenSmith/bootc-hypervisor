@@ -90,6 +90,31 @@ def hostname_control_character(host: str) -> str | None:
     return None
 
 
+# What a name a guest supplies may be spelled with, once normalised:
+# letters, digits, the hyphen, the underscore and the dot. That is every DNS
+# name a client resolves (`_` included, for the reason egress_ca's leaf
+# alphabet gives) and every IPv4 literal.
+HOSTNAME_CHARS = frozenset("abcdefghijklmnopqrstuvwxyz0123456789-_.")
+
+
+def hostname_bad_character(host: str) -> str | None:
+    """The first character in a normalised name that no name is spelled
+    with, or None.
+
+    The control characters are not the only ones that matter. A name is
+    matched by fnmatch, whose `*` matches anything, so `*.example.com`
+    admits `a reason='x' .example.com` -- and that name is then written
+    into a `key=value` journal line, where the space and the quotes forge
+    a field. It is also what gets dialled and sent upstream as `Host`.
+    Refused at the parse like a control character, and for the same
+    reason: no name that reaches a decision here needs one.
+    """
+    for ch in host:
+        if ch not in HOSTNAME_CHARS:
+            return ch
+    return None
+
+
 def hostname_match(host: str, patterns) -> bool:
     """Whether a hostname is authorised by a list of fnmatch patterns.
 

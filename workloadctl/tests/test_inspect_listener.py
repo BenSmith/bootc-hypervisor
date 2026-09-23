@@ -37,7 +37,8 @@ from inspect_policy import Policy, load_policy
 from sd_listen import NotSocketActivated
 from workload_addr import INSPECT_LISTENER_BIN
 from tls_hello import HelloUnreadable, TLS_EXT_ECH, read_client_hello
-from http_target import (normalise_path, normalise_target)
+from http_target import (
+    host_from_authority, normalise_path, normalise_target)
 from h2_framing import H2_PREFACE, H2Framing, NotH2
 from http_framing import (
     DRAIN_MAX, MAX_TRAILER_LINES, RELAY_CHUNK, RequestUnreadable, _Stream,
@@ -1628,6 +1629,35 @@ class TestLogInjection(unittest.TestCase):
             listener.inspection.counters.snapshot(open_now=0, refused=0))
         self.assertNotIn("evil.example", snapshot)
 
+    _field_forged = "a reason='allowed' .example.com"
+
+    def test_an_sni_a_wildcard_admits_cannot_forge_a_field(self):
+        """Printable is not enough. `*` matches a space and a quote, so
+        `*.example.com` admitted this name, and it went into the `splice`
+        line whole: a second `reason=` the reader takes for ours."""
+        _, listener, out = self._listener(["*.example.com"])
+        guest, ours = socket.socketpair()
+        self.addCleanup(guest.close)
+        self.addCleanup(ours.close)
+        guest.sendall(_hello_bytes(server_name=self._field_forged))
+        ours.settimeout(2.0)
+        serve_tls(listener.inspection, ours, _where("tls"))
+        self.assertIn("no readable name", out.getvalue())
+        self.assertNotIn("allowed", out.getvalue())
+
+    def test_every_character_no_name_has_is_refused(self):
+        for ch in (" ", "'", '"', "#", "/", "*", "@", "=", ","):
+            with self.subTest(ch=ch):
+                with self.assertRaises(HelloUnreadable):
+                    read_client_hello(
+                        _FakeSocket([_hello_bytes(
+                            server_name=f"a{ch}b.example")]))
+
+    def test_an_ordinary_name_in_any_case_still_parses(self):
+        _, hello = read_client_hello(
+            _FakeSocket([_hello_bytes(server_name="Svc_1.Example-A.com.")]))
+        self.assertEqual(hello.server_name, "Svc_1.Example-A.com.")
+
     def test_every_control_character_is_refused_not_only_the_newline(self):
         """LF is the one that forges a record; CR, NUL and DEL are refused with
         it because a field with any of them has no reading both ends share."""
@@ -2060,6 +2090,30 @@ class TestCleartextAuthorisation(unittest.TestCase):
             b"GET / HTTP/1.1\r\nHost: a.example:8080\r\n\r\n")
         self.assertEqual(ups, [])
         self.assertIn("only ever reaches port 80", log)
+
+    def test_a_host_a_wildcard_admits_cannot_forge_a_field(self):
+        """`*` matches a space and a quote, so `*.example.com` admitted this
+        Host, which was dialled, sent upstream and written into the journal
+        line whole -- where it is a second `reason=`."""
+        log, got, ups = self._run(
+            ["*.example.com"],
+            b"GET / HTTP/1.1\r\nHost: a reason='allowed' .example.com"
+            b"\r\n\r\n")
+        self.assertEqual(ups, [])
+        self.assertNotIn("allowed", log)
+        self.assertIn(b"400", got)
+
+    def test_an_authority_with_a_character_no_name_has_is_refused(self):
+        for authority in ("a b.example", "a'b.example", "a#b.example",
+                          "a*b.example", "a/b.example", "[::1%25eth0]",
+                          "[not-an-address]"):
+            with self.subTest(authority=authority):
+                with self.assertRaises(RequestUnreadable):
+                    host_from_authority(authority)
+
+    def test_an_ipv6_literal_authority_is_still_read(self):
+        self.assertEqual(host_from_authority("[2001:DB8::1]:80").host,
+                         "[2001:db8::1]")
 
     def test_the_port_is_dropped_from_the_host_we_emit(self):
         _, _, ups = self._run(

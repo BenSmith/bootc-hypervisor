@@ -29,7 +29,9 @@ import socket
 import time
 from typing import NamedTuple
 
-from inspect_document import hostname_control_character
+from inspect_document import (
+    hostname_bad_character, hostname_control_character, normalise_hostname,
+)
 
 # The ceiling on how much is read looking for a complete ClientHello, in bytes.
 # A real one is a few hundred bytes; post-quantum key shares push it over a
@@ -137,7 +139,8 @@ def _parse_server_name(data: bytes):
     A control character is refused for the second reason, which ASCII-ness does
     not cover: this name is logged and written into the status document, and a
     bare LF inside it forges a journal record. See
-    `hostname_control_character`.
+    `hostname_control_character`. So is anything else no host name is spelled
+    with, which forges a field inside one; see `hostname_bad_character`.
     """
     r = _Reader(data)
     entries = _Reader(r.take(r.u16()))
@@ -159,6 +162,12 @@ def _parse_server_name(data: bytes):
                 raise HelloUnreadable(
                     f"the server_name carries the control character {ch!r}, "
                     "which no name has and which forges a line in this log")
+            ch = hostname_bad_character(normalise_hostname(name))
+            if ch is not None:
+                # Named with !r alone, for the reason above.
+                raise HelloUnreadable(
+                    f"the server_name carries {ch!r}, which no host name is "
+                    "spelled with")
             return name
     return None
 
