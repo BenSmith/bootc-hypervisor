@@ -399,7 +399,7 @@ class TestMinting(_MinterCase):
                 verify = subprocess.run(
                     ["openssl", "verify", "-CAfile",
                      str(egress_ca.ca_cert_path(self.state)), str(leaf.path)],
-                    capture_output=True, text=True)
+                    capture_output=True, text=True, check=False)
                 self.assertEqual(verify.returncode, 0,
                                  verify.stdout + verify.stderr)
         self.assertEqual(second.stats["hits"], 0)

@@ -397,7 +397,7 @@ def pem_leaf_facts(path: Path) -> tuple[float | None, str | None]:
         result = subprocess.run(
             ["openssl", "x509", "-in", str(path), "-noout", "-enddate",
              "-ext", "authorityKeyIdentifier"],
-            capture_output=True, text=True, timeout=10)
+            capture_output=True, text=True, timeout=10, check=False)
     except (OSError, subprocess.SubprocessError):
         return None, None
     if result.returncode != 0:
@@ -413,7 +413,7 @@ def pem_subject_key_id(path: Path) -> str | None:
         result = subprocess.run(
             ["openssl", "x509", "-in", str(path), "-noout",
              "-ext", "subjectKeyIdentifier"],
-            capture_output=True, text=True, timeout=10)
+            capture_output=True, text=True, timeout=10, check=False)
     except (OSError, subprocess.SubprocessError):
         return None
     if result.returncode != 0:
