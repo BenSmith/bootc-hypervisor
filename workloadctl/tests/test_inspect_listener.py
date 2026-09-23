@@ -3498,6 +3498,26 @@ class TestTargetNormalisation(unittest.TestCase):
         get to decide the origin shares it."""
         self.assertEqual(self.norm("/a;v=1/b"), "/a;v=1/b")
 
+    def test_a_dot_segment_with_params_is_refused(self):
+        """`..;` is `..` to a servlet container and a name to the matcher:
+        `/v1/files/..;/admin` matched `/v1/files/*` and reached `/admin`."""
+        for target in ("/v1/files/..;/admin", "/v1/files/..;x=1/admin",
+                       "/a/.;/b", "/a/%2e%2e;/b"):
+            with self.assertRaises(RequestUnreadable, msg=target):
+                self.norm(target)
+
+    def test_a_backslash_is_refused_literal_or_encoded(self):
+        """Some origins read it as a separator, and then `..\\..\\admin` is a
+        traversal the resolution never saw."""
+        for target in ("/v1/files/..\\..\\admin", "/v1/files/%5c..%5cadmin",
+                       "/a%5Cb"):
+            with self.assertRaises(RequestUnreadable, msg=target):
+                self.norm(target)
+
+    def test_params_on_an_ordinary_segment_are_still_carried(self):
+        self.assertEqual(self.norm("/a/..x;v=1/b"), "/a/..x;v=1/b")
+        self.assertEqual(self.norm("/a/b;jsessionid=1"), "/a/b;jsessionid=1")
+
     def test_a_fragment_is_refused(self):
         with self.assertRaises(RequestUnreadable):
             self.norm("/a#b")

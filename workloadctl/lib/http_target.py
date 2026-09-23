@@ -153,7 +153,11 @@ def normalise_path(path):
 
     `;params` are left inside their segment for the same reason: stripping them
     is a legacy reading, and this listener does not get to decide that the
-    origin shares it.
+    origin shares it. Except on a dot segment: `..;x` is `..` to an origin
+    that strips params and a name to one that does not, which is the
+    encoded slash's two readings again, and is refused for the same reason.
+    So is a backslash, literal or encoded, which some origins read as a
+    separator.
     """
     if "#" in path:
         raise RequestUnreadable(
@@ -161,7 +165,33 @@ def normalise_path(path):
             "to an origin, and a parser that keeps it addresses a different "
             "resource from one that drops it")
     path, sep, query = path.partition("?")
-    return _resolve_dot_segments(_decode_unreserved(path)) + sep + query
+    path = _decode_unreserved(path)
+    _refuse_second_readings(path)
+    return _resolve_dot_segments(path) + sep + query
+
+
+def _refuse_second_readings(path):
+    """Refuse a decoded path some origins read as another path.
+
+    Each case is one the dot-segment resolution below cannot settle,
+    because it is a separator or a dot segment only to SOME origins: a
+    backslash (IIS and the frameworks that copy it), and a dot segment
+    carrying `;params` (the servlet containers, which strip params before
+    resolving). Matched as written, `/allowed/..;/admin` passes a pattern
+    for `/allowed/*` and reaches `/admin` there.
+    """
+    if "\\" in path or "%5C" in path:
+        raise RequestUnreadable(
+            "a backslash in the request target: some origins read it as a "
+            "separator and some as a byte, so it is not a path this can "
+            "authorise")
+    for segment in path.split("/"):
+        name, semi, _params = segment.partition(";")
+        if semi and name in (".", ".."):
+            raise RequestUnreadable(
+                f"the segment {segment!r} is a dot segment to an origin that "
+                "strips ;params and a name to one that does not, so it is "
+                "not a path this can authorise")
 
 
 def normalise_target(method, target, scheme=SCHEME_HTTP):
