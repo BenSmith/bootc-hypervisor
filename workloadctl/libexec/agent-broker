@@ -41,7 +41,7 @@ Usage:
                --host HOST=CREDENTIAL [--host ...]
                [--placeholder CREDENTIAL=TEXT] [--auth-header CREDENTIAL=FIELD]
                [--auth-format CREDENTIAL=FORMAT]
-               [--tls-cert PATH --tls-key PATH] [--relax-x509-strict]
+               [--relax-x509-strict]
                [--connect-timeout SECONDS] [--read-timeout SECONDS]
 """
 
@@ -58,8 +58,7 @@ from broker_profiles import (
     BrokerConfigError, build_profiles, listen_endpoint,
 )
 from broker_server import (
-    CONNECT_TIMEOUT, READ_TIMEOUT, Handler, Server, guest_tls_context, log,
-    upstream_tls_context,
+    CONNECT_TIMEOUT, READ_TIMEOUT, Handler, Server, log, upstream_tls_context,
 )
 from peer_identity import overflow_uid, unmappable_uids, userns_maps_everything
 
@@ -95,10 +94,6 @@ def parse_args(argv):
                    metavar="CREDENTIAL=FORMAT",
                    help="the header value, with {secret} substituted "
                         "(default {secret})")
-    p.add_argument("--tls-cert", metavar="PATH",
-                   help="serve HTTPS to the guest with this certificate "
-                        "(docs/agent-broker.md §8)")
-    p.add_argument("--tls-key", metavar="PATH")
     p.add_argument("--relax-x509-strict", action="store_true",
                    help="clear VERIFY_X509_STRICT for a private upstream CA "
                         "missing keyUsage; verification otherwise unchanged")
@@ -106,10 +101,7 @@ def parse_args(argv):
                    metavar="SECONDS")
     p.add_argument("--read-timeout", type=float, default=READ_TIMEOUT,
                    metavar="SECONDS")
-    args = p.parse_args(argv[1:])
-    if bool(args.tls_cert) != bool(args.tls_key):
-        p.error("--tls-cert and --tls-key go together")
-    return args
+    return p.parse_args(argv[1:])
 
 
 def main(argv=None):
@@ -157,10 +149,7 @@ def main(argv=None):
     Handler.read_timeout = args.read_timeout
 
     server = Server(addr, Handler)
-    server.guest_tls_context = guest_tls_context(args.tls_cert, args.tls_key)
-    scheme = "https" if server.guest_tls_context else "http"
-
-    log("listening", url=f"{scheme}://{addr[0]}:{addr[1]}",
+    log("listening", url=f"http://{addr[0]}:{addr[1]}",
         workload=args.name, uid=args.caller_uid,
         hosts=len(Handler.profiles), unknown="refused")
     try:

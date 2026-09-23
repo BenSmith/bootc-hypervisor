@@ -5,8 +5,8 @@ request's Host up in the profile table, and forwards one buffered request at a t
 the fixed upstream with the credential attached -- the decisions themselves
 are broker_request's. Server bounds the pool: a global ceiling, a small
 shared ceiling for every caller that is not the one served, and an in-flight
-body budget, each refusing fast rather than queueing. The two TLS contexts at the end are the program's:
-verified TLS out to the provider, and optional TLS in from the guest.
+body budget, each refusing fast rather than queueing. The TLS context at the
+end is verified TLS out to the provider.
 
 Used by `libexec/agent-broker`. Installed to /usr/libexec/workloadctl/broker_server.py.
 """
@@ -98,14 +98,6 @@ class Handler(http.server.BaseHTTPRequestHandler):
         Identity is settled here, once per connection rather than once per
         request: it is what the caller's ceiling is applied to, and what
         _identify then uses without scanning the socket tables again.
-
-        TLS to the guest is also completed here rather than on the listening
-        socket. Wrapping the listener makes accept() perform the handshake, so
-        a caller that connected and then stalled it would block the accept
-        loop for every other caller -- a denial of service that
-        MAX_CONCURRENT does not bound, because the connection never reaches a
-        handler at all. In this thread the same stall costs one slot and
-        expires on the timeout.
         """
         try:
             self.caller_uid = peer_uid(local_endpoints(self.request),
@@ -115,17 +107,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
         served = (self.caller_uid is not None
                   and self.caller_uid != self.overflow
                   and self.caller_uid == self.workload_uid)
-        if not self.server.admit_caller(self.request, self.caller_uid,
-                                        served=served):
+        if not self.server.admit_caller(self.request, served=served):
             raise CallerCeilingExceeded(
                 self.caller_uid if served else FOREIGN)
-
-        guest_ctx = self.server.guest_tls_context
-        if guest_ctx is not None:
-            # Before wrapping: the handshake happens inside wrap_socket, and an
-            # unarmed socket would let it hang for as long as the caller likes.
-            self.request.settimeout(self.timeout)
-            self.request = guest_ctx.wrap_socket(self.request, server_side=True)
         super().setup()
 
     def log_message(self, fmt, *args):
@@ -437,10 +421,6 @@ class Server(socketserver.ThreadingMixIn, http.server.HTTPServer):
     allow_reuse_address = True
     block_on_close = False
 
-    # TLS to the guest, when configured. Applied per connection in
-    # Handler.setup(), never to the listening socket -- see that method.
-    guest_tls_context = None
-
     _slots = None  # set in __init__; a semaphore, not a count
 
     def __init__(self, *args, **kwargs):
@@ -449,8 +429,8 @@ class Server(socketserver.ThreadingMixIn, http.server.HTTPServer):
         # sandbox in a loop can exhaust host threads.
         self._slots = threading.BoundedSemaphore(MAX_CONCURRENT)
         self._lock = threading.Lock()
-        self._held = {}       # caller bucket -> live connections
-        self._caller_of = {}  # accepted socket -> its caller's bucket
+        self._held = {True: 0, False: 0}  # served, foreign: live connections
+        self._served = {}     # accepted socket -> whether its caller is served
         self._inflight = 0    # request-body bytes reserved across all handlers
 
     def reserve_body(self, length):
@@ -477,7 +457,7 @@ class Server(socketserver.ThreadingMixIn, http.server.HTTPServer):
         with self._lock:
             self._inflight -= length
 
-    def admit_caller(self, request, uid, *, served=False):
+    def admit_caller(self, request, *, served=False):
         """Count this connection against its caller's ceiling, or refuse it.
 
         The served caller is bounded by the pool alone; every other caller
@@ -503,14 +483,12 @@ class Server(socketserver.ThreadingMixIn, http.server.HTTPServer):
         whose wrong answer is the wrong credential, so it is not a change to
         make casually.
         """
-        bucket = uid if served else FOREIGN
         limit = MAX_CONCURRENT if served else MAX_FOREIGN
         with self._lock:
-            held = self._held.get(bucket, 0)
-            if held >= limit:
+            if self._held[served] >= limit:
                 return False
-            self._held[bucket] = held + 1
-            self._caller_of[request] = bucket
+            self._held[served] += 1
+            self._served[request] = served
         return True
 
     def process_request(self, request, client_address):
@@ -534,16 +512,9 @@ class Server(socketserver.ThreadingMixIn, http.server.HTTPServer):
         """Called by ThreadingMixIn once the handler thread is done."""
         try:
             with self._lock:
-                if request in self._caller_of:
-                    bucket = self._caller_of.pop(request)
-                    remaining = self._held.get(bucket, 1) - 1
-                    if remaining > 0:
-                        self._held[bucket] = remaining
-                    else:
-                        # Drop the key rather than leave a zero: the map is
-                        # keyed by uid and would otherwise grow one entry per
-                        # workload that ever called, for the life of the process.
-                        self._held.pop(bucket, None)
+                served = self._served.pop(request, None)
+                if served is not None:
+                    self._held[served] -= 1
             super().shutdown_request(request)
         finally:
             self._slots.release()
@@ -551,7 +522,7 @@ class Server(socketserver.ThreadingMixIn, http.server.HTTPServer):
     def handle_error(self, request, client_address):
         """One line for the expected, a traceback for the rest.
 
-        A stalled TLS handshake, a caller that vanishes mid-request, a caller
+        A stalled read, a caller that vanishes mid-request, a caller
         over its ceiling: ordinary here, saying nothing an operator can act on,
         and the default's full traceback for each one is itself a log-flooding
         lever for a hostile sandbox.
@@ -564,9 +535,7 @@ class Server(socketserver.ThreadingMixIn, http.server.HTTPServer):
         if isinstance(exc, CallerCeilingExceeded):
             log("deny", reason="too-many-connections-for-caller",
                 caller=exc.bucket)
-        elif isinstance(exc, (OSError, ssl.SSLError, TimeoutError, EOFError)):
-            # ssl.SSLError and TimeoutError are OSError subclasses; named for
-            # the reader, not for the isinstance.
+        elif isinstance(exc, (OSError, EOFError)):
             log("connection-error", error=type(exc).__name__)
         else:
             super().handle_error(request, client_address)
@@ -588,21 +557,4 @@ def upstream_tls_context(relax_x509_strict=False):
         # not a path to an unverified connection. Fix the CA instead where you
         # can; this exists for the case where you cannot.
         ctx.verify_flags &= ~ssl.VERIFY_X509_STRICT
-    return ctx
-
-
-def guest_tls_context(cert, key):
-    """HTTPS to the guest, or None: for agents that refuse to send credentials
-    over plaintext. One cert for one name, signed by a private CA the guest
-    trusts -- internal PKI, not interception.
-
-    Applied per connection in Handler.setup(); the listening socket stays
-    plain. Wrapping the listener is the obvious spelling and it moves the
-    handshake into accept(), where one caller stalling it stops the broker
-    accepting anything at all.
-    """
-    if not (cert and key):
-        return None
-    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-    ctx.load_cert_chain(cert, key)
     return ctx

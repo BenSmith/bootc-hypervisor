@@ -373,14 +373,10 @@ Consequences worth knowing:
 > the guest is told about, which is a weaker shape than the per-workload
 > instance the guest cannot name.
 
-## 8. TLS to the guest, and the private-CA trap
+## 8. The private-CA trap
 
-`--tls-cert`/`--tls-key` serve HTTPS to the guest for clients that refuse
-plaintext credentials. One certificate for one name from a private CA the
-guest trusts — internal PKI, not interception. Most deployments will not need
-it, and the generator never emits the flags: they exist for a hand-written
-unit, and the inspector→broker leg they would protect is loopback (ADR 007
-decision 7).
+The broker's only caller is the inspector, over loopback (ADR 007 decision
+7), so it serves plain HTTP and has no flag for TLS to its caller.
 
 `--relax-x509-strict` exists for one specific failure: Python 3.13+ enables
 `VERIFY_X509_STRICT`, which enforces RFC 5280's requirement that a CA
@@ -508,7 +504,6 @@ The flags, and what each one is:
 | `--placeholder CREDENTIAL=TEXT` | the fiction the guest holds; the broker refuses to start if it equals the decrypted material | when the block states it |
 | `--auth-header CREDENTIAL=FIELD` | the provider's header; default `x-api-key` | when the block states it |
 | `--auth-format CREDENTIAL=FORMAT` | the header value with `{secret}` substituted; default `{secret}` | when the block states it |
-| `--tls-cert PATH --tls-key PATH` | HTTPS to the guest (§8) | never |
 | `--relax-x509-strict` | §8 | never |
 | `--connect-timeout S`, `--read-timeout S` | the upstream leg; defaults 15 and 900 | never |
 
