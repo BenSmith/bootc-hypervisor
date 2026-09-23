@@ -60,6 +60,7 @@ from inspect_http import serve_one_request
 import inspect_tls
 from inspect_tls import serve_tls
 from egress_record import (
+    DROP_BROKER_UNREACHABLE,
     DROP_INTERNAL,
     DROP_NOT_H2,
     DROP_NOT_HTTP,
@@ -526,12 +527,16 @@ class TestADeniedNameIsBumpedRatherThanClosed(TerminationCase):
 
 class TestAnUnverifiableUpstreamIsBumpedWithA502(TerminationCase):
 
-    def test_the_502_names_the_host_and_the_reason(self):
+    def test_the_502_is_generic_and_the_journal_names_the_reason(self):
         """A failed handshake here would be an opaque error to the guest.
 
-        The 502 body is the ONLY place the reason reaches it, so the reason has
-        to be in the body -- and it has to point at the HOST's anchors, because
-        that is where the operator's one-line fix lives.
+        The guest gets a readable 502 and nothing more: the reason names this
+        host's trust anchors, which is a fact about the sandbox. It goes to
+        the journal, and it has to point at the HOST's anchors, because that
+        is where the operator's one-line fix lives.
+
+        The body used to carry the sentence, which handed a guest the words
+        "THIS HOST's trust anchors" on its first unverifiable request.
         """
         mod = _mod()
         origin = _Origin(self.origin_pem)
@@ -541,10 +546,12 @@ class TestAnUnverifiableUpstreamIsBumpedWithA502(TerminationCase):
         listener, out = self._listener(mod, origin, trust=False)
         response, error = self._exchange(listener, origin)
         self.assertIsNone(error)
-        self.assertIn(b"502 Bad Gateway", response)
-        self.assertIn(b"localhost", response)
-        self.assertIn(b"could not be verified", response)
-        self.assertIn(b"THIS HOST", response)
+        self.assertTrue(response.endswith(b"\r\n\r\nBad Gateway\n"),
+                        response)
+        log = out.getvalue()
+        self.assertIn("localhost", log)
+        self.assertIn("could not be verified", log)
+        self.assertIn("THIS HOST", log)
         status = listener.status()
         self.assertEqual(
             status["drop_reasons"]["upstream certificate unverified"], 1)
@@ -587,9 +594,9 @@ class TestTheClientCertificateCase(TerminationCase):
         deliver a legible 502 rather than to make the race go away, which
         nothing here can do.
 
-        What must hold either way: the guest is told, the sentence points at
-        splice, and the request never reaches an origin that will refuse the
-        session.
+        What must hold either way: the guest is given a 502, the journal's
+        sentence points at splice, and the request never reaches an origin
+        that will refuse the session.
         """
         mod = _mod()
         origin = _Origin(self.origin_pem, client_ca=self.origin_ca_cert)
@@ -597,9 +604,10 @@ class TestTheClientCertificateCase(TerminationCase):
         listener, out = self._listener(mod, origin)
         response, error = self._exchange(listener, origin)
         self.assertIsNone(error)
-        self.assertIn(b"502 Bad Gateway", response)
-        self.assertIn(b"client certificate", response)
-        self.assertIn(b'tls = "splice"', response)
+        self.assertTrue(response.endswith(b"\r\n\r\nBad Gateway\n"),
+                        response)
+        self.assertIn("client certificate", out.getvalue())
+        self.assertIn('tls = "splice"', out.getvalue())
         self.assertEqual(origin.requests, [],
                          "the request must not reach an origin that will "
                          "refuse the session")
@@ -1762,19 +1770,23 @@ class TestAnHttp2HostIsRelayedAtFrameLevel(TerminationCase):
                          "did not select h2")
         self.assertIn("bump", out.getvalue())
 
-    def test_the_refusal_names_both_ways_out(self):
+    def test_the_journal_names_both_ways_out(self):
         """Drop the entry, or move the host to splice. Neither is guessable
-        from `502`, and this is the only place either is said."""
+        from `502`, and the journal line is the only place either is said:
+        the guest's body names neither list."""
         mod = _mod()
         origin = self._http11_origin()
-        listener, _ = self._listener(mod, origin, http2=("localhost",))
+        listener, out = self._listener(mod, origin, http2=("localhost",))
         back, _, _ = self._h2_exchange(
             listener, origin, H2_PREFACE + self.SETTINGS)
         text = back.decode("latin-1")
         self.assertIn("502", text)
-        self.assertIn("did not select h2", text)
-        self.assertIn("[[vm.network.http2]]", text)
-        self.assertIn("[[vm.network.splice]]", text)
+        self.assertNotIn("http2", text)
+        self.assertNotIn("splice", text)
+        log = out.getvalue()
+        self.assertIn("did not select h2", log)
+        self.assertIn("[[vm.network.http2]]", log)
+        self.assertIn("[[vm.network.splice]]", log)
 
     def test_the_answer_is_readable_because_the_guest_leg_stays_http11(self):
         """A refusal is an HTTP/1.1 response, so the guest leg must not have
@@ -1965,10 +1977,10 @@ class TestARedialThatCannotBeVerifiedSaysSo(TerminationCase):
         mod = _mod()
         listener, response, log = self._drive(
             mod, ssl.SSLCertVerificationError("self-signed certificate"))
-        self.assertIn(b"502", response)
-        self.assertIn(b"could not be verified", response,
-                      "the guest's 502 is the only place the reason lands")
-        self.assertIn(b"THIS HOST", response,
+        self.assertTrue(response.endswith(b"\r\n\r\nBad Gateway\n"),
+                        response)
+        self.assertIn("could not be verified", log)
+        self.assertIn("THIS HOST", log,
                       "an operator has to be told whose trust store to fix")
         self.assertIn(DROP_UNVERIFIED, log)
         self.assertNotIn(DROP_UNREACHABLE, log)
@@ -1987,7 +1999,47 @@ class TestARedialThatCannotBeVerifiedSaysSo(TerminationCase):
         mod = _mod()
         listener, response, log = self._drive(
             mod, ConnectionRefusedError("connection refused"))
-        self.assertIn(b"502", response)
-        self.assertIn(b"could not be reached", response)
+        self.assertTrue(response.endswith(b"\r\n\r\nBad Gateway\n"),
+                        response)
+        self.assertIn("could not be reached", log)
         self.assertIn(DROP_INTERNAL, log)
         self.assertNotIn(DROP_UNVERIFIED, log)
+
+    def test_a_dead_broker_is_named_in_the_journal_not_to_the_guest(self):
+        """The broker sentence names the broker, SELinux and audit.log --
+        three facts about the sandbox. It reached the guest's body once."""
+        mod = _mod()
+        with unittest.mock.patch.object(
+                Policy, "credential_for", return_value="api-key"):
+            _, response, log = self._drive(
+                mod, ConnectionRefusedError("connection refused"))
+        self.assertTrue(response.endswith(b"\r\n\r\nBad Gateway\n"),
+                        response)
+        self.assertIn(DROP_BROKER_UNREACHABLE, log)
+        self.assertIn("credential broker did not answer", log)
+        self.assertIn("audit.log", log)
+
+    def test_a_head_that_never_left_is_named_in_the_journal(self):
+        """The client-certificate sentence names `tls = "splice"`."""
+        mod = _mod()
+        up = unittest.mock.Mock()
+        up.sock.sendall.side_effect = ConnectionResetError("reset")
+        listener, out = self._listener(mod, _Origin(self.origin_pem))
+        ours, guest = _tcp_pair()
+        self.addCleanup(ours.close)
+        self.addCleanup(guest.close)
+        ours.settimeout(3.0)
+        guest.settimeout(3.0)
+        guest.sendall(b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        with unittest.mock.patch.object(
+                listener.inspection.upstream, "connection_for",
+                return_value=up):
+            serve_one_request(
+                listener.inspection,
+                _Stream(ours), ours, _where("tls").request(1),
+                {}, True)
+        response = guest.recv(65536)
+        self.assertTrue(response.endswith(b"\r\n\r\nBad Gateway\n"),
+                        response)
+        self.assertIn("was not delivered", out.getvalue())
+        self.assertIn('tls = "splice"', out.getvalue())

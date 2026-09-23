@@ -841,26 +841,30 @@ class TestTheRefusalWhenTheBrokerIsDown(_BrokerRig):
         self.assertEqual(snap["drop_reasons"][DROP_UNREACHABLE], 0)
         self.assertIn(DROP_BROKER_UNREACHABLE, log)
 
-    def test_the_guest_is_told_the_request_was_not_sent(self):
+    def test_the_guest_gets_a_502_that_names_nothing(self):
         """A silent close is the one outcome this listener argues against at
         length: a guest told 'no' by a dead socket cannot tell a refusal from
-        the host being down. It gets a 502, and the body says the request did
-        NOT reach the origin -- which matters more here than on a dead
-        upstream, because a retry against the same host will do the same thing
-        until an operator touches the host."""
+        the host being down. It gets a 502 -- and a generic body, because the
+        sentence below names the broker, its unit and SELinux, and a guest
+        that could read it would learn it is sandboxed. The body once carried
+        that sentence."""
         self._serve(self._policy([BROKERED]), _GET_BROKERED, refuse=True)
         self.assertIn(b"502", self.answer)
-        self.assertIn(b"NOT sent", self.answer)
+        self.assertTrue(self.answer.endswith(b"\r\n\r\nBad Gateway\n"),
+                        self.answer)
 
     def test_the_operator_is_pointed_at_the_unit_and_at_audit_log(self):
         """The AVC and a broker that failed to start are indistinguishable
         from here -- the counter cannot tell them apart and neither can the
-        502. So the sentence names both remedies rather than asserting one,
-        per this module's own 'a policy gap wearing a network error's
-        clothes'."""
-        self._serve(self._policy([BROKERED]), _GET_BROKERED, refuse=True)
-        self.assertIn(b"broker.service", self.answer)
-        self.assertIn(b"audit.log", self.answer)
+        502. So the journal's sentence names both remedies rather than
+        asserting one, per this module's own 'a policy gap wearing a network
+        error's clothes', and says the request was NOT sent: a retry will do
+        the same thing until an operator touches the host."""
+        log, _, _, _ = self._serve(
+            self._policy([BROKERED]), _GET_BROKERED, refuse=True)
+        self.assertIn("NOT sent", log)
+        self.assertIn("broker.service", log)
+        self.assertIn("audit.log", log)
 
     def test_the_failed_host_is_not_re_resolved(self):
         """dial_failure_reason exists to tell the wildcard trap from a dead

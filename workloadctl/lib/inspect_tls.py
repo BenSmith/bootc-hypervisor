@@ -30,8 +30,9 @@ BUMP-THEN-ANSWER
 Every refusal a terminated connection carries is delivered THROUGH a completed
 handshake, denials included: mint, complete the guest's handshake, then answer
 403 or 502 in plain HTTP. Failing the handshake instead gives the guest an
-opaque certificate error indistinguishable from the host being down, and the one
-place a reason can reach a guest inside a TLS session is a response body.
+opaque certificate error indistinguishable from the host being down. The
+answer is a status and a generic body; the reason is the operator's, and goes
+to the journal.
 """
 
 import socket
@@ -56,7 +57,7 @@ from http_framing import (
     RequestUnreadable, _Stream, is_http_request_start, send_response,
 )
 from http_target import SCHEME_HTTPS
-from inspect_http import POLICY_REFUSAL_BODY
+from inspect_http import POLICY_REFUSAL_BODY, UPSTREAM_FAILURE_BODY
 import inspect_http
 from tls_hello import HelloUnreadable, read_client_hello
 
@@ -210,10 +211,10 @@ def _serve_tls_inspect(insp, conn, where, host, allowed):
 
     EVERY OUTCOME IS BUMPED, denials included. A guest told "no" by a failed
     handshake is told nothing it can distinguish from the host being down;
-    told "no" by a 403 through a chain it trusts, it has the name, the
-    reason, and something to put in a log. That is the whole argument for
-    holding a CA at all, and it applies with more force to the refusals than
-    to the successes.
+    told "no" by a 403 or 502 through a chain it trusts, it knows it was
+    answered rather than cut off, and has something to put in a log. That is
+    the whole argument for holding a CA at all, and it applies with more
+    force to the refusals than to the successes.
     """
     upstream = None
     refusal = None            # (drop reason, status, phrase, body text)
@@ -433,7 +434,10 @@ def _serve_tls_inspect(insp, conn, where, host, allowed):
                                               status=status)
             insp.log(f"bump {where} host={host} status={status} "
                                 f"reason='{reason}: {text}'")
-            _bump_answer(tls_conn, status, phrase, text)
+            # The text is the operator's; the guest gets a generic body.
+            _bump_answer(tls_conn, status, phrase,
+                         POLICY_REFUSAL_BODY if status == 403
+                         else UPSTREAM_FAILURE_BODY)
             return
         insp.counters.record_termination()
         insp.log(f"terminate {where} host={host}"

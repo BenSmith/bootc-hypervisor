@@ -59,15 +59,22 @@ INTERIM_MAX = 32
 # applied to a tool-name prefix.
 POLICY_REFUSAL_BODY = "Forbidden"
 
+# The body every UPSTREAM failure shows the guest, for the same reason. The
+# sentence explaining one -- a broker that did not answer, a certificate this
+# host could not verify, a host that belongs in `splice` or out of `http2` --
+# is written for the operator and names the broker, the policy's lists and
+# this host's trust anchors: each of them a fact about the sandbox. It goes to
+# the journal line; the guest gets the status and this.
+UPSTREAM_FAILURE_BODY = "Bad Gateway"
+
 
 def serve_cleartext(insp, conn, where):
     """Authorise every request on this connection, and relay the ones that
     pass.
 
     Port 80. Two properties hold: a name that is on no list gets a real
-    403 naming it, and nothing reaches an upstream the policy did not
-    authorise. A guest is not configured to send its requests here; it is
-    redirected.
+    403, and nothing reaches an upstream the policy did not authorise. A
+    guest is not configured to send its requests here; it is redirected.
 
     Per REQUEST, not per connection. One connection carries many requests,
     each free to name a different host, so a decision taken once at the
@@ -291,8 +298,9 @@ def serve_request(insp, client, conn, where, upstreams, first, rec, *,
         insp.counters.record_drop(reason, req.host)
         rec.set(decision="drop", reason=reason, status=502)
         insp.log(f"drop {where} host={req.host} "
-                            f"reason='{reason}: {exc}'")
-        return _refuse(client, conn, req, 502, "Bad Gateway", text)
+                            f"reason='{reason}: {text}'")
+        return _refuse(client, conn, req, 502, "Bad Gateway",
+                       UPSTREAM_FAILURE_BODY)
     except OSError as exc:
         # THE BROKER LEG GETS ITS OWN REASON AND ITS OWN SENTENCE, and does
         # NOT go through dial_failure_reason: that helper re-resolves the
@@ -316,8 +324,9 @@ def serve_request(insp, client, conn, where, upstreams, first, rec, *,
         insp.counters.record_drop(reason, req.host)
         rec.set(decision="drop", reason=reason, status=502)
         insp.log(f"drop {where} host={req.host} "
-                            f"reason='{reason}: {exc}'")
-        return _refuse(client, conn, req, 502, "Bad Gateway", text)
+                            f"reason='{reason}: {text}'")
+        return _refuse(client, conn, req, 502, "Bad Gateway",
+                       UPSTREAM_FAILURE_BODY)
     if credential:
         # After the dial and not before it: a request whose broker never
         # answered carried no credential, and counting it above would
@@ -349,8 +358,8 @@ def serve_request(insp, client, conn, where, upstreams, first, rec, *,
             # held precisely so it can be told.
             #
             # IT IS ALSO WHERE A CLIENT-CERTIFICATE ORIGIN LANDS, SOMETIMES,
-            # and that is why the body names the possibility. Under TLS 1.3
-            # a CertificateRequest is answered after the handshake
+            # and that is why the journal line names the possibility. Under
+            # TLS 1.3 a CertificateRequest is answered after the handshake
             # completes, so the same origin either fails at the dial with
             # `CERTIFICATE_REQUIRED` -- named exactly, by
             # egress_upstream.tls_failure -- or resets the connection here, with
@@ -368,11 +377,8 @@ def serve_request(insp, client, conn, where, upstreams, first, rec, *,
             # reason.
             insp.counters.record_drop(DROP_RELAY_FAILED, req.host)
             rec.set(decision="drop", reason=DROP_RELAY_FAILED, status=502)
-            insp.log(f"drop {where} host={req.host} "
-                                f"reason='relay failed before the head was sent: "
-                                f"{exc}'")
-            return _refuse(
-                client, conn, req, 502, "Bad Gateway",
+            insp.log(
+                f"drop {where} host={req.host} reason='{DROP_RELAY_FAILED}: "
                 f"the request to {req.host} was not delivered: the "
                 f"upstream connection failed before its head could be "
                 f"sent ({exc}). If {req.host} requires a client "
@@ -381,7 +387,9 @@ def serve_request(insp, client, conn, where, upstreams, first, rec, *,
                 f"succeeded, leaving a reset rather than a named alert -- "
                 f"and it must then be spliced: set tls = \"splice\" for "
                 f"this workload so the guest's own handshake reaches "
-                f"{req.host}.")
+                f"{req.host}.'")
+            return _refuse(client, conn, req, 502, "Bad Gateway",
+                           UPSTREAM_FAILURE_BODY)
         if req.expects_continue:
             # AFTER policy, and by us. The natural implementation answers a
             # continue while reading the head, which grants it on a request

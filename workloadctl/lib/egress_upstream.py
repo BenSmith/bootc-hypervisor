@@ -267,10 +267,12 @@ def early_bytes(ssock):
 
 
 def tls_failure(host, exc):
-    """(drop reason, the sentence the guest is given) for a failed leg.
+    """(drop reason, the operator's sentence) for a failed leg.
 
-    THE 502 BODY IS THE ONLY PLACE A REASON REACHES THE GUEST, so it names
-    the host and what went wrong and nothing else about the certificate.
+    The sentence goes to the journal, not to the guest: it names this
+    host's trust anchors and the `splice` list, and a guest that could read
+    those would learn from one failed request that it is sandboxed. The
+    guest is given a bare 502 (inspect_http.UPSTREAM_FAILURE_BODY).
 
     THREE CASES, ONE OF THEM DISTINGUISHABLE. A TLS 1.3 server that requires
     a client certificate is named exactly. A TLS 1.2 one sends
