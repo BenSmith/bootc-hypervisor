@@ -159,11 +159,21 @@ def write_status(path: str, payload: dict) -> None:
     Failures are swallowed by the CALLER, not here: a status write that cannot
     land must never take down a listener that is otherwise serving the guest
     correctly, and the caller is where the log line for that belongs.
+
+    The file is 0600 whatever the umask: it names the hosts the workload
+    reached, which is the request record's content in summary, and the
+    record is 0600. The open mode is filtered by the umask; fchmod is not.
     """
     body = dict(payload)
     body["written_at"] = time.time()
     tmp = f"{path}.tmp"
-    with open(tmp, "w") as f:
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.fchmod(fd, 0o600)
+    except OSError:
+        os.close(fd)
+        raise
+    with open(fd, "w") as f:
         json.dump(body, f, indent=2, sort_keys=True)
         f.write("\n")
     os.replace(tmp, path)

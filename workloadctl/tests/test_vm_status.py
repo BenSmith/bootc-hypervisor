@@ -12,6 +12,7 @@ machine running the workload it was supposed to contain.
 import json
 import os
 import shutil
+import stat
 import tempfile
 import unittest
 from pathlib import Path
@@ -115,6 +116,20 @@ class TestTheStatusFile(unittest.TestCase):
     def test_it_leaves_no_temporary_file_behind(self):
         write_status(self.path, {"n": 1})
         self.assertEqual(os.listdir(self.dir), ["status.json"])
+
+    def test_it_is_the_owners_alone_whatever_the_umask(self):
+        """The file names the hosts the workload reached. Written with a
+        plain open() it took the umask's mode, 0644 under the usual one,
+        while the request record beside it was 0600. A temporary file
+        left by a crash is made 0600 too, not reused as it was."""
+        Path(self.path + ".tmp").write_text("")
+        os.chmod(self.path + ".tmp", 0o666)
+        old = os.umask(0)
+        try:
+            write_status(self.path, {"n": 1})
+        finally:
+            os.umask(old)
+        self.assertEqual(stat.S_IMODE(os.stat(self.path).st_mode), 0o600)
 
     def test_the_payload_is_not_mutated_by_the_write(self):
         """The caller's snapshot is live state in one of the two producers;
