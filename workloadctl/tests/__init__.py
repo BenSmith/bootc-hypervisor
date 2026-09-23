@@ -88,3 +88,20 @@ def script_env(**overrides):
     env["NO_COLOR"] = "1"
     env.update({key: str(value) for key, value in overrides.items()})
     return env
+
+
+def assert_bare_refusal(case, response, status, phrase):
+    """`response` is one refusal of ours that says nothing about us.
+
+    Checked field by field against what an origin's own refusal looks like:
+    the status line, a `Date`, no `Server`, and the reason phrase as the whole
+    body. Anything more in the body is a sentence of ours reaching the guest.
+    """
+    head, sep, body = response.partition(b"\r\n\r\n")
+    case.assertTrue(sep, f"no complete head in {response!r}")
+    lines = head.split(b"\r\n")
+    case.assertEqual(lines[0], f"HTTP/1.1 {status} {phrase}".encode())
+    names = {line.split(b":", 1)[0].strip().lower() for line in lines[1:]}
+    case.assertIn(b"date", names)
+    case.assertNotIn(b"server", names)
+    case.assertEqual(body, f"{phrase}\n".encode())

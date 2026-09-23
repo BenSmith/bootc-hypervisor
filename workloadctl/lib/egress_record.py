@@ -95,9 +95,9 @@ DROP_MISDIRECTED = "host does not match the server name"
 # Both strings begin "host does not match the server name" so a grep for the
 # reason still finds both, the convention `not HTTP` set one tier earlier.
 #
-# The guest is told the same thing either way -- a 421 naming the session's
-# name -- because the split is FOR THE OPERATOR and changing the body would
-# only tell the guest which of its guesses were on the list.
+# The guest is told the same thing either way -- a bare 421 -- because the
+# split is FOR THE OPERATOR and changing the answer would only tell the guest
+# which of its guesses were on the list.
 DROP_MISDIRECTED_LISTED = "host does not match the server name (allowlisted)"
 DROP_THROTTLED = "mint rationed"
 DROP_MINT_FAILED = "could not mint a leaf"

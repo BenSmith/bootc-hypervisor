@@ -379,7 +379,7 @@ def probe_cleartext(plain, origin, log):
     # "workloadctl: GET / is not permitted on <host> by this workload's egress
     # policy". That body made one refused request a reliable oracle for "you are
     # sandboxed" and what the sandbox was called, before the guest had inspected
-    # a single certificate, so it was stripped to a bare POLICY_REFUSAL_BODY.
+    # a single certificate, so it was stripped to the bare status phrase.
     # The rig kept demanding the name for one commit and failed here on the next
     # hardware run -- asserting the leak the change closed. Guarding the absence
     # is what keeps a future edit from putting it back.

@@ -31,8 +31,8 @@ Every refusal a terminated connection carries is delivered THROUGH a completed
 handshake, denials included: mint, complete the guest's handshake, then answer
 403 or 502 in plain HTTP. Failing the handshake instead gives the guest an
 opaque certificate error indistinguishable from the host being down. The
-answer is a status and a generic body; the reason is the operator's, and goes
-to the journal.
+answer is the status and its phrase alone; the reason is the operator's, and
+goes to the journal.
 """
 
 import socket
@@ -57,7 +57,6 @@ from http_framing import (
     RequestUnreadable, _Stream, is_http_request_start, send_response,
 )
 from http_target import SCHEME_HTTPS
-from inspect_http import POLICY_REFUSAL_BODY, UPSTREAM_FAILURE_BODY
 import inspect_http
 from tls_hello import HelloUnreadable, read_client_hello
 
@@ -250,11 +249,11 @@ def _serve_tls_inspect(insp, conn, where, host, allowed):
     if brokered:
         h2 = False
     if not allowed:
-        # Generic body, like every policy denial (POLICY_REFUSAL_BODY): the
-        # reason is the operator's, carried by the record_drop this refusal
-        # triggers, and is not handed to the guest.
+        # The reason is the operator's, carried by the journal line and the
+        # record_drop this refusal triggers, and is not handed to the guest.
         refusal = (DROP_NOT_ALLOWLISTED, 403, "Forbidden",
-                   POLICY_REFUSAL_BODY)
+                   (f"{host} matches no `hosts` pattern and no `policy` "
+                    f"entry"))
     elif brokered:
         pass  # no upstream leg at connection time; see above
     else:
@@ -434,10 +433,8 @@ def _serve_tls_inspect(insp, conn, where, host, allowed):
                                               status=status)
             insp.log(f"bump {where} host={host} status={status} "
                                 f"reason='{reason}: {text}'")
-            # The text is the operator's; the guest gets a generic body.
-            _bump_answer(tls_conn, status, phrase,
-                         POLICY_REFUSAL_BODY if status == 403
-                         else UPSTREAM_FAILURE_BODY)
+            # The text is the operator's; the guest gets the status alone.
+            _bump_answer(tls_conn, status, phrase)
             return
         insp.counters.record_termination()
         insp.log(f"terminate {where} host={host}"
@@ -453,7 +450,7 @@ def _serve_tls_inspect(insp, conn, where, host, allowed):
             pass
 
 
-def _bump_answer(tls_conn, status, phrase, text):
+def _bump_answer(tls_conn, status, phrase):
     """Deliver a refusal inside a handshake we just completed.
 
     The guest's request is read first and thrown away. Not for anything in
@@ -468,7 +465,7 @@ def _bump_answer(tls_conn, status, phrase, text):
         _Stream(tls_conn).read_head()
     except (RequestUnreadable, OSError):
         pass
-    send_response(tls_conn, status, phrase, text, close=True)
+    send_response(tls_conn, status, phrase, close=True)
 
 
 def wrap_guest(conn, leaf, alpn=UPSTREAM_ALPN):

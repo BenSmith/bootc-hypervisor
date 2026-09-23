@@ -23,7 +23,7 @@ import unittest
 import unittest.mock
 from pathlib import Path
 
-from tests import load_script
+from tests import assert_bare_refusal, load_script
 from inspect_document import (
     TLS_DEFAULT,
     hostname_match,
@@ -1639,6 +1639,35 @@ class TestPolicyGovernsIsAskedWhereThereIsNoRequest(unittest.TestCase):
         policy = self._policy(("a.example", ("GET",), ("/v1/only",)))
         self.assertTrue(policy.governs("a.example"))
         self.assertFalse(policy.permits("a.example", "POST", "/other"))
+
+
+class TestARefusalSaysNothingOfTheInspector(_CleartextRig):
+    """Every answer the cleartext plane writes itself is an origin's answer.
+
+    The body of a 400 was the parser's own sentence. A guest sending one
+    malformed request read "this listener is transparent" or "a version we
+    relay" and learnt that its traffic is inspected, before it had looked
+    at a certificate. The sentence is for the operator and goes to the
+    journal; the guest gets the status, its phrase and a `Date`.
+    """
+
+    def test_a_connect_gets_a_bare_400(self):
+        log, got, ups = self._run(
+            ["a.example"],
+            b"CONNECT a.example:443 HTTP/1.1\r\nHost: a.example:443\r\n\r\n")
+        self.assertEqual(ups, [])
+        assert_bare_refusal(self, got, 400, "Bad Request")
+        self.assertIn("transparent", log)
+
+    def test_a_request_with_no_host_gets_a_bare_400(self):
+        log, got, _ = self._run(["a.example"], b"GET / HTTP/1.1\r\n\r\n")
+        assert_bare_refusal(self, got, 400, "Bad Request")
+        self.assertIn("Host headers", log)
+
+    def test_an_unlisted_host_gets_a_bare_403(self):
+        _, got, _ = self._run(
+            ["a.example"], b"GET / HTTP/1.1\r\nHost: b.example\r\n\r\n")
+        assert_bare_refusal(self, got, 403, "Forbidden")
 
 
 class TestPolicyEnforcement(_CleartextRig):

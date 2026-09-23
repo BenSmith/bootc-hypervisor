@@ -19,6 +19,7 @@ request looks like once parsed (`http_request`), and the HTTP/2 check
 (`h2_framing`), which is framing too, of the shallowest kind.
 """
 
+import email.utils
 from typing import NamedTuple
 
 # The buffer size the relay moves in each direction, in bytes.
@@ -587,9 +588,12 @@ class _Discard:
                 f"a refused body over the {DRAIN_MAX}-byte drain ceiling")
 
 
-def http_response(status, reason, body_text, *, close):
-    body = body_text.encode()
+def http_response(status, reason, *, close):
+    """One refusal of ours, as an origin would write it: the status line,
+    a `Date`, and the reason phrase as the whole body."""
+    body = f"{reason}\n".encode()
     head = (f"HTTP/1.1 {status} {reason}\r\n"
+            f"Date: {email.utils.formatdate(usegmt=True)}\r\n"
             "Content-Type: text/plain; charset=utf-8\r\n"
             f"Content-Length: {len(body)}\r\n"
             f"Connection: {'close' if close else 'keep-alive'}\r\n"
@@ -615,15 +619,19 @@ def drain(client, framing):
     return True
 
 
-def send_response(conn, status, reason, text, *, close):
-    # NO TOOL NAME IN A GUEST-FACING BODY. A `workloadctl: ` prefix here
-    # would ride every refusal and announce -- in one refused request,
-    # before the guest inspected a single certificate -- that its egress
-    # is mediated and by what. The status line is an ordinary origin
-    # answer; the body is the only place an identity could leak, so it
-    # carries none. What an operator needs is in the journal and the
-    # per-request record, neither of which the guest can read.
+def send_response(conn, status, reason, *, close):
+    """Write one refusal to the guest, and nothing about why.
+
+    The body is the status's own phrase. This process's responses reach
+    the guest where an origin's would, so a sentence of ours in one -- a
+    parser's refusal, a session bound to another name, a tool name -- is
+    a guest learning in one request that its egress is mediated, and by
+    what, before it has looked at a single certificate. The reason is in
+    the journal line and the per-request record the caller writes, which
+    the guest cannot read. `Date` is there because every origin sends one,
+    and its absence would say the same thing.
+    """
     try:
-        conn.sendall(http_response(status, reason, f"{text}\n", close=close))
+        conn.sendall(http_response(status, reason, close=close))
     except OSError:
         pass

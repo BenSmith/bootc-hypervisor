@@ -272,7 +272,7 @@ def tls_failure(host, exc):
     The sentence goes to the journal, not to the guest: it names this
     host's trust anchors and the `splice` list, and a guest that could read
     those would learn from one failed request that it is sandboxed. The
-    guest is given a bare 502 (inspect_http.UPSTREAM_FAILURE_BODY).
+    guest is given a bare 502 (http_framing.send_response).
 
     THREE CASES, ONE OF THEM DISTINGUISHABLE. A TLS 1.3 server that requires
     a client certificate is named exactly. A TLS 1.2 one sends

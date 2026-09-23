@@ -48,24 +48,6 @@ from http_target import SCHEME_HTTP, redirect_target
 INTERIM_MAX = 32
 
 
-# The body every POLICY denial shows the guest: generic, and identical for the
-# not-allowlisted and the not-permitted case alike. The split between those two
-# is real and it is the OPERATOR'S -- it lives in the journal line and in the
-# per-request record's `reason` -- but a guest has no business learning it, or
-# even that there is a policy to be on the wrong side of. A body that named the
-# allowlist, the egress policy, or the tool would turn a single refused request
-# into a reliable "you are sandboxed" oracle, answerable before the guest looked
-# at one certificate; a bare status does not. See http_framing.send_response for the same reasoning
-# applied to a tool-name prefix.
-POLICY_REFUSAL_BODY = "Forbidden"
-
-# The body every UPSTREAM failure shows the guest, for the same reason. The
-# sentence explaining one -- a broker that did not answer, a certificate this
-# host could not verify, a host that belongs in `splice` or out of `http2` --
-# is written for the operator and names the broker, the policy's lists and
-# this host's trust anchors: each of them a fact about the sandbox. It goes to
-# the journal line; the guest gets the status and this.
-UPSTREAM_FAILURE_BODY = "Bad Gateway"
 
 
 def serve_cleartext(insp, conn, where):
@@ -195,7 +177,7 @@ def serve_request(insp, client, conn, where, upstreams, first, rec, *,
         # rather than by guessing at a name out of bytes we refused.
         rec.set(decision="drop", reason=DROP_UNREADABLE_REQUEST, status=400)
         insp.log(f"drop {where} reason='unreadable request: {exc}'")
-        send_response(conn, 400, "Bad Request", str(exc), close=True)
+        send_response(conn, 400, "Bad Request", close=True)
         return False
     if pinned_host is not None and req.host != pinned_host:
         # Not a policy refusal and deliberately not counted as one: the name
@@ -212,10 +194,7 @@ def serve_request(insp, client, conn, where, upstreams, first, rec, *,
             reason is DROP_MISDIRECTED_LISTED) else ""
         insp.log(f"drop {where} host={req.host} reason='host does not "
                             f"match the server name {pinned_host}{listed}'")
-        return _refuse(
-            client, conn, req, 421, "Misdirected Request",
-            f"this session was established for {pinned_host}, not "
-            f"{req.host}")
+        return _refuse(client, conn, req, 421, "Misdirected Request")
     if not insp.policy.admits(req.host):
         # A STATUS is speakable on 80, unlike 443 -- there is no session to
         # be inside, so the guest gets a real 403 rather than a connection
@@ -227,8 +206,7 @@ def serve_request(insp, client, conn, where, upstreams, first, rec, *,
         rec.request(req)
         rec.set(decision="drop", reason=DROP_NOT_ALLOWLISTED, status=403)
         insp.log(f"drop {where} host={req.host} reason='not allowlisted'")
-        return _refuse(
-            client, conn, req, 403, "Forbidden", POLICY_REFUSAL_BODY)
+        return _refuse(client, conn, req, 403, "Forbidden")
     if not insp.policy.permits(req.host, req.method, req.path):
         # A SECOND refusal and a second reason, never merged into the one
         # above -- FOR THE OPERATOR. The host IS allowlisted (written down on
@@ -243,8 +221,7 @@ def serve_request(insp, client, conn, where, upstreams, first, rec, *,
         rec.set(decision="drop", reason=DROP_NOT_PERMITTED, status=403)
         insp.log(f"drop {where} host={req.host} method={req.method} "
                             f"reason='not permitted by policy'")
-        return _refuse(
-            client, conn, req, 403, "Forbidden", POLICY_REFUSAL_BODY)
+        return _refuse(client, conn, req, 403, "Forbidden")
     # An HTTP/1.0 request is the one we tell the origin to close (see
     # rebuild_request), so its upstream is opened for this request alone
     # and is not put in the map for the next one to find.
@@ -299,8 +276,7 @@ def serve_request(insp, client, conn, where, upstreams, first, rec, *,
         rec.set(decision="drop", reason=reason, status=502)
         insp.log(f"drop {where} host={req.host} "
                             f"reason='{reason}: {text}'")
-        return _refuse(client, conn, req, 502, "Bad Gateway",
-                       UPSTREAM_FAILURE_BODY)
+        return _refuse(client, conn, req, 502, "Bad Gateway")
     except OSError as exc:
         # THE BROKER LEG GETS ITS OWN REASON AND ITS OWN SENTENCE, and does
         # NOT go through dial_failure_reason: that helper re-resolves the
@@ -325,8 +301,7 @@ def serve_request(insp, client, conn, where, upstreams, first, rec, *,
         rec.set(decision="drop", reason=reason, status=502)
         insp.log(f"drop {where} host={req.host} "
                             f"reason='{reason}: {text}'")
-        return _refuse(client, conn, req, 502, "Bad Gateway",
-                       UPSTREAM_FAILURE_BODY)
+        return _refuse(client, conn, req, 502, "Bad Gateway")
     if credential:
         # After the dial and not before it: a request whose broker never
         # answered carried no credential, and counting it above would
@@ -388,8 +363,7 @@ def serve_request(insp, client, conn, where, upstreams, first, rec, *,
                 f"and it must then be spliced: set tls = \"splice\" for "
                 f"this workload so the guest's own handshake reaches "
                 f"{req.host}.'")
-            return _refuse(client, conn, req, 502, "Bad Gateway",
-                           UPSTREAM_FAILURE_BODY)
+            return _refuse(client, conn, req, 502, "Bad Gateway")
         if req.expects_continue:
             # AFTER policy, and by us. The natural implementation answers a
             # continue while reading the head, which grants it on a request
@@ -629,7 +603,7 @@ def _binding_reason(insp, host):
     return DROP_MISDIRECTED
 
 
-def _refuse(client, conn, req, status, reason, text):
+def _refuse(client, conn, req, status, reason):
     """Answer a request we will not relay. True if the connection lives.
 
     The body is drained BEFORE the answer, or the connection is closed.
@@ -644,5 +618,5 @@ def _refuse(client, conn, req, status, reason, text):
     keep = not req.wants_close and not req.expects_continue
     if keep:
         keep = drain(client, req.framing)
-    send_response(conn, status, reason, text, close=not keep)
+    send_response(conn, status, reason, close=not keep)
     return keep

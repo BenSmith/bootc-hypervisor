@@ -36,7 +36,7 @@ import unittest
 import unittest.mock
 from pathlib import Path
 
-from tests import load_script
+from tests import assert_bare_refusal, load_script
 from egress_plane import TLS
 from inspect_document import VmPolicyEntry
 from inspect_policy import Policy
@@ -523,6 +523,49 @@ class TestADeniedNameIsBumpedRatherThanClosed(TerminationCase):
         self._exchange(listener, origin)
         self.assertEqual(len(minter.denials), 1)
         self.assertEqual(len(minter.working_set), 0)
+
+
+class TestABumpedRefusalSaysNothingOfTheInspector(TerminationCase):
+    """The refusals written inside a terminated session: a 421 for a name
+    the session was not minted for, and the bumped 403 and 502.
+
+    The 421 body named both names in a sentence of ours. The bumped
+    answers are the status's phrase already; all three now carry the
+    `Date` every origin sends.
+    """
+
+    def test_the_421_is_bare(self):
+        mod = _mod()
+        origin = _Origin(self.origin_pem)
+        self.addCleanup(origin.close)
+        listener, out = self._listener(mod, origin)
+        response, error = self._exchange(
+            listener, origin,
+            request=b"GET / HTTP/1.1\r\nHost: other.example\r\n"
+                    b"Connection: close\r\n\r\n")
+        self.assertIsNone(error)
+        assert_bare_refusal(self, response, 421, "Misdirected Request")
+        self.assertIn("other.example", out.getvalue())
+
+    def test_the_bumped_403_is_bare(self):
+        mod = _mod()
+        origin = _Origin(self.origin_pem)
+        self.addCleanup(origin.close)
+        listener, out = self._listener(mod, origin,
+                                       hosts=("nothing.example",))
+        response, error = self._exchange(listener, origin)
+        self.assertIsNone(error)
+        assert_bare_refusal(self, response, 403, "Forbidden")
+        self.assertIn("matches no `hosts` pattern", out.getvalue())
+
+    def test_the_bumped_502_is_bare(self):
+        mod = _mod()
+        origin = _Origin(self.origin_pem)
+        self.addCleanup(origin.close)
+        listener, _ = self._listener(mod, origin, trust=False)
+        response, error = self._exchange(listener, origin)
+        self.assertIsNone(error)
+        assert_bare_refusal(self, response, 502, "Bad Gateway")
 
 
 class TestAnUnverifiableUpstreamIsBumpedWithA502(TerminationCase):
