@@ -9,6 +9,7 @@ the builder's own output.
 """
 
 import io
+import tempfile
 import unittest
 from contextlib import redirect_stderr
 from pathlib import Path
@@ -17,11 +18,13 @@ from unittest import mock
 from egress_plane import CLEARTEXT, PLANES, TLS
 from egress_policy import (
     vm_inspect_policy,
+    vm_inspect_policy_text,
     inspect_policy_path,
     http2_hosts,
     vm_policy_entries,
 )
-from inspect_document import TLS_DEFAULT, policy_governs, policy_permits
+from inspect_document import TLS_DEFAULT, policy_governs
+from inspect_policy import load_policy
 from nft_elements import (
     inspect_cgroup, inspect_cgroup_command,
     inspect_cgroup_filter_command, inspect_dst_elements,
@@ -496,11 +499,21 @@ class TestPolicyComposition(unittest.TestCase):
     """§3's composition rule, which is the thing to get right.
 
     A host with any matching `policy` entry is governed by `policy` ALONE.
-    Membership in `hosts` allowlists it and contributes no rules.
+    Membership in `hosts` allowlists it and contributes no rules. The
+    permits questions are asked of the Policy the listener consults: each
+    one is rendered by vm_inspect_policy_text and read back by load_policy.
     """
 
     def _entries(self, *items):
         return vm_policy_entries({"policy": list(items)})
+
+    def _policy(self, *items, hosts=()):
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "inspect.json"
+            path.write_text(vm_inspect_policy_text(
+                {"tls": "inspect", "hosts": list(hosts),
+                 "policy": list(items)}))
+            return load_policy(path)
 
     def test_hosts_does_not_union_into_policy(self):
         """The reading a careless implementation falls into, and it silently
@@ -513,34 +526,36 @@ class TestPolicyComposition(unittest.TestCase):
         looks wrong, and the diff that introduced the wildcard looks like it
         ADDED access rather than removing a restriction.
         """
-        entries = self._entries({"host": "api.github.com",
-                                 "methods": ["GET", "POST"],
-                                 "paths": ["/repos/myorg/*"]})
-        self.assertTrue(policy_governs("api.github.com", entries))
-        self.assertFalse(
-            policy_permits("api.github.com", "GET", "/user", entries))
-        self.assertTrue(policy_permits(
-            "api.github.com", "GET", "/repos/myorg/thing", entries))
+        entry = {"host": "api.github.com", "methods": ["GET", "POST"],
+                 "paths": ["/repos/myorg/*"]}
+        self.assertTrue(policy_governs("api.github.com",
+                                       self._entries(entry)))
+        policy = self._policy(entry, hosts=["*.github.com"])
+        self.assertFalse(policy.permits("api.github.com", "GET", "/user"))
+        self.assertTrue(policy.permits(
+            "api.github.com", "GET", "/repos/myorg/thing"))
+        self.assertTrue(policy.permits("codeload.github.com", "GET", "/x"))
 
     def test_a_host_no_entry_matches_is_governed_by_nothing(self):
         """Step 3 of the algorithm: the caller falls back to `hosts`. The
         matcher says only that it has no rules of its own."""
         entries = self._entries({"host": "api.example.com"})
         self.assertEqual(policy_governs("cdn.example.com", entries), [])
+        policy = self._policy({"host": "api.example.com"},
+                              hosts=["cdn.example.com"])
+        self.assertTrue(policy.permits("cdn.example.com", "DELETE", "/x"))
+        self.assertFalse(policy.permits("other.example", "GET", "/"))
 
     def test_methods_and_paths_inside_one_entry_are_a_cross_product(self):
-        entries = self._entries({"host": "r.example",
-                                 "methods": ["GET", "POST"],
-                                 "paths": ["/v2/*", "/token"]})
+        policy = self._policy({"host": "r.example",
+                               "methods": ["GET", "POST"],
+                               "paths": ["/v2/*", "/token"]})
         for method in ("GET", "POST"):
             for path in ("/v2/x", "/token"):
-                self.assertTrue(
-                    policy_permits("r.example", method, path, entries),
-                    (method, path))
-        self.assertFalse(policy_permits("r.example", "DELETE", "/token",
-                                           entries))
-        self.assertFalse(policy_permits("r.example", "GET", "/other",
-                                           entries))
+                self.assertTrue(policy.permits("r.example", method, path),
+                                (method, path))
+        self.assertFalse(policy.permits("r.example", "DELETE", "/token"))
+        self.assertFalse(policy.permits("r.example", "GET", "/other"))
 
     def test_entries_union_so_reordering_cannot_change_what_is_allowed(self):
         """Union, not precedence, and that is what lets a reviewer approve an
@@ -551,35 +566,35 @@ class TestPolicyComposition(unittest.TestCase):
         b = {"host": "api.example.com", "methods": ["GET"],
              "paths": ["/v1/models", "/v1/models/*"]}
         for order in ((a, b), (b, a)):
-            entries = self._entries(*order)
-            self.assertTrue(policy_permits(
-                "api.example.com", "POST", "/v1/messages", entries))
-            self.assertTrue(policy_permits(
-                "api.example.com", "GET", "/v1/models/x", entries))
-            self.assertFalse(policy_permits(
-                "api.example.com", "POST", "/v1/models", entries))
+            policy = self._policy(*order)
+            self.assertTrue(policy.permits(
+                "api.example.com", "POST", "/v1/messages"))
+            self.assertTrue(policy.permits(
+                "api.example.com", "GET", "/v1/models/x"))
+            self.assertFalse(policy.permits(
+                "api.example.com", "POST", "/v1/models"))
 
     def test_there_is_no_way_to_subtract(self):
         """Looks like a bug and is not: a narrower entry cannot carve an
         exception out of a wider one. If a host needs a hole punched in it,
         the wide entry is what has to change."""
-        entries = self._entries(
+        policy = self._policy(
             {"host": "a.example", "methods": ["GET"], "paths": ["/v1/*"]},
             {"host": "a.example", "methods": ["GET"], "paths": ["/v1/public"]})
-        self.assertTrue(
-            policy_permits("a.example", "GET", "/v1/admin", entries))
+        self.assertTrue(policy.permits("a.example", "GET", "/v1/admin"))
 
     def test_host_patterns_union_too(self):
         """A specific entry does NOT override a general one -- the apex trap's
         sibling, and why `diagnose` has to print the effective rules per host
         rather than the file's entries."""
-        entries = self._entries(
-            {"host": "*.example.com", "methods": ["GET"], "paths": ["/*"]},
-            {"host": "api.example.com", "methods": ["POST"],
-             "paths": ["/v1/messages"]})
-        self.assertEqual(len(policy_governs("api.example.com", entries)), 2)
-        self.assertTrue(policy_permits(
-            "api.example.com", "GET", "/anything", entries))
+        items = ({"host": "*.example.com", "methods": ["GET"],
+                  "paths": ["/*"]},
+                 {"host": "api.example.com", "methods": ["POST"],
+                  "paths": ["/v1/messages"]})
+        self.assertEqual(
+            len(policy_governs("api.example.com", self._entries(*items))), 2)
+        self.assertTrue(self._policy(*items).permits(
+            "api.example.com", "GET", "/anything"))
 
     def test_case_sensitivity_is_per_field_and_paths_are_the_odd_one_out(self):
         """P1-3, from reading OpenSnitch's rule engine (.reference/opensnitch).
@@ -600,14 +615,14 @@ class TestPolicyComposition(unittest.TestCase):
         accept a request this policy refuses. Pinned in both directions so a
         "consistency" change that lowercased paths has to be a deliberate one.
         """
-        entries = self._entries({"host": "api.example.com",
-                                 "methods": ["GET"], "paths": ["/v1/*"]})
-        self.assertTrue(policy_permits(
-            "API.Example.COM", "get", "/v1/models", entries))
-        self.assertTrue(policy_permits(
-            "api.example.com.", "GET", "/v1/models", entries))
-        self.assertFalse(policy_permits(
-            "api.example.com", "GET", "/V1/models", entries))
+        policy = self._policy({"host": "api.example.com",
+                               "methods": ["GET"], "paths": ["/v1/*"]})
+        self.assertTrue(policy.permits(
+            "API.Example.COM", "get", "/v1/models"))
+        self.assertTrue(policy.permits(
+            "api.example.com.", "GET", "/v1/models"))
+        self.assertFalse(policy.permits(
+            "api.example.com", "GET", "/V1/models"))
 
     def test_an_absent_key_means_any_and_an_empty_one_would_mean_none(self):
         """None and () are different answers and the difference is §3's
@@ -617,8 +632,8 @@ class TestPolicyComposition(unittest.TestCase):
         entry, = vm_policy_entries({"policy": [{"host": "a.example"}]})
         self.assertIsNone(entry.methods)
         self.assertIsNone(entry.paths)
-        self.assertTrue(
-            policy_permits("a.example", "DELETE", "/anything", [entry]))
+        self.assertTrue(self._policy({"host": "a.example"}).permits(
+            "a.example", "DELETE", "/anything"))
 
     def test_the_document_carries_absent_keys_as_null(self):
         """JSON has a word for the difference, so the document uses it rather

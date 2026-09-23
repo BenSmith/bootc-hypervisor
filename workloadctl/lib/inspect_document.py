@@ -205,22 +205,6 @@ def policy_governs(host: str, entries) -> list[VmPolicyEntry]:
     return [e for e in entries if hostname_match(host, (e.host,))]
 
 
-def policy_permits(host: str, method: str, path: str, entries) -> bool:
-    """Whether the governing entries permit one request. Union, not precedence.
-
-    Every entry either permits something or does nothing, so REORDERING THE
-    FILE CANNOT CHANGE WHAT IS ALLOWED. Two consequences follow and both look
-    like bugs: there is no way to subtract -- a narrower entry cannot carve an
-    exception out of a wider one -- and a specific entry does not override a
-    general one.
-
-    The caller decides what an empty governing set means; this function is only
-    asked about a host some entry governs.
-    """
-    return any(e.permits(method, path)
-               for e in policy_governs(host, entries))
-
-
 # --- The keys the listener reads that are not lists, and the digest ---
 
 # How much of the digest an operator is shown. Twelve hex characters is enough

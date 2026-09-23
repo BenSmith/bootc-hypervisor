@@ -88,6 +88,12 @@ class Policy(NamedTuple):
         reading one wildcard in `hosts` written for an unrelated reason
         contributes "any method, any path" to every host it covers, silently
         removing the restriction somebody wrote a policy entry for.
+
+        Among the governing entries it is union, not precedence: every entry
+        permits something or does nothing, so REORDERING THE FILE CANNOT
+        CHANGE WHAT IS ALLOWED. Two consequences follow and both look like
+        bugs: a narrower entry cannot carve an exception out of a wider one,
+        and a specific entry does not override a general one.
         """
         governing = policy_governs(host, self.policy)
         if governing:

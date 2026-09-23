@@ -307,8 +307,3 @@ def redirect_target(location, scheme=SCHEME_HTTP):
         return host, normalise_path(path)
     except RequestUnreadable:
         return host, None
-
-
-def redirect_host(location, scheme=SCHEME_HTTP):
-    """The host a Location header names, or None when it names none."""
-    return redirect_target(location, scheme)[0]

@@ -45,8 +45,7 @@ from egress_ca import (
 )
 from tls_hello import HelloUnreadable, read_client_hello
 from http_target import (
-    SCHEME_HTTP, SCHEME_HTTPS, host_from_authority, redirect_host,
-    redirect_target,
+    SCHEME_HTTP, SCHEME_HTTPS, host_from_authority, redirect_target,
 )
 from h2_framing import H2_PREFACE
 from http_framing import (
@@ -996,13 +995,13 @@ class TestARedirectOffTheAllowlistIsNamedWhereBothNamesAreKnown(
         self.assertNotIn("redirected to", out.getvalue())
 
     def test_a_relative_location_names_no_host(self):
-        self.assertIsNone(redirect_host("/next"))
-        self.assertIsNone(redirect_host("//host-relative/x"))
+        self.assertIsNone(redirect_target("/next")[0])
+        self.assertIsNone(redirect_target("//host-relative/x")[0])
 
     def test_a_port_in_the_location_does_not_lose_the_name(self):
         """host_from_authority refuses a port the plane does not reach, which
         is right for authorising and wrong for reporting."""
-        self.assertEqual(redirect_host("https://cdn.elsewhere:8443/x"),
+        self.assertEqual(redirect_target("https://cdn.elsewhere:8443/x")[0],
                          "cdn.elsewhere")
 
     # --- rung 4 T8: the target its own policy entry will refuse ---
