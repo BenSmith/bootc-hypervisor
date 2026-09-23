@@ -604,6 +604,9 @@ class _FakeSocket:
     def recv(self, _n):
         return self._chunks.pop(0) if self._chunks else b""
 
+    def gettimeout(self):
+        return None                     # a blocking socket: no deadline
+
 
 class TestHostnameMatching(unittest.TestCase):
     """One matcher, shared with the cleartext plane and with the `hosts` list

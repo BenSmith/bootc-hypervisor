@@ -20,6 +20,7 @@ request looks like once parsed (`http_request`), and the HTTP/2 check
 """
 
 import email.utils
+import time
 from typing import NamedTuple
 
 # The buffer size the relay moves in each direction, in bytes.
@@ -155,7 +156,7 @@ class _Stream:
         out, self._buf = self._buf, b""
         return out
 
-    def _fill(self, timeout=None):
+    def _fill(self, timeout=None, *, idle=False):
         """One recv, appended to the buffer. False at a clean EOF.
 
         `timeout` overrides the socket's own for this ONE read and is restored
@@ -164,7 +165,7 @@ class _Stream:
         reaches its timeout raises ReadTimedOut rather than the generic
         RequestUnreadable, and the flag says which of the two waits it was --
         the caller's disposition differs, and the socket cannot be asked after
-        the fact.
+        the fact. `idle` says the wait was for a first byte.
         """
         if timeout is not None:
             previous = self.sock.gettimeout()
@@ -178,7 +179,7 @@ class _Stream:
             raise ReadTimedOut(
                 f"nothing was readable within "
                 f"{timeout if timeout is not None else self.sock.gettimeout()}s",
-                idle=timeout is not None) from None
+                idle=idle) from None
         except OSError as exc:
             raise RequestUnreadable(f"read failed: {exc}") from None
         finally:
@@ -190,7 +191,8 @@ class _Stream:
         self._buf += chunk
         return True
 
-    def read_head(self, max_bytes=MESSAGE_HEAD_MAX, idle_timeout=None):
+    def read_head(self, max_bytes=MESSAGE_HEAD_MAX, idle_timeout=None, *,
+                  whole=False):
         """A whole message head, or b"" if the peer closed cleanly first.
 
         The terminator is CRLFCRLF and only that. A bare-LF head is refused by
@@ -205,7 +207,15 @@ class _Stream:
         the decision timeout. One number for both would either cut keep-alive
         at five seconds or hand a dribbling peer a 128th of the ceiling for two
         minutes.
+
+        `whole` makes the socket's timeout bound the rest of the head as one
+        wait, from its first byte, rather than each read of it. Without it a
+        peer sending a byte inside every timeout holds its slot for as many
+        timeouts as MESSAGE_HEAD_MAX has bytes. Asked for on the guest's
+        reads; an origin's head is bounded by the idle timeout, like the
+        rest of its answer.
         """
+        deadline = None
         while True:
             idx = self._buf.find(b"\r\n\r\n")
             if idx != -1:
@@ -214,7 +224,22 @@ class _Stream:
             if len(self._buf) > max_bytes:
                 raise RequestUnreadable(
                     f"a message head over {max_bytes} bytes is not one we read")
-            if not self._fill(idle_timeout if not self._buf else None):
+            if not self._buf:
+                got = self._fill(idle_timeout, idle=idle_timeout is not None)
+            elif whole:
+                limit = self.sock.gettimeout()
+                if deadline is None and limit is not None:
+                    deadline = time.monotonic() + limit
+                left = None
+                if deadline is not None:
+                    left = deadline - time.monotonic()
+                    if left <= 0:
+                        raise ReadTimedOut(
+                            f"the head did not arrive whole within {limit}s")
+                got = self._fill(left)
+            else:
+                got = self._fill()
+            if not got:
                 if not self._buf:
                     return b""
                 raise RequestUnreadable("the connection closed mid-head")

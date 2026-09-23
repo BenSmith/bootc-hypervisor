@@ -141,7 +141,8 @@ def serve_request(insp, client, conn, where, upstreams, first, rec, *,
     conn.settimeout(egress_relay.CONNECTION_TIMEOUT)
     try:
         head = client.read_head(
-            idle_timeout=None if first else egress_relay.RELAY_IDLE_TIMEOUT)
+            idle_timeout=None if first else egress_relay.RELAY_IDLE_TIMEOUT,
+            whole=True)
     except ReadTimedOut as exc:
         if exc.idle:
             # Not a drop and not counted as one: an idle kept-alive

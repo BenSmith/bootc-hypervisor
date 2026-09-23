@@ -49,7 +49,8 @@ from http_target import (
 )
 from h2_framing import H2_PREFACE
 from http_framing import (
-    Framing, HTTP_METHOD_MAX, RequestUnreadable, _Stream, _is_count,
+    Framing, HTTP_METHOD_MAX, ReadTimedOut, RequestUnreadable, _Stream,
+    _is_count,
     is_http_request_start, request_framing, response_framing,
 )
 import egress_upstream
@@ -1284,6 +1285,64 @@ class TestThePeekLeavesTheHelloWhereItWas(unittest.TestCase):
         threading.Thread(target=rest, daemon=True).start()
         _, parsed = read_client_hello(ours, peek=True)
         self.assertEqual(parsed.server_name, "peek.example")
+
+
+class TestADribbledReadIsBoundedAsAWhole(unittest.TestCase):
+    """A peer that sends one byte inside every timeout never trips a
+    per-read bound, so the timeout has to bound the whole read: the hello
+    on the splice path, and a guest's request head."""
+
+    def _dribble(self, guest, data, every=0.05):
+        stop = threading.Event()
+
+        def run():
+            for i in range(len(data)):
+                if stop.wait(every):
+                    return
+                try:
+                    guest.sendall(data[i:i + 1])
+                except OSError:
+                    return
+
+        threading.Thread(target=run, daemon=True).start()
+        self.addCleanup(stop.set)
+
+    def test_a_dribbled_hello_on_the_splice_path_is_refused_in_time(self):
+        ours, guest = _tcp_pair()
+        self.addCleanup(ours.close)
+        self.addCleanup(guest.close)
+        ours.settimeout(0.3)
+        self._dribble(guest, bytes([0x16, 0x03, 0x01, 0x01, 0x2c])
+                     + b"\x01" + b"\x00" * 299)
+        started = time.monotonic()
+        with self.assertRaises(HelloUnreadable):
+            read_client_hello(ours)
+        self.assertLess(time.monotonic() - started, 1.0)
+        self.assertEqual(ours.gettimeout(), 0.3,
+                         "the socket's own timeout was not put back")
+
+    def test_a_dribbled_request_head_times_out_in_time(self):
+        ours, guest = _tcp_pair()
+        self.addCleanup(ours.close)
+        self.addCleanup(guest.close)
+        ours.settimeout(0.3)
+        self._dribble(guest, b"GET / HTTP/1.1\r\nHost: " + b"a" * 200)
+        started = time.monotonic()
+        with self.assertRaises(ReadTimedOut) as caught:
+            _Stream(ours).read_head(whole=True)
+        self.assertFalse(caught.exception.idle,
+                         "a head that was started is not an idle connection")
+        self.assertLess(time.monotonic() - started, 1.0)
+
+    def test_a_head_that_arrives_in_pieces_in_time_is_read(self):
+        ours, guest = _tcp_pair()
+        self.addCleanup(ours.close)
+        self.addCleanup(guest.close)
+        ours.settimeout(2.0)
+        self._dribble(guest, b"GET / HTTP/1.1\r\nHost: a\r\n\r\n",
+                      every=0.01)
+        head = _Stream(ours).read_head(whole=True)
+        self.assertTrue(head.endswith(b"\r\n\r\n"))
 
 
 class TestWhatCountsAsTheStartOfARequest(unittest.TestCase):

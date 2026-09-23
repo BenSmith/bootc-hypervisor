@@ -48,7 +48,7 @@ CLIENTHELLO_MAX = 16384
 # larger than one segment -- the default post-quantum hello is, at 1500 MTU
 # -- is routinely caught between its segments, so no progress means "wait",
 # not "refuse". The whole read is bounded by the socket's own timeout, taken
-# once for the hello rather than per peek, so a dribbling peer holds its
+# once for the hello rather than per read, so a dribbling peer holds its
 # slot for one timeout and no longer.
 PEEK_POLL = 0.01
 
@@ -230,10 +230,19 @@ def read_client_hello(conn, max_bytes=CLIENTHELLO_MAX, *, peek=False):
     and a parser that read only the first record would fail exactly the clients
     that are becoming the common case.
     """
-    # Only a peek waits on its own; a consuming read blocks in recv under
-    # the socket's timeout.
-    timeout = conn.gettimeout() if peek else None
+    # The socket's timeout bounds the WHOLE hello, not each read: a peer
+    # that dribbles a byte inside every timeout would otherwise hold its
+    # slot for as many timeouts as CLIENTHELLO_MAX has bytes.
+    timeout = conn.gettimeout()
     deadline = None if timeout is None else time.monotonic() + timeout
+    try:
+        return _read_client_hello(conn, max_bytes, peek, deadline)
+    finally:
+        if timeout is not None and not peek:
+            conn.settimeout(timeout)
+
+
+def _read_client_hello(conn, max_bytes, peek, deadline):
     raw = b""
     pos = 0          # how much of `raw` has been consumed as complete records
     body = b""       # handshake bytes, record framing stripped
@@ -267,7 +276,8 @@ def _recv_at_least(conn, raw, n, max_bytes, *, peek=False, deadline=None):
     than what we already had is the rest of the hello not having arrived yet
     (see PEEK_POLL): it is asked again until `deadline`, a monotonic time, and
     refused past it. A hello larger than the receive buffer ends the same
-    way, since no amount of waiting makes it fit.
+    way, since no amount of waiting makes it fit. A consuming read waits no
+    longer than what is left before `deadline`.
     """
     while len(raw) < n:
         if n > max_bytes:
@@ -277,6 +287,12 @@ def _recv_at_least(conn, raw, n, max_bytes, *, peek=False, deadline=None):
             if peek:
                 chunk = conn.recv(n, socket.MSG_PEEK | socket.MSG_WAITALL)
             else:
+                if deadline is not None:
+                    left = deadline - time.monotonic()
+                    if left <= 0:
+                        raise HelloUnreadable(
+                            "the ClientHello did not arrive whole in time")
+                    conn.settimeout(left)
                 chunk = conn.recv(READ_CHUNK)
         except OSError as exc:
             raise HelloUnreadable(f"read failed: {exc}") from None
