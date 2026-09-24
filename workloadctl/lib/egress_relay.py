@@ -35,9 +35,10 @@ Installed to /usr/libexec/workloadctl/egress_relay.py.
 """
 
 import selectors
+import ssl
+import time
 
 from http_framing import RELAY_CHUNK
-
 
 # The timeout on an accepted socket up to and including the decision, in
 # seconds. It bounds the ClientHello peek and the upstream connect, which are
@@ -46,70 +47,188 @@ from http_framing import RELAY_CHUNK
 # MAX_CONNECTIONS slots for nothing.
 CONNECTION_TIMEOUT = 5.0
 
-# The timeout both sockets carry once a connection is spliced, in seconds. It is
-# an IDLE bound, not a lifetime: the relay loop rearms it on every direction of
-# traffic, so a long download is fine and a tunnel nobody is using is not. It
+# The idle bound once a connection is spliced, in seconds, and the timeout both
+# sockets carry after it. It is an IDLE bound, not a lifetime: the relay loop
+# rearms it on every byte moved either way, so a long download is fine and a
+# tunnel nobody is using is not. It
 # must be larger than CONNECTION_TIMEOUT — the module docstring says why the
 # two cannot be one number.
 RELAY_IDLE_TIMEOUT = 120.0
+
+# What one direction may hold that its far side has not taken. Past it that
+# direction's sender is not read, so a peer that stops reading slows the
+# other rather than growing this process.
+RELAY_BUFFER = 4 * RELAY_CHUNK
+
+
+class _Direction:
+    """Bytes read from `src` and not yet written to `dst`, and which event
+    each side's last attempt was left waiting on.
+
+    A TLS read can need the socket writable and a TLS write can need it
+    readable, so the event is the one the engine asked for, not the one the
+    direction suggests.
+    """
+
+    def __init__(self, src, dst, check=None):
+        self.src, self.dst, self.check = src, dst, check
+        self.buf = bytearray()
+        # The chunk a TLS write was refused on: OpenSSL requires the retry
+        # to carry the same bytes.
+        self.inflight = None
+        self.read_on = selectors.EVENT_READ
+        self.write_on = selectors.EVENT_WRITE
+
+    def holding(self):
+        return bool(self.buf) or self.inflight is not None
+
+    def room(self):
+        return len(self.buf) < RELAY_BUFFER
+
+    def read(self):
+        """One read into the buffer: the bytes, b"" at the end of the
+        stream, or None when there was nothing to take yet."""
+        try:
+            data = self.src.recv(RELAY_CHUNK)
+        except ssl.SSLWantWriteError:
+            self.read_on = selectors.EVENT_WRITE
+            return None
+        except (ssl.SSLWantReadError, BlockingIOError):
+            self.read_on = selectors.EVENT_READ
+            return None
+        self.read_on = selectors.EVENT_READ
+        if data:
+            if self.check is not None:
+                # Before the buffer, so a stream this refuses does not
+                # reach the origin at all.
+                self.check(data)
+            self.buf += data
+        return data
+
+    def write(self):
+        """One write from the buffer. Whether any bytes moved."""
+        chunk = self.inflight or bytes(self.buf[:RELAY_CHUNK])
+        try:
+            sent = self.dst.send(chunk)
+        except ssl.SSLWantReadError:
+            self.inflight, self.write_on = chunk, selectors.EVENT_READ
+            return False
+        except (ssl.SSLWantWriteError, BlockingIOError):
+            self.inflight, self.write_on = chunk, selectors.EVENT_WRITE
+            return False
+        self.inflight, self.write_on = None, selectors.EVENT_WRITE
+        del self.buf[:sent]
+        return sent > 0
 
 
 def relay(client, upstream, on_client_bytes=None):
     """Move bytes both ways until either side closes or goes idle.
 
-    Both sockets are moved off the handshake timeout onto the idle one
-    first: up to here the numbers bounded a decision, and from here they
-    bound a tunnel.
+    Neither direction waits on the other. Each is read while its buffer has
+    room and written while it holds anything, so a peer that writes before
+    it reads -- an origin answering 401 or 413 to a large upload, a
+    WebSocket, a bidirectional h2 stream -- is read while it writes. A
+    relay that blocked in one direction's write never read the other, and
+    both peers and the relay waited out the idle timeout together. Two
+    threads are not the way out: a terminated connection's legs are TLS
+    engines, and one SSLSocket carries both directions of its leg.
+
+    A close in either direction ends the whole splice once what was already
+    read has been written, or the side it is for refuses it or goes idle.
+    Half-close forwarding would be more faithful to TCP, but it also keeps
+    a slot and a thread alive on a direction the guest has already
+    abandoned; the ceiling is the reason to prefer the simpler end. Idle
+    means no byte moved either way for RELAY_IDLE_TIMEOUT, and before a
+    close it raises TimeoutError if bytes were still waiting for a side
+    that stopped reading.
 
     `on_client_bytes`, when given, sees every byte read from `client`
     BEFORE it is forwarded, and may raise to end the relay. That ordering
     is what lets a check refuse a chunk without the origin seeing it; note
     that the h2 framing check can only make use of it for what it can spot
     WITHIN a chunk, which is less than it looks (see H2Framing). Only the
-    guest's
-    direction is offered, and that is a decision rather than an omission:
-    the origin is a name this workload allowlisted, reached over a fully
-    verified session, so checking its framing could only break a working
-    host on our own parser's opinion.
+    guest's direction is offered, and that is a decision rather than an
+    omission: the origin is a name this workload allowlisted, reached over
+    a fully verified session, so checking its framing could only break a
+    working host on our own parser's opinion.
     """
-    for s in (client, upstream):
-        s.settimeout(RELAY_IDLE_TIMEOUT)
-    peer = {client: upstream, upstream: client}
+    directions = (_Direction(client, upstream, on_client_bytes),
+                  _Direction(upstream, client))
     sel = selectors.DefaultSelector()
-    sel.register(client, selectors.EVENT_READ)
-    sel.register(upstream, selectors.EVENT_READ)
+    watching = {}
+    closing = False
+    moved_at = time.monotonic()
     try:
+        for s in (client, upstream):
+            s.setblocking(False)
         while True:
+            holding = any(d.holding() for d in directions)
+            if closing and not holding:
+                return
+            idle = time.monotonic() - moved_at
+            if idle >= RELAY_IDLE_TIMEOUT:
+                if holding and not closing:
+                    raise TimeoutError(
+                        f"no byte moved for {RELAY_IDLE_TIMEOUT:.0f}s with "
+                        f"bytes still to write")
+                return
+            reading = [d for d in directions if not closing and d.room()]
+            events = {client: 0, upstream: 0}
+            for d in reading:
+                events[d.src] |= d.read_on
+            for d in directions:
+                if d.holding():
+                    events[d.dst] |= d.write_on
+            _watch(sel, watching, events)
             # BYTES INSIDE A TLS ENGINE ARE INVISIBLE TO select(). A record
             # that has been read off the kernel and decrypted leaves nothing
-            # for the kernel to report, so a relay that only ever selected
-            # would sit idle holding a complete frame until the idle timeout
-            # cut it. Reachable on the terminated plane in two ways: a
+            # for the kernel to report, so a side holding some is ready
+            # without it. Reachable on the terminated plane in two ways: a
             # `101` handing an upgraded TLS connection to this loop, and an
             # [[vm.network.http2]] host, where BOTH legs are TLS and every
             # frame arrives through an engine.
-            buffered = [s for s in (client, upstream)
-                        if getattr(s, "pending", None) and s.pending()]
-            if buffered:
-                ready = buffered
-            else:
-                events = sel.select(timeout=RELAY_IDLE_TIMEOUT)
-                if not events:
-                    return                  # idle: nothing either way
-                ready = [key.fileobj for key, _ in events]
-            for sock in ready:
-                data = sock.recv(RELAY_CHUNK)
-                if data and on_client_bytes is not None and sock is client:
-                    # Before the forward, so a stream this refuses does not
-                    # reach the origin at all.
-                    on_client_bytes(data)
-                if not data:
-                    # A close in either direction ends the whole splice.
-                    # Half-close forwarding would be more faithful to TCP,
-                    # but it also keeps a slot and a thread alive on a
-                    # direction the guest has already abandoned; the
-                    # ceiling is the reason to prefer the simpler end.
-                    return
-                peer[sock].sendall(data)
+            ready = {d.src for d in reading
+                     if getattr(d.src, "pending", None) and d.src.pending()}
+            timeout = 0 if ready else RELAY_IDLE_TIMEOUT - idle
+            ready |= {key.fileobj for key, _ in sel.select(timeout)}
+            for d in directions:
+                moved = False
+                if d.src in ready and d in reading and not closing:
+                    data = d.read()
+                    if data == b"":
+                        closing = True
+                    elif data:
+                        moved = True
+                if d.holding() and (d.dst in ready or moved):
+                    try:
+                        moved = d.write() or moved
+                    except OSError:
+                        if not closing:
+                            raise
+                        # The side that closed will take nothing more.
+                        return
+                if moved:
+                    moved_at = time.monotonic()
     finally:
         sel.close()
+        for s in (client, upstream):
+            try:
+                s.settimeout(RELAY_IDLE_TIMEOUT)
+            except OSError:
+                pass
+
+
+def _watch(sel, watching, events):
+    """Bring the selector's registrations to `events`, a mask per socket;
+    a socket with none is unregistered."""
+    for sock, mask in events.items():
+        now = watching.get(sock, 0)
+        if mask == now:
+            continue
+        if not mask:
+            sel.unregister(sock)
+        elif not now:
+            sel.register(sock, mask)
+        else:
+            sel.modify(sock, mask)
+        watching[sock] = mask
