@@ -76,8 +76,9 @@ MAX_CONNECTIONS = 128
 
 # The ceiling on connections whose caller is still being looked up. Separate
 # from MAX_CONNECTIONS so that a caller refused as foreign never holds a
-# serving slot, and small because a lookup takes milliseconds: past it a
-# connection is refused, like one over the other ceiling.
+# serving slot, and small because a lookup takes milliseconds. At it the
+# loop stops accepting, so a flood of foreign callers queues the workload's
+# connections in the kernel rather than having them refused.
 MAX_IDENTIFYING = 32
 
 
@@ -107,7 +108,7 @@ class Ceiling:
 
     def __init__(self, limit):
         self._limit = limit
-        self._lock = threading.Lock()
+        self._lock = threading.Condition()
         self._held = 0
         self.rejected = 0
 
@@ -146,6 +147,14 @@ class Ceiling:
             self._held -= 1
             if refused:
                 self.rejected += 1
+            self._lock.notify()
+
+    def wait_for_room(self, timeout):
+        """Whether a slot is free, waiting up to `timeout` seconds for
+        one."""
+        with self._lock:
+            return self._lock.wait_for(lambda: self._held < self._limit,
+                                       timeout)
 
 
 class Listener:
@@ -195,6 +204,8 @@ class Listener:
                 except InterruptedError:
                     continue
                 for key, _ in events:
+                    if not self._identifying.wait_for_room(_ACCEPT_POLL):
+                        break
                     try:
                         conn, peer = key.fileobj.accept()
                     except OSError as exc:

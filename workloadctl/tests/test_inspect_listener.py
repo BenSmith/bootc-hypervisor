@@ -4094,24 +4094,38 @@ class TestCallerIdentity(unittest.TestCase):
                 listener, _conn, _log = self._handled(_mod(), caller)
                 self.assertEqual(listener._identifying.held, 0)
 
-    def test_past_the_identifying_bound_a_connection_is_refused(self):
-        """Bounded like everything else a caller can multiply: refused and
-        counted, never queued."""
-        local = ("198.18.0.1", CLEARTEXT.inspect_port)
-        out = io.StringIO()
-        listener = Listener([_listener_with(local)], out)
-        listener._identifying = Ceiling(0)
-        conn = _mock_conn()
-        with unittest.mock.patch.object(inspect_listener, "peer_caller",
-                                        side_effect=AssertionError(
-                                            "looked up past the bound")):
-            listener._handle(conn, ("192.0.2.1", 1024),
-                             _listener_with(local))
-        self.assertIn("connection ceiling reached", out.getvalue())
-        conn.close.assert_called()
-        self.assertEqual(listener.rejected, 1)
-        self.assertEqual(
-            listener.status()["drop_reasons"][DROP_CEILING], 1)
+    def test_past_the_identifying_bound_the_loop_stops_accepting(self):
+        """Refused there, any local uid could get the workload's connections
+        refused by keeping the lookups busy. Left in the kernel's queue, a
+        connection is accepted once a slot comes back."""
+        srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.addCleanup(srv.close)
+        srv.bind(("127.0.0.1", 0))
+        srv.listen(4)
+        client = socket.create_connection(srv.getsockname())
+        self.addCleanup(client.close)
+        listener = Listener([srv], io.StringIO())
+        listener._identifying = Ceiling(1)
+        self.assertTrue(listener._identifying.admit())
+        handled = threading.Event()
+
+        def handle(conn, *_args):
+            conn.close()
+            handled.set()
+
+        loop = _REAL_THREAD(target=listener.accept_loop, daemon=True)
+        with unittest.mock.patch.object(listener, "_handle",
+                                        side_effect=handle):
+            loop.start()
+            self.assertFalse(handled.wait(0.5),
+                             "accepted with every identifying slot held")
+            listener._identifying.release()
+            self.assertTrue(handled.wait(5.0),
+                            "not accepted once a slot came back")
+            listener.stop()
+            loop.join(5)
+        self.assertFalse(loop.is_alive())
+        self.assertEqual(listener.rejected, 0)
 
     def test_the_check_runs_before_the_ceiling(self):
         """A foreign caller must not be able to spend a slot the workload
