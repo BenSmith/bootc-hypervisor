@@ -113,6 +113,11 @@ def parse_request(head, scheme=SCHEME_HTTP):
         raise RequestUnreadable(f"{version!r} is not a version we relay")
     if not method or any(c not in _TOKEN_CHARS for c in method):
         raise RequestUnreadable(f"method {method!r} is not a token")
+    # Methods are case-sensitive. The policy matches them uppercased and the
+    # framing knows HEAD by its spelling, so a `head` would be permitted as
+    # HEAD and framed as something else.
+    if method != method.upper():
+        raise RequestUnreadable(f"method {method!r} is not uppercase")
     target, authority = normalise_target(method, target, scheme)
     if authority is None:
         hosts = _get_all(headers, "host")

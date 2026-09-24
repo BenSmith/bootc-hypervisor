@@ -1995,6 +1995,20 @@ class TestPolicyEnforcement(_CleartextRig):
         self.assertEqual(dialled, [],
                          "a refused request must never reach an origin")
 
+    def test_a_lowercase_method_is_refused_before_the_policy(self):
+        """The policy compares methods uppercased; the framing knows HEAD by
+        its spelling. A `head` the policy permits as HEAD would be framed as
+        a request whose response has a body, and wait on one that never
+        comes."""
+        for method in ("head", "get", "Get"):
+            with self.subTest(method=method):
+                _, sent, dialled = self._run(
+                    [], self._get("/v2/thing", method=method), (_OK,),
+                    policy=self._policy(
+                        [], ("a.example", ("GET", "HEAD"), ("/v2/*",))))
+                self.assertIn(b"400", sent)
+                self.assertEqual(dialled, [])
+
     def test_a_path_no_entry_permits_is_a_403(self):
         log, sent, dialled = self._run(
             [], self._get("/admin"),
