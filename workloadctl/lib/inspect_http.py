@@ -24,9 +24,9 @@ in, the upstream pool it is sent down, and the log.
 import ssl
 
 from egress_record import (
-    DROP_BROKER_UNREACHABLE, DROP_MISDIRECTED, DROP_MISDIRECTED_LISTED,
-    DROP_NOT_ALLOWLISTED, DROP_NOT_PERMITTED, DROP_RELAY_FAILED,
-    DROP_TIMED_OUT, DROP_UNREADABLE_REQUEST, Record,
+    DROP_BROKER_UNREACHABLE, DROP_CLIENT_CERT, DROP_MISDIRECTED,
+    DROP_MISDIRECTED_LISTED, DROP_NOT_ALLOWLISTED, DROP_NOT_PERMITTED,
+    DROP_RELAY_FAILED, DROP_TIMED_OUT, DROP_UNREADABLE_REQUEST, Record,
 )
 from egress_relay import relay
 import egress_relay
@@ -47,6 +47,11 @@ from inspect_scope import quoted
 # driven by the far end: without it an allowlisted host can hold a guest's
 # connection, and one of MAX_CONNECTIONS slots, with interim heads alone.
 INTERIM_MAX = 32
+
+
+class _ClientCertDemanded(Exception):
+    """The origin's answer to a head already sent was a demand for a
+    client certificate. The message is the operator's sentence."""
 
 
 
@@ -371,6 +376,14 @@ def serve_request(insp, client, conn, where, upstreams, first, rec, *,
             # so there is one definition of what the origin said.
             insp.counters.record_credential_unauthorized()
         return keep
+    except _ClientCertDemanded as exc:
+        # The origin refused the session before reading anything, so the
+        # guest is answered as the dial answers it; closed, since its body
+        # has already gone up.
+        insp.drop(where, DROP_CLIENT_CERT, exc, host=req.host, rec=rec,
+                  answered=502)
+        send_response(conn, 502, "Bad Gateway", close=True)
+        return False
     except (RequestUnreadable, OSError) as exc:
         # Overwrites the `forward` set above. `status` survives if a head
         # had already come back, which tells a relay that failed before the
@@ -409,7 +422,17 @@ def _relay_response(insp, up, client, conn, req, where="", rec=None):
     """
     interim = 0
     while True:
-        head = up.read_head()
+        try:
+            head = up.read_head()
+        except RequestUnreadable as exc:
+            # A TLS 1.3 origin requiring a client certificate names it here
+            # when its alert was slower than the dial's early read. Only
+            # this read is asked: a guest can send any alert on its own leg.
+            if isinstance(exc.__cause__, ssl.SSLError):
+                reason, text = tls_failure(req.host, exc.__cause__)
+                if reason == DROP_CLIENT_CERT:
+                    raise _ClientCertDemanded(text) from exc
+            raise
         if not head:
             raise RequestUnreadable("the upstream closed before answering")
         start, headers = _split_response_head(head)

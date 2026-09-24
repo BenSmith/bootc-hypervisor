@@ -62,11 +62,13 @@ import inspect_tls
 from inspect_tls import serve_tls
 from egress_record import (
     DROP_BROKER_UNREACHABLE,
+    DROP_CLIENT_CERT,
     DROP_INTERNAL,
     DROP_NOT_H2,
     DROP_NOT_HTTP,
     DROP_NOT_HTTP_POLICY,
     DROP_NOT_PERMITTED,
+    DROP_RELAY_FAILED,
     DROP_TIMED_OUT,
     DROP_UNREACHABLE,
     DROP_UNREADABLE_REQUEST,
@@ -232,6 +234,16 @@ def _tcp_pair():
     ours, _ = server.accept()
     server.close()
     return ours, guest
+
+
+def _certificate_required():
+    """The TLS 1.3 alert an origin requiring a client certificate sends, as
+    the ssl module raises it."""
+    alert = ssl.SSLError(
+        1, "[SSL: TLSV13_ALERT_CERTIFICATE_REQUIRED] tlsv13 alert "
+           "certificate required")
+    alert.reason = "TLSV13_ALERT_CERTIFICATE_REQUIRED"
+    return alert
 
 
 @unittest.skipUnless(_have_openssl(), "openssl is not installed")
@@ -625,10 +637,11 @@ class TestTheClientCertificateCase(TerminationCase):
 
         TWO DISPOSITIONS, BOTH LEGITIMATE, AND THE TEST ASSERTS THE DISJUNCTION.
         Under TLS 1.3 the CertificateRequest is answered after the handshake
-        succeeds, so the demand can surface either as an SSLError on the dial --
-        `CERTIFICATE_REQUIRED`, named exactly -- or as a reset when the head is
-        written, with nothing left to read the reason from. Which one happens is
-        decided inside the peer's stack.
+        succeeds, so the demand can surface as an SSLError on the dial --
+        `CERTIFICATE_REQUIRED`, named exactly -- or, once the head is written,
+        as the same alert on the first read or as a reset, with nothing left
+        to read the reason from. Which one happens is decided inside the
+        peer's stack; the two alerts are one reason and the reset the other.
 
         Asserting only the first is what this test used to do, and it failed
         about one run in thirty as a result. That read as flakiness; it was not.
@@ -636,7 +649,8 @@ class TestTheClientCertificateCase(TerminationCase):
         relay's handler closed the connection instead of refusing it -- so the
         race was hiding a real defect, and the fix was to make BOTH branches
         deliver a legible 502 rather than to make the race go away, which
-        nothing here can do.
+        nothing here can do. The alert on the first read was a third branch
+        with the same defect, and this test reported it as the same flake.
 
         What must hold either way: the guest is given a 502, the journal's
         sentence points at splice, and the request never reaches an origin
@@ -2160,3 +2174,65 @@ class TestARedialThatCannotBeVerifiedSaysSo(TerminationCase):
                         response)
         self.assertIn("was not delivered", out.getvalue())
         self.assertIn('tls = \\"splice\\"', out.getvalue())
+
+    def test_an_alert_on_the_first_read_is_answered_and_named(self):
+        """The head went up and the alert is what the first read finds.
+
+        This arm closed the guest's connection with nothing on it and filed
+        the demand, named exactly, as `relay failed`: the empty response
+        the client-certificate test reported once in ten to thirty runs,
+        whenever the origin's alert was slower than the dial's early read.
+        The alert reaches the handler only as the read failure's cause.
+        """
+        mod = _mod()
+        sock = unittest.mock.Mock()
+        sock.recv.side_effect = _certificate_required()
+        listener, out = self._listener(mod, unittest.mock.Mock())
+        ours, guest = _tcp_pair()
+        self.addCleanup(ours.close)
+        self.addCleanup(guest.close)
+        ours.settimeout(3.0)
+        guest.settimeout(3.0)
+        guest.sendall(b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        with unittest.mock.patch.object(
+                listener.inspection.upstream, "connection_for",
+                return_value=_Stream(sock)):
+            keep = serve_one_request(
+                listener.inspection,
+                _Stream(ours), ours, _where("tls").request(1),
+                {}, True)
+        # As its caller would, so a missing answer reads as b"".
+        ours.close()
+        response = guest.recv(65536)
+        sock.sendall.assert_called_once()
+        self.assertFalse(keep)
+        self.assertTrue(response.endswith(b"\r\n\r\nBad Gateway\n"),
+                        response)
+        self.assertIn(b"Connection: close", response)
+        self.assertIn("requires a client certificate", out.getvalue())
+        reasons = listener.status()["drop_reasons"]
+        self.assertEqual(reasons[DROP_CLIENT_CERT], 1)
+        self.assertEqual(reasons[DROP_RELAY_FAILED], 0)
+
+    def test_the_same_alert_on_the_guests_leg_is_a_relay_failure(self):
+        """The client-certificate sentence tells the operator to splice the
+        host, which ends inspection of it, and a guest can send any alert
+        it likes on its own leg. One read while its body is copied up is
+        the guest's, and never files the origin's demand."""
+        mod = _mod()
+        guest = unittest.mock.Mock()
+        guest.recv.side_effect = [
+            (b"POST / HTTP/1.1\r\nHost: localhost\r\n"
+             b"Content-Length: 10\r\n\r\n"),
+            _certificate_required()]
+        listener, out = self._listener(mod, unittest.mock.Mock())
+        with unittest.mock.patch.object(
+                listener.inspection.upstream, "connection_for",
+                return_value=unittest.mock.Mock()):
+            serve_one_request(
+                listener.inspection, _Stream(guest), guest,
+                _where("tls").request(1), {}, True)
+        reasons = listener.status()["drop_reasons"]
+        self.assertEqual(reasons[DROP_CLIENT_CERT], 0)
+        self.assertEqual(reasons[DROP_RELAY_FAILED], 1)
+        self.assertNotIn('tls = \\"splice\\"', out.getvalue())

@@ -185,7 +185,8 @@ class _Stream:
                 f"{timeout if timeout is not None else self.sock.gettimeout()}s",
                 idle=idle) from None
         except OSError as exc:
-            raise RequestUnreadable(f"read failed: {exc}") from None
+            # Chained, so a TLS alert can still be told by its reason.
+            raise RequestUnreadable(f"read failed: {exc}") from exc
         finally:
             if timeout is not None:
                 self.sock.settimeout(previous)
