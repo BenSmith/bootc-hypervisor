@@ -316,7 +316,7 @@ def make_ca():
     os.makedirs(CA_DIR, exist_ok=True)
     run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
          "-keyout", CA_KEY, "-out", CA_CERT, "-days", "1",
-         "-subj", f"/CN=workloadctl egress CA ({NAME})",
+         "-subj", f"/CN=egress CA ({NAME})",
          "-addext", "basicConstraints=critical,CA:TRUE",
          "-addext", "keyUsage=critical,keyCertSign"])
     os.chmod(CA_KEY, 0o600)

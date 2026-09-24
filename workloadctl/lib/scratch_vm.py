@@ -194,12 +194,12 @@ write_files:
 # below.
 #
 # write_files (append to the list above):
-#   - path: /etc/pki/ca-trust/source/anchors/workloadctl-egress.crt
+#   - path: /etc/pki/ca-trust/source/anchors/egress-ca.crt
 #     permissions: '0644'
 #     owner: root:root
 #     encoding: b64
 #     content: ${WORKLOADCTL_VM_EGRESS_CA_B64}
-#   - path: /usr/local/share/ca-certificates/workloadctl-egress.crt
+#   - path: /usr/local/share/ca-certificates/egress-ca.crt
 #     permissions: '0644'
 #     owner: root:root
 #     encoding: b64
@@ -207,11 +207,11 @@ write_files:
 #   - path: /etc/environment
 #     append: true
 #     content: |
-#       SSL_CERT_FILE=/usr/local/share/ca-certificates/workloadctl-egress.crt
-#       NODE_EXTRA_CA_CERTS=/usr/local/share/ca-certificates/workloadctl-egress.crt
-#       REQUESTS_CA_BUNDLE=/usr/local/share/ca-certificates/workloadctl-egress.crt
-#       GIT_SSL_CAINFO=/usr/local/share/ca-certificates/workloadctl-egress.crt
-#       PIP_CERT=/usr/local/share/ca-certificates/workloadctl-egress.crt
+#       SSL_CERT_FILE=/usr/local/share/ca-certificates/egress-ca.crt
+#       NODE_EXTRA_CA_CERTS=/usr/local/share/ca-certificates/egress-ca.crt
+#       REQUESTS_CA_BUNDLE=/usr/local/share/ca-certificates/egress-ca.crt
+#       GIT_SSL_CAINFO=/usr/local/share/ca-certificates/egress-ca.crt
+#       PIP_CERT=/usr/local/share/ca-certificates/egress-ca.crt
 #
 # runcmd (add as an item to the `runcmd:` list AT THE END OF THIS FILE, never as
 # a second `runcmd:` key -- see below):

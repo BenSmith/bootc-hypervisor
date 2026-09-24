@@ -109,8 +109,9 @@ def denial_dir(state_dir) -> Path:
 
 def ca_subject(name: str) -> str:
     """The CA's subject. Names the workload, because an operator reading a
-    certificate error inside a guest needs to know which CA it came from."""
-    return f"/CN=workloadctl egress CA ({name})"
+    certificate error inside a guest needs to know which CA it came from. No
+    product name: the guest reads it as the issuer of every leaf."""
+    return f"/CN=egress CA ({name})"
 
 
 def ca_openssl_argv(name: str, key_path, cert_path, *, now: float) -> list[str]:

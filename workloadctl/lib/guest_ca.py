@@ -19,7 +19,7 @@ Installed to /usr/libexec/workloadctl/guest_ca.py.
 # variables below name the FILE directly rather than relying on either, because
 # the whole point of the block is to work in a guest whose distribution we do
 # not choose.
-CA_BUNDLE_PATH = "/usr/local/share/ca-certificates/workloadctl-egress.crt"
+CA_BUNDLE_PATH = "/usr/local/share/ca-certificates/egress-ca.crt"
 
 
 # The environment variables that point a guest's HTTP clients at that bundle.

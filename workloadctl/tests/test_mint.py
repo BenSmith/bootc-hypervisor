@@ -142,7 +142,7 @@ class TestTheMintedLeaf(unittest.TestCase):
         cls._tmp.cleanup()
 
     def test_it_is_issued_by_this_workloads_ca(self):
-        self.assertIn("workloadctl egress CA",
+        self.assertIn("egress CA",
                       _certificate(self.leaf_crt, "-issuer"))
 
     def test_the_subject_is_empty(self):
