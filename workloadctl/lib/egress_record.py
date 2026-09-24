@@ -401,7 +401,9 @@ class Record:
 # refusal costs the guest almost nothing -- pipelined down one kept-alive
 # connection, a guest writes megabytes a second into a file on the host's
 # disk. Past the cap the lines are counted as write failures instead, so the
-# loss is visible and the disk is not the guest's to fill.
+# loss is visible and the disk is not the guest's to fill. Refusal lines
+# stop at three quarters of it: a guest that floods refusals must not leave
+# no room to record the requests that were let through.
 RECORD_MAX_BYTES = 512 * 1024 * 1024
 
 
@@ -433,6 +435,7 @@ class RequestLog:
                  max_bytes=RECORD_MAX_BYTES):
         self._path = None if path is None else str(path)
         self._max_bytes = max_bytes
+        self._drop_max_bytes = max_bytes * 3 // 4
         self._size = 0
         self._out = out
         self._on_failure = on_failure
@@ -446,7 +449,8 @@ class RequestLog:
         # exactly what the logrotate snippet's `delaycompress` is for -- the
         # two are a pair.
         self._reopen = False
-        self._warned = False
+        # Which kinds of failure have warned: each once per file.
+        self._warned = set()
 
     def reopen(self):
         """Ask for a reopen. Async-signal-safe: one assignment, no I/O."""
@@ -471,14 +475,20 @@ class RequestLog:
                 # partial write atomic -- the lock is what keeps one record on
                 # one line, and it is needed for the reopen regardless.
                 data = line.encode()
-                over = self._size + len(data) > self._max_bytes
+                refusal = record.get("decision") == "drop"
+                cap = self._drop_max_bytes if refusal else self._max_bytes
+                over = self._size + len(data) > cap
                 if not over:
                     os.write(self._fd, data)
                     self._size += len(data)
-            if over:
-                self._fail(f"{self._path} reached its cap of "
-                           f"{self._max_bytes} bytes; lines are dropped "
-                           "until it is rotated")
+            if over and refusal:
+                self._fail(f"{self._path} reached its cap of {cap} bytes "
+                           "for refusals; they are dropped until it is "
+                           "rotated", kind="drop-cap")
+            elif over:
+                self._fail(f"{self._path} reached its cap of {cap} bytes; "
+                           "lines are dropped until it is rotated",
+                           kind="cap")
             return
         except OSError as exc:
             self._fail(f"could not write {self._path}: {exc}")
@@ -506,14 +516,14 @@ class RequestLog:
         # A new file is a new sink: its first failure is worth a line even if
         # the last one's was. Only once it is open -- a path that cannot be
         # opened fails every write the same way, and warns once.
-        self._warned = False
+        self._warned = set()
 
-    def _fail(self, message):
+    def _fail(self, message, kind="write"):
         if self._on_failure is not None:
             self._on_failure()
-        if self._warned or self._out is None:
+        if kind in self._warned or self._out is None:
             return
-        self._warned = True
+        self._warned.add(kind)
         # One write, newline included: see Inspection.log.
         self._out.write(f"WARNING: the per-request record is not being "
                         f"written: {message}\n")

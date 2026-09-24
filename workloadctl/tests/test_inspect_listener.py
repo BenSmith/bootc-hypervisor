@@ -1186,6 +1186,71 @@ class TestTheRecordHasACap(unittest.TestCase):
         log.write({"n": 1})
         self.assertEqual(len(failures), 1)
 
+    def test_refusals_stop_short_and_leave_room_for_what_was_let_through(self):
+        """A guest that floods refusals to the cap would blind the record to
+        every request it makes after them until the rotation."""
+        log, path, failures, out = self._log(max_bytes=400)
+        for i in range(40):
+            log.write({"decision": "drop", "n": i})
+        self.assertLessEqual(os.path.getsize(path), 300)
+        self.assertIn("for refusals", out.getvalue())
+        dropped = len(failures)
+        log.write({"decision": "forward", "n": "let through"})
+        self.assertEqual(len(failures), dropped)
+        with open(path) as fh:
+            self.assertIn('"let through"', fh.read())
+
+    def test_the_whole_cap_still_warns_after_the_refusal_one(self):
+        log, _path, _failures, out = self._log(max_bytes=400)
+        for i in range(40):
+            log.write({"decision": "drop", "n": i})
+        for i in range(40):
+            log.write({"decision": "forward", "n": i})
+        self.assertEqual(out.getvalue().count("WARNING"), 2)
+
+    def test_a_refused_request_is_the_line_the_cap_holds_back(self):
+        """The cap keys on the decision the planes write: a refusal flood
+        through a real listener, then an allowed request, which is
+        recorded."""
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        path = os.path.join(d, "requests.log")
+        listener = Listener([], io.StringIO(),
+                            policy=Policy(tls="splice", hosts=("a.example",)))
+        listener.inspection.record = egress_record.RequestLog(
+            path, max_bytes=8000)
+        self.addCleanup(listener.inspection.record.close)
+        refused = b"GET /no HTTP/1.1\r\nHost: b.example\r\n\r\n" * 40
+        allowed = b"GET /yes HTTP/1.1\r\nHost: a.example\r\n\r\n"
+        ours, guest = socket.socketpair()
+        self.addCleanup(ours.close)
+        self.addCleanup(guest.close)
+        ours.settimeout(2.0)
+        guest.settimeout(2.0)
+        answer = threading.Thread(target=_read_all, args=(guest,),
+                                  daemon=True)
+        answer.start()
+        guest.sendall(refused + allowed)
+        guest.shutdown(socket.SHUT_WR)
+
+        def dial(addr, timeout=None):
+            near, far = socket.socketpair()
+            self.addCleanup(near.close)
+            self.addCleanup(far.close)
+            far.sendall(_OK)
+            return near
+
+        with unittest.mock.patch.object(
+                socket, "create_connection", side_effect=dial), \
+                unittest.mock.patch.object(
+                    egress_relay, "RELAY_IDLE_TIMEOUT", 2.0):
+            serve_cleartext(listener.inspection, ours, _where("cleartext"))
+        with open(path) as fh:
+            lines = [json.loads(ln) for ln in fh]
+        self.assertLess(len(lines), 41, "the flood never reached the cap")
+        self.assertEqual(lines[-1]["decision"], "forward")
+        self.assertEqual(lines[-1]["path"], "/yes")
+
 
 class TestEntrypointWiring(unittest.TestCase):
     """main() past the argv check, with a real Listener and no sockets.
