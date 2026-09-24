@@ -260,7 +260,11 @@ def gone_while_idle(stream):
     closed it or sent bytes no request asked for; either way it is not one
     to send the next request down. A TLS record that carries no data -- a
     session ticket arriving late -- reads as nothing and leaves it usable.
+    Bytes the stream read past the last response spoke unasked too, though
+    the socket no longer shows them.
     """
+    if stream.holds_unread():
+        return True
     sock = stream.sock
     # poll, not select: select refuses a descriptor past FD_SETSIZE, and
     # this process raises its fd limit well past that, so under load every

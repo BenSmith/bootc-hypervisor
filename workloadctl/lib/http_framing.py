@@ -156,6 +156,10 @@ class _Stream:
         out, self._buf = self._buf, b""
         return out
 
+    def holds_unread(self):
+        """Whether bytes past the last message wait in the buffer."""
+        return bool(self._buf)
+
     def _fill(self, timeout=None, *, idle=False):
         """One recv, appended to the buffer. False at a clean EOF.
 

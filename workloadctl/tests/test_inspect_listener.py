@@ -1799,7 +1799,10 @@ class _CleartextRig(unittest.TestCase):
         Returns (log, what the guest was sent, [(dialled address, bytes the
         upstream received)]). Each dialled upstream is a socketpair whose far
         end is pre-loaded with the matching entry of `responses`, so the
-        response is already waiting when the relay comes to read it.
+        response is already waiting when the relay comes to read it. An
+        entry that is a list is answered one response per request head
+        instead, as an origin does: pre-loaded, the second response would
+        be unasked bytes, and the pool redials a connection holding them.
         """
         out = io.StringIO()
         listener = Listener(
@@ -1813,8 +1816,10 @@ class _CleartextRig(unittest.TestCase):
         def dial(addr, timeout=None):
             near, far = self._pair()
             index = len(dialled)
-            if index < len(responses):
-                far.sendall(responses[index])
+            answers = responses[index] if index < len(responses) else b""
+            if isinstance(answers, bytes):
+                far.sendall(answers)
+                answers = []
             # Drained CONCURRENTLY, not after the fact. The relay sends a
             # request body upstream before it reads the response, so an
             # upstream nobody is reading fills its socket buffer and the send
@@ -1822,7 +1827,8 @@ class _CleartextRig(unittest.TestCase):
             # the listener, but it caps every body the rig can carry at one
             # buffer and looks exactly like a relay defect.
             buf = bytearray()
-            pump = threading.Thread(target=_pump, args=(far, buf), daemon=True)
+            pump = threading.Thread(target=_pump, args=(far, buf, answers),
+                                    daemon=True)
             pump.start()
             dialled.append((addr, buf, pump))
             return near
@@ -1845,13 +1851,21 @@ class _CleartextRig(unittest.TestCase):
                 [(addr, bytes(buf)) for addr, buf, _ in dialled])
 
 
-def _pump(sock, buf):
+def _pump(sock, buf, answers=()):
+    """Everything `sock` receives, into `buf`; each of `answers` sent once
+    one more request head has arrived. The requests that use `answers`
+    carry no body."""
+    answers = list(answers)
+    sent = 0
     try:
         while True:
             chunk = sock.recv(65536)
             if not chunk:
                 return
             buf += chunk
+            while answers and buf.count(b"\r\n\r\n") > sent:
+                sock.sendall(answers.pop(0))
+                sent += 1
     except (TimeoutError, OSError):
         return
 
@@ -2478,7 +2492,7 @@ class TestCleartextFraming(unittest.TestCase):
             ["a.example"],
             b"HEAD / HTTP/1.1\r\nHost: a.example\r\n\r\n"
             b"GET /second HTTP/1.1\r\nHost: a.example\r\n\r\n",
-            [b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n" + _OK])
+            [[b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n", _OK]])
         self.assertIn(b"GET /second", ups[0][1])
         self.assertIn(b"Content-Length: 100", got)
 
@@ -2771,6 +2785,40 @@ class TestCleartextPerRequest(unittest.TestCase):
             "a.example", upstreams, dial=dial)
         self.assertEqual(dialled, ["a.example"])
 
+    def test_a_pooled_connection_holding_read_bytes_is_redialled(self):
+        """The same unasked bytes, already read off the socket into the
+        stream's buffer: the socket is quiet, and the next response would
+        still be read out of them."""
+        listener = Listener([], io.StringIO())
+        near, far = self._pair()
+        self.addCleanup(far.close)
+        upstreams = {"a.example": _Stream(near, prefill=b"HTTP/1.1 200")}
+        dialled = []
+
+        def dial(host):
+            fresh, keep = self._pair()
+            self.addCleanup(keep.close)
+            dialled.append(host)
+            return _Stream(fresh)
+
+        listener.inspection.upstream.connection_for(
+            "a.example", upstreams, dial=dial)
+        self.assertEqual(dialled, ["a.example"])
+
+    def test_a_second_response_to_one_request_answers_no_later_one(self):
+        """An origin that answers one request twice, both in one read: the
+        second response is not handed to the guest's next request, which
+        goes to a fresh connection and gets that one's answer."""
+        other = b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nstale"
+        _, got, ups = self._run(
+            ["a.example"],
+            b"GET /one HTTP/1.1\r\nHost: a.example\r\n\r\n"
+            b"GET /two HTTP/1.1\r\nHost: a.example\r\n\r\n",
+            [_OK + other, _OK])
+        self.assertEqual(len(ups), 2)
+        self.assertIn(b"/two", ups[1][1])
+        self.assertNotIn(b"stale", got)
+
     def test_the_brokered_slot_is_not_nameable_by_a_guest(self):
         """The separation is only a separation while no host can spell it. A
         NUL cannot appear in a hostname, which is why the prefix carries one."""
@@ -2825,7 +2873,7 @@ class TestCleartextPerRequest(unittest.TestCase):
             ["a.example"],
             b"GET /one HTTP/1.1\r\nHost: a.example\r\n\r\n"
             b"GET /two HTTP/1.1\r\nHost: a.example\r\n\r\n",
-            [_OK + _OK])
+            [[_OK, _OK]])
         self.assertEqual(len(ups), 1)
         self.assertIn(b"/one", ups[0][1])
         self.assertIn(b"/two", ups[0][1])
@@ -2865,7 +2913,7 @@ class TestCleartextPerRequest(unittest.TestCase):
             for h in (b"a", b"b", b"a", b"c", b"a"))
         with unittest.mock.patch.object(egress_upstream, "UPSTREAMS_MAX", 2):
             _, got, ups = self._run(
-                ["*.example"], request, [_OK + _OK + _OK, _OK, _OK])
+                ["*.example"], request, [[_OK, _OK, _OK], _OK, _OK])
         # a is touched before every eviction, so it is never the oldest: three
         # dials for three names, and b is the one that goes.
         self.assertEqual([addr for addr, _ in ups],
