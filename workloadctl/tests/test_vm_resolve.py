@@ -624,6 +624,18 @@ class TestMalformed(unittest.TestCase):
         with self.assertRaises(dns_wire.Malformed):
             dns_wire.build_answer(raw, self.policy)
 
+    def test_a_response_is_not_answered(self):
+        """Its own FORMERR would be a response too, so an error reply is
+        no way out of a loop; there is no reply at all."""
+        raw = bytearray(query("example.com", TYPE_A))
+        raw[2] |= 0x80
+        with self.assertRaises(dns_wire.NotAQuery):
+            dns_wire.build_answer(bytes(raw), self.policy)
+        answered = dns_wire.build_answer(query("example.com", TYPE_A),
+                                         self.policy)
+        with self.assertRaises(dns_wire.NotAQuery):
+            dns_wire.build_answer(answered, self.policy)
+
     def test_an_error_response_carries_the_queried_id(self):
         raw = dns_wire.error_response(
             query("example.com", TYPE_A, ident=0x4242), 1)
@@ -813,6 +825,42 @@ class TestUdpBudget(unittest.TestCase):
                                             self.policy))
         self.assertFalse(reply.tc)
         self.assertEqual(reply.ancount, 59)
+
+
+class TestAResponseGetsNoReply(unittest.TestCase):
+    """A response sent to the responder, its own reply looped back
+    included, is dropped on both transports: no reply and no log line,
+    which a loop would fill, but counted."""
+
+    def setUp(self):
+        self.logged = _silenced_log()
+        self.response = dns_wire.build_answer(
+            query("example.com", TYPE_A), _policy())
+        self.logged.clear()
+
+    def test_over_udp(self):
+        sock = _RefusingSocket(self.response)
+        counters = resolve_server.Counters()
+        resolve_server.serve_datagram(sock, _policy(), counters=counters)
+        self.assertIsNone(sock.sent)
+        self.assertEqual(self.logged, [])
+        self.assertEqual(counters.snapshot()["queries"]["malformed"], 1)
+
+    def test_over_tcp_the_next_query_is_still_answered(self):
+        near, far = socket.socketpair()
+        self.addCleanup(far.close)
+        ask = query("example.com", TYPE_A, ident=0x4242)
+        far.sendall(struct.pack("!H", len(self.response)) + self.response
+                    + struct.pack("!H", len(ask)) + ask)
+        far.shutdown(socket.SHUT_WR)
+        resolve_server.handle_stream(near, _policy(),
+                                     deadline=time.monotonic() + 2)
+        replies = b""
+        while chunk := far.recv(4096):
+            replies += chunk
+        (length,) = struct.unpack("!H", replies[:2])
+        self.assertEqual(len(replies), 2 + length)
+        self.assertEqual(Reply(replies[2:]).id, 0x4242)
 
 
 class TestNoUpstream(unittest.TestCase):
@@ -1236,7 +1284,7 @@ class TestFuzz(unittest.TestCase):
             budget = 512 if i % 2 else None
             try:
                 reply = dns_wire.build_answer(data, self.policy, budget=budget)
-            except dns_wire.Malformed:
+            except (dns_wire.Malformed, dns_wire.NotAQuery):
                 continue
             except Exception as exc:  # noqa: BLE001
                 self.fail(f"{type(exc).__name__}: {exc} on {data.hex()}")
