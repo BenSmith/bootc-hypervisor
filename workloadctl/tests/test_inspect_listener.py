@@ -4105,15 +4105,19 @@ class TestCallerIdentity(unittest.TestCase):
     # the opposite. Pinned to a synthetic workload uid instead.
     OWN_UID = 10007
 
-    def _handled(self, mod, caller_uid, own_uid=OWN_UID, orphaned=False):
-        """Drive one connection with the caller lookup answering `caller_uid`."""
+    def _handled(self, mod, caller_uid, own_uid=OWN_UID, orphaned=False,
+                 closed=False):
+        """Drive one connection with the caller lookup answering `caller_uid`,
+        over a connection the caller has `closed` or not."""
         local = ("198.18.0.1", CLEARTEXT.inspect_port)
         out = io.StringIO()
         listener = Listener([_listener_with(local)], out)
         conn = _mock_conn()
         with unittest.mock.patch("os.getuid", return_value=own_uid), \
                 unittest.mock.patch.object(inspect_listener, "peer_caller",
-                                           return_value=(caller_uid, orphaned)):
+                                           return_value=(caller_uid, orphaned)), \
+                unittest.mock.patch.object(inspect_listener, "peer_closed",
+                                           return_value=closed):
             listener._handle(conn, ("192.0.2.1", 1024), _listener_with(local))
         return listener, conn, out.getvalue()
 
@@ -4172,6 +4176,29 @@ class TestCallerIdentity(unittest.TestCase):
         snap = listener.status()
         self.assertEqual(snap["drop_reasons"][DROP_CALLER_CLOSED], 1)
         self.assertEqual(snap["caller_unresolved"], 0)
+
+    def test_a_caller_that_reset_before_the_lookup_is_refused(self):
+        """A reset takes the row with it, so the lookup names no one, as it
+        does for a live caller lost to churn; its request is still queued.
+        Admitting that as unresolved let any local uid have a request
+        forwarded, brokered included, by writing it and resetting."""
+        mod = _mod()
+        listener, conn, log = self._handled(mod, None, closed=True)
+        self.assertIn(DROP_CALLER_CLOSED, log)
+        conn.close.assert_called()
+        conn.recv.assert_not_called()
+        snap = listener.status()
+        self.assertEqual(snap["drop_reasons"][DROP_CALLER_CLOSED], 1)
+        self.assertEqual(snap["caller_unresolved"], 0)
+
+    def test_a_named_caller_is_not_asked_whether_it_closed(self):
+        """The state is read only when the lookup names no one: a caller
+        it named is refused or served on its uid alone."""
+        mod = _mod()
+        listener, _conn, log = self._handled(mod, self.OWN_UID, closed=True)
+        self.assertNotIn(DROP_CALLER_CLOSED, log)
+        self.assertEqual(
+            listener.status()["drop_reasons"][DROP_CALLER_CLOSED], 0)
 
     def test_a_raising_lookup_does_not_take_the_connection_path_down(self):
         """A hardening check that can throw is worse than one that fails soft:

@@ -63,7 +63,7 @@ from egress_status import write_status
 import inspect_http
 import inspect_tls
 from inspect_scope import Inspection
-from peer_identity import local_endpoints, peer_caller
+from peer_identity import local_endpoints, peer_caller, peer_closed
 
 
 
@@ -349,6 +349,8 @@ class Listener:
         # half of the same defect.
         try:
             caller, orphaned = peer_caller(local_endpoints(conn), peer[:2])
+            if caller is None and not orphaned:
+                orphaned = peer_closed(conn)
         except Exception:
             # A check that can throw is worse than one that fails soft: this is
             # the second layer, and taking the connection path down with it
@@ -356,8 +358,9 @@ class Listener:
             # unresolved, which is handled below.
             caller, orphaned = None, False
         if orphaned:
-            # The caller wrote and closed before it could be looked up: its
-            # row is there and no socket owns it. Admitting it would let any
+            # The caller wrote and closed or reset before it could be looked
+            # up: its row is there and no socket owns it, or it is gone with
+            # the connection. Admitting it would let any
             # local uid have a request served by closing first -- a request
             # it cannot read the answer to, but one that is forwarded, and
             # brokered where the policy says so.

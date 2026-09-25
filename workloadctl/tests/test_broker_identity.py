@@ -278,6 +278,37 @@ class TestPeerUidLive(unittest.TestCase):
                                       peer2[:2]),
             (os.getuid(), False))
 
+    def test_a_peer_that_reset_leaves_no_row_but_reads_closed(self):
+        """Written, reset, and only then accepted: the reset takes the row
+        with it, so the lookup finds nothing -- the answer it gives for a
+        live caller lost to churn. The connection's own state tells them
+        apart, and the queued request is still there to be read."""
+        srv = socket.socket()
+        self.addCleanup(srv.close)
+        srv.bind(("127.0.0.1", 0))
+        srv.listen(1)
+        client = socket.create_connection(srv.getsockname())
+        client.sendall(b"GET / HTTP/1.1\r\nHost: x\r\n\r\n")
+        client.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER,
+                          struct.pack("ii", 1, 0))
+        client.close()
+        conn, peer = srv.accept()
+        self.addCleanup(conn.close)
+
+        endpoints = peer_identity.local_endpoints(conn)
+        self.assertEqual(peer_identity.peer_caller(endpoints, peer[:2]),
+                         (None, False))
+        self.assertIs(peer_identity.peer_closed(conn), True)
+
+        live = socket.create_connection(srv.getsockname())
+        self.addCleanup(live.close)
+        conn2, _peer2 = srv.accept()
+        self.addCleanup(conn2.close)
+        self.assertIs(peer_identity.peer_closed(conn2), False)
+        live.close()
+        self.assertEqual(conn2.recv(1), b"")
+        self.assertIs(peer_identity.peer_closed(conn2), True)
+
 
 INITIAL_NS = "         0          0 4294967295\n"
 # What `unshare -Ur` produces: one uid mapped, everything else invisible.

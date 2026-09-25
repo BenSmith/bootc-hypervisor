@@ -208,6 +208,19 @@ def peer_caller(locals_, peer):
     return None, orphaned
 
 
+# The first byte of the kernel's struct tcp_info: the connection's state.
+TCP_ESTABLISHED = 1
+
+
+def peer_closed(sock):
+    """Whether the far end of an accepted TCP connection has already closed
+    or reset it. A reset leaves no row in the table at all, so a caller the
+    lookup could not name is only innocent while its connection is up.
+    """
+    info = sock.getsockopt(socket.IPPROTO_TCP, socket.TCP_INFO, 1)
+    return info[0] != TCP_ESTABLISHED
+
+
 def userns_ranges(uid_map):
     """The uid ranges this namespace can represent, as (start, count), in
     the namespace's OWN numbering.
