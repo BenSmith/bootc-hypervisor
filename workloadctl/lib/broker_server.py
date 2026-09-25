@@ -271,6 +271,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
             headers["Content-Length"] = str(len(body))
 
         path = self.path
+        # The query stays out of the journal, which is not private: the
+        # guest writes it, and it can carry what the guest was given.
+        logged_path = path.partition("?")[0]
         conn = None
         try:
             conn = http.client.HTTPSConnection(
@@ -285,7 +288,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             conn.sock.settimeout(self.read_timeout)
             resp = conn.getresponse()
             sent = self._relay(resp)
-            log("ok", sandbox=sandbox, method=method, path=self.path,
+            log("ok", sandbox=sandbox, method=method, path=logged_path,
                 status=resp.status, bytes=sent,
                 ms=int((time.monotonic() - started) * 1000))
         # ValueError is http.client refusing a header or a target before a
@@ -295,7 +298,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         # refuses such a credential at start; this is the line that holds
         # if something reaches here anyway.
         except (OSError, http.client.HTTPException, ValueError) as exc:
-            log("upstream-error", sandbox=sandbox, path=self.path,
+            log("upstream-error", sandbox=sandbox, path=logged_path,
                 error=type(exc).__name__, streamed=self.response_started)
             if self.response_started:
                 # A status line and headers -- and usually some body -- are

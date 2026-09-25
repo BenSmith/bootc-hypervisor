@@ -901,6 +901,21 @@ class TestTheHostSelectsTheCredential(BrokerServerCase):
         self._get("API.Example.com:443")
         self.assertEqual([h for h, _, _ in self.seen], ["api.example.com"])
 
+    def test_the_query_goes_upstream_and_not_into_the_journal(self):
+        """The inspector records a query apart from the path, in its private
+        record; the broker's line is the journal's, and the guest writes
+        the query."""
+        with mock.patch.object(broker_server, "log") as log:
+            sock = self.connect()
+            sock.sendall(b"GET /v1/x?token=LEAKED HTTP/1.1\r\n"
+                         b"Host: api.example.com\r\nConnection: close\r\n"
+                         b"\r\n")
+            self.drain(sock)
+        self.assertEqual([p for _, p, _ in self.seen], ["/v1/x?token=LEAKED"])
+        (ok,) = [c for c in log.call_args_list if c.args[0] == "ok"]
+        self.assertEqual(ok.kwargs["path"], "/v1/x")
+        self.assertNotIn("LEAKED", repr(log.call_args_list))
+
     def test_a_missing_host_header_is_refused(self):
         sock = self.connect()
         sock.sendall(b"GET /v1/x HTTP/1.0\r\nConnection: close\r\n\r\n")
