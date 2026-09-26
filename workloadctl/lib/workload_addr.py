@@ -364,11 +364,11 @@ BROKER_INSTANCE_PORT = 8081
 
 # --- §9: the synthesising responder ---
 #
-# The guest's only nameserver. Every A/AAAA, for any name, is answered with this
-# workload's inspector address; everything else is NODATA. NOTHING IS FORWARDED
-# -- there is no upstream socket in the program at all, which is what makes DNS
-# exfiltration absent rather than filtered, and is the property to check first if
-# anyone ever "adds a fallback".
+# The guest's only nameserver. Every A, for any name, is answered with this
+# workload's inspector address; everything else, AAAA included, is NODATA.
+# NOTHING IS FORWARDED -- there is no upstream socket in the program at all,
+# which is what makes DNS exfiltration absent rather than filtered, and is the
+# property to check first if anyone ever "adds a fallback".
 #
 # Base of the per-workload responder addresses. 127.130.0.0, by the same offset
 # arithmetic management_address uses against 127.128.0.0 -- and deliberately

@@ -607,8 +607,7 @@ def generate_container_workload(config, user_name: str, uid: int) -> bool:
         resolve_dests = paths.get(("unit", "resolve"), [])
         if resolve_dests:
             resolve_dests[0].write_text(
-                generate_resolve_service(config, user_name, uid,
-                                         address6=False))
+                generate_resolve_service(config, user_name, uid))
             log_msg("  Created DNS responder service")
 
     # The credential broker instance (P2-2), on the same reuse terms:

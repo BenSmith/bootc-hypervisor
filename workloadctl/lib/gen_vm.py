@@ -949,8 +949,7 @@ def generate_vm_workload(config, user_name: str, uid: int):
         resolve_dests = paths.get(("unit", "resolve"), [])
         if resolve_dests:
             resolve_dests[0].write_text(
-                generate_resolve_service(config, user_name, uid,
-                                         address6=True))
+                generate_resolve_service(config, user_name, uid))
             log_msg("  Created DNS responder service")
 
     # The clock keeper, for every VM: it is about the guest's clock, not its

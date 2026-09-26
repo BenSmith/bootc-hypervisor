@@ -364,9 +364,10 @@ name = "schema-reference"
 #            to the query then depends on .egress, and the two are not
 #            variations of one thing:
 #              egress = "filtered" — the query reaches this workload's own
-#                synthesising responder and STOPS THERE. Every A/AAAA, for any
+#                synthesising responder and STOPS THERE. Every A, for any
 #                name, is answered with the workload's inspector address;
-#                everything else is NODATA. Nothing is forwarded, so no query
+#                everything else, AAAA included, is NODATA (passt's DHCPv6 can
+#                give the guest the inspector's v6 address as its own). Nothing is forwarded, so no query
 #                the guest emits ever leaves the host and the host's own
 #                resolver never sees it. /etc/resolv.conf is not consulted.
 #              egress = "open" (and any .bridge VM) — forwarded to the host's
@@ -1891,8 +1892,8 @@ ports = ["8080:80", "8443:443"]
 # customs-resolve on 127.130.x.y, reached through pasta's `--dns-host`, which
 # the generator adds to `--network=`. Every A query, for any name, is
 # answered with this workload's inspector address, and everything else --
-# AAAA included -- with no records. (pasta can copy the inspector's own IPv6
-# address onto the container's interface, so an AAAA answer naming it would be
+# AAAA included -- with no records, as for a VM. (pasta can copy the
+# inspector's own IPv6 address onto the container's interface, so an AAAA answer naming it would be
 # a dial the container refuses to itself.) So:
 #
 #   - names resolve whatever the host's /etc/resolv.conf says; the host's

@@ -553,6 +553,21 @@ def probes():
                parse_probe(r) + "  | "
                + (log.strip().splitlines() or ["<no journal line>"])[-1])
 
+    # A name resolves to IPv4 alone. passt's DHCPv6 hands the guest a host
+    # IPv6 address, and on a host with no v6 uplink the only global ones are
+    # the inspectors' on workload-proxy -- so an AAAA naming this workload's
+    # inspector names the guest's own interface, and the dial is refused
+    # inside the guest in a millisecond. The rows above cannot see that: curl
+    # falls back to v4 and gets its 200. The guest's v6 addresses are in the
+    # detail so a reader can tell whether this host set the trap at all.
+    r = guest(p, f"getent ahosts {ALLOWED_HOST} | awk '{{print $1}}' | sort -u;"
+                 f" echo '| guest v6:';"
+                 f" ip -6 -o addr show scope global | awk '{{print $4}}'")
+    answers = r.stdout.split("|", 1)[0].split()
+    record(f"{p}: a name resolves to IPv4 only, no AAAA",
+           bool(answers) and not any(":" in a for a in answers),
+           " ".join(r.stdout.split()))
+
 
 def egress(name, *flags, as_uid=None, timeout=60):
     """`workloadctl egress`, optionally as somebody who should not be able to."""

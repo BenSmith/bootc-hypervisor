@@ -1886,7 +1886,7 @@ class TestResolveDiagnose(unittest.TestCase):
         names."""
         from diagnose_probe import PROBE
         from gen_egress import resolve_command
-        cmd = resolve_command("vm1", 10001, address6=True)
+        cmd = resolve_command("vm1", 10001)
         handed = cmd[cmd.index("--static") + 1]
         probed = []
         with mock.patch("os.path.exists",

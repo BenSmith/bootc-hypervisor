@@ -272,7 +272,7 @@ The genuine differences:
 |---|---|---|
 | re-originator | passt | pasta (or the bridge-mode equivalent) |
 | arming helper | `workload-vm-inspect` / `-filter` | `workload-container-inspect` / `-filter` |
-| DNS | per-workload synthesising responder on `127.130.x.y`; answers every A/AAAA with the inspector address and has no upstream socket at all; passt's `dns-host` points at it | the same responder, reached through pasta's `--dns-host` on single and pod mode, answering A only (pasta can copy the inspector's v6 address onto the container); bridge mode has none, aardvark-dns asks the host's resolver, and a `[network]` trigger drops port 53 unless that resolver is on loopback |
+| DNS | per-workload synthesising responder on `127.130.x.y`; answers every A with the inspector address, and AAAA with no records (passt's DHCPv6 can hand the guest the inspector's v6 address), and has no upstream socket at all; passt's `dns-host` points at it | the same responder, reached through pasta's `--dns-host` on single and pod mode, answering A only for the same reason (pasta copies a host v6 address onto the container); bridge mode has none, aardvark-dns asks the host's resolver, and a `[network]` trigger drops port 53 unless that resolver is on loopback |
 | turning it on | `egress = "filtered"` (stated explicitly; there is no safe default) plus a trigger | any one of `hosts`, `[[allow]]`, `[[policy]]` |
 | default deny | yes, keyed on the uid | no — the triggers are the whole statement |
 | schema | `[vm.network].*` | `[network].*` |

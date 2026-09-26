@@ -259,7 +259,7 @@ sudo python3 tests/manual/inspect_rig.py --quiet   # failures and the tally only
 ```
 
 `--quiet` is for reading a run back over ssh rather than watching it: a green
-run collapses from 57 PASS lines, several carrying a whole JSON document, to
+run collapses from 58 PASS lines, several carrying a whole JSON document, to
 one tally line. Failures are never suppressed — each prints in full, under the
 section header naming the phase it was in, and an escaping exception prints
 that header too. `tests/test_manual_rig_quiet.py` pins that, because the branch
@@ -358,9 +358,20 @@ workload's plane. It is an artifact of the rig's own route, not a policy
 finding: the guards match on destination, and a host with a real v6 uplink
 sources from a global address. Worth recognising rather than re-investigating.
 
-Last green 2026-09-21, **all 57 rows**, on a bare-metal Fedora 44 KVM host
-under plain **enforcing**, against the installed RPM at the inspector-flags
-merge -- the first run in which the listener started from the generator's
+**A name resolves to IPv4 only.** passt's DHCPv6 hands the guest a host IPv6
+address, and on a host with no v6 uplink the only global ones are the
+inspectors' on `workload-proxy` -- the guest took its own inspector's. While the
+responder answered AAAA with that address, every by-name dial tried v6 first and
+was refused inside the guest in a millisecond. The fetch rows stayed green over
+it, because curl falls back to v4 and gets its 200; only a v6-only client, or one
+that dials the first answer alone, fails. The row reads `getent ahosts` and
+prints the guest's own v6 addresses beside it, so a run on a host with a real
+uplink, where the trap is not set, says so.
+
+Last green 2026-09-26, **all 58 rows**, on a bare-metal Fedora 44 KVM host
+under plain **enforcing**, with no responder handed `--address6`. Before that
+2026-09-21, all 57 rows, same host and posture, against the installed RPM at
+the inspector-flags merge -- the first run in which the listener started from the generator's
 `ExecStart=` flags rather than a bare name it derived the rest from. Before that
 2026-08-25, all rows, same host and posture with the shipped dontaudit rules in
 place: the first recorded run of the post-deletion shape, since the rig was
@@ -983,7 +994,9 @@ over both:
   that is an inspector's address on the `workload-proxy` link. The responder
   answered AAAA with the inspector's v6 address, busybox wget tried v6 first,
   and every HTTPS fetch by name was refused inside the container in half a
-  second. A container's responder now gets no `--address6`. The row that
+  second. No responder gets `--address6` now: a VM guest had the same
+  trap through passt's DHCPv6, masked by curl's v4 fallback (`inspect_rig`'s
+  IPv4-only row). The row that
   caught it was not an S11 row: it was every pre-existing fetch in the rig,
   red at once.
 - **The static map was read before it was written.** The responder service

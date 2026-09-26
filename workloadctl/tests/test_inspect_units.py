@@ -349,8 +349,7 @@ class TestSidecarHardening(unittest.TestCase):
         cls.inspect = importlib.import_module("gen_egress") \
             .generate_inspect_service(_config({}), "_wl-web", UID)
         cls.resolve = importlib.import_module("gen_vm") \
-            .generate_resolve_service(_config({}), "_wl-web", UID,
-                                      address6=True)
+            .generate_resolve_service(_config({}), "_wl-web", UID)
 
     def units(self):
         return (("inspect", self.inspect), ("resolve", self.resolve))

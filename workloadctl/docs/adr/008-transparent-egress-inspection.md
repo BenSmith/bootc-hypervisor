@@ -107,9 +107,12 @@ per-workload selector the guest cannot forge (ADR 006).
 
 9. **The guest's resolver is ours, and it synthesises rather than forwards.**
    passt already directs the guest's queries wherever `--dns-host` names, so a
-   per-workload responder answers every `A`/`AAAA` — for any name, on a list or not
+   per-workload responder answers every `A` — for any name, on a list or not
    — with that workload's own inspector address, and answers every other type,
-   `HTTPS`/`SVCB` included, with `NODATA` rather than `REFUSED`: the guest's
+   `AAAA` and `HTTPS`/`SVCB` included, with `NODATA` rather than `REFUSED`
+   (`AAAA` because passt's DHCPv6 can hand the guest the inspector's IPv6
+   address as its own, so an answer naming it is a dial the guest refuses to
+   itself): the guest's
    resolver list has one entry, so `REFUSED` costs a timeout per lookup where
    `NODATA` fails fast. **No query the guest emits leaves the host.** From inside
    the guest DNS works normally, which is what distinguishes this from

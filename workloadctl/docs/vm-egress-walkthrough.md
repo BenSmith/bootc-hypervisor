@@ -185,8 +185,8 @@ this is an ordinary dial on an ordinary network:
 1. It asks its resolver for `api.example.com`. Its resolver is passt's
    interception, which reaches **this workload's synthesising responder** on
    `127.130.0.4`. The responder answers with this workload's inspector address,
-   `198.18.1.4` — it answers every A/AAAA that way, and it has no upstream socket
-   at all, so the query never leaves the host.
+   `198.18.1.4` — it answers every A that way, and AAAA with no records, and it
+   has no upstream socket at all, so the query never leaves the host.
 2. curl opens TCP to `198.18.1.4:443`. passt re-originates it as a host socket
    owned by uid 10004.
 3. `inet workload_proxy` at nat hook output (priority `dstnat`, −100, so it runs

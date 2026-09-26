@@ -87,11 +87,13 @@ INSPECT_HANDED = frozenset({
     "--broker",     # what the uid became, and the broker's port
 })
 BROKER_REQUIRED = frozenset({"--name", "--listen", "--caller-uid", "--host"})
-# The responder's, every one it takes.
+# The responder's, every one it takes but --address6, withheld because pasta
+# and passt can copy the inspector's v6 address onto the workload itself
+# (gen_egress.resolve_command).
+RESOLVE_WITHHELD = frozenset({"--address6"})
 RESOLVE_HANDED = frozenset({
     "--name",      # a label: the log lines
     "--address",   # the inspector's v4 address, every synthesised A
-    "--address6",  # its v6 twin, every synthesised AAAA
     "--policy",    # the inspector's document, read to count unlisted names
     "--static",    # the allow-by-name map
     "--status",    # where the counters go
@@ -361,13 +363,12 @@ class TestTheGeneratorHandsCustomsItsFlags(unittest.TestCase):
         from nft_elements import resolve_status_path
         from egress_policy import resolve_static_path
         from workload_addr import RESOLVE_LISTENER_BIN, inspect_address
-        cmd = resolve_command("web", 10004, address6=True)
+        cmd = resolve_command("web", 10004)
         self.assertEqual(cmd[0], RESOLVE_LISTENER_BIN)
         flags = {cmd[i]: cmd[i + 1] for i in range(1, len(cmd), 2)}
         self.assertEqual(flags, {
             "--name": "web",
             "--address": inspect_address(10004).v4,
-            "--address6": inspect_address(10004).v6,
             "--policy": inspect_policy_path("web"),
             "--static": resolve_static_path("web"),
             "--status": resolve_status_path("web"),
@@ -375,7 +376,8 @@ class TestTheGeneratorHandsCustomsItsFlags(unittest.TestCase):
 
     def test_the_responder_takes_each_handed_flag_and_requires_no_other(self):
         taken = _program_flags(RESOLVE)
-        self.assertEqual(set(taken), RESOLVE_HANDED)
+        self.assertEqual(set(taken), RESOLVE_HANDED | RESOLVE_WITHHELD)
+        self.assertFalse(any(taken[f] for f in RESOLVE_WITHHELD), taken)
 
 
 class TestTheResponderStatusIsReadByPublishedKeys(unittest.TestCase):
@@ -493,7 +495,7 @@ class TestTheResponderRunsOnWhatWorkloadctlWrites(unittest.TestCase):
                              reason="forge")
         Path(paths["--static"]).write_text(json.dumps(resolve_static(
             [(forge, [ipaddress.IPv4Address("192.0.2.9")])])))
-        _binary, *args = resolve_command("web", 10004, address6=True)
+        _binary, *args = resolve_command("web", 10004)
         for i in range(0, len(args), 2):
             args[i + 1] = paths.get(args[i], args[i + 1])
 
@@ -516,7 +518,7 @@ class TestTheResponderRunsOnWhatWorkloadctlWrites(unittest.TestCase):
         asked = [("git.local", 1, ["192.0.2.9"]),
                  ("git.local", 28, []),
                  ("elsewhere.example", 1, [inspect.v4]),
-                 ("elsewhere.example", 28, [inspect.v6]),
+                 ("elsewhere.example", 28, []),  # no --address6 handed
                  ("listed.example", 1, [inspect.v4]),
                  ("v1.api.example", 1, [inspect.v4]),
                  ("api.example", 1, [inspect.v4])]
@@ -536,7 +538,8 @@ class TestTheResponderRunsOnWhatWorkloadctlWrites(unittest.TestCase):
                          proc.stderr.read().decode())
         status = json.loads(Path(paths["--status"]).read_text())
         self.assertEqual(status["queries"]["static"], 2)
-        self.assertEqual(status["queries"]["synthesised"], 5)
+        # The four A answers; the AAAA had no address to synthesise.
+        self.assertEqual(status["queries"]["synthesised"], 4)
         # A `hosts` name, a policy wildcard and a static name are listed;
         # the policy wildcard's apex is not.
         self.assertEqual(status["unlisted"], 3)

@@ -206,7 +206,7 @@ class TestGeneratedUnits(unittest.TestCase):
         cls.socket_unit = cls.egress.generate_resolve_socket(
             config, "_wl-web", UID)
         cls.service = cls.egress.generate_resolve_service(
-            config, "_wl-web", UID, address6=True)
+            config, "_wl-web", UID)
         cls.address = resolve_address(UID)
 
     def test_both_transports_are_bound(self):
@@ -372,20 +372,22 @@ class TestGeneratedUnits(unittest.TestCase):
         inspect = inspect_address(UID)
         self.assertIn(
             f'ExecStart={RESOLVE_LISTENER_BIN} --name "web"'
-            f' --address "{inspect.v4}" --address6 "{inspect.v6}"'
+            f' --address "{inspect.v4}"'
             f' --policy "{inspect_policy_path("web")}"'
             f' --static "{resolve_static_path("web")}"'
             f' --status "{resolve_status_path("web")}"',
             self.service.splitlines())
 
     def test_the_synthesised_addresses_are_the_inspectors(self):
-        """Every synthesised A/AAAA points the guest at the listener its 80
+        """Every synthesised A points the guest at the listener its 80
         and 443 are redirected to anyway, so a guest that ignores the
-        redirect and one that does not arrive at the same place."""
-        cmd = self.egress.resolve_command("web", UID, address6=True)
+        redirect and one that does not arrive at the same place. No AAAA:
+        passt's DHCPv6 can hand the guest the inspector's v6 address as its
+        own, and a dial to it is then refused inside the guest."""
+        cmd = self.egress.resolve_command("web", UID)
         flags = {cmd[i]: cmd[i + 1] for i in range(1, len(cmd), 2)}
         self.assertEqual(flags["--address"], inspect_address(UID).v4)
-        self.assertEqual(flags["--address6"], inspect_address(UID).v6)
+        self.assertNotIn("--address6", flags)
 
     def test_the_service_carries_no_cgroup_exemptions(self):
         """The inspector's two exemptions exist because it ORIGINATES traffic.

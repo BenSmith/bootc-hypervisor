@@ -704,7 +704,7 @@ def generate_resolve_socket(config, user_name: str, uid: int) -> str:
     return unit.render()
 
 
-def resolve_command(name: str, uid: int, *, address6: bool) -> list:
+def resolve_command(name: str, uid: int) -> list:
     """The responder's argv: customs-resolve and the values it is handed.
 
     The same seam as gen_egress.inspect_listener_command: customs-resolve
@@ -713,38 +713,34 @@ def resolve_command(name: str, uid: int, *, address6: bool) -> list:
     computed here and written into ExecStart= as flags.
     tests/test_customs_seam.py holds this command to the program's flags.
 
-    `--address`/`--address6` are the inspector's, not the responder's: every
-    synthesised A/AAAA points the workload at the listener its 80 and 443 are
+    `--address` is the inspector's, not the responder's: every
+    synthesised A points the workload at the listener its 80 and 443 are
     redirected to anyway, so a workload that ignores the redirect and one that
     does not both arrive at the same place. That address is on the
     workload-proxy link, not loopback, so a container's dial to it leaves
     through pasta like any other. `--policy` is the inspector's own
     document, read to COUNT queries for names on no list, never to answer.
 
-    `address6` is False for a container, whose AAAA queries then get no
-    records. pasta copies a host IPv6 address onto the container's
-    interface, and on a host with no IPv6 default route the one it copies
-    can be an inspector's own address from the workload-proxy link -- this
-    workload's included. An AAAA answer naming it is a dial to the
-    container's own interface, refused before it leaves, and clients try
-    IPv6 first. A dial to an IPv6 literal on 80 or 443 is still redirected
-    by port.
+    No `--address6`, so AAAA queries get no records. pasta and passt both
+    copy a host IPv6 address onto the workload's interface -- pasta onto a
+    container's, passt's DHCPv6 onto a guest's -- and on a host with no IPv6
+    default route the one they copy can be an inspector's own address from
+    the workload-proxy link, this workload's included. An AAAA answer naming
+    it is a dial to the workload's own interface, refused before it leaves,
+    and clients try IPv6 first. A dial to an IPv6 literal on 80 or 443 is
+    still redirected by port.
     """
-    inspect = inspect_address(uid)
-    v6 = ["--address6", inspect.v6] if address6 else []
     return [
         RESOLVE_LISTENER_BIN,
         "--name", name,
-        "--address", inspect.v4,
-        *v6,
+        "--address", inspect_address(uid).v4,
         "--policy", inspect_policy_path(name),
         "--static", resolve_static_path(name),
         "--status", resolve_status_path(name),
     ]
 
 
-def generate_resolve_service(config, user_name: str, uid: int, *,
-                             address6: bool) -> str:
+def generate_resolve_service(config, user_name: str, uid: int) -> str:
     """Generate the service unit for one workload's synthesising DNS responder.
 
     Socket-activated, and it never binds: the program refuses to open a socket
@@ -792,7 +788,7 @@ def generate_resolve_service(config, user_name: str, uid: int, *,
     # resolve_command says why. The name among them because it is
     # socket-activated with two identically-named fds, so there is nothing on
     # the socket to recover it from.
-    binary, *args = resolve_command(name, uid, address6=address6)
+    binary, *args = resolve_command(name, uid)
     svc.add("ExecStart", " ".join(
         [binary] + [a if a.startswith("--") else dq(a) for a in args]))
     svc.blank()
