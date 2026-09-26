@@ -83,7 +83,10 @@
 ; harvest shows it being attempted.
 ;
 ;   getattr, ioctl on init_t:unix_stream_socket   Python asking whether its
-;     stdout is a tty. The answer is "no" either way.
+;     stdout is a tty. The answer is "no" either way. The audit line shows
+;     0x542a (TCGETS2, glibc's isatty), plus one 0x5413 (TIOCGWINSZ):
+;     argparse sizing its help formatter, which add_argument builds even
+;     when no help is printed.
 ;   search on container_file_t:dir ("workloads")  site.py stat'ing
 ;     $HOME/.local/lib/pythonX.Y/site-packages. $HOME is
 ;     /var/lib/workloads/<name> because the unit sets User= to the workload
@@ -91,9 +94,9 @@
 ;     site-packages dir to find, and one must never be on this path anyway.
 ;   search on cert_t:dir ("pki")                  libcrypto reading its
 ;     OPENSSLDIR config, pulled in transitively: the customs package imports
-;     hashlib. This domain terminates no TLS and verifies
-;     nothing, so the trust store is not its to read -- contrast the
-;     inspector, which cannot work without it.
+;     hashlib. This domain terminates no TLS and verifies nothing, so the
+;     trust store is not its to read -- contrast the inspector, which cannot
+;     work without it.
 
 ; The inherited listening sockets, created by init_t in this domain. Both
 ; transports, for the reason in the header.
