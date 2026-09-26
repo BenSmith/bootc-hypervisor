@@ -149,7 +149,8 @@
 ; Its own runtime directory: /run/workload-vm/<name>, qemu_var_run_t. resolve.json
 ; is READ at start (without it the process exits and the socket restart-loops);
 ; resolve-status.json is WRITTEN via a temp file and os.replace, which is why
-; `rename` is present here and in no sibling grant — see the same block in
+; `rename` is present here and in no sibling grant, and `setattr` is the
+; fchmod to 0600 — see the same block in
 ; workload-inspect.cil for the full argument.
 (allow wlresolve_t qemu_var_run_t (dir (add_name remove_name search write)))
-(allow wlresolve_t qemu_var_run_t (file (create getattr open read rename unlink write)))
+(allow wlresolve_t qemu_var_run_t (file (create getattr open read rename setattr unlink write)))

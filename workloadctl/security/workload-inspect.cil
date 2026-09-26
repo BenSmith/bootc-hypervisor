@@ -374,18 +374,19 @@
 ;
 ; `rename` is the one permission no sibling grant carries, and it is not
 ; optional. write_status() uses the file class as: create getattr open read
-; rename unlink write. `unlink` is in that set for a reason worth keeping: os.replace over an
+; rename setattr unlink write. `unlink` is in that set for a reason worth keeping: os.replace over an
 ; existing target needs it on the destination, so it is load-bearing only from
 ; the SECOND status write onward. A harvest that ticks once misses it; the
 ; rig's STATUS_SETTLE against STATUS_INTERVAL is what makes it appear.
-; The same harvest trimmed `lock` and `setattr` from this line, and getattr,
+; `setattr` is the fchmod that holds the file at 0600 whatever the umask.
+; The same harvest trimmed `lock` from this line, and getattr,
 ; open and read from the dir line below, as used by nothing. wlproxy_t writes its log and pid file in place and never renames;
 ; the status write is a temp-file-plus-os.replace so that a reader never sees a
 ; half-written document. Copying wlproxy_t's file line verbatim therefore
 ; produces a grant that gets all the way to the replace and fails there — the
 ; silent half of the table above, reached by a route that looks correct.
 (allow wlinspect_t qemu_var_run_t (dir (add_name remove_name search write)))
-(allow wlinspect_t qemu_var_run_t (file (create getattr open read rename unlink write)))
+(allow wlinspect_t qemu_var_run_t (file (create getattr open read rename setattr unlink write)))
 
 
 ; THE TERMINATING PLANE (rung 3)

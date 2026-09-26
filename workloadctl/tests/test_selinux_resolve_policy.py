@@ -118,6 +118,13 @@ class TestRuntimeDirectory(unittest.TestCase):
             _body(),
             r"\(allow\s+wlresolve_t\s+qemu_var_run_t\s+\(file\s+\([^)]*rename")
 
+    def test_the_status_write_can_fchmod(self):
+        """write_status fchmods its temp file to 0600 whatever the umask;
+        denied, it fails the same silent way as a missing `rename`."""
+        self.assertRegex(
+            _body(),
+            r"\(allow\s+wlresolve_t\s+qemu_var_run_t\s+\(file\s+\([^)]*setattr")
+
     def test_the_policy_document_can_be_read(self):
         """resolve.json is read at start; without it the process exits and the
         socket restart-loops."""

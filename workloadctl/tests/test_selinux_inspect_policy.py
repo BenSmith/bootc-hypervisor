@@ -398,6 +398,16 @@ class TestBoundary(unittest.TestCase):
             "granting container_t directly leaves every selinux_policy "
             "workload denied; grant container_domain instead")
 
+    def test_the_status_write_can_fchmod(self):
+        """write_status fchmods its temp file to 0600, whatever the umask.
+
+        The writer catches OSError by design, so without `setattr` the only
+        symptom is an inspect-status.json that never appears.
+        """
+        self.assertTrue(
+            {"create", "rename", "setattr", "unlink", "write"}
+            <= self._perms("qemu_var_run_t", "file"))
+
     def test_the_leaf_caches_are_writable(self):
         """Minting into them is the job, and the eviction is unlink+replace."""
         self.assertTrue(
