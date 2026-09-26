@@ -1,7 +1,7 @@
 # The credential broker
 
-`libexec/agent-broker` — why this program exists, what it refuses to do, how it
-knows which sandbox is calling, and how to run it.
+`customs-broker`, from customs — why workloadctl runs it, what it refuses to
+do, how it knows which sandbox is calling, and how to run it.
 
 A sandboxed coding agent never receives a provider API key. It calls the
 provider's real hostname, exactly as it would with a key; its workload's egress
@@ -443,8 +443,9 @@ nothing to check.
 
 ## 10. Running it
 
-The broker ships in the workloadctl RPM and therefore in the hypervisor image:
-the program at `/usr/libexec/workloadctl/agent-broker` and this file under
+The broker ships in the customs RPM, which workloadctl's requires, and
+therefore in the hypervisor image: the program at
+`/usr/libexec/customs/customs-broker`, and this file under
 `/usr/share/doc/workloadctl/`.
 
 **There is no unit to enable and no config to edit.** There is no host-wide
@@ -487,7 +488,7 @@ What the generator writes for that, on `workload-agent-vm-broker.service`
 (one line, wrapped here; every value is quoted for a systemd Exec line):
 
 ```
-ExecStart=/usr/libexec/workloadctl/agent-broker --name "agent-vm"
+ExecStart=/usr/libexec/customs/customs-broker --name "agent-vm"
     --listen "127.129.0.7:8081" --caller-uid "10007"
     --host "api.anthropic.com=broker-agent-vm-anthropic"
     --placeholder "broker-agent-vm-anthropic=sk-ant-placeholder-not-a-real-key"
@@ -622,11 +623,11 @@ variable by hand, because `NODE_EXTRA_CA_CERTS` appends and `SSL_CERT_FILE`
 replaces.
 
 For local development the program takes the same flags and falls back to
-`AGENT_BROKER_SECRET` for every credential, logging a warning. Name your own
+`CUSTOMS_BROKER_SECRET` for every credential, logging a warning. Name your own
 uid as the caller, since a request from your own login is otherwise a 403:
 
 ```bash
-AGENT_BROKER_SECRET='sk-...' /usr/libexec/workloadctl/agent-broker \
+CUSTOMS_BROKER_SECRET='sk-...' /usr/libexec/customs/customs-broker \
     --name dev --listen 127.0.0.1:8081 --caller-uid "$(id -u)" \
     --host api.anthropic.com=anthropic
 ```

@@ -458,7 +458,7 @@ Two things bound what rule 16 now admits, and neither is rule 16:
   listener. So root reaching the socket by hand was never a supported path,
   and root's manual probe landing in a workload's egress records was the
   second half of the same defect the guard fixed. The check reads the kernel's
-  socket table (`lib/peer_identity.py`, shared with `agent-broker`) rather
+  socket table (`customs.peer_identity`, shared with the broker) rather
   than `SO_PEERCRED`, which is AF_UNIX-only and says nothing about the peer of
   a TCP connection. It fails **soft**: a lookup that cannot name the owner
   admits the connection and increments `caller_unresolved` in the status file,

@@ -4,6 +4,9 @@
 [ADR 006](006-vm-networking-passt-not-managed-bridge.md) added for hostname
 policy; [ADR 007](007-per-workload-credential-broker.md) chains the credential
 broker behind the inspector this record decides.
+Amended 2026-09-26: the inspector is customs' `customs-inspect`, which
+workloadctl requires, and it relays no HTTP/2: `[[vm.network.http2]]` below is
+refused by `validate`, naming `[[vm.network.splice]]` as where its hosts go.
 
 ## Context
 

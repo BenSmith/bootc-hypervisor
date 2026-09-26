@@ -40,6 +40,11 @@ just rpm-install          # build + dnf install/upgrade locally
 python3 -m unittest tests.test_workloads -v
 python3 -m unittest tests.test_workloads.SomeClass.test_method
 
+# the suite imports customs: installed (its RPM), or a checkout named by
+# CUSTOMS_CHECKOUT, whose libexec/ then stands in for /usr/libexec/customs
+CUSTOMS_CHECKOUT=../../customs just test
+just customs-rpm          # the RPM hypervisor.Containerfile pins, from its image
+
 # --- image builds (root, requires podman; *-local skip the registry push) ---
 just build-base-local                 # hypervisor-bootc from local minimal
 just build-nvidia-rpmfusion-local
@@ -74,7 +79,7 @@ The hard-won design rationale lives in `workloadctl/llms.txt` and `workloadctl/d
 
 - `bin/workloadctl` — the CLI (argparse). One `cmd_<name>(args, manager)` function per subcommand, wired up in `main()`. Mutating commands call `require_root()`.
 - `lib/workloadctl_core.py` — `WorkloadConfig` / `WorkloadManager`. `lib/workload_lib.py` — TOML loading, paths, naming; `lib/workload_uid.py` — uid allocation and subid math; `lib/run_files.py` — the per-workload run-file list. VM-specific constants live in `lib/vm_defs.py`, and the uid-derived addresses in `lib/workload_addr.py`.
-- `generators/`, `libexec/` — boot-time and helper scripts (also the `workload-vm-*` VM helpers and `workload-exporter` for Prometheus metrics). `libexec/agent-broker` is the odd one out: a whole standalone program, not a helper — see below.
+- `generators/`, `libexec/` — boot-time and helper scripts (also the `workload-vm-*` VM helpers and `workload-exporter` for Prometheus metrics). The egress inspector and the credential broker are not here: they are customs' programs (`/usr/libexec/customs/`), a package the spec requires — see below.
 - `workloads/<name>/` — the shipped bundles. Each is a directory with `workload.toml` at minimum, plus optional extras it needs: a `Containerfile` for self-built images, `README.md`, `cloud-init/`, additional unit files. `docs/schema-reference.toml` is the annotated full schema.
 - `tests/` — `test_*.py` unittest modules.
 
@@ -92,18 +97,16 @@ Virtiofs volumes have their own design doc, `workloadctl/docs/vm-virtiofs.md` �
 
 ### The credential broker
 
-`libexec/agent-broker` holds a provider API key that a sandboxed workload -- a
+The broker holds a provider API key that a sandboxed workload -- a
 coding-agent VM or a filtered container -- is never given, and attaches it to
 outbound requests that workload makes through it.
-It is a whole program shipped by the workloadctl RPM, stdlib only: the
-entrypoint is a `main()` shim over `lib/broker_profiles.py` (the flags, read),
-`lib/broker_request.py` (what goes upstream), `lib/broker_server.py`
-(Handler, Server, the ceilings) and `lib/peer_identity.py` (caller
-identification, shared with the egress inspector's listener). The generator
-side is `lib/broker_config.py` (which workloads get an instance, and
-`broker_command`, the argv the unit carries). Callers are identified by the
-uid owning the far end of the connection, compared to the one uid the
-instance was started for.
+It is customs' `customs-broker`, shipped by the customs RPM beside the egress
+inspector, `customs-inspect`; workloadctl's spec requires it, its units run
+both from `/usr/libexec/customs/`, and it imports the modules it needs from
+the `customs` package. The generator side is `lib/broker_config.py` (which
+workloads get an instance, and `broker_command`, the argv the unit carries).
+Callers are identified by the uid owning the far end of the connection,
+compared to the one uid the instance was started for.
 
 **One instance per workload, and the workload is never told where it is.**
 One mechanism on both substrates: a VM declaring `[[vm.network.credential]]`

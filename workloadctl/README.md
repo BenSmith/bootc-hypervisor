@@ -334,14 +334,19 @@ first boot.
 
 ## Install
 
+workloadctl requires customs, the egress inspector and credential broker its
+filtered workloads run behind. Install its RPM first; `just customs-rpm`
+fetches the version the hypervisor image pins.
+
 ```bash
 cd workloadctl
+sudo dnf install ./customs.rpm
 rpmbuild -bb --define "_topdir $(pwd)/rpmbuild" \
   --define "_sourcedir $(pwd)" rpm/workloadctl.spec
 sudo dnf install rpmbuild/RPMS/noarch/workloadctl-*.rpm
 ```
 
-Or `just rpm-install` from the same directory, which does both steps.
+Or `just rpm-install` from the same directory, which does the last two steps.
 
 ## Development
 
@@ -354,7 +359,8 @@ just rpm-build         # build the RPM from this checkout
 ```
 
 There is no virtualenv: scripts run against the system `python3`, and `lib/` has
-no third-party dependencies. `just test-runtime` boots a throwaway VM and runs
+no third-party dependencies beyond customs. The suite imports customs from its
+RPM, or from a checkout named by `CUSTOMS_CHECKOUT`. `just test-runtime` boots a throwaway VM and runs
 runtime checks against it; it skips cleanly on a host without `/dev/kvm`.
 
 ## Comparison with Quadlets

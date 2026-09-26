@@ -4,6 +4,9 @@
 ([ADR 008](008-transparent-egress-inspection.md)), which is what dials the broker.
 Amended 2026-09-21: the instance's configuration is its command line, not a
 file — see the note under decision 8 and the third detail that bites.
+Amended 2026-09-26: the broker and the listener are customs' programs
+(`customs-broker`, `customs-inspect`), which workloadctl requires; the
+`lib/` and `libexec/` paths below are where they lived when this was decided.
 
 ## Context
 

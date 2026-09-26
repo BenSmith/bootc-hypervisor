@@ -407,7 +407,7 @@ Loud, at least, unlike the status write. Note that no sibling grant includes
 `rename`, which `os.replace` needs — copying `workload-proxy.cil`'s block
 verbatim gives a half-grant that reaches the replace and fails there.
 
-**Domains.** `workload-inspect-listener` has a filecon and a
+**Domains.** `customs-inspect` has a filecon and a
 `type_transition` and should be `wlinspect_t`. `workload-vm-resolve` has
 neither, so it entrypoints `bin_t` from `init_t` with nothing to retype it and
 runs in PID 1's own domain — a process terminating guest-supplied DNS packets,
@@ -790,7 +790,7 @@ was waiting on has landed, and it was "close it", so the probe asserts.**
 Two layers now stop it, and the rig requires both to hold. `workload_filter`
 drops a non-root packet aimed at a live inspector address that is not the
 sender's own (`@wl_inspect_live`), and the listener refuses a caller whose uid
-is not the workload's own — root included — through `lib/peer_identity.py`,
+is not the workload's own — root included — through `customs.peer_identity`,
 which reads the kernel's socket table because `SO_PEERCRED` is AF_UNIX-only
 and says nothing about a TCP peer. A `REACHED` line is a regression in one of
 those two.

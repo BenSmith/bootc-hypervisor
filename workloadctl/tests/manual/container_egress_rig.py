@@ -1908,7 +1908,7 @@ def check_cross_workload_gap():
         with no [network] table and an ordinary shell all fail to be, so all
         three went straight through.
       - the listener refuses a caller whose uid is not the workload's own,
-        root included, via lib/peer_identity.py.
+        root included, via customs.peer_identity.
 
     Not reaching it is therefore the assertion. A REACHED here is a real
     regression in one of those two layers, and reaching it was never only a

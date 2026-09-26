@@ -340,7 +340,7 @@ def container_inspect_policy(net: dict) -> dict:
     """The inspector's policy document for one container workload.
 
     Same JSON shape as vm_inspect_policy (lib/egress_policy.py) -- D6: the
-    listener binary (workload-inspect-listener) does not change between
+    listener binary (customs-inspect) does not change between
     substrates, so whichever wrote the file, it reads the same keys. `http2`
     is always empty, as it is for a VM. `tls` is the EFFECTIVE mode (container_effective_tls_mode),
     not the literal key, since the container schema computes it per the

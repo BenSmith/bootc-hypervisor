@@ -5,6 +5,9 @@ and [ADR 007](007-per-workload-credential-broker.md) to container workloads;
 decides nothing new about the mechanism itself. Most of this record is the
 alternatives that lost, kept because each is the obvious idea and will be
 proposed again.
+Amended 2026-09-26: the broker and the listener are customs' programs
+(`customs-broker`, `customs-inspect`), which workloadctl requires; the
+`lib/` and `libexec/` paths below are where they lived when this was decided.
 
 ## Context
 
