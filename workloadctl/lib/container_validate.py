@@ -89,9 +89,8 @@ def validate_publish_ports(ports, where: str) -> list[str]:
 def validate_container_network(net: dict, config: dict | None = None) -> list[str]:
     """Validate [network] on a container workload. Returns a list of error
     strings. Implements every numbered rule in the container egress-parity
-    build spec's validation section except V13 (reserved for a
-    [[network.http2]] array, which no inspector of HTTP/1.1 alone can
-    have), plus the mode="host" delta (§6 delta 2),
+    build spec's validation section, V13 being the refusal of a
+    [[network.http2]] array, plus the mode="host" delta (§6 delta 2),
     settled by the P0-1 hardware spike -- see the module note above.
 
     `config` is the whole parsed TOML, and it is optional only so that the
@@ -111,6 +110,16 @@ def validate_container_network(net: dict, config: dict | None = None) -> list[st
     # check. Runs before the host-mode branch: a malformed port is a typo in
     # any mode, even one that ignores ports.)
     errors.extend(validate_publish_ports(net.get("ports"), "[network].ports"))
+
+    # V13. Refused by name, as [[vm.network.http2]] is: the table is not
+    # read, and one accepted without a word reads as h2 kept for the host.
+    if "http2" in net:
+        errors.append(
+            "[[network.http2]] is not accepted: the egress inspector relays "
+            "no HTTP/2, so a terminated host is offered http/1.1 alone. A "
+            "host that must keep h2 is spliced: move the entry, with its "
+            "reason, to [[network.splice]], and it is not decrypted. Drop "
+            "the entry if the host takes HTTP/1.1.")
 
     # --- The mode = "host" delta (build spec §6 delta 2) ---
     # First, and on its own: every other rule below describes how to spell an

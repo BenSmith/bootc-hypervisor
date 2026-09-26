@@ -2729,6 +2729,16 @@ class TestValidateContainerNetwork(unittest.TestCase):
                "ca_delivery": "env"}
         self.assertEqual(validate_container_network(net), [])
 
+    def test_v13_http2_is_refused_and_the_message_names_splice(self):
+        """Refused by name: the table is read by nothing, so one accepted
+        in silence reads as h2 kept for the host."""
+        net = {"hosts": ["a.com"],
+               "http2": [{"host": "a.com", "reason": "grpc"}]}
+        errors = validate_container_network(net)
+        self.assertEqual(len(errors), 1, errors)
+        self.assertIn("[[network.http2]]", errors[0])
+        self.assertIn("[[network.splice]]", errors[0])
+
     def test_v16_policy_without_ca_delivery_is_error(self):
         net = {"hosts": ["a.com"], "policy": [{"host": "a.com"}]}
         errors = validate_container_network(net)

@@ -32,9 +32,8 @@
 ; ONE FILE, NOT A GLOB
 ;
 ; The filecon names a single path. /usr/libexec/customs holds customs-broker
-; too, which reads the provider key this domain must never reach, and
-; customs-resolve, which has a domain of its own (workload-resolve.cil). A
-; glob over that directory would make each of them an entrypoint into this
+; too, which reads the provider key this domain must never reach. A glob
+; over that directory would make every program in it an entrypoint into this
 ; domain — the same class of silent over-reach as the /usr/sbin symlink trap
 ; workload-proxy.cil documents, and in the same direction, since nothing would
 ; fail. Everything under libexec/ is bin_t, and bin_t carries both exec_type
@@ -104,7 +103,10 @@
 ; a harvest shows it merely being attempted.
 ;
 ;   getattr, ioctl(TCGETS) on init_t:unix_stream_socket   Python probing
-;     whether its stdout is a tty. The answer is "no" either way.
+;     whether its stdout is a tty. The answer is "no" either way. The audit
+;     line shows 0x542a (TCGETS2, glibc's isatty) rather than 0x5401, plus
+;     one 0x5413 (TIOCGWINSZ): argparse sizing its help formatter, which
+;     add_argument builds even when no help is printed.
 ;   (WAS: cert_t, container_file_t and svirt_image_t. All three were granted
 ;     in rung 3 -- see THE TERMINATING PLANE below. The reasoning that kept
 ;     them denied was sound and its premise expired.)
