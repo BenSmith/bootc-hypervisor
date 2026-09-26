@@ -50,6 +50,12 @@ for _dir in (LIB_DIR, str(TESTS_DIR)):
         sys.path.insert(0, _dir)
 
 CUSTOMS_CHECKOUT = os.environ.get("CUSTOMS_CHECKOUT")
+# Absolute, and written back: it reaches subprocesses through PYTHONPATH and
+# the inherited environment, and some of those run with another cwd, where a
+# relative checkout path names a different directory.
+if CUSTOMS_CHECKOUT:
+    CUSTOMS_CHECKOUT = str(Path(CUSTOMS_CHECKOUT).resolve())
+    os.environ["CUSTOMS_CHECKOUT"] = CUSTOMS_CHECKOUT
 if CUSTOMS_CHECKOUT and CUSTOMS_CHECKOUT not in sys.path:
     sys.path.append(CUSTOMS_CHECKOUT)
 # The directory customs' programs are read from: the installed one, or the
