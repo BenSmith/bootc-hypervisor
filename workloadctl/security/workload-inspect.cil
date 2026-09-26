@@ -6,9 +6,9 @@
 ; reasoning is what says whether this one should have absorbed anything from it.
 ; wlproxy_t was defined by two things the inspector does not share: the binary
 ; it entrypointed (/usr/bin/tinyproxy) and a filesystem boundary drawn at
-; /run/workload-vm/<name>. The inspector is a Python script in
-; /usr/libexec/workloadctl and its sockets are opened by init, so nothing about
-; the shape transferred. Rung 2 deleted wlproxy_t entirely; nothing moved here,
+; /run/workload-vm/<name>. The inspector is a Python script,
+; /usr/libexec/customs/customs-inspect, and its sockets are opened by init, so
+; nothing about the shape transferred. Rung 2 deleted wlproxy_t entirely; nothing moved here,
 ; because there was nothing in it that this domain lacked.
 ;
 ; THE ENTRYPOINT IS A SCRIPT, AND THAT WORKS
@@ -31,14 +31,19 @@
 ;
 ; ONE FILE, NOT A GLOB
 ;
-; The filecon names a single path. /usr/libexec/workloadctl holds the helpers
-; too, and workload-vm-inspect runs *privileged* from the socket unit's
-; ExecStartPre=+. A glob over that directory would make every helper an
-; entrypoint into this domain — the same class of silent over-reach as the
-; /usr/sbin symlink trap workload-proxy.cil documents, and in the same
-; direction, since nothing would fail. Everything under libexec/ is bin_t
-; today, and bin_t carries both exec_type and entry_type, which is exactly why
-; the retype is necessary rather than a bin_t:file entrypoint.
+; The filecon names a single path. /usr/libexec/customs holds customs-broker
+; too, which reads the provider key this domain must never reach, and
+; customs-resolve, which has a domain of its own (workload-resolve.cil). A
+; glob over that directory would make each of them an entrypoint into this
+; domain — the same class of silent over-reach as the /usr/sbin symlink trap
+; workload-proxy.cil documents, and in the same direction, since nothing would
+; fail. Everything under libexec/ is bin_t, and bin_t carries both exec_type
+; and entry_type, which is exactly why the retype is necessary rather than a
+; bin_t:file entrypoint.
+;
+; The modules it imports are the customs package in site-packages, lib_t,
+; which the base policy's read and lib_t's execute/map cover as they cover the
+; stdlib.
 ;
 ; SOCKET ACTIVATION DOES NOT MOVE THE BIND OUT OF THE DOMAIN
 ;
@@ -133,7 +138,7 @@
 (typeattributeset file_type (wlinspect_exec_t))
 (typeattributeset exec_type (wlinspect_exec_t))
 (typeattributeset entry_type (wlinspect_exec_t))
-(filecon "/usr/libexec/workloadctl/workload-inspect-listener" file (system_u object_r wlinspect_exec_t ((s0) (s0))))
+(filecon "/usr/libexec/customs/customs-inspect" file (system_u object_r wlinspect_exec_t ((s0) (s0))))
 
 ; Straight out of systemd, like wlproxy_t and unlike QEMU: the module declares
 ; the transition itself, so the unit's ExecStart is the plain script path.
@@ -311,7 +316,7 @@
 ; --- caller identification -------------------------------------------------
 ;
 ; The listener refuses a connection whose peer uid is not this workload's own
-; (lib/peer_identity.py). Identifying a TCP peer means reading the kernel's
+; (customs.peer_identity). Identifying a TCP peer means reading the kernel's
 ; socket table -- SO_PEERCRED is AF_UNIX-only and says nothing here -- so the
 ; domain needs /proc/net/tcp and /proc/net/tcp6.
 ;

@@ -115,7 +115,8 @@ told everything else on its `ExecStart=`: `--name`, `--listen`, `--caller-uid`,
 one `--host HOST=CREDENTIAL` per credentialed policy entry, and each
 credential's `--placeholder`/`--auth-header`/`--auth-format`. There is no
 config file, no `ExecStartPre` and no TOML in the broker's process
-(`tests/test_broker_closure.py`, the twin of `test_inspector_closure.py`).
+(customs' closure test; `tests/test_customs_seam.py` holds the command to the
+program's flags).
 Its only caller is that workload's own egress inspector, which recognises a
 host whose policy entry names a `credential` and sends that request to the
 broker instead of to the origin. So a workload cannot name the broker, cannot

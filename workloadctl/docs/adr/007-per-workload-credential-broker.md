@@ -151,8 +151,8 @@ than only requests to one endpoint.
    `--host HOST=CREDENTIAL` per credentialed entry, and the per-credential
    `--placeholder`/`--auth-header`/`--auth-format`), the broker compares the
    caller's uid to the one it was given, and its process imports nothing that
-   reads a workload's config or resolves a user
-   (`tests/test_broker_closure.py`). What the file was chosen for — never
+   reads a workload's config or resolves a user (a closure test held it;
+   the broker is customs' since, and its closure test is there). What the file was chosen for — never
    serving a previous boot's credential set — was never its property: it held
    no material, and `LoadCredentialEncrypted=` decrypts afresh at every start
    regardless. What is genuinely given up is the per-start cross-check a

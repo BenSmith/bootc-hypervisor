@@ -46,7 +46,7 @@ from egress_record_query import (
     group_by_connection, group_is_partial, parse_when, read_records,
     resolve_id, resolve_reason, resolve_status, select,
 )
-from egress_record import (
+from customs.egress_record import (
     DROP_REASONS,
     LOG_ID_FIELD,
     LOG_REQ_FIELD,
@@ -54,7 +54,7 @@ from egress_record import (
     RECORD_FIELDS,
     RECORD_MODES,
 )
-from egress_plane import PLANES, plane_for_port
+from customs.egress_plane import PLANES, plane_for_port
 
 
 def _rec(**overrides):

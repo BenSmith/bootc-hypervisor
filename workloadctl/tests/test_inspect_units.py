@@ -7,17 +7,16 @@ generator reads, so a drift between the constant and the rendered unit is a
 failure.
 
 These were written before the listener program existed, when no functional test
-could have caught any of it. It exists now (libexec/workload-inspect-listener,
-tests/test_inspect_listener.py), which is why the unit numbers the original
-docstring cited are gone: rung 2 reuses those labels for different work, and a
-stale "T5a" reads as a live forward reference to it.
+could have caught any of it. It exists now, as customs-inspect, which is why the
+unit numbers the original docstring cited are gone: rung 2 reuses those labels
+for different work, and a stale "T5a" reads as a live forward reference to it.
 """
 
 import importlib
 import unittest
 import unittest.mock
 
-from egress_plane import CLEARTEXT, TLS
+from customs.egress_plane import CLEARTEXT, TLS
 from egress_policy import (
     vm_uses_inspect,
 )
@@ -26,7 +25,7 @@ from nft_elements import (
     inspect_cgroup_filter_command,
 )
 from nft_constants import NFT_SET_INSPECT_CG, NFT_SET_EGRESS_CG
-from inspect_listener import MAX_CONNECTIONS
+from customs.inspect_listener import MAX_CONNECTIONS
 from nft_constants import SIDECAR_SLICE
 from vm_defs import EGRESS_DEFAULT
 from workload_addr import (
@@ -303,7 +302,7 @@ class TestGeneratedService(unittest.TestCase):
         no way to recover any of them, so an ExecStart that dropped one
         produces a listener that fails its start -- but only on the guest's
         first dial, long after the generator ran. The exact set is
-        tests/test_inspector_closure.py's; this asserts the rendering, with
+        tests/test_customs_seam.py's; this asserts the rendering, with
         every value dq-quoted and the flags bare.
         """
         binary, *args = self.gen.inspect_listener_command("web", UID)

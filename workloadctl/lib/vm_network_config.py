@@ -15,8 +15,8 @@ import socket
 from typing import NamedTuple
 
 from config_parser import SOCKET_DIR
-from inspect_document import normalise_hostname
-from egress_plane import CLEARTEXT, TLS
+from customs.inspect_document import normalise_hostname
+from customs.egress_plane import CLEARTEXT, TLS
 from egress_policy import vm_policy_entries
 from workload_addr import (RESOLVE_POLICY_FILE, RESOLVE_TTL,
                            allow_reserved_reason, inspect_address)

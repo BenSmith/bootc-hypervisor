@@ -57,7 +57,7 @@ from egress_policy import (
     inspect_policy_path,
     vm_uses_inspect,
 )
-from inspect_document import (
+from customs.inspect_document import (
     TLS_DEFAULT,
     TLS_MODES,
     VmPolicyEntry,

@@ -41,7 +41,7 @@ from container_network_config import (
     container_policy_entries,
     container_splice_entries,
 )
-from inspect_document import TLS_DEFAULT, VmPolicyEntry
+from customs.inspect_document import TLS_DEFAULT, VmPolicyEntry
 from vm_defs import EGRESS_DEFAULT, vm_allowed_hosts
 
 
@@ -164,7 +164,7 @@ INSPECT_STATUS_FILE = "inspect-status.json"
 def inspect_status_path(name: str) -> str:
     """Where one workload's inspector writes its counters.
 
-    Two status files rather than one, and lib/egress_status.py carries the
+    Two status files rather than one, and customs' egress_status carries the
     argument: the responder is a separate socket-activated process, and two
     processes atomically replacing one path leaves only the last writer's
     figures, silently.

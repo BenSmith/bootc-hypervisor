@@ -38,15 +38,14 @@ import diagnose_inspect
 from diagnose_inspect import (
     CA_EXPIRY_WARN_DAYS, INSPECT_DIGEST_SHORT, inspect_digest_short,
 )
-import inspect_policy
+from customs import inspect_policy
 from egress_policy import vm_inspect_policy_text
-from inspect_document import (
+from customs.inspect_document import (
     INSPECT_DIGEST_KEY,
     inspect_policy_digest,
 )
-from inspect_policy import Policy, load_policy
-
-from tests.test_inspect_listener import _mod
+from customs.inspect_listener import Listener
+from customs.inspect_policy import Policy, load_policy
 
 UID = 10001
 NET = {"hosts": ["example.com"], "egress": "filtered"}
@@ -83,7 +82,6 @@ class TestTheDigestProducer(unittest.TestCase):
 class TestTheListenerReportsWhatItLoaded(unittest.TestCase):
 
     def setUp(self):
-        self.mod = _mod()
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
 
@@ -131,7 +129,7 @@ class TestTheListenerReportsWhatItLoaded(unittest.TestCase):
         host. A digest held in memory and never written is unreadable by the
         check that exists to read it."""
         policy = load_policy(self._write(vm_inspect_policy_text(NET)))
-        listener = self.mod.Listener([], policy=policy)
+        listener = Listener([], policy=policy)
         self.assertEqual(listener.status()[INSPECT_DIGEST_KEY],
                          policy.digest)
 
@@ -139,7 +137,7 @@ class TestTheListenerReportsWhatItLoaded(unittest.TestCase):
         """A key that appeared only when non-empty would make "no digest" and
         "a listener from before this rung" indistinguishable, and the reader
         treats one of those as silence."""
-        listener = self.mod.Listener([], policy=Policy(
+        listener = Listener([], policy=Policy(
             tls="inspect", hosts=("example.com",)))
         self.assertIn(INSPECT_DIGEST_KEY, listener.status())
         self.assertEqual(listener.status()[INSPECT_DIGEST_KEY], "")

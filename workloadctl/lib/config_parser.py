@@ -15,7 +15,7 @@ Installed to /usr/libexec/workloadctl/config_parser.py.
 
 import re
 from pathlib import Path
-from egress_plane import CLEARTEXT, TLS
+from customs.egress_plane import CLEARTEXT, TLS
 
 
 # Persistent workload data directory

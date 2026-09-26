@@ -22,7 +22,7 @@ from pathlib import Path
 from cli_log import error, info, warn
 from config_parser import workload_root_dir
 from container_network_config import container_uses_inspect
-from egress_ca import CA_DIR_NAME, DENIAL_DIR_NAME, LEAF_DIR_NAME
+from customs.egress_ca import CA_DIR_NAME, DENIAL_DIR_NAME, LEAF_DIR_NAME
 from workload_lib import (
     NAME_PATTERN,
     WORKLOAD_BUNDLES_DIR,

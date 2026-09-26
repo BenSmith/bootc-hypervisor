@@ -18,7 +18,7 @@ with the map, asserted below by its absence.
 """
 
 import importlib
-from tests import load_script
+from tests import CUSTOMS_LIBEXEC, load_script
 
 # `lib/` reaches sys.path via tests/__init__, so this import follows it.
 import vm_default_seed
@@ -37,7 +37,7 @@ from broker_config import (BROKER_BIN, vm_broker_command,
 import inspect_arm
 from nft_elements import internal_ok_elements
 from vm_validate import validate_vm_network
-import broker_profiles
+from customs import broker_profiles
 from workload_addr import BROKER_INSTANCE_PORT, UID_MIN, broker_listen_address
 import ipaddress
 
@@ -606,7 +606,7 @@ import socket
 import threading
 import time
 
-from egress_record import (
+from customs.egress_record import (
     DROP_BROKER_UNREACHABLE,
     DROP_REASONS,
     DROP_UNREACHABLE,
@@ -615,17 +615,16 @@ from egress_record import (
     Where,
 )
 from egress_policy import vm_inspect_policy, vm_inspect_policy_text
-from inspect_document import VmPolicyEntry
-from inspect_policy import Policy, load_policy
+from customs.inspect_document import VmPolicyEntry
+from customs.inspect_policy import Policy, load_policy
 from workload_addr import broker_listen_address
-import egress_relay
-from egress_upstream import Upstream
-import inspect_http
-from inspect_listener import Listener
-from inspect_http import serve_cleartext
+from customs import egress_relay
+from customs.egress_upstream import Upstream
+from customs import inspect_http
+from customs.inspect_listener import Listener
+from customs.inspect_http import serve_cleartext
 import inspect_figures
 
-LISTENER = Path(__file__).resolve().parent.parent / "libexec" / "workload-inspect-listener"
 CIL = Path(__file__).resolve().parent.parent / "security" / "workload-inspect.cil"
 
 _LISTENER_MOD = None
@@ -634,7 +633,7 @@ _LISTENER_MOD = None
 def listener_mod():
     global _LISTENER_MOD
     if _LISTENER_MOD is None:
-        _LISTENER_MOD = load_script("libexec/workload-inspect-listener")
+        _LISTENER_MOD = load_script(CUSTOMS_LIBEXEC / "customs-inspect")
     return _LISTENER_MOD
 
 
@@ -853,18 +852,16 @@ class TestTheRefusalWhenTheBrokerIsDown(_BrokerRig):
         self.assertTrue(self.answer.endswith(b"\r\n\r\nBad Gateway\n"),
                         self.answer)
 
-    def test_the_operator_is_pointed_at_the_unit_and_at_audit_log(self):
-        """The AVC and a broker that failed to start are indistinguishable
-        from here -- the counter cannot tell them apart and neither can the
-        502. So the journal's sentence names both remedies rather than
-        asserting one, per this module's own 'a policy gap wearing a network
-        error's clothes', and says the request was NOT sent: a retry will do
-        the same thing until an operator touches the host."""
+    def test_the_operator_is_pointed_at_the_unit_and_at_the_pair(self):
+        """A broker that failed to start and a --broker that names another
+        endpoint are indistinguishable from here, so the journal's sentence
+        names both, and says the request was NOT sent: a retry will do the
+        same thing until an operator touches the host."""
         log, _, _, _ = self._serve(
             self._policy([BROKERED]), _GET_BROKERED, refuse=True)
         self.assertIn("NOT sent", log)
-        self.assertIn("broker.service", log)
-        self.assertIn("audit.log", log)
+        self.assertIn("broker's unit", log)
+        self.assertIn("--listen", log)
 
     def test_the_failed_host_is_not_re_resolved(self):
         """dial_failure_reason exists to tell the wildcard trap from a dead
@@ -1115,7 +1112,7 @@ class TestTheBrokerEndpointComesFromTheUid(unittest.TestCase):
         names neither the address function nor the port constant. A dial that
         derived either would be one workloadctl-shaped assumption back inside
         the inspector."""
-        import egress_upstream
+        from customs import egress_upstream
         source = Path(egress_upstream.__file__).read_text()
         self.assertNotIn("broker_listen_address", source)
         self.assertNotIn("BROKER_INSTANCE_PORT", source)
@@ -1397,7 +1394,7 @@ class TestTheRetiredMechanismLeavesNoSymbols(unittest.TestCase):
         self.assertNotIn("workload-broker.nft", spec)
         self.assertNotIn("%{_unitdir}/agent-broker.service", spec)
         self.assertNotIn("systemd/agent-broker.service", spec)
-        self.assertIn("libexec/agent-broker", spec)
+        self.assertNotIn("libexec/agent-broker", spec)
 
 
 class TestTheBrokerAddressIsExemptedFromTheInternalDrop(unittest.TestCase):

@@ -13,7 +13,7 @@ Installed to /usr/libexec/workloadctl/vm_egress_validate.py.
 
 from broker_config import VmCredential
 from config_parser import validate_host_pattern
-from inspect_document import (
+from customs.inspect_document import (
     TLS_DEFAULT,
     TLS_MODES,
     hostname_match,

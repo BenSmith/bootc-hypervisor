@@ -70,7 +70,7 @@ import time
 sys.dont_write_bytecode = True
 
 LIBDIR = "/usr/libexec/workloadctl"
-LISTENER = f"{LIBDIR}/workload-inspect-listener"
+LISTENER = "/usr/libexec/customs/customs-inspect"
 NS = "wlpol"
 
 # The throwaway workload this rig pretends to be. Nothing is enabled and no
@@ -774,7 +774,7 @@ def main(argv):
     if os.geteuid() != 0:
         sys.exit("run as root: this needs a netns and binds 443 in it")
     if not os.path.exists(LISTENER):
-        sys.exit(f"{LISTENER} is missing -- install the workloadctl RPM first")
+        sys.exit(f"{LISTENER} is missing -- install the customs RPM first")
     if not shutil.which("openssl"):
         sys.exit("openssl is missing -- it generates the CA and the origin")
     for path in (POLICY, CA_DIR):

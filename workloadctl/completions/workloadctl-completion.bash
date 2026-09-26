@@ -140,7 +140,7 @@ _workload_ctl_completion() {
             if [[ "$prev" == "--decision" ]]; then
                 COMPREPLY=( $(compgen -W "forward drop" -- "$cur") )
             elif [[ "$prev" == "--mode" ]]; then
-                COMPREPLY=( $(compgen -W "forward terminate splice h2" -- "$cur") )
+                COMPREPLY=( $(compgen -W "forward terminate splice" -- "$cur") )
             elif [[ "$prev" == "--plane" ]]; then
                 COMPREPLY=( $(compgen -W "tls cleartext" -- "$cur") )
             elif [[ "$cur" == -* ]]; then

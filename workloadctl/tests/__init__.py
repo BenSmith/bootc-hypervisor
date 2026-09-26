@@ -11,6 +11,12 @@ itself goes on the path too, so sibling helpers (e.g.
 and ``libexec/`` have no ``.py`` extension and so cannot be imported by name --
 use :func:`load_script`. Subprocess launches of those scripts need the same lib
 path handed down in the child env -- use :func:`script_env`.
+
+The egress inspector and the credential broker are customs': its package
+(``import customs``) and its programs, which the generator names. Installed,
+the package is in site-packages and the programs in ``/usr/libexec/customs``;
+``CUSTOMS_CHECKOUT`` names a customs checkout to use instead, for a host that
+has not installed it.
 """
 
 import importlib.machinery
@@ -42,6 +48,14 @@ LIB_DIR = str(REPO_ROOT / "lib")
 for _dir in (LIB_DIR, str(TESTS_DIR)):
     if _dir not in sys.path:
         sys.path.insert(0, _dir)
+
+CUSTOMS_CHECKOUT = os.environ.get("CUSTOMS_CHECKOUT")
+if CUSTOMS_CHECKOUT and CUSTOMS_CHECKOUT not in sys.path:
+    sys.path.append(CUSTOMS_CHECKOUT)
+# The directory customs' programs are read from: the installed one, or the
+# checkout's own.
+CUSTOMS_LIBEXEC = (Path(CUSTOMS_CHECKOUT) / "libexec" if CUSTOMS_CHECKOUT
+                   else Path("/usr/libexec/customs"))
 
 
 def load_script(relpath, name=None):
@@ -84,7 +98,8 @@ def script_env(**overrides):
     test that genuinely wants to see colour.
     """
     env = os.environ.copy()
-    env["PYTHONPATH"] = LIB_DIR
+    env["PYTHONPATH"] = os.pathsep.join(
+        [LIB_DIR] + ([CUSTOMS_CHECKOUT] if CUSTOMS_CHECKOUT else []))
     env["NO_COLOR"] = "1"
     env.update({key: str(value) for key, value in overrides.items()})
     return env

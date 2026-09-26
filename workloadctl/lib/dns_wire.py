@@ -12,7 +12,7 @@ tests/test_vm_resolve.py TestNoUpstream parses this file to keep it that way.
 import socket
 import struct
 
-from inspect_document import hostname_control_character, normalise_hostname
+from customs.inspect_document import hostname_control_character, normalise_hostname
 
 FLAG_QR = 0x8000
 FLAG_AA = 0x0400

@@ -13,7 +13,7 @@ in workload-filter.nft is keyed on. See container_uses_inspect().
 
 Installed to /usr/libexec/workloadctl/container_validate.py.
 """
-from inspect_document import patterns_overlap
+from customs.inspect_document import patterns_overlap
 from container_network_config import (
     ContainerCredential,
     ContainerPolicyEntry,
@@ -28,7 +28,7 @@ from container_network_config import (
 from credential_entries import validate_credential_entries
 from guest_ca import RESERVED_GUEST_ENV
 from egress_policy import POLICY_METHODS, POLICY_METHODS_REFUSED
-from inspect_document import hostname_match
+from customs.inspect_document import hostname_match
 
 
 # The alphabet a podman publish spec may contain:

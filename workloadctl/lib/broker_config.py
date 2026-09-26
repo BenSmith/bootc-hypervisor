@@ -3,12 +3,10 @@
 
 One per declaring workload, per ADR 007. This is the generator side: which
 workloads get an instance, what it is told, and the argv the unit's
-ExecStart= carries. What `libexec/agent-broker` makes of those flags at
-startup -- the refusals and the per-Host profile table -- is
-broker_profiles. A writer and a reader that each spell the flags drift, and
-a flag emitted here and not taken there is a broker that refuses to start,
-so tests/test_broker_closure.py pins the command against the entrypoint's
-parser.
+ExecStart= carries. What customs-broker makes of those flags at startup is
+customs'. A writer and a reader that each spell the flags drift, and a flag
+emitted here and not taken there is a broker that refuses to start, so
+tests/test_customs_seam.py pins the command against the program's parser.
 
 IT WAS A DOCUMENT. broker_command replaces render_broker_config, which
 rendered a broker.toml that write_instance_config -- the unit's ExecStartPre,
@@ -48,9 +46,9 @@ from secrets_template import credential_path, CREDSTORE_DIR
 from egress_policy import vm_policy_entries
 
 
-# The program the generated unit runs. One instance per workload, generated;
-# there is no host-wide unit for an operator to enable.
-BROKER_BIN = "/usr/libexec/workloadctl/agent-broker"
+# The program the generated unit runs, customs': one instance per workload,
+# generated; there is no host-wide unit for an operator to enable.
+BROKER_BIN = "/usr/libexec/customs/customs-broker"
 
 
 # --- The credential table, and the blocks that name one ---

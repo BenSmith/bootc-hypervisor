@@ -42,7 +42,7 @@ UID_MAX = 52948
 # `[vm.network].ports`. Most of these rows sit in one; the nflog group is not
 # an address and sits in none, which is why the reservation fields are
 # optional. "Plane" is deliberately NOT the word for any of this: in this
-# codebase a plane is which port a record arrived on (lib/egress_plane.py,
+# codebase a plane is which port a record arrived on (customs.egress_plane,
 # and the user-visible `--plane tls`), and one word for two unrelated things
 # is how a v6 range went unchecked for a whole rung.
 #
@@ -162,9 +162,9 @@ UID_INSPECT = UidDerived("inspector address", INSPECT_ADDR_BASE,
                             RESERVATION_INSPECT4, RESERVATION_INSPECT6)
 
 
-# The inspector's listener binary, the socket unit's ExecStart. Named here so
-# the unit and the RPM stay one place apart.
-INSPECT_LISTENER_BIN = "/usr/libexec/workloadctl/workload-inspect-listener"
+# The inspector, customs', the socket unit's ExecStart. Named here so the
+# unit and the program's installed path stay one place apart.
+INSPECT_LISTENER_BIN = "/usr/libexec/customs/customs-inspect"
 
 # VM workloads have no bridge. passt terminates the guest's stack in userspace
 # and re-originates its traffic as ordinary host sockets owned by the workload's

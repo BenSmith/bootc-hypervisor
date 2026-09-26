@@ -54,7 +54,7 @@ from container_network_config import (
     container_uses_inspect,
 )
 from egress_policy import uses_resolve
-from egress_status import clear_status
+from customs.egress_status import clear_status
 from helper_main import log, run
 from nft import purge_uid_elements
 from nft_constants import NFT_BIN, NFT_SKELETON

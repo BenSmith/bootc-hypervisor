@@ -61,7 +61,7 @@ from nft_elements import (
 )
 from egress_policy import container_inspect_policy, container_inspect_policy_text
 from container_validate import validate_container_network
-from inspect_policy import load_policy
+from customs.inspect_policy import load_policy
 from vm_defs import parse_memory_mib, mac_address, mac_collisions
 from validation import (
     validate_workload_name, validate_workload_config,

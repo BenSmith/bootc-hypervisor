@@ -32,7 +32,7 @@ from workload_lib import (
 )
 from egress_policy import vm_uses_inspect
 from workload_addr import UID_MAX, UID_MIN, inspect_address
-from egress_ca import ca_cert_path
+from customs.egress_ca import ca_cert_path
 from guest_ca import CA_BUNDLE_PATH, CA_ENV_VARS
 from broker_config import vm_credential_env
 from config_parser import SOCKET_DIR

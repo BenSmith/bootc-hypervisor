@@ -3,9 +3,10 @@
 
 workloadctl runs against the system python3 with no venv, no package manager and
 no third-party deps: `rpm/workloadctl.spec` declares `Requires: python3 >= 3.14`
-plus system tools, and *no* Python library dependency. That is what lets the RPM
-install onto a bootc host — where `pip` is not an option and every Python
-dependency would have to become another layered RPM.
+plus system tools, and one Python library, customs -- the egress inspector and
+credential broker, an RPM of its own that is stdlib-only in turn. That is what
+lets the RPM install onto a bootc host — where `pip` is not an option and every
+Python dependency would have to become another layered RPM.
 
 The invariant is easy to break by accident: a `import yaml` or `import requests`
 added during development works fine in a dev container that happens to have it
@@ -30,6 +31,12 @@ SPEC = REPO_ROOT / "rpm" / "workloadctl.spec"
 # The trees the RPM installs. Everything here lands in one flat directory on the
 # host, so any lib/*.py stem is importable by a bare name from any of them.
 RUNTIME_DIRS = ("bin", "lib", "generators", "libexec")
+
+# The Python packages the spec requires, by the name they are imported as, and
+# the Requires: that brings each in.
+DEPENDENCIES = {
+    "customs": "customs",
+}
 
 # Modules that are neither stdlib nor a checked-in sibling, but are legitimately
 # importable at runtime. Keep this list short and justified.
@@ -117,6 +124,7 @@ class TestStdlibOnly(unittest.TestCase):
             sys.stdlib_module_names
             | sibling_modules()
             | ALLOWED_NON_STDLIB
+            | set(DEPENDENCIES)
         ) - SPLIT_OUT_ON_FEDORA
 
         offenders = []
@@ -134,8 +142,9 @@ class TestStdlibOnly(unittest.TestCase):
 
         self.assertEqual(
             offenders, [],
-            "shipped code may only import the standard library and its own "
-            "modules (rpm/workloadctl.spec declares no Python dependency):\n  "
+            "shipped code may only import the standard library, its own "
+            "modules and DEPENDENCIES (rpm/workloadctl.spec declares no "
+            "other Python dependency):\n  "
             + "\n  ".join(offenders),
         )
 
@@ -181,6 +190,13 @@ class TestSpecDeclaresNoPythonDeps(unittest.TestCase):
         r"(python3-\S+|python3(?:\.\d+)?dist\(\S+)",
         re.MULTILINE,
     )
+
+    def test_each_dependency_is_required(self):
+        """An import of a package the spec does not require works in a
+        checkout that has it and fails at import on a host that does not."""
+        for requires in DEPENDENCIES.values():
+            self.assertRegex(SPEC.read_text(),
+                             rf"(?m)^Requires:\s+{re.escape(requires)}\b")
 
     def test_no_python_library_requires(self):
         matches = self._PY_LIB_RE.findall(SPEC.read_text())

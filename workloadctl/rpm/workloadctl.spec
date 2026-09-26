@@ -37,20 +37,23 @@ Recommends:     udica
 Requires:       passt
 Requires:       nftables
 # The `openssl` command line, not just the library. Nothing here links against
-# libcrypto -- lib/egress_ca.py builds argv for the per-workload CA and its
+# libcrypto -- customs' egress_ca builds argv for the per-workload CA and its
 # leaves and `workload-ensure-user` mints the CA at first boot, so a host
 # without the CLI fails a VM start rather than a build. cmd_secret shells out
 # to it as well.
 # openssl-libs arrives with half the base system; the CLI does not.
 Requires:       openssl
+# The egress inspector and the credential broker: customs-inspect and
+# customs-broker, which the generated units run, and the customs package whose
+# published names lib/ imports (tests/test_customs_seam.py). 0.2.0 is the first
+# release that installs the package where Python finds it.
+Requires:       customs >= 0.2.0
 # There is deliberately NO proxy dependency here. Through rung 1 this was a hard
 # `Requires: tinyproxy`, because a VM declaring [vm.network].hosts was filtered
 # default-deny with its own proxy as the only route out. Rung 2 replaced that
-# with a transparent redirect into workload-inspect-listener, which is
-# shipped by this package and has no dependency outside the standard library --
-# so hostname policy now needs nothing installed that this package does not
-# install itself. On upgrade, dnf leaves tinyproxy on the host as a package
-# nothing requires; %%post removes the SELinux module that confined it.
+# with a transparent redirect into the egress inspector. On upgrade, dnf
+# leaves tinyproxy on the host as a package nothing requires; %%post removes
+# the SELinux module that confined it.
 # `workloadctl pcap` reads the host-side vantage back through tcpdump. Weak,
 # because capture is a diagnostic and `pcap -D` reports a missing tcpdump rather
 # than failing at the point of use.
@@ -136,8 +139,6 @@ install -Dpm 0755 %{_sourcedir}/libexec/workload-vm-inspect \
     %{buildroot}%{_libexecdir}/workloadctl/workload-vm-inspect
 install -Dpm 0755 %{_sourcedir}/libexec/workload-vm-svcaddr \
     %{buildroot}%{_libexecdir}/workloadctl/workload-vm-svcaddr
-install -Dpm 0755 %{_sourcedir}/libexec/workload-inspect-listener \
-    %{buildroot}%{_libexecdir}/workloadctl/workload-inspect-listener
 install -Dpm 0755 %{_sourcedir}/libexec/workload-vm-resolve \
     %{buildroot}%{_libexecdir}/workloadctl/workload-vm-resolve
 install -Dpm 0755 %{_sourcedir}/libexec/workload-vm-clock \
@@ -148,26 +149,6 @@ install -Dpm 0755 %{_sourcedir}/libexec/workload-vm-qmp \
     %{buildroot}%{_libexecdir}/workloadctl/workload-vm-qmp
 install -Dpm 0755 %{_sourcedir}/libexec/workload-vm-shutdown \
     %{buildroot}%{_libexecdir}/workloadctl/workload-vm-shutdown
-
-# The credential broker. A whole program rather than a helper: it holds a
-# provider API key a sandbox is never given, and hands it to outbound requests
-# the sandbox makes through it (docs/agent-broker.md).
-#
-# It keeps its own name instead of a workload-* one: it is not a helper of a
-# workload's units but a daemon those units run, and the workload-* names are
-# the helpers. (libexec once also held workload-broker-config, the helper that
-# wrote one instance's broker.toml; it went with the document, so the two
-# names a hyphen apart are no longer a 3am confusion to avoid.)
-#
-# It is a main() over four lib/ modules -- broker_profiles, broker_request,
-# broker_server, and peer_identity, the caller-identification it shares with
-# the egress inspector's listener -- so being installed beside them is
-# load-bearing: it is how the imports resolve, via this entrypoint's own
-# sys.path[0]. Everything else it uses is stdlib. Everything it needs to
-# know it is told on the generated unit's ExecStart=; it reads no file of
-# ours (tests/test_broker_closure.py).
-install -Dpm 0755 %{_sourcedir}/libexec/agent-broker \
-    %{buildroot}%{_libexecdir}/workloadctl/agent-broker
 
 install -Dpm 0644 %{_sourcedir}/systemd/workload-exporter.service \
     %{buildroot}%{_unitdir}/workload-exporter.service
@@ -285,10 +266,9 @@ install -dm 0755 %{buildroot}%{_sysconfdir}/workloads.d
 # The timers are the enabled units; each oneshot service is pulled in by its
 # timer, not enabled on its own.
 #
-# agent-broker.service was listed here and is gone with the host-wide broker.
-# The program it ran still ships; what changed is who starts it. Each workload
-# that declares a credential gets workload-<name>-broker.service, written by
-# the generator into /run at boot — a generated unit, so there is nothing for a
+# No broker unit is listed. Each workload that declares a credential gets
+# workload-<name>-broker.service, running customs-broker, written by the
+# generator into /run at boot — a generated unit, so there is nothing for a
 # preset to apply to and nothing here to enable.
 %post
 %systemd_post workload-exporter.timer workload-exporter-disk.timer
@@ -413,13 +393,14 @@ if [ -x /usr/sbin/semodule ]; then
         restorecon /usr/bin/tinyproxy 2>/dev/null || :
     fi
 fi
-# The egress inspector's domain, on the same terms. The filecon names ONE file
-# under /usr/libexec/workloadctl, not the directory: the other helpers there
-# include workload-vm-inspect, which runs privileged, and a glob would make
-# every one of them an entrypoint into this domain (see the module header).
+# The egress inspector's domain, on the same terms. The inspector is customs',
+# installed before this package (Requires:), so its file already carries a
+# label and needs the restorecon. The filecon names ONE file under
+# /usr/libexec/customs, not the directory: the broker is there too, and holds
+# the key the inspector must never read (see the module header).
 if [ -x /usr/sbin/semodule ] && [ -f %{_datadir}/workloadctl/workload-inspect.cil ]; then
     if semodule -i %{_datadir}/workloadctl/workload-inspect.cil 2>/dev/null; then
-        restorecon /usr/libexec/workloadctl/workload-inspect-listener 2>/dev/null || :
+        restorecon /usr/libexec/customs/customs-inspect 2>/dev/null || :
     fi
 fi
 # The synthesising responder's domain, on the same terms and for the same
@@ -478,8 +459,8 @@ fi
 # not be: they are per-workload units this macro has no name for. An upgrade
 # therefore leaves a running broker serving from the previous package's code
 # until its workload restarts, which is the same bargain every other
-# per-workload unit takes and a weaker one than the host-wide agent-broker.service
-# had — that unit was named here and restarted on every upgrade. The cost is
+# per-workload unit takes and a weaker one than the retired host-wide broker
+# unit had — that unit was named here and restarted on every upgrade. The cost is
 # bounded by the credential never being re-read: the material is decrypted
 # at every start, so a broker that has not restarted is running old code
 # against the flags it started with, not against a stale credential set.
@@ -505,7 +486,7 @@ if [ $1 -eq 0 ]; then
         semodule -r workload-vm 2>/dev/null || :
         restorecon /usr/libexec/virtiofsd 2>/dev/null || :
         semodule -r workload-inspect 2>/dev/null || :
-        restorecon /usr/libexec/workloadctl/workload-inspect-listener 2>/dev/null || :
+        restorecon /usr/libexec/customs/customs-inspect 2>/dev/null || :
         semodule -r workload-resolve 2>/dev/null || :
         restorecon /usr/libexec/workloadctl/workload-vm-resolve 2>/dev/null || :
         semodule -r workload-clock 2>/dev/null || :
@@ -533,12 +514,10 @@ fi
 %{_libexecdir}/workloadctl/workload-vm-notify
 %{_libexecdir}/workloadctl/workload-vm-inspect
 %{_libexecdir}/workloadctl/workload-vm-svcaddr
-%{_libexecdir}/workloadctl/workload-inspect-listener
 %{_libexecdir}/workloadctl/workload-vm-resolve
 %{_libexecdir}/workloadctl/workload-vm-clock
 %{_libexecdir}/workloadctl/workload-vm-qmp
 %{_libexecdir}/workloadctl/workload-vm-shutdown
-%{_libexecdir}/workloadctl/agent-broker
 %{_unitdir}/workload-exporter.service
 %{_unitdir}/workload-exporter.timer
 %{_unitdir}/workload-exporter-disk.service

@@ -14,7 +14,7 @@ as one.
 """
 
 import importlib
-from sd_listen import NotSocketActivated
+from customs.sd_listen import NotSocketActivated
 import dns_wire
 import resolve_policy
 import resolve_server
@@ -927,8 +927,8 @@ class TestNoUpstream(unittest.TestCase):
     def test_the_program_itself_constructs_no_socket_at_all(self):
         """No file of the responder's contains a socket.socket() call.
 
-        The one constructor it relies on moved to lib/sd_listen.py when the
-        activation mechanics were shared with workload-inspect-listener.
+        The one constructor it relies on is customs' sd_listen, shared with
+        the egress inspector.
         The invariant did not move with it, which is the whole point of
         splitting this into two assertions: the property is that THIS program
         never creates a socket, and a file with zero constructors states that
@@ -954,7 +954,8 @@ class TestNoUpstream(unittest.TestCase):
         listener's benefit would silently become the resolver's too.
         """
         import ast
-        constructions = self._socket_constructions("lib/sd_listen.py")
+        from customs import sd_listen
+        constructions = self._socket_constructions(sd_listen.__file__)
         self.assertEqual(len(constructions), 1,
                          [ast.unparse(c) for c in constructions])
         self.assertEqual([kw.arg for kw in constructions[0].keywords],

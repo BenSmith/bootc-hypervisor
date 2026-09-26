@@ -1055,7 +1055,7 @@ Read the per-request record the inspector writes for a filtered workload, VM or 
 
 ```
 sudo workloadctl egress [-n N] [-g] [--json] [--id ID] [--decision forward|drop]
-                        [--mode forward|terminate|splice|h2] [--plane cleartext|tls]
+                        [--mode forward|terminate|splice] [--plane cleartext|tls]
                         [--reason REASON] [--host PATTERN] [--method METHOD]
                         [--status STATUS] [--since TIME] [--until TIME] <workload>
 ```
@@ -1067,7 +1067,7 @@ sudo workloadctl egress [-n N] [-g] [--json] [--id ID] [--decision forward|drop]
 | `--json` | Print the record objects verbatim |
 | `--id` | Connection id, as pasted from a journal line. Repeatable |
 | `--decision` | `forward` or `drop`. Repeatable |
-| `--mode` | `forward`, `terminate`, `splice` or `h2`. Repeatable |
+| `--mode` | `forward`, `terminate` or `splice`. Repeatable |
 | `--plane` | `tls` or `cleartext`. Repeatable |
 | `--reason` | Drop reason, or an unambiguous part of one. Repeatable |
 | `--host` | Host, as an fnmatch pattern. Repeatable |

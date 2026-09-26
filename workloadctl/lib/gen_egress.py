@@ -23,12 +23,12 @@ Installed to /usr/libexec/workloadctl/gen_egress.py.
 
 from workload_lib import workload_state_dir, dq, uq
 from run_files import GENERATED_BY
-from egress_plane import PLANES
+from customs.egress_plane import PLANES
 from egress_policy import (
     inspect_logs_directory, inspect_policy_path, inspect_record_path,
     inspect_status_path,
 )
-from egress_ca import denial_dir, leaf_dir
+from customs.egress_ca import denial_dir, leaf_dir
 from nft_elements import inspect_cgroup_command, inspect_cgroup_filter_command
 from broker_config import broker_credential, host_resolver_addresses
 from config_parser import SOCKET_DIR
@@ -226,15 +226,14 @@ def inspect_listener_command(name: str, uid: int) -> list:
     """The listener's argv: the binary and the five values it is handed.
 
     THIS IS WHERE THE INSPECTOR AND WORKLOADCTL MEET, and it is the only
-    place. The inspector (lib/inspect_listener.py and its closure, the
-    entrypoint included) knows nothing about workloads -- not where one
+    place. The inspector (customs-inspect, from the customs package) knows
+    nothing about workloads -- not where one
     keeps its policy, its state, its counters or its record, and not what a
     uid becomes. Each of those is a fact about how workloadctl lays out a
     host, computed HERE from the name and uid the generator already holds,
     and written into ExecStart= as a flag. The entrypoint parses; it derives
-    nothing. tests/test_inspector_closure.py asserts both halves: that the
-    entrypoint's closure reaches no workload-side module, and that this
-    command names every one of the five.
+    nothing. tests/test_customs_seam.py asserts that this command names
+    every one of the five and that customs-inspect takes each.
 
     It used to be `workload-inspect-listener <name>`, with the entrypoint
     importing egress_policy, workload_lib and workload_addr to compute the

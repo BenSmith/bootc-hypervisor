@@ -24,8 +24,8 @@ from dns_wire import (
     error_response,
     log,
 )
-from egress_status import STATUS_TOP_N, BoundedCounts, write_status
-from sd_listen import inherited_listening_sockets as sd_inherited_listening_sockets
+from customs.egress_status import STATUS_TOP_N, BoundedCounts, write_status
+from customs.sd_listen import inherited_listening_sockets as sd_inherited_listening_sockets
 
 # How long a TCP peer may hold a connection open with nothing on it. Clients
 # reuse connections (RFC 7766) so this is not one query per connection, but an
@@ -138,8 +138,8 @@ class Counters:
 def inherited_listening_sockets():
     """Recover the sockets systemd passed in, or fail loudly.
 
-    The mechanics are shared with workload-inspect-listener
-    (lib/sd_listen.py); what is ours is the reason a fallback bind is refused.
+    The mechanics are customs' (customs.sd_listen), shared with the
+    inspector; what is ours is the reason a fallback bind is refused.
     Port 53 is privileged and this process is not, so a fallback would not fail
     -- it would succeed on some other port that nothing forwards to.
     """

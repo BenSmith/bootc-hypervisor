@@ -24,7 +24,7 @@ Installed to /usr/libexec/workloadctl/nft_elements.py.
 import ipaddress
 import socket
 
-from egress_plane import PLANES
+from customs.egress_plane import PLANES
 from netfilter_state import nft_set_elements
 from nft_constants import (both_families, split_by_family, NFT_BIN,
                            NFT_PAIR_ALLOW, NFT_PAIR_INSPECT_DST,

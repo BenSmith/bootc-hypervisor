@@ -36,10 +36,10 @@ def _filecons():
 
 class TestFilecon(unittest.TestCase):
     def test_no_filecon_globs_the_libexec_directory(self):
-        """A glob over /usr/libexec/workloadctl would make every helper an
-        entrypoint into this domain -- including workload-vm-inspect, which
-        the socket unit runs privileged. Nothing would fail; the domain would
-        just be enterable from six more binaries.
+        """A glob over /usr/libexec/customs would make every program there
+        an entrypoint into this domain -- including customs-broker, which
+        holds the key. Nothing would fail; the domain would just be enterable
+        from four more programs.
 
         Asserted as a property of every filecon rather than as a count of
         them. The count was the original spelling and it fails the moment the

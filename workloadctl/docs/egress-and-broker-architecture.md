@@ -286,7 +286,7 @@ inspector (`libexec/workload-inspect-listener`, `lib/inspect_listener.py` and
 their closure) knows nothing about either substrate, or about workloads at
 all. It is handed a policy document, a state directory, a status file, a
 record file and a broker `(address, port)` as flags on its command line, and
-`tests/test_inspector_closure.py` asserts its closure contains no config
+customs' closure test asserts its closure contains no config
 grammar, no `workload_lib`, no `vm_defs`, no `qmp` and nothing that turns a
 uid into an address. The generator (`gen_egress.inspect_listener_command`) is
 the one place those values are derived from the workload name and uid, and
@@ -345,7 +345,7 @@ Properties that follow from the picture, each of which is load-bearing:
   credentialed policy entry and the per-credential placeholder and auth
   convention, all computed by the generator and written onto the unit; no
   config file, no `ExecStartPre`, no TOML in its process and no passwd lookup
-  (`tests/test_broker_closure.py`). The line holds nothing the workload does
+  (customs' closure test). The line holds nothing the workload does
   not already hold — its own hosts, its own placeholders, its own uid — and
   the seal names it carries are the ones the same unit's
   `LoadCredentialEncrypted=` lines spell. The material is decrypted into a

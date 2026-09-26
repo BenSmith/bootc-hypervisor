@@ -19,7 +19,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from egress_ca import (CA_BACKDATE_SECONDS, CA_CERT_NAME, CA_KEY_NAME,
+from customs.egress_ca import (CA_BACKDATE_SECONDS, CA_CERT_NAME, CA_KEY_NAME,
                        CA_VALIDITY_DAYS, ca_cert_path, ca_dir,
                        ca_key_path, ca_openssl_argv, ca_subject)
 

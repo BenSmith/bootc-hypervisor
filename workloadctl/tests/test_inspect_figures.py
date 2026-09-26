@@ -41,7 +41,7 @@ FULL_STATUS = {
     "drop_reasons": {"not allowlisted": 3, "timed out": 0, "not HTTP": 0},
     "concurrency": {"open": 1, "refused": 0},
     "internal_refusals_total": 4,
-    "record_failures": 0, "h2_unrecorded": 1, "bumped": 5,
+    "record_failures": 0, "bumped": 5,
     "ech": {"seen": 0, "alarm": 0},
     "policy_digest": "a" * 64,
     "mint": {"mints": 4, "hits": 11, "denied_mints": 1, "denied_hits": 0,
@@ -472,7 +472,7 @@ class DocumentedMetricTest(unittest.TestCase):
     def _named(self):
         """Full metric names in every tracked doc, `_`-suffix shorthand aside.
 
-        The digit in `h2_unrecorded` is why the character class is not [a-z_]:
+        Digits are in the character class: a metric name may carry one, and
         a name-shaped regex that stops at a digit reports a real metric as
         fictional, which is how this check first accused the docs it was
         written to guard.

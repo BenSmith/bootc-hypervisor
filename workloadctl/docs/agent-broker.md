@@ -301,7 +301,8 @@ was chosen for, never serving a previous boot's credential set, is
 and the file held none. So the reader, the writer, the helper binary, the
 `ExecStartPre` and the runtime directory went, and the broker's process now
 imports nothing that reads a workload's config or knows what a uid is called
-(`tests/test_broker_closure.py`).
+(customs' closure test; `tests/test_customs_seam.py` holds the generated
+command to the program's flags).
 
 A request therefore goes: guest → passt (re-originates as the workload uid) →
 the nat redirect that sends every filtered guest's 80/443 to its inspector →

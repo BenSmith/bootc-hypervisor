@@ -37,6 +37,8 @@ import sys
 import unittest
 from pathlib import Path
 
+from tests import script_env
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 LIB = REPO_ROOT / "lib"
 
@@ -65,7 +67,7 @@ class TestEveryLibModuleImportsAlone(unittest.TestCase):
         for name in _lib_modules():
             result = subprocess.run(
                 [sys.executable, "-c", f"import {name}"],
-                cwd=LIB, capture_output=True, text=True)
+                cwd=LIB, capture_output=True, text=True, env=script_env())
             if result.returncode != 0:
                 last = result.stderr.strip().splitlines()[-1:] or ["(no output)"]
                 failures.append(f"{name}: {last[0]}")
@@ -193,16 +195,16 @@ class TestASharedModuleIsNotShadowedByItsCaller(unittest.TestCase):
         "lib/cli_main.py": ("workloadctl_core", "substrate"),
         "lib/workload_uid.py": ("workload_lib",),
         "lib/run_files.py": ("workload_lib",),
-        "lib/config_parser.py": ("inspect_document",),
+        "lib/config_parser.py": ("customs.inspect_document",),
         "lib/container_network_config.py": ("config_parser", "credential_entries"),
         "lib/broker_config.py": ("credential_entries", "container_network_config"),
-        "lib/credential_entries.py": ("broker_profiles",),
+        "lib/credential_entries.py": ("customs.broker_profiles",),
         "lib/container_validate.py": ("container_network_config",),
-        "lib/egress_policy.py": ("container_network_config", "inspect_document"),
+        "lib/egress_policy.py": ("container_network_config",
+                                  "customs.inspect_document"),
         "lib/cmd_egress.py": ("egress_record_query",),
         "lib/substrate_vm.py": ("vm_guest_reach",),
         "lib/pcap_vm_tap.py": ("pcap", "pcap_file"),
-        "lib/inspect_policy.py": ("inspect_document",),
         "lib/cmd_disable.py": ("host_setup", "workload_selinux"),
         "lib/ensure_vm.py": ("ensure_common", "vm_ssh_keys", "vm_default_seed"),
         "lib/diagnose_battery.py": ("diagnose_inspect",),
@@ -321,7 +323,7 @@ class TestANameIsImportedFromTheModuleThatDefinesIt(unittest.TestCase):
         """Every Python file in the tree, including the extensionless ones.
 
         The entrypoints are the reason this walks paths rather than importing:
-        `libexec/workload-inspect-listener` has no `.py`, is invisible to
+        `libexec/workload-vm-resolve` has no `.py`, is invisible to
         `_lib_modules()`, and importing it runs its argv parsing.
 
         An extensionless file is taken as Python only if it says so in a
@@ -356,13 +358,12 @@ class TestANameIsImportedFromTheModuleThatDefinesIt(unittest.TestCase):
         """
         sources = list(self._sources())
         self.assertGreater(len(sources), 100, len(sources))
-        self.assertIn("workload-inspect-listener",
+        self.assertIn("workload-vm-resolve",
                       [p.name for p in sources])
         defines = self._defines()
         self.assertGreater(len(defines), 30, sorted(defines))
-        self.assertIn("normalise_hostname", defines["inspect_document"])
-        self.assertNotIn("normalise_hostname", defines["config_parser"])
-        self.assertNotIn("normalise_hostname", defines["egress_policy"])
+        self.assertIn("vm_policy_entries", defines["egress_policy"])
+        self.assertNotIn("vm_policy_entries", defines["config_parser"])
 
     def test_a_module_level_try_counts_as_a_definition(self):
         """workload_lib really does bind its version that way, so a scan that

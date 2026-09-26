@@ -15,15 +15,15 @@ from contextlib import redirect_stderr
 from pathlib import Path
 from unittest import mock
 
-from egress_plane import CLEARTEXT, PLANES, TLS
+from customs.egress_plane import CLEARTEXT, PLANES, TLS
 from egress_policy import (
     vm_inspect_policy,
     vm_inspect_policy_text,
     inspect_policy_path,
     vm_policy_entries,
 )
-from inspect_document import TLS_DEFAULT, policy_governs
-from inspect_policy import load_policy
+from customs.inspect_document import TLS_DEFAULT, policy_governs
+from customs.inspect_policy import load_policy
 from nft_elements import (
     inspect_cgroup, inspect_cgroup_command,
     inspect_cgroup_filter_command, inspect_dst_elements,

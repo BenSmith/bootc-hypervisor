@@ -97,7 +97,7 @@ from dns_wire import log
 from nft_elements import vm_resolve_status_path
 from resolve_policy import load_policy
 from resolve_server import Counters, inherited_listening_sockets, serve
-from sd_listen import NotSocketActivated
+from customs.sd_listen import NotSocketActivated
 from vm_network_config import vm_resolve_policy_path
 
 

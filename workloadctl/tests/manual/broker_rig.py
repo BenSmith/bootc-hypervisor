@@ -119,7 +119,7 @@ BROKER_PORT = 8081                          # workload_addr.BROKER_INSTANCE_PORT
 # The installed broker and the installed everything else. `just rpm-install`
 # refreshes them; a green run then means the PACKAGE is right, which is the
 # claim worth making.
-BROKER_BIN = Path("/usr/libexec/workloadctl/agent-broker")
+BROKER_BIN = Path("/usr/libexec/customs/customs-broker")
 
 # The name the guests dial and the broker resolves. `.test` is reserved
 # (RFC 6761) so it can never collide with a real record, and the host's own
@@ -305,8 +305,8 @@ def preflight():
     if not Path("/dev/kvm").exists():
         sys.exit("no /dev/kvm")
     if not os.access(BROKER_BIN, os.X_OK):
-        sys.exit(f"missing {BROKER_BIN} — it ships in the workloadctl RPM; "
-                 f"run `just rpm-install` from the checkout")
+        sys.exit(f"missing {BROKER_BIN} — it ships in the customs RPM, "
+                 f"which the workloadctl RPM requires")
     # A stale listener takes traffic that should have gone to a process this run
     # started, and the result reads as a fault in whatever is downstream of it.
     busy = run(["ss", "-lntH", f"sport = :{PROVIDER_PORT}"], check=False)
@@ -951,7 +951,7 @@ def selinux(since):
         m = re.search(r"\bmsg=audit\((\d+)", line)
         if m and float(m.group(1)) < since:
             continue
-        if INSPECT_DOMAIN not in line and "agent-broker" not in line:
+        if INSPECT_DOMAIN not in line and "customs-broker" not in line:
             continue
         if is_known_ungranted(line):
             continue

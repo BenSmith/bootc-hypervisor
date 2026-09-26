@@ -44,7 +44,7 @@ from dataclasses import dataclass
 from typing import Callable
 
 from egress_policy import inspect_status_path
-from inspect_document import INSPECT_DIGEST_KEY
+from customs.inspect_document import INSPECT_DIGEST_KEY
 from nft_elements import vm_resolve_status_path
 
 # Group keys. A group is present or absent as a whole, because what makes it
@@ -247,12 +247,6 @@ FIGURES = (
            "RECORD IS INCOMPLETE — read it before concluding a guest made no "
            "requests",
            path=("record_failures",)),
-    Figure("h2_unrecorded", EVIDENCE,
-           "workload_vm_inspect_h2_unrecorded_total", "counter",
-           "HTTP/2 sessions whose requests were not decoded",
-           "Spliced h2 sessions recorded as one connection with no per-request "
-           "detail",
-           path=("h2_unrecorded",)),
     Figure("bumped", EVIDENCE, "workload_vm_inspect_bumped_total", "counter",
            "connections bumped",
            "Connections whose TLS was terminated and re-originated",
