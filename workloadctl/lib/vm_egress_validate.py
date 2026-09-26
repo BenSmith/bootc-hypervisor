@@ -1,7 +1,7 @@
 """The rules a `[vm.network]` egress declaration must satisfy.
 
 Everything a filtered or inspected VM may say about its egress -- `hosts`,
-`internal`, `splice`, `http2`, `policy`, `credential`, `allow` -- and every
+`internal`, `splice`, `policy`, `credential`, `allow` -- and every
 way those declarations can contradict each other or the substrate. The entry
 point is validate_egress, called from vm_validate.validate_vm_network once
 the shape of the section itself has been checked. The patterns and allow
@@ -36,9 +36,9 @@ def _validate_host_reason_entries(entries, key: str, reason_clause: str):
     that is its own -- which for all three users of this helper is some form of
     "this entry matches nothing, and a dead bypass fails silently".
 
-    Shared because `internal`, `splice` and `http2` are the same table with the
-    same two keys and the same two failure directions, and three copies of this
-    drifted in review before there was one. What is NOT shared is the sentence
+    Shared because `internal` and `splice` are the same table with the same
+    two keys and the same two failure directions, and copies of this drifted
+    in review before there was one. What is NOT shared is the sentence
     each key gives for a missing `reason` (`reason_clause`) or for a dead entry:
     those name what the operator was trying to do, which is the whole value of
     the message.
@@ -167,17 +167,17 @@ def _validate_credentials(net: dict) -> tuple[list[VmCredential], list[str]]:
         reserved_env=RESERVED_GUEST_ENV)
 
 
-def _validate_policy(net: dict, splice_hosts, http2_hosts, egress: str,
+def _validate_policy(net: dict, splice_hosts, egress: str,
                      tls, credentials=()) -> tuple[list[VmPolicyEntry], list[str]]:
     """Validate [[vm.network.policy]]. Returns (entries, errors).
 
     NO `hosts` PARAMETER, and its absence is the decision rather than a rule
-    left unwritten. `internal`, `splice` and `http2` each get a "this entry
+    left unwritten. `internal` and `splice` each get a "this entry
     matches no allowlisted name" error, because each of them is an exception
     TO the allowlist and one naming a host that is not on it is dead. A
     `policy` entry is not: §3 makes it allowlist its own host, so an entry
     matching nothing in `.hosts` is the ordinary way to write one, and a rule
-    borrowed from the three siblings for symmetry would refuse the
+    borrowed from the siblings for symmetry would refuse the
     configuration the schema documents.
     """
     errors: list[str] = []
@@ -350,31 +350,9 @@ def _validate_policy(net: dict, splice_hosts, http2_hosts, egress: str,
                     f"splice entry and let the host be inspected")
                 break
 
-    # And a name in both `http2` and `policy`, which is the same failure one
-    # key along and reads as the milder one. It is not milder: an h2 stream's
-    # request headers are HPACK-compressed frames nothing here decodes, so
-    # `methods` and `paths` have no text to match and the entry is inert in
-    # exactly the way the splice case is. The difference is only that `splice`
-    # looks like an exemption and `http2` looks like a protocol -- which is the
-    # misreading HLD §8 corrected, and the reason this gets its own sentence
-    # rather than being folded into the loop above.
-    for entry in entries:
-        for h2_host in http2_hosts:
-            if patterns_overlap(entry.host, h2_host):
-                errors.append(
-                    f"[vm.network].policy: {entry.host!r} is also in .http2 "
-                    f"({h2_host!r}) — an h2 connection is relayed at the frame "
-                    f"level with its headers left HPACK-compressed, so there "
-                    f"is no request line for `methods` and `paths` to match "
-                    f"and the rules could never run. Keep one: drop the "
-                    f".http2 entry and let the host be inspected as HTTP/1.1, "
-                    f"or drop the policy entry and accept that this host is "
-                    f"enforced by name alone")
-                break
-
-    # The per-host twins of the two rules above, for the credential rather than
-    # for the rules. Kept separate for the same reason: the sibling messages
-    # name a lost restriction, and what is lost here is the request itself.
+    # The per-host twin of the rule above, for the credential rather than
+    # for the rules. Kept separate because the sibling message names a lost
+    # restriction, and what is lost here is the request itself.
     for entry in entries:
         if not entry.credential:
             continue
@@ -388,25 +366,6 @@ def _validate_policy(net: dict, splice_hosts, http2_hosts, egress: str,
                     f"and the guest reaches the provider carrying its "
                     f"placeholder. Drop the splice entry so the host is "
                     f"inspected, or drop the credential")
-                break
-        for h2_host in http2_hosts:
-            # ADR 007's decision 4, which neither the design's validation list
-            # nor the ADR names -- both name the splice case, which is this
-            # one's exact twin. An h2 host is relayed at the frame level with
-            # its headers left HPACK-compressed, so there is no `Host`, no
-            # method and no path; and (uid, Host) is the ENTIRE dispatch key of
-            # a broker instance, which is an HTTP/1.1 server. A credential here
-            # cannot be attached at all, not merely attached less precisely.
-            if patterns_overlap(entry.host, h2_host):
-                errors.append(
-                    f"[vm.network].policy: {entry.host!r} selects credential "
-                    f"{entry.credential!r} and is also in .http2 "
-                    f"({h2_host!r}) — an h2 connection is relayed at the frame "
-                    f"level with its headers HPACK-compressed, so there is no "
-                    f"`Host` for the broker to dispatch on and no request for "
-                    f"it to attach a credential to. Drop the .http2 entry for "
-                    f"this host and let it be inspected as HTTP/1.1, or move "
-                    f"the credential to a host that is not relayed")
                 break
 
     # §3's widening trap. Where more than one entry matches a host BY PATTERN,
@@ -532,7 +491,7 @@ def _validate_apex_coverage(hosts, entries, key: str, consequence: str, *,
 
     `self_allowlisting` says whether an entry naming something `.hosts` does
     not cover means anything on its own. It does for `policy` (§3) and it does
-    not for `splice` and `http2`, where such an entry is ALREADY refused as
+    not for `splice`, where such an entry is ALREADY refused as
     dead -- so there the apex message is suppressed rather than stacked on top
     of one that says a different thing about the same line.
     """
@@ -638,8 +597,8 @@ def validate_egress(net: dict) -> list[str]:
         errors.append(
             "[vm.network].tls = 'splice' has no `tls_reason` — this is the "
             "widest bypass in this schema: it splices EVERY host the workload "
-            "reaches, not a named one, and .allow, .internal, .splice and "
-            ".http2 have each carried a written reason since they existed. "
+            "reaches, not a named one, and .allow, .internal and .splice "
+            "have each carried a written reason since they existed. "
             "Without one, nothing in this file distinguishes a workload "
             "spliced because its guest cannot be re-seeded with the CA from "
             "one spliced because nobody tried. Add "
@@ -691,43 +650,17 @@ def validate_egress(net: dict) -> list[str]:
                 f"belief about what is reachable that the config contradicts. "
                 f"Add it to .hosts, or drop this entry")
 
-    # HLD §8's narrow opt-in, and the one bypass whose name does not look
-    # like one. A host here keeps h2 and is relayed at the frame level, so its
-    # `:authority` goes unread and true fronting stays open on it -- which is
-    # why it carries a `reason` like every other hole rather than reading as a
-    # performance flag.
-    http2_hosts, http2_errors = _validate_host_reason_entries(
-        net.get("http2", []), "http2",
-        "it leaves the host enforced by server name alone and carries one "
-        "like `allow` does")
-    errors.extend(http2_errors)
-    for host in http2_hosts:
-        # Dead in the same direction a dead `splice` entry is: the host is
-        # refused before the exemption is reached, so the operator's belief
-        # about what is reachable is contradicted by the config.
-        if not any(patterns_overlap(host, pattern)
-                   for pattern in hosts if isinstance(pattern, str)):
-            errors.append(
-                f"[vm.network].http2: {host!r} matches no allowlisted name — "
-                f"nothing in .hosts covers it, so the entry keeps h2 for a "
-                f"host the guest is refused before the connection is served. "
-                f"Add it to .hosts, or drop this entry")
-        for spliced in splice_hosts:
-            # Both are exemptions and only one can apply: the listener asks
-            # `splices()` first, so the connection is never terminated and the
-            # h2 entry decides nothing. Refused rather than resolved silently
-            # in splice's favour, because the two entries state different
-            # beliefs about the host -- one that it cannot take our CA, one
-            # that it can and speaks h2 -- and only the operator knows which.
-            if patterns_overlap(host, spliced):
-                errors.append(
-                    f"[vm.network].http2: {host!r} is also in .splice "
-                    f"({spliced!r}) — a spliced connection is never "
-                    f"terminated, so no ALPN of ours is offered on it and the "
-                    f".http2 entry decides nothing. Keep one: splice the host "
-                    f"and drop the .http2 entry, or drop the splice entry if "
-                    f"the host can take this workload's CA")
-                break
+    # The inspector relays no HTTP/2: every terminated connection is offered
+    # http/1.1 alone. A host that needs h2 is spliced, and saying so is the
+    # operator's decision, since a splice is never decrypted and an entry
+    # here was.
+    if "http2" in net:
+        errors.append(
+            "[[vm.network.http2]] is no longer accepted: the egress inspector "
+            "relays no HTTP/2, so a terminated host is offered http/1.1 "
+            "alone. A host that must keep h2 is spliced: move the entry, "
+            "with its reason, to [[vm.network.splice]], and it is not "
+            "decrypted. Drop the entry if the host takes HTTP/1.1.")
 
     # Before `policy`, because a policy entry selects a credential by name and
     # the "no block declares it" rule needs the blocks.
@@ -735,7 +668,7 @@ def validate_egress(net: dict) -> list[str]:
     errors.extend(credential_errors)
 
     vm_policy_entries, policy_errors = _validate_policy(
-        net, splice_hosts, http2_hosts, egress, tls, credentials)
+        net, splice_hosts, egress, tls, credentials)
     errors.extend(policy_errors)
     policy_hosts = [e.host for e in vm_policy_entries]
 
@@ -754,12 +687,6 @@ def validate_egress(net: dict) -> list[str]:
         "So the apex is allowlisted and inspected with NO method or path rules "
         "applied — a restriction you believe is in force and is not.",
         self_allowlisting=True))
-    errors.extend(_validate_apex_coverage(
-        hosts, http2_hosts, "http2",
-        "So the apex is offered `http/1.1` alone while the names under it keep "
-        "h2, and a client that will not take the downgrade fails on the apex "
-        "only — which presents as that one name being broken rather than as a "
-        "protocol decision."))
 
     for host in internal_deferred:
         # A dead entry here fails in the direction nobody notices until the
@@ -768,7 +695,7 @@ def validate_egress(net: dict) -> list[str]:
         # error, for the same reason an `allow` element that arms nothing is.
         #
         # _patterns_overlap on BOTH halves, which is the same comparison the
-        # `splice` and `http2` dead-entry rules make and for the same reason.
+        # `splice` dead-entry rule makes and for the same reason.
         # The obvious reading -- match the entry's `host` as a NAME against the
         # allowlist patterns -- gets the wildcard case backwards: an
         # `*.nas.example` entry justified by an allowlisted `a.nas.example` is
@@ -795,24 +722,20 @@ def validate_egress(net: dict) -> list[str]:
     # third hatch, reached in the middle of an incident by an operator whose
     # toolchain is broken: new output there is a cost with nothing to buy.
     #
-    # `http2` is accepted there on the same terms as `splice`: no ALPN of ours
-    # is offered on a connection that is never terminated, so the entry asks
-    # for something already true rather than something contradicted.
-    #
     # `internal` gets the same acceptance under `tls = "splice"` and for a
     # different reason, which is why they are written out rather than merged:
     # the internal-destination check lives on the inspector's UPSTREAM leg,
     # which a spliced connection still has, so a spliced host can resolve into
     # private space and still needs the exemption. `policy` is refused there,
     # because a spliced connection is never decrypted and there is no request
-    # for it to govern. A later pass tidying the four for symmetry would take
+    # for it to govern. A later pass tidying the three for symmetry would take
     # the exemption away from exactly the workloads that need it.
 
     # §5.3: `bridge` means a real LAN identity, and nothing of ours is in that
     # guest's data path — no host socket, so no uid to match on.
     if "bridge" in net:
         for key in ("egress", "allow", "tls", "tls_reason", "internal",
-                    "splice", "http2", "policy", "credential"):
+                    "splice", "policy", "credential"):
             if key in net:
                 errors.append(
                     f"[vm.network].{key} has no effect with .bridge set — a "
@@ -868,7 +791,7 @@ def validate_egress(net: dict) -> list[str]:
     # same reason .hosts is: a key accepted and then not applied is a config
     # that reports a confinement it does not have.
     if egress != "filtered":
-        for key in ("tls", "tls_reason", "internal", "splice", "http2"):
+        for key in ("tls", "tls_reason", "internal", "splice"):
             # `policy` is not in this list: _validate_policy names it itself,
             # with a sentence about requests rather than about redirection.
             # `credential` is not either, and for a stronger version of the same
@@ -901,8 +824,6 @@ def validate_egress(net: dict) -> list[str]:
             named.append(".internal")
         if splice_hosts:
             named.append(".splice")
-        if http2_hosts:
-            named.append(".http2")
         if policy_hosts:
             named.append(".policy")
         if any(e.host for e in allow_entries):

@@ -1518,9 +1518,8 @@ How it fits together:
   request** are closed rather than relayed. The `http/1.1` ALPN offer is not the
   enforcement and never was: a client offering only `h2` completes that
   handshake with nothing negotiated and no alert, so what binds is the refusal,
-  not the offer. A host that genuinely speaks something else over 443 needs a
-  `[[vm.network.splice]]` entry — or `[[vm.network.http2]]`, if what it speaks
-  is h2.
+  not the offer. A host that genuinely speaks something else over 443,
+  h2 among it, needs a `[[vm.network.splice]]` entry.
 - Only **80 and 443** are redirected. Anything else belongs in `allow`.
 
 **`hosts` requires `egress = "filtered"`**, and `validate` rejects the pair
@@ -1658,19 +1657,15 @@ Note that the wildcard does not have to appear in `hosts` for this to bite: a
 policy entry allowlists its own host, so the natural way to write the trap
 never mentions it there.
 
-#### Splicing one host, and HTTP/2 on one host
+#### Splicing one host
 
-Not every host on 443 speaks HTTP, and not every host will take this workload's
-CA. Two per-host escape hatches cover that, and both carry a written `reason`:
+Not every host on 443 speaks HTTP/1.1, and not every host will take this
+workload's CA. The per-host escape hatch for both carries a written `reason`:
 
 ```toml
 [[vm.network.splice]]
 host   = "sum.golang.org"
 reason = "client verifies a signed log, not the chain; cannot take our CA"
-
-[[vm.network.http2]]
-host   = "grpc.example.com"
-reason = "gRPC; requires h2, and :authority goes unchecked as a result"
 ```
 
 `splice` gives that one host the `tls = "splice"` property — byte-for-byte
@@ -1679,20 +1674,9 @@ connection — while every other host stays terminated and inspected. A host in
 both `splice` and `policy` is a validation error: method and path rules cannot
 run on bytes nobody reads.
 
-`http2` is the opt-out from the `http/1.1` ALPN offer every terminated host
-gets. A listed host is offered h2 on both legs and relayed at **frame level**
-with `:authority` HPACK-encoded and unread, which leaves true fronting open on
-it — so `http2` on a host with a matching `policy` entry is an error too, not a
-no-op. The key means *speaks h2*, not *exempt*: the guest's connection must
-present the 24-byte preface and parse as frames to the end, and the origin must
-actually **select** h2, or the connection is refused with a `502` naming both
-ways out. An ALPN offer binds nobody — an origin speaking only HTTP/1.1
-completes that handshake having selected nothing at all.
-
-**Where `splice` works it is the better choice.** Both leave enforcement at the
-SNI and both take a written reason, and `splice` additionally gives the host
-back end-to-end TLS and needs no CA in the guest. `http2` exists for hosts that
-require h2, not because it enforces more.
+A host that requires HTTP/2 is spliced too. The inspector relays no HTTP/2, so
+every terminated host is offered `http/1.1` alone; `[[vm.network.http2]]` is
+refused by name, saying so.
 
 #### Two figures the file could never have told you
 

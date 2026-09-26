@@ -17,8 +17,8 @@ the careless union reading silently destroys the feature, and a report that
 merged the two lists would print exactly that error on the screen an operator
 opens in order to check it has not happened.
 
-TWO FORMS, NOT ONE, because there is no host set to iterate. `hosts`, `splice`,
-`http2` and `policy[].host` are all fnmatch patterns, so "the effective rules
+TWO FORMS, NOT ONE, because there is no host set to iterate. `hosts`, `splice`
+and `policy[].host` are all fnmatch patterns, so "the effective rules
 per host" has nothing to loop over:
 
   * the QUERY form (`rules <workload> <host>`) names a host and gets what
@@ -73,14 +73,13 @@ from inspect_document import (
 _WILDCARD_CHARS = "*?["
 
 # The keys of the policy document whose values are host patterns, and the label
-# each gets in the report. Driven by a table rather than by four hand-written
+# each gets in the report. Driven by a table rather than by hand-written
 # blocks so that a key added to vm_inspect_policy() and not to this one shows up
 # as an absent column rather than as a silently narrower report.
 _PATTERN_KEYS = (
     ("hosts", "hosts"),
     ("internal", "internal"),
     ("splice", "splice"),
-    ("http2", "http2"),
 )
 
 
@@ -344,12 +343,9 @@ def render_query(view: dict, doc: dict, origin: str, path, name: str) -> list:
     else:
         lines.append("  allowlist  no `hosts` pattern and no policy entry "
                      "matches — every connection\n             to this host is "
-                     "refused. (`internal`, `splice` and `http2`\n             "
+                     "refused. (`internal` and `splice`\n             "
                      "admit nothing on their own.)")
     lines.append(f"  tls        {tls_treatment(view)}")
-    if matched["http2"]:
-        lines.append(f"  http2      matched by: {', '.join(matched['http2'])} — "
-                     "this host must select h2, or the connection is refused")
     if matched["internal"]:
         lines.append(f"  internal   matched by: {', '.join(matched['internal'])} "
                      "— excepts the inspector's upstream leg from the internal "

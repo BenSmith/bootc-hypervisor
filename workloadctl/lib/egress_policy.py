@@ -105,9 +105,8 @@ def uses_resolve(config: dict) -> bool:
 # transparent -- it is reached by a redirect, never by a proxy request -- so a
 # guest has no CONNECT to send it and an entry permitting one describes a
 # request that cannot arrive. PRI is the HTTP/2 connection preface's method,
-# which is refused on a terminated host and checked as a preface on an `http2`
-# one; permitting it by name would read as a way to allow h2 through `policy`,
-# which is exactly the thing `http2` carries a written reason for.
+# which is refused on every terminated host: the inspector relays no HTTP/2,
+# and permitting it by name would read as a way to allow h2 through `policy`.
 POLICY_METHODS = frozenset((
     "ACL", "BASELINE-CONTROL", "BIND", "CHECKIN", "CHECKOUT", "COPY", "DELETE",
     "GET", "HEAD", "LABEL", "LINK", "LOCK", "MERGE", "MKACTIVITY",
@@ -121,8 +120,9 @@ POLICY_METHODS = frozenset((
 POLICY_METHODS_REFUSED = {
     "CONNECT": "the inspector is transparent and is never sent a CONNECT; a "
                "guest reaches it by a redirect it cannot see",
-    "PRI": "PRI is the HTTP/2 connection preface's method; h2 on a host is "
-           "[[vm.network.http2]], which carries a written reason",
+    "PRI": "PRI is the HTTP/2 connection preface's method, and the "
+           "inspector relays no HTTP/2; a host that must keep h2 is "
+           "[[vm.network.splice]]",
 }
 
 
@@ -262,10 +262,9 @@ def vm_inspect_policy(net: dict) -> dict:
     listener restarted onto a different `tls` reads a document that already
     says what the per-host list was.
 
-    `http2` is the [[vm.network.http2]] host patterns. Like `splice` it
-    DECIDES something -- a name it matches is offered h2 on both legs and
-    relayed at frame level rather than parsed -- and like `splice` it is
-    carried even when tls is "splice", so the document describes the file.
+    `http2` is always empty. The inspector relays no HTTP/2 and refuses a
+    list that names a host; the key stays so that the document, and so its
+    digest, is the one every inspected workload already has.
 
     `policy` is the [[vm.network.policy]] entries, normalised. `methods` and
     `paths` are carried as null where the key was absent rather than as an
@@ -308,7 +307,7 @@ def vm_inspect_policy(net: dict) -> dict:
         "hosts": vm_allowed_hosts(net),
         "internal": internal_hosts(net),
         "splice": splice_hosts(net),
-        "http2": http2_hosts(net),
+        "http2": [],
         "policy": [
             {"host": e.host,
              "methods": None if e.methods is None else list(e.methods),
@@ -343,8 +342,7 @@ def container_inspect_policy(net: dict) -> dict:
     Same JSON shape as vm_inspect_policy (lib/egress_policy.py) -- D6: the
     listener binary (workload-inspect-listener) does not change between
     substrates, so whichever wrote the file, it reads the same keys. `http2`
-    is always empty: [[network.http2]] is deferred for containers (§5 of the
-    build spec). `tls` is the EFFECTIVE mode (container_effective_tls_mode),
+    is always empty, as it is for a VM. `tls` is the EFFECTIVE mode (container_effective_tls_mode),
     not the literal key, since the container schema computes it per the
     three-rung ladder rather than defaulting it the way the VM schema does.
 
@@ -422,33 +420,14 @@ def splice_hosts(net: dict) -> list[str]:
     return _host_reason_hosts(net, "splice")
 
 
-def http2_hosts(net: dict) -> list[str]:
-    """The host patterns in [[vm.network.http2]], in file order.
-
-    HLD §8's narrow opt-in: a host here is offered `h2` on both legs and
-    relayed at the frame level, so its `:authority` goes unread and true
-    fronting stays open on it. Every OTHER terminated host is offered
-    `http/1.1` alone, which is what makes `paths`, `methods` and the
-    Host-binding work without an HPACK decoder anywhere.
-
-    So this is a bypass with a written reason, beside `allow`, `internal` and
-    `splice` -- not a performance flag. What keeps it from meaning EXEMPT is
-    the preface and frame check on the listener's side: a connection here must
-    actually speak h2. Read that half before widening this one.
-
-    Shape-tolerant for the reason internal_hosts is.
-    """
-    return _host_reason_hosts(net, "http2")
-
-
 def _host_reason_hosts(net: dict, key: str) -> list[str]:
     """The `host` of every well-formed [[vm.network.<key>]] entry, in order.
 
-    One body for `internal`, `splice` and `http2`, which are the same table
-    with the same two keys -- the mirror of _validate_host_reason_entries on
-    the validating side, and shared for the same reason: three copies of this
-    is three chances for one of them to start tolerating a shape the other two
-    refuse, on a path where the difference is silent.
+    One body for `internal` and `splice`, which are the same table with the
+    same two keys -- the mirror of _validate_host_reason_entries on the
+    validating side, and shared for the same reason: two copies of this is a
+    chance for one of them to start tolerating a shape the other refuses, on
+    a path where the difference is silent.
     """
     entries = net.get(key, [])
     if not isinstance(entries, list):

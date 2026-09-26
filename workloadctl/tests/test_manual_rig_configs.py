@@ -168,7 +168,7 @@ class TestGeneratedConfigs(unittest.TestCase):
         """
         vm_arrays = ("[[vm.network.allow]]", "[[vm.network.internal]]",
                      "[[vm.network.splice]]", "[[vm.network.policy]]",
-                     "[[vm.network.credential]]", "[[vm.network.http2]]")
+                     "[[vm.network.credential]]")
         vm_scalars = ("egress", "hosts", "resolver", "ports", "bridge",
                       "tls", "tls_reason", "outbound_if")
         ct_arrays = ("[[network.allow]]", "[[network.internal]]",

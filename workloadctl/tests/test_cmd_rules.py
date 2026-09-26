@@ -93,7 +93,7 @@ class CompositionRuleTest(unittest.TestCase):
         self.assertIn("is refused", text)
 
     def test_the_refusal_names_the_two_lists_that_admit(self):
-        """`internal`, `splice` and `http2` admit nothing on their own, so a
+        """`internal` and `splice` admit nothing on their own, so a
         host sitting in one of them and in neither `hosts` nor `policy` is
         still refused -- and saying `no list names this host` about it would be
         plainly false to an operator looking at the file."""
@@ -169,11 +169,10 @@ class TlsTreatmentTest(unittest.TestCase):
 class EnumerationTest(unittest.TestCase):
     def test_literals_come_from_every_key(self):
         d = doc(hosts=["a.example.com"], internal=["b.example.com"],
-                splice=["c.example.com"], http2=["d.example.com"],
-                policy=[entry("e.example.com")])
+                splice=["c.example.com"], policy=[entry("e.example.com")])
         self.assertEqual(cmd_rules.literal_names(d),
                          ["a.example.com", "b.example.com", "c.example.com",
-                          "d.example.com", "e.example.com"])
+                          "e.example.com"])
 
     def test_wildcards_are_not_enumerated_as_names(self):
         d = doc(hosts=["*.example.com", "a.example.com"])

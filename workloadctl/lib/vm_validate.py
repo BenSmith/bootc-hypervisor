@@ -55,7 +55,7 @@ def vm_network_warnings(net: dict) -> list[str]:
         return warnings
     egress = net.get("egress", EGRESS_DEFAULT)
 
-    for key in ("hosts", "internal", "splice", "http2", "policy"):
+    for key in ("hosts", "internal", "splice", "policy"):
         entries = net.get(key, [])
         if not isinstance(entries, list):
             continue

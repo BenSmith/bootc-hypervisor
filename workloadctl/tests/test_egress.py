@@ -2538,11 +2538,11 @@ class TestRung2Schema(unittest.TestCase):
         self.assertTrue(any("reason" in e for e in errors), errors)
 
     def test_a_bare_string_internal_entry_is_refused_by_shape(self):
-        """The three reasoned tables share one reader, so one probe covers
-        `internal`, `splice` and `http2`. Asserted on the message naming the
-        shape, because a bare string is also a host on no list, and that
-        error alone would let the shape rule vanish unnoticed."""
-        for key in ("internal", "splice", "http2"):
+        """The two reasoned tables share one reader, so one probe covers
+        `internal` and `splice`. Asserted on the message naming the shape,
+        because a bare string is also a host on no list, and that error
+        alone would let the shape rule vanish unnoticed."""
+        for key in ("internal", "splice"):
             with self.subTest(key=key):
                 errors = self._egress({"hosts": ["git.local"],
                                        key: ["git.local"]})
@@ -2702,7 +2702,7 @@ class TestRung2Schema(unittest.TestCase):
 
         The rule that missed this looked for the wildcard IN .hosts, which
         made it fire only on the redundant form. `policy` is also the one key
-        where nothing else catches it: `splice` and `http2` entries that match
+        where nothing else catches it: `splice` entries that match
         no allowlisted name are refused as dead, and a `policy` entry matching
         none is the ordinary way to write one."""
         errors = self._egress({
@@ -2731,13 +2731,6 @@ class TestRung2Schema(unittest.TestCase):
         errors = self._egress({
             "hosts": ["example.com"],
             "splice": [{"host": "*.example.com", "reason": "pins a cert"}]})
-        self.assertEqual(len(errors), 1, errors)
-        self.assertIn("matches no allowlisted name", errors[0])
-
-    def test_a_dead_http2_entry_is_reported_once_not_twice(self):
-        errors = self._egress({
-            "hosts": ["example.com"],
-            "http2": [{"host": "*.example.com", "reason": "gRPC"}]})
         self.assertEqual(len(errors), 1, errors)
         self.assertIn("matches no allowlisted name", errors[0])
 
@@ -2784,8 +2777,7 @@ class TestRung2Schema(unittest.TestCase):
     def test_CONNECT_and_PRI_are_refused_by_name(self):
         """Both are registered, and neither can arrive. The inspector is
         transparent, so a guest has no CONNECT to send it; PRI is the HTTP/2
-        preface's method, and h2 on a host is [[vm.network.http2]] with a
-        written reason, never a method somebody permitted."""
+        preface's method, and the inspector relays no HTTP/2."""
         for method in ("CONNECT", "PRI"):
             errors = self._egress({
                 "hosts": ["a.example"],
@@ -2988,112 +2980,31 @@ class TestRung2Schema(unittest.TestCase):
         self.assertTrue(any(".splice" in e and "resolver" in e
                             for e in errors), errors)
 
-    # --- http2 (per host; HLD §8's narrow opt-in) ---
+    # --- http2 (retired: the inspector relays no HTTP/2) ---
 
-    def test_an_http2_host_the_allowlist_covers_is_accepted(self):
-        self.assertEqual(self._egress({
+    def test_http2_is_refused_and_the_message_names_splice(self):
+        """A host that needs h2 is spliced now, and moving it there is the
+        operator's decision: the entry was terminated and checked, and a
+        splice is never decrypted."""
+        errors = self._egress({
             "hosts": ["grpc.example.com"],
             "http2": [{"host": "grpc.example.com",
-                       "reason": "gRPC; requires h2"}]}),
-            [])
+                       "reason": "gRPC; requires h2"}]})
+        self.assertEqual(len(errors), 1, errors)
+        self.assertIn("[[vm.network.http2]]", errors[0])
+        self.assertIn("[[vm.network.splice]]", errors[0])
 
-    def test_an_http2_entry_matching_no_allowlisted_name_is_refused(self):
-        errors = self._egress({
-            "hosts": ["github.com"],
-            "http2": [{"host": "grpc.example.com", "reason": "gRPC"}]})
-        self.assertTrue(any("matches no allowlisted name" in e and ".http2" in e
-                            for e in errors), errors)
-
-    def test_http2_requires_a_reason(self):
-        """The reason is not paperwork: a host here is enforced by SERVER NAME
-        ALONE, exactly like a spliced one, because its request headers stay
-        HPACK-compressed. The key reads as a protocol setting and is a hole,
-        and the required sentence is what puts that in the file."""
-        errors = self._egress({"hosts": ["grpc.example.com"],
-                               "http2": [{"host": "grpc.example.com"}]})
-        self.assertTrue(any("reason" in e for e in errors), errors)
-
-    def test_http2_refuses_a_key_it_does_not_know(self):
-        errors = self._egress({
-            "hosts": ["grpc.example.com"],
-            "http2": [{"host": "grpc.example.com", "reason": "r",
-                       "methods": ["GET"]}]})
-        self.assertTrue(any("unknown key" in e for e in errors), errors)
-
-    def test_a_name_in_both_http2_and_policy_is_refused(self):
-        """The rules could never run: nothing decodes HPACK, so `methods` and
-        `paths` have no request line to match. Same failure as the splice
-        overlap, and it reads as the milder one because `http2` looks like it
-        names a protocol rather than an exemption."""
-        errors = self._egress({
-            "hosts": ["grpc.example.com"],
-            "http2": [{"host": "grpc.example.com", "reason": "gRPC"}],
-            "policy": [{"host": "grpc.example.com", "methods": ["POST"]}]})
-        self.assertTrue(any(".http2" in e and "HPACK" in e
-                            for e in errors), errors)
-
-    def test_a_wildcard_http2_entry_over_a_narrow_policy_entry_is_refused(self):
-        """By PATTERN, not by identical host strings -- the overlap that gets
-        written by accident is the one where a wildcard added for a whole
-        domain silently exempts a name somebody wrote path rules for."""
-        errors = self._egress({
-            "hosts": ["*.example.com"],
-            "http2": [{"host": "*.example.com", "reason": "gRPC everywhere"}],
-            "policy": [{"host": "api.example.com", "methods": ["POST"],
-                        "paths": ["/v1/messages"]}]})
-        self.assertTrue(any(".http2" in e for e in errors), errors)
-
-    def test_a_name_in_both_http2_and_splice_is_refused(self):
-        """Two exemptions, only one of which can apply. The listener asks
-        `splices()` first, so the connection is never terminated and no ALPN of
-        ours is offered -- the http2 entry decides nothing. Refused rather than
-        resolved silently in splice's favour, because the entries state
-        different beliefs about the host and only the operator knows which."""
-        errors = self._egress({
-            "hosts": ["grpc.example.com"],
-            "splice": [{"host": "grpc.example.com", "reason": "pins a cert"}],
-            "http2": [{"host": "grpc.example.com", "reason": "gRPC"}]})
-        self.assertTrue(any(".http2" in e and ".splice" in e
-                            for e in errors), errors)
-
-    def test_a_wildcard_http2_entry_over_an_allowlisted_apex_is_refused(self):
-        """§3's apex trap, with the consequence this key produces: the apex is
-        offered http/1.1 while every name under it keeps h2, so a client that
-        will not take the downgrade fails on the apex ALONE. That presents as
-        one name being broken, not as a protocol decision anybody made."""
-        errors = self._egress({
-            "hosts": ["example.com", "*.example.com"],
-            "http2": [{"host": "*.example.com", "reason": "gRPC"}]})
-        self.assertTrue(any(".http2" in e and "apex" in e
-                            for e in errors), errors)
-
-    def test_http2_is_refused_under_open_and_beside_a_bridge(self):
+    def test_http2_is_refused_once_under_open_and_beside_a_bridge(self):
+        """The retirement is the one thing to say about the key: a second
+        sentence calling it inert under open or a bridge would describe a
+        key that no longer means anything anywhere."""
         for net in ({"egress": "open",
                      "http2": [{"host": "x.example.com", "reason": "r"}]},
                     {"bridge": "br0",
                      "http2": [{"host": "x.example.com", "reason": "r"}]}):
-            errors = self._egress(net)
-            self.assertTrue(any("no effect" in e and "http2" in e
-                                for e in errors), (net, errors))
-
-    def test_http2_entries_are_ACCEPTED_under_tls_splice(self):
-        """On the same terms `splice` entries are: nothing is terminated, so no
-        ALPN of ours is offered on any connection and the entry asks for
-        something already true rather than something contradicted."""
-        self.assertEqual(self._egress({
-            "hosts": ["grpc.example.com"],
-            "tls": "splice",
-            "tls_reason": "the guest cannot be re-seeded",
-            "http2": [{"host": "grpc.example.com", "reason": "gRPC"}]}),
-            [])
-
-    def test_resolver_none_beside_http2_is_refused(self):
-        errors = self._egress({
-            "resolver": "none",
-            "hosts": ["grpc.example.com"],
-            "http2": [{"host": "grpc.example.com", "reason": "gRPC"}]})
-        self.assertTrue(any(".http2" in e and "resolver" in e
-                            for e in errors), errors)
+            errors = [e for e in self._egress(net) if "http2" in e]
+            self.assertEqual(len(errors), 1, (net, errors))
+            self.assertIn("no longer accepted", errors[0])
 
     # --- allow ---
 
@@ -3890,23 +3801,6 @@ class TestRung6CredentialSchema(unittest.TestCase):
         credential_errors = [e for e in errors if "credential 'tok'" in e]
         self.assertTrue(credential_errors, errors)
         self.assertIn("Drop the splice entry", " ".join(credential_errors))
-
-    def test_an_http2_credential_host_names_both_remedies(self):
-        """ADR 007 decision 4, which neither the design nor the ADR states.
-
-        Both name the splice case, which is this one's exact twin: an h2
-        connection is relayed at frame level with HPACK-compressed headers, so
-        there is no `Host` -- and (uid, Host) is the ENTIRE dispatch key of a
-        broker instance.
-        """
-        errors = self._egress(self._net(http2=[
-            {"host": "api.example", "reason": "the client requires h2"}]))
-        credential_errors = [e for e in errors if "credential 'tok'" in e]
-        self.assertTrue(credential_errors, errors)
-        joined = " ".join(credential_errors)
-        self.assertIn("HPACK", joined)
-        self.assertIn(".http2", joined)
-        self.assertIn("not relayed", joined)
 
     def test_overlapping_entries_may_not_name_different_credentials(self):
         errors = self._egress(self._net(

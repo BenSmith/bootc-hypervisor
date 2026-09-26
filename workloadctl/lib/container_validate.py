@@ -89,8 +89,9 @@ def validate_publish_ports(ports, where: str) -> list[str]:
 def validate_container_network(net: dict, config: dict | None = None) -> list[str]:
     """Validate [network] on a container workload. Returns a list of error
     strings. Implements every numbered rule in the container egress-parity
-    build spec's validation section except V13 (reserved for a deferred
-    [[network.http2]] array), plus the mode="host" delta (§6 delta 2),
+    build spec's validation section except V13 (reserved for a
+    [[network.http2]] array, which no inspector of HTTP/1.1 alone can
+    have), plus the mode="host" delta (§6 delta 2),
     settled by the P0-1 hardware spike -- see the module note above.
 
     `config` is the whole parsed TOML, and it is optional only so that the

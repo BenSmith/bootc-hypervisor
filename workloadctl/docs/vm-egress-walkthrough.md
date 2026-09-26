@@ -244,29 +244,15 @@ Then the paths that don't work, which are the point:
   told otherwise goes looking in the wrong file. Counted apart, under *not
   permitted by policy*.
 - **The guest speaks something other than HTTP over 443.** A database wire
-  protocol, a tunnel, raw HTTP/2 on a host nothing opted in — under `inspect`
-  the inspector is the one reading, and bytes that do not begin a request line
-  get the connection **closed**, counted per host under *not HTTP*. Under
+  protocol, a tunnel, raw HTTP/2 — under `inspect` the inspector is the one
+  reading, and bytes that do not begin a request line get the connection
+  **closed**, counted per host under *not HTTP*. Under
   `splice` those bytes went through untouched. That per-host figure is the list
   of HOSTS to give a `[[vm.network.splice]]` entry — one host, not the whole
   workload; `tls = "splice"` gives up far more than the one host asked for.
   The figure comes in two halves: a host a `[[vm.network.policy]]` entry names
   is counted separately, because splicing it also means DELETING that entry —
   `validate` refuses a host that is in both.
-
-  A host in `[[vm.network.http2]]` is the one exception, and it is checked the
-  other way round: it must open with the HTTP/2 connection preface, its first
-  frame must be SETTINGS on stream 0, and the origin must have selected `h2`
-  as well — or it is refused under *not HTTP/2*, with the same remedy. Without
-  those checks the key would mean *exempt from policy* rather than *speaks h2*,
-  reachable by writing different first bytes.
-
-  Where `splice` works it is the better choice of the two. Both leave
-  enforcement at the SNI and both take a written reason, and `splice` gives the
-  host back end-to-end TLS and needs no CA inside the guest — where a relayed
-  h2 session has its `:authority` HPACK-encoded and unread, which is true
-  fronting open on that host. Reach for `http2` when the host *requires* h2,
-  not for what it costs less of.
 
 There is no earlier, DNS-shaped refusal to add to that list, and it is worth
 saying so because the shape invites the assumption. The responder synthesises

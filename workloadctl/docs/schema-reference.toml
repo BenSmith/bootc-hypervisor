@@ -533,9 +533,9 @@ name = "schema-reference"
 #              certificates.
 #
 #              REQUIRES .tls_reason. This is the widest bypass in the schema
-#              -- every host, not a named one -- and .allow, .internal,
-#              .splice and .http2 have each carried a written reason since
-#              they existed. Reach for [[vm.network.splice]] first: if one
+#              -- every host, not a named one -- and .allow, .internal
+#              and .splice have each carried a written reason since they
+#              existed. Reach for [[vm.network.splice]] first: if one
 #              host is the problem, exempting it leaves the other names
 #              authorised per request instead of per connection.
 #
@@ -868,56 +868,17 @@ name = "schema-reference"
 # loaded into a broker for a host it is never attached to reads, in the file
 # and in `diagnose`, exactly like a credential that is in use.
 #
-# REQUIRES tls = "inspect" and a policy entry that names it. A spliced or h2
-# host cannot be credential-backed — neither is decrypted into a request the
-# broker could dispatch on — and both are refused rather than ignored.
+# REQUIRES tls = "inspect" and a policy entry that names it. A spliced host
+# cannot be credential-backed — it is not decrypted into a request the broker
+# could dispatch on — and that is refused rather than ignored.
 #
-# Optional: allowlisted hosts that keep HTTP/2.
-# Type: array of [[vm.network.http2]] tables, each with `host` and `reason`
-# Default: []
-# Every terminated host is offered `http/1.1` alone, and this is the opt-out.
-# The downgrade is what makes everything else work without an HPACK decoder:
-# an HTTP/1.1 request line and headers are plain text, so .policy's `methods`
-# and `paths` and the Host binding apply to every inspected host rather than
-# to some subset. Most clients take it silently — but not all traffic can, and
-# a host listed here is offered `h2` on both legs and relayed at the frame
-# level instead.
-#
-# READ THIS AS A HOLE, NOT AS A PROTOCOL SETTING, which is the mistake the key
-# invites. An h2 stream's request headers are HPACK-compressed frames nothing
-# here decodes, so a host listed here is enforced by its NAME alone — exactly
-# like a spliced one. No Host binding, no `methods`, no `paths`. That is why it
-# carries a `reason`.
-#
-# PREFER .splice WHERE IT WORKS. Both leave enforcement at the server name, and
-# splice additionally gives the host back its end-to-end TLS and needs no CA in
-# the guest — so it is strictly the better trade unless you specifically want
-# the connection terminated and logged. This key exists so that an HPACK
-# decoder has somewhere to land later, at which point it stops being a bypass.
-#
-# A connection here must actually SPEAK h2, on BOTH legs. The guest must open
-# with the HTTP/2 connection preface, its first frame must be SETTINGS on
-# stream 0, and the stream must keep parsing as frames; the origin must have
-# selected `h2` in the handshake. Any of those failing is refused with the same
-# message and the same remedy as a host that is not speaking HTTP at all.
-# Without the guest half the entry would mean "exempt from policy" rather than
-# "speaks h2", reachable by writing different first bytes. Without the origin
-# half a host listed here by mistake would have the guest's preface relayed
-# into an HTTP/1.1 server, and fail as garbage no figure names — an ALPN offer
-# binds nobody, and a server that speaks only HTTP/1.1 completes the handshake
-# selecting nothing rather than refusing it.
-#
-# `host` is an fnmatch pattern like .hosts, with the same apex trap. An entry
-# matching no allowlisted name is an ERROR. So is an entry for a host that also
-# has a .policy entry (the rules could never run) or a .splice entry (a spliced
-# connection is never terminated, so no ALPN of ours is offered on it).
-#
-# REQUIRES egress = "filtered". Entries are accepted and inert under
-# tls = "splice", where nothing is terminated at all.
-#
-# [[vm.network.http2]]
-# host   = "grpc.example.com"
-# reason = "gRPC; requires h2, and :authority goes unchecked as a result"
+# THERE IS NO [[vm.network.http2]]. Every terminated host is offered
+# `http/1.1` alone, and the inspector relays no HTTP/2: an h2 request's
+# headers are HPACK-compressed frames nothing here decodes, so a host relayed
+# as h2 would be enforced by name alone. A host that must keep h2 is a
+# [[vm.network.splice]] entry, which leaves enforcement at the server name in
+# the same way and gives the host back its end-to-end TLS. The key is refused
+# by name, saying so.
 #
 # Capture is a command, not a schema key: `workloadctl pcap <name>`. passt's own
 # --pcap has no size limit, no rotation and no runtime toggle — it writes until
@@ -2490,10 +2451,9 @@ ports = ["8080:80", "8443:443"]
 # request the broker could dispatch on -- and that is refused rather than
 # ignored.
 #
-# THERE IS NO [[network.http2]] FOR CONTAINERS. The [[vm.network.http2]] opt-out
-# is deliberately not ported; a host that must keep h2 is a [[network.splice]]
-# entry here, which leaves enforcement at the server name in exactly the same
-# way and additionally gives the host back its end-to-end TLS.
+# THERE IS NO [[network.http2]], as there is none for a VM: a host that must
+# keep h2 is a [[network.splice]] entry here, which leaves enforcement at the
+# server name and gives the host back its end-to-end TLS.
 #
 # Example Container-EGRESS-1: rung 2, the one that works on any image
 # ------------------------------------------------------------------

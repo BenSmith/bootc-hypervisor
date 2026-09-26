@@ -25,7 +25,7 @@ from vm_defs import vm_allowed_hosts
 # --- `allow`: the address-scoped bypass, now a table with a reason ---
 #
 # `allow` is a table carrying `address` and a required `reason` — the shape
-# every other bypass in this schema has (`internal` below; `splice`, `http2`).
+# every other bypass in this schema has (`internal` below; `splice`).
 # A bare `<addr>:<port>` string is REFUSED rather than accepted alongside it:
 # there is no deployed config to migrate, so a compatibility path would exist
 # only to let the two shapes drift.

@@ -969,17 +969,6 @@ class TestPolicyLoading(unittest.TestCase):
         self.assertIsNone(entry.paths)
         self.assertTrue(entry.permits("DELETE", "/anything"))
 
-    def test_the_document_carries_the_http2_list_through(self):
-        """Both halves against each other. A listener that dropped this on load
-        offers `http/1.1` to a host the operator listed for h2, which fails as
-        that one host being broken rather than as a key being ignored."""
-        path = self._write(json.dumps(vm_inspect_policy({
-            "hosts": ["grpc.example.com"],
-            "http2": [{"host": "grpc.example.com", "reason": "gRPC"}]})))
-        policy = load_policy(path)
-        self.assertEqual(policy.http2, ("grpc.example.com",))
-        self.assertTrue(policy.speaks_h2("grpc.example.com"))
-
     def test_a_malformed_http2_list_is_an_error(self):
         path = self._write(json.dumps({"hosts": [], "http2": "grpc.example"}))
         with self.assertRaises(ValueError):

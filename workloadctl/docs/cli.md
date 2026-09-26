@@ -904,15 +904,6 @@ host is one a `[[vm.network.policy]]` entry names, the report says so
 separately — those method and path rules can never run, and splicing the host
 means deleting that entry, because a host in both keys is a `validate` error.
 
-**A `502` on a host in `[[vm.network.http2]]`.** The key means *speaks h2*, not
-*exempt from inspection*: the guest's connection must present the HTTP/2 preface
-and parse as frames, and the origin must **select** h2 on its own leg. An ALPN
-offer binds nobody — an origin speaking only HTTP/1.1 completes that handshake
-having selected nothing, with no alert — so the refusal is what catches a host
-listed by mistake. The message names both ways out: drop the entry and let the
-host be inspected as HTTP/1.1, or, if it cannot take this workload's CA, move it
-to `[[vm.network.splice]]`.
-
 **When the inspector says the CA "is not there" and it plainly is.** The
 listener refuses to start under `tls = "inspect"` without
 `/var/lib/workloads/<name>/state/ca/egress-ca.crt`, and the message names the
