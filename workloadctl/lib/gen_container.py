@@ -275,6 +275,11 @@ def _lifecycle_exec(svc, wl_lifecycle, podman_cmd, container_name_quoted, pull_p
         podman_stop_timeout = 10
 
     svc.add("ExecStop", f"/usr/bin/podman stop -t {podman_stop_timeout} {container_name_quoted}")
+    # `podman stop` sends SIGTERM, and a container that dies of it hands the
+    # main process 128+15 as an exit CODE. systemd only counts SIGTERM as clean
+    # when it arrives as a signal, so without this every stop reads `failed`.
+    # 137 stays a failure: it means the grace ran out and podman had to KILL.
+    svc.add("SuccessExitStatus", "143")
     # Under option 1b payloads live in the user manager's cgroup, not the unit's
     # cgroup, so KillMode=control-group can't reach them. ExecStopPost force-removes
     # any container that survived ExecStop (e.g. a SIGKILLed podman client).

@@ -1123,6 +1123,48 @@ class TestGeneratorResources(unittest.TestCase):
         self.assertIn("ExecStop=/usr/bin/podman stop -t 10 ", service)
         self.assertIn("TimeoutStopSec=30", service)
 
+    def test_a_container_that_dies_of_the_stop_signal_stopped_cleanly(self):
+        # `podman stop` SIGTERMs the container and the unit's main process
+        # exits 143, which systemd reads as a failure unless told otherwise.
+        # Measured on a production host: nearly every container workload left
+        # `failed` behind on every stop. Every container unit gets it -- single,
+        # pet (`podman start -a` passes the code through the same way) and each
+        # member of a pod or bridge -- and 137, an expired grace, does not.
+        write_config(self.config_dir, "solo", """\
+            [workload]
+            name = "solo"
+
+            [container]
+            image = "myapp"
+        """)
+        write_config(self.config_dir, "pet", """\
+            [workload]
+            name = "pet"
+            lifecycle = "pet"
+
+            [container]
+            image = "myapp"
+        """)
+        for mode in ("pod", "bridge"):
+            write_config(self.config_dir, mode, f"""\
+                [workload]
+                name = "{mode}"
+                mode = "{mode}"
+
+                [[containers]]
+                name = "a"
+                [containers.container]
+                image = "myapp"
+            """)
+        result = run_generator(self.config_dir, self.services_dir, self.sysusers_dir)
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        for unit in ("workload-solo.service", "workload-pet.service",
+                     "workload-pod-a.service", "workload-bridge-a.service"):
+            service = (Path(self.services_dir) / unit).read_text()
+            codes = [line.split("=", 1)[1] for line in service.splitlines()
+                     if line.startswith("SuccessExitStatus=")]
+            self.assertEqual(codes, ["143"], unit)
+
     def test_timeout_stop_sec_plumbs_into_podman_stop_grace(self):
         # A longer drain must reach podman's -t, not just systemd: podman's
         # grace tracks timeout_stop_sec minus a margin so systemd doesn't kill
