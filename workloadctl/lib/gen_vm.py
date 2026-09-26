@@ -443,6 +443,12 @@ def generate_vm_resolve_socket(config, user_name: str, uid: int) -> str:
     # as a nameserver for a guest that is gone.
     u.set("Before", f"workload-{name}.service")
     u.set("PartOf", f"workload-{name}.service")
+    # No default dependencies, for the ordering cycle generate_inspect_socket
+    # describes: the After= on setup.service above and a socket's implicit
+    # Before=sockets.target close a loop through basic.target.
+    u.set("DefaultDependencies", "no")
+    u.set("Conflicts", "shutdown.target")
+    u.add("Before", "shutdown.target")
 
     sock = unit.section("Socket")
     # Both transports on the workload's own loopback address. IPv4 only: there

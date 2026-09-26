@@ -98,6 +98,20 @@ def generate_inspect_socket(config, user_name: str, uid: int, *,
     # redirect pointing at a listener with nothing behind it).
     u.set("Before", f"workload-{name}.service")
     u.set("PartOf", f"workload-{name}.service")
+    # A socket's default dependencies order it Before=sockets.target, which is
+    # ordered before basic.target, which every service with default
+    # dependencies -- setup.service included -- is After=. With the After= on
+    # setup above that is a cycle: socket > setup > basic > sockets > socket.
+    # Starting never trips it (sockets.target is already reached by the time
+    # anything pulls this socket in), but a shutdown puts all four in one
+    # transaction and systemd deletes a job of its choosing to break it. The
+    # sockets.target edge is false anyway: this socket is pulled in by the
+    # workload's own unit, never by sockets.target. Dropped, and the defaults
+    # that matter re-stated -- stop at shutdown; sysinit.target comes through
+    # setup.service.
+    u.set("DefaultDependencies", "no")
+    u.set("Conflicts", "shutdown.target")
+    u.add("Before", "shutdown.target")
 
     sock = unit.section("Socket")
     # The address-add lives on the SOCKET unit, not the service, because the
