@@ -75,8 +75,8 @@ so a policy-matched path cannot be prefixed on the way out -- so the provider
 has to answer at that name on 443. The rig therefore writes ONE /etc/hosts entry
 and binds 127.0.0.1:443, and removes both at teardown. The stub's certificate is
 handed to each broker instance through SSL_CERT_FILE in a drop-in rather than
-installed into the host's trust store, on policy_rig.py's reasoning: the trust
-decision stays the broker's, made the way it always is, and this rig does not
+installed into the host's trust store: the trust decision stays the
+broker's, made the way it always is, and this rig does not
 leave a trust anchor behind on a machine it borrowed.
 
 Nothing here weakens the path under test. The drop-in adds one environment

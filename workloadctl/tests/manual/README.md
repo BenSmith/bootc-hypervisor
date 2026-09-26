@@ -129,8 +129,7 @@ cannot be prefixed on the way out — so the provider has to answer at that name
 on 443. The rig writes one `/etc/hosts` line, binds `127.0.0.1:443`, and removes
 both at teardown. The stub's certificate is handed to each broker instance
 through `SSL_CERT_FILE` in a drop-in rather than installed into the host trust
-store, on `policy_rig.py`'s reasoning: the trust decision stays the broker's,
-made the way it always is, and the rig leaves no trust anchor behind on a
+store: the trust decision stays the broker's, made the way it always is, and the rig leaves no trust anchor behind on a
 machine it borrowed. Nothing about the path under test is weakened — the drop-in
 adds one environment variable and changes no directive.
 
@@ -501,154 +500,6 @@ own behalf appear once, because there is no owner for `meta skuid` to match.
 
 Last green 2026-08-25, all rows, on a bare-metal Fedora 44 host.
 
-## splice_rig.py — does a real session survive the splice, and a real request get authorised?
-
-Rung 2's T4a and T4b claims, and the halves of them the unit suite cannot
-reach. Needs root and the installed RPM; **no KVM and no VM** — a throwaway
-network namespace, a real TLS origin and a real HTTP origin, and the real
-listener process started the way the socket unit starts it.
-
-```bash
-sudo python3 tests/manual/splice_rig.py
-```
-
-**What the unit tests already hold, and what they cannot.** That the parser
-reads a name, and that the buffer replayed upstream is byte-identical to the
-one read, are unit tests — the second against a hand-built ClientHello. What no
-byte comparison can establish is that a *real* client and a *real* server
-complete a handshake through the splice. A hello that is subtly re-serialised —
-a reordered extension block, a dropped GREASE value, a rebuilt record header —
-still reads as "close enough" in a diff and still fails a real handshake.
-
-**The certificate is the honest question.** The rig's client verifies nothing,
-so a wrong certificate reaches the assertion instead of being refused before it
-can be looked at, and the assertion compares what the client was handed against
-the origin's own DER. If anything between the two terminated the session, that
-one check fails and every other check in the rig still passes.
-
-**"The upstream saw nobody" is an assertion, not an aside.** The first version
-of this rig reported a denied name completing a handshake — an apparent policy
-bypass. It was the rig: its own `dup2(fd, 3)` had clobbered the origin's
-listening socket, so the parent raced the listener for the guest's connections
-and answered them itself. A false pass in that direction is indistinguishable
-from a real bypass, so the origin counts its connections and the denied probe
-asserts the count did not move.
-
-**Three drop reasons, checked at runtime rather than in the source.** A name on
-no list, an allowlisted name that does not resolve (`nx.invalid`), and bytes
-that are not TLS each produce their own line. An operator with one bucket for
-the three cannot tell a policy decision from a broken resolver from something
-speaking a non-TLS protocol at the TLS port, which is the tunnelling signature.
-
-**The cleartext plane, from the origin's side.** The unit tests drive it over a
-socketpair they own, so they read the bytes this process wrote. What they
-cannot do is have an *origin* report what arrived — and that is where two of
-T4b's claims live: the head reaching the origin is the one we composed (our
-framing, our `Host`, hop-by-hop headers gone) rather than the guest's forwarded
-on, and the refused request reached nobody at all. Two names are sent down
-**one** connection, because a per-connection decision would send the second
-request to the first one's upstream and nothing outside would look wrong.
-
-**One control.** A listener whose policy document is missing must fail its
-start rather than fall back to an empty allowlist: an empty `hosts` is a legal
-configuration, so the fallback could not tell "the operator allowed nothing"
-from "the file was not there".
-
-It writes `/run/workload-vm/wlspl/inspect.json` and refuses to start if that
-path already exists, since it would be a real workload's policy. Teardown
-removes the namespace and the directory.
-
-Last green 2026-09-20, all rows, on a bare-metal Fedora 44 host against
-the installed RPM (inspector-decouple: the launcher's module set changed,
-which item 5 is the check for).
-
-Verified by breaking the splice on purpose — replaying the buffer without its
-record header — which fails the four handshake assertions and leaves the other
-eleven green.
-
-## policy_rig.py — does rung 4 enforce what it claims, against the installed listener?
-
-Rung 4's T1, T3, tiers 4–5, T6, T7 and T9, and the halves of them the unit
-suite cannot reach. Needs root and the installed RPM; **no KVM and no VM** — a
-throwaway network namespace, one real TLS origin answering to six names, and
-the real listener process started the way the socket unit starts it.
-
-```bash
-sudo python3 tests/manual/policy_rig.py
-```
-
-**Why it exists when every figure below has a unit test.** The unit suite
-proves the *decision*; it drives the request over a socket pair it owns. What
-it cannot do is show that the decision is reached by the process systemd
-starts, from the document on disk, with a real TLS stack on both sides — the
-same gap rung 2 and rung 3 each found the hard way.
-
-**One listener, two dispositions, told apart by whose key ends the session.**
-`tls = "inspect"` with a `[[vm.network.splice]]` entry produces two different
-outcomes on one process, and the only honest way to say which happened is the
-certificate the client is holding when the handshake finishes: the spliced host
-hands back the origin's own DER, the inspected host a leaf this workload's CA
-signed. Either one alone proves nothing — a listener that spliced everything
-and a listener that terminated everything each pass half of the pair.
-
-**"Reached nobody" is measured in requests, not connections.** §6 establishes
-the upstream leg *before* the guest's handshake completes, precisely so nothing
-sniffs the guest to decide what to say upstream — so by the time a request can
-be refused on policy, the origin has already been dialled. The first version of
-this rig asserted the connection count and reported that design as a leak. What
-must never arrive is the *request*, and that is what every refusal here checks.
-
-**Both halves of the h2 bypass.** A host in `[[vm.network.http2]]` that speaks
-h2 relays its preface to an origin that selected h2. The same host sent an
-HTTP/1.1 request is refused — without that check the key would mean "exempt
-from policy" rather than "speaks h2", reachable by writing different first
-bytes. And a *second* host is listed whose origin answers `http/1.1` anyway:
-an ALPN offer binds nobody, and a server that speaks only HTTP/1.1 completes
-the handshake selecting nothing, with no alert of any kind.
-
-**The four split counters, read off a file a real process wrote.**
-`tests/test_inspect_diagnose.py` pins each key string against the listener's
-own constant, so a rename cannot rot them. What no unit test can say is whether
-anything ever *increments* them: a counter that is declared, exported, pinned
-and never written reads 0, and 0 is a legal value every test passes. These are
-the same figures after the refusals above actually happened, plus the
-reconciliation `sum(drop_reasons) == dispositions.dropped`.
-
-**The counter key is not the log line**, and assuming it was got this rig
-wrong twice. The log interpolates the server name inside the reason — `host
-does not match the server name plain.wlpol.test (allowlisted)` — so the
-counter's key is not a substring of it. Matching the log on the allowlisted key
-never fires; matching it on the shorter key matches *both* halves, which made
-the sibling assertion pass vacuously on a listener that had merged them. The
-split is asserted where it is authoritative, in the status document.
-
-**The trust store is the rig's, and the trust decision is still the
-listener's.** Every upstream leg is verified fully against the host's anchors
-with no configuration key to weaken it — deliberately, since such a key would
-turn the inspector into an attacker with a friendly name. So the rig points
-`SSL_CERT_FILE` at a file naming its own origin alone. Without it every
-terminated host answers 502 `upstream certificate unverified` and every policy
-assertion silently measures that instead of policy, which is how the first
-run read.
-
-It writes `/run/workload-vm/wlpol/inspect.json` and this workload's CA under
-`/var/lib/workloads/wlpol/`, and refuses to start if either exists. The six
-test names resolve through `/etc/netns/wlpol/hosts`, which `ip netns exec`
-binds over `/etc/hosts` inside the namespace alone — editing the host's own
-would leave six entries pointing at a listener that is gone. Teardown removes
-all of it.
-
-Last green 2026-09-20, all rows, on a bare-metal Fedora 44 host under
-enforcing, against the installed RPM (inspector-decouple). Four consecutive
-runs were green on 2026-08-27.
-
-Verified by emptying each rung-4 list in the policy document in turn, on a
-throwaway copy so the product is never touched. Emptying `splice` fails 2 of
-the 42 (the origin's own certificate stops coming back); emptying `http2` fails
-8, including the HTTP/1.1 request that the entry is what refuses — without the
-entry it is relayed and answered 200; emptying `policy` fails 8. Each break
-lands on the assertions written for it and leaves the rest green.
-
 ## clock_rig.py — what a vCPU pause does to a guest's clock, and whether a wrong clock costs the guest its egress
 
 ```bash
@@ -836,8 +687,8 @@ serves `api.example.com`, so the governed probes end 502 at the dial rather
 than as policy decisions — and that is the signal, not a flaw: reaching the
 upstream at all is what proves the host was admitted, while the unlisted probe
 never gets that far and is refused at the allowlist with a 403. Whether a
-permitted request is permitted and a forbidden one forbidden is `policy_rig`'s
-question, against a stub origin built to answer it.
+permitted request is permitted and a forbidden one forbidden is customs'
+rigs' question, against a stub origin built to answer it.
 
 **The unlisted probe uses `--resolve`, not DNS.** The synthesising resolver
 answers only for names the lists carry, so an unlisted name never resolves and
