@@ -282,6 +282,8 @@ class TestCurrentDestructiveGolden(unittest.TestCase):
                 # deliberate superset (no [network] trigger, P1-9):
                 'workload-app-inspect.socket',
                 'workload-app-inspect.service',
+                'workload-app-resolve.socket',
+                'workload-app-resolve.service',
                 # deliberate superset (P2-4): listed for every container so a
                 # workload that drops its last [[network.credential]] has the
                 # unit unlinked rather than left behind holding material
@@ -303,6 +305,8 @@ class TestCurrentDestructiveGolden(unittest.TestCase):
                 # deliberate superset (no [network] trigger, P1-9):
                 'workload-stack-inspect.socket',
                 'workload-stack-inspect.service',
+                'workload-stack-resolve.socket',
+                'workload-stack-resolve.service',
                 # deliberate superset (P2-4), as in test_single:
                 'workload-stack-broker.service',
             })

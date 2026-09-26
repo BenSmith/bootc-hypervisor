@@ -1,20 +1,21 @@
-"""The resolver half of diagnose: is the synthesising responder the guest's DNS.
+"""The resolver half of diagnose: is the synthesising responder the workload's DNS.
 
 A filtered VM's guest is told one nameserver, the per-workload responder on
-the host, so a responder that is not listening is the whole of DNS for that
-guest while every other line in `diagnose` still passes. vm_resolve_check()
-is the one verdict: the socket unit, the static map it reads, and the
-passt netdev line that tells the guest where to look, each named when it
-is the thing that is wrong.
+the host, and a filtered container's pasta sends its queries there, so a
+responder that is not listening is the whole of DNS for that workload while
+every other line in `diagnose` still passes. vm_resolve_check() and
+container_resolve_check() are the verdicts: the socket unit, the static map
+it reads, and for a VM the passt netdev line that tells the guest where to
+look, each named when it is the thing that is wrong.
 """
 
 import os
 
 from diagnose_probe import PROBE
-from egress_policy import uses_resolve
+from egress_policy import container_uses_resolve, vm_uses_resolve
 from run_files import workload_env_dir
 from substrate import service_active
-from vm_network_config import vm_resolve_static_path
+from egress_policy import resolve_static_path
 from workload_addr import RESOLVE_PORT, resolve_address
 
 
@@ -91,7 +92,7 @@ def vm_resolve_check(config, *, socket_active=PROBE, static_present=PROBE,
     Observations are injectable (PROBE sentinel) so the verdict logic is
     testable without a live host.
     """
-    if not uses_resolve(config.config):
+    if not vm_uses_resolve(config.config):
         return None
     try:
         uid = config.uid
@@ -119,7 +120,7 @@ def vm_resolve_check(config, *, socket_active=PROBE, static_present=PROBE,
                 f"here passes. Inside the guest that reads as a broken guest. "
                 f"Start it: {restart}")
 
-    path = vm_resolve_static_path(name)
+    path = resolve_static_path(name)
     if static_present is PROBE:
         static_present = os.path.exists(path)
     if not static_present:
@@ -166,3 +167,54 @@ def vm_resolve_check(config, *, socket_active=PROBE, static_present=PROBE,
                 f"systemctl restart workload-{name}.service")
 
     return ("vm_resolve", True, f"{told}, advertised to the guest by passt")
+
+
+def container_resolve_check(config, *, socket_active=PROBE,
+                            static_present=PROBE
+                            ) -> tuple[str, bool, str] | None:
+    """Report whether a container's synthesising responder can answer it.
+
+    Returns None for workloads with no responder (a VM, an unfiltered
+    container, bridge mode, or a network pasta is not on), so no line is
+    emitted.
+
+    vm_resolve_check's first two arms, for the same two failures: a socket
+    that hit its trigger limit and stays failed, and a static map the
+    container's own prestart did not write. The third arm has no container
+    twin to read back: `--dns-host` is on the unit's own `--network=`, which
+    `drift` compares against a fresh render.
+    """
+    if config.is_vm or not container_uses_resolve(config.config):
+        return None
+    try:
+        uid = config.uid
+    except Exception:
+        return None                      # no user yet; user_exists says so
+
+    name = config.name
+    unit = f"workload-{name}-resolve.socket"
+
+    if socket_active is PROBE:
+        socket_active, _ = service_active(unit)
+    if not socket_active:
+        return ("container_resolve", False,
+                f"{unit} is not listening, and it is the only nameserver "
+                f"that answers this container — every name inside it fails "
+                f"to resolve while its egress stays filtered and every other "
+                f"line here passes. Start it: systemctl restart {unit}")
+
+    path = resolve_static_path(name)
+    if static_present is PROBE:
+        static_present = os.path.exists(path)
+    if not static_present:
+        return ("container_resolve", False,
+                f"{unit} is listening but {path} is missing, so the responder "
+                f"will fail its start on the container's first query rather "
+                f"than answer it. The map is written by this workload's own "
+                f"prestart: systemctl restart workload-{name}.service")
+
+    address = resolve_address(uid)
+    return ("container_resolve", True,
+            f"synthesising responder on {address}:{RESOLVE_PORT}, {unit} "
+            f"listening, static map {path}, reached through pasta's "
+            f"--dns-host")

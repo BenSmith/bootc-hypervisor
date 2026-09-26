@@ -2,8 +2,8 @@
 """Generating the egress units both substrates share.
 
 The transparent egress inspector's socket and service, the credential broker
-instance, and the sandbox the inspector and the synthesising responder run
-in. ADR 009's second decision is that the mechanism is shared byte for byte
+instance, the synthesising DNS responder's socket and service, and the sandbox
+all three run in. ADR 009's second decision is that the mechanism is shared byte for byte
 and only the arming differs, and these are the units that decision is about:
 generators/workload-generate emits them for a container with a `[network]`
 trigger and gen_vm emits them for a VM with `egress = "filtered"`, and the
@@ -26,16 +26,18 @@ from run_files import GENERATED_BY
 from customs.egress_plane import PLANES
 from egress_policy import (
     inspect_logs_directory, inspect_policy_path, inspect_record_path,
-    inspect_status_path,
+    inspect_status_path, resolve_static_path,
 )
 from customs.egress_ca import denial_dir, leaf_dir
-from nft_elements import inspect_cgroup_command, inspect_cgroup_filter_command
+from nft_elements import (
+    inspect_cgroup_command, inspect_cgroup_filter_command, resolve_status_path,
+)
 from broker_config import broker_credential, host_resolver_addresses
 from config_parser import SOCKET_DIR
 from nft_constants import SIDECAR_SLICE
 from workload_addr import (
-    BROKER_INSTANCE_PORT, INSPECT_LISTENER_BIN, broker_listen_address,
-    inspect_address,
+    BROKER_INSTANCE_PORT, INSPECT_LISTENER_BIN, RESOLVE_LISTENER_BIN,
+    RESOLVE_PORT, broker_listen_address, inspect_address, resolve_address,
 )
 from unit_file import Unit
 
@@ -164,9 +166,8 @@ def harden_sidecar(svc, name: str, *, families: str, tasks_max: int,
                    memory_max: str, extra_rw: tuple = ()) -> None:
     """The sandbox both egress sidecars run in.
 
-    Public rather than underscored because its second caller is in another
-    module: gen_vm's synthesising responder is the VM-only sidecar, and it
-    runs in this same sandbox.
+    Public rather than underscored because its other caller is in another
+    module: gen_vm's virtiofsd sidecar runs in this same sandbox.
 
     These two processes are the ones ADR 008 names as the cost of the design:
     code parsing hostile guest input, on the path for all HTTP and HTTPS, and
@@ -620,5 +621,194 @@ def generate_broker_service(config, uid: int, *, before: str,
     # meantime, which is D5's named drop reason and not a silence.
     svc.add("Restart", "on-failure")
     svc.add("RestartSec", "2")
+
+    return unit.render()
+
+
+def generate_resolve_socket(config, user_name: str, uid: int) -> str:
+    """Generate the socket unit for one workload's synthesising DNS responder.
+
+    A socket unit for ONE reason: port 53 is privileged and the responder runs
+    as _wl-<name>, so the bind has to happen in PID 1 and be handed over. It
+    borrows nothing else from the inspector's socket unit -- and specifically
+    there is NO ExecStartPre address-add here, which is the difference a reader
+    coming from generate_inspect_socket will look for.
+
+    The kernel treats all of 127/8 as local on `lo`, so the responder's address
+    needs no assignment: binding 127.130.1.4 succeeds with nothing
+    configured. A step adding a /32 would be a no-op, and worse, it would invent
+    an address whose absence the inspector's fail-at-bind argument would then
+    appear to depend on. There is likewise no
+    FreeBind= question to answer, and no teardown that would make the presence
+    of an address mean a running process.
+
+    Both transports. A static name with more addresses than fit in a datagram
+    is answered with the truncate bit set, and the client asks again over TCP;
+    clients also open TCP connections for their own reasons, and a UDP-only
+    responder leaves those hanging with nothing to diagnose from.
+    """
+    name = config["workload"]["name"]
+    # The uid is passed in, never looked up, for the reason
+    # generate_inspect_socket gives: on a first enable this runs before
+    # systemd-sysusers has created _wl-<name>.
+    address = resolve_address(uid)
+
+    unit = Unit()
+    unit.comment(f"synthesising DNS responder socket for {name}")
+    unit.comment(GENERATED_BY)
+
+    u = unit.section("Unit")
+    u.set("Description", f"Synthesising DNS responder socket for {name}")
+    # Ordered after setup.service like the inspector's pair, one step weaker in
+    # what it needs: this socket has no ExecStartPre and so no getpwnam of its
+    # own, but the service it triggers carries User=_wl-<name>, and leaving the
+    # socket unordered would invite a reader to conclude the inspector's
+    # ordering was the accident rather than the rule.
+    u.set("Requires", f"workload-{name}-setup.service")
+    u.set("After", f"workload-{name}-setup.service")
+    # The workload's first query can arrive as soon as it runs, so the socket
+    # is bound before it; PartOf= so it stops with the workload rather than
+    # lingering as a nameserver for one that is gone. The workload's own unit
+    # (or a container pod's head unit) also Requires= and orders After= this
+    # socket, since Before= alone starts nothing.
+    u.set("Before", f"workload-{name}.service")
+    u.set("PartOf", f"workload-{name}.service")
+    # No default dependencies, for the ordering cycle generate_inspect_socket
+    # describes: the After= on setup.service above and a socket's implicit
+    # Before=sockets.target close a loop through basic.target.
+    u.set("DefaultDependencies", "no")
+    u.set("Conflicts", "shutdown.target")
+    u.add("Before", "shutdown.target")
+
+    sock = unit.section("Socket")
+    # Both transports on the workload's own loopback address. IPv4 only: there
+    # is deliberately no v6 responder plane (§9 rejects one on cost), and a v6
+    # plane on `lo` would not be a substitute anyway -- the shipped `oif lo
+    # accept` would make it reachable from every workload on the host, which is
+    # the one property 127/8's unreachability from the workload is providing:
+    # a guest's 127/8 and a container's are their own, and passt or pasta's
+    # DNS forwarding is the only way here.
+    sock.add("ListenDatagram", f"{address}:{RESOLVE_PORT}")
+    sock.add("ListenStream", f"{address}:{RESOLVE_PORT}")
+    # One long-lived process, not one per connection -- and with Accept=no the
+    # trigger limit below is the meaningful knob. Set explicitly.
+    sock.set("Accept", "no")
+    # Accept=no silently lowers systemd's trigger-limit default to 20 per 2s,
+    # and hitting it fails the socket unit PERMANENTLY until something restarts
+    # it. A workload starting is a burst of lookups; 20 is inside what one
+    # `dnf makecache` costs. Both values explicit, for the reason the inspector's
+    # socket sets them.
+    sock.set("TriggerLimitIntervalSec", "2s")
+    sock.set("TriggerLimitBurst", "200")
+
+    return unit.render()
+
+
+def resolve_command(name: str, uid: int, *, address6: bool) -> list:
+    """The responder's argv: customs-resolve and the values it is handed.
+
+    The same seam as gen_egress.inspect_listener_command: customs-resolve
+    knows nothing about workloads, so where this one's lists, static map and
+    counters live, and what its uid makes the inspector's address, are
+    computed here and written into ExecStart= as flags.
+    tests/test_customs_seam.py holds this command to the program's flags.
+
+    `--address`/`--address6` are the inspector's, not the responder's: every
+    synthesised A/AAAA points the workload at the listener its 80 and 443 are
+    redirected to anyway, so a workload that ignores the redirect and one that
+    does not both arrive at the same place. That address is on the
+    workload-proxy link, not loopback, so a container's dial to it leaves
+    through pasta like any other. `--policy` is the inspector's own
+    document, read to COUNT queries for names on no list, never to answer.
+
+    `address6` is False for a container, whose AAAA queries then get no
+    records. pasta copies a host IPv6 address onto the container's
+    interface, and on a host with no IPv6 default route the one it copies
+    can be an inspector's own address from the workload-proxy link -- this
+    workload's included. An AAAA answer naming it is a dial to the
+    container's own interface, refused before it leaves, and clients try
+    IPv6 first. A dial to an IPv6 literal on 80 or 443 is still redirected
+    by port.
+    """
+    inspect = inspect_address(uid)
+    v6 = ["--address6", inspect.v6] if address6 else []
+    return [
+        RESOLVE_LISTENER_BIN,
+        "--name", name,
+        "--address", inspect.v4,
+        *v6,
+        "--policy", inspect_policy_path(name),
+        "--static", resolve_static_path(name),
+        "--status", resolve_status_path(name),
+    ]
+
+
+def generate_resolve_service(config, user_name: str, uid: int, *,
+                             address6: bool) -> str:
+    """Generate the service unit for one workload's synthesising DNS responder.
+
+    Socket-activated, and it never binds: the program refuses to open a socket
+    of its own, because port 53 is privileged and this process is not -- a
+    fallback bind would be a listener on some other port that nothing forwards
+    to, which is a working responder no workload can reach.
+
+    No cgroup exemptions here, unlike the inspector's service. Those exist
+    because the inspector ORIGINATES traffic that would otherwise be redirected
+    into itself or caught by the default-deny drop; the responder originates
+    none at all -- it has no upstream socket, which is the property that makes
+    DNS exfiltration absent rather than filtered. There is nothing to exempt.
+    """
+    name = config["workload"]["name"]
+
+    unit = Unit()
+    unit.comment(f"synthesising DNS responder service for {name}")
+    unit.comment(GENERATED_BY)
+
+    u = unit.section("Unit")
+    u.set("Description", f"Synthesising DNS responder for {name}")
+    u.set("Requires", f"workload-{name}-setup.service")
+    u.set("After", f"workload-{name}-setup.service")
+    # Stopped with the workload, for the reason the inspector's service
+    # gives: a process that survived a workload restart would keep answering
+    # from the previous run's static map while the workload runs the new one.
+    # StopPropagatedFrom= and not PartOf=, because PartOf= propagates a
+    # restart as a restart, which starts the responder at once -- before the
+    # workload's own prestart (workload-*-filter up) rewrites the static map,
+    # so it would load the previous start's. A propagated stop leaves it down
+    # until the workload's first query, which cannot come before that
+    # prestart.
+    u.set("StopPropagatedFrom", f"workload-{name}.service")
+
+    svc = unit.section("Service")
+    svc.set("User", user_name)
+    svc.set("Group", user_name)
+    # Placement, not policy. The inspector pins this slice because two
+    # `socket cgroupv2 level 2` matches depend on the path being exactly two
+    # components; nothing keys on this unit's cgroup, so the pin here only
+    # keeps the responder out of the workload's own resource accounting. Stated so a
+    # later reader does not conclude the inspector's pin is decorative.
+    svc.set("Slice", SIDECAR_SLICE)
+    # Everything the responder needs to know about this workload, as flags;
+    # resolve_command says why. The name among them because it is
+    # socket-activated with two identically-named fds, so there is nothing on
+    # the socket to recover it from.
+    binary, *args = resolve_command(name, uid, address6=address6)
+    svc.add("ExecStart", " ".join(
+        [binary] + [a if a.startswith("--") else dq(a) for a in args]))
+    svc.blank()
+    # Narrower than the inspector on both axes, and the address families are
+    # the load-bearing half: this program must contain no call that could
+    # consult a resolver, and it opens no socket of its own at all -- its two
+    # listeners are handed to it. AF_NETLINK is absent for that reason, so a
+    # getaddrinfo that appeared here would fail at the socket rather than
+    # quietly reaching a nameserver. One process, one loop: 16 tasks is slack.
+    harden_sidecar(svc, name, families="AF_INET AF_UNIX",
+                       tasks_max=16, memory_max="128M")
+    svc.blank()
+    svc.add("StandardOutput", "journal")
+    svc.add("StandardError", "journal")
+    svc.blank()
+    svc.add("Restart", "on-failure")
+    svc.add("RestartSec", "5s")
 
     return unit.render()

@@ -174,7 +174,7 @@ class ReaderTest(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             path = Path(tmp) / "s.json"
             path.write_text("[1, 2]")
-            with mock.patch.object(fig, "vm_resolve_status_path",
+            with mock.patch.object(fig, "resolve_status_path",
                                    return_value=str(path)):
                 self.assertIsNone(fig.read_resolve_status("vm1"))
 

@@ -17,6 +17,7 @@ from pathlib import Path
 
 from config_parser import infer_workload_mode, workload_root_dir
 from container_network_config import container_uses_inspect
+from egress_policy import container_uses_resolve
 from workload_lib import workload_state_dir, dq, uq, normalize_containers
 from run_files import GENERATED_BY
 from broker_config import (
@@ -32,7 +33,8 @@ from gen_common import (
 )
 from gen_egress import (
     generate_inspect_socket, generate_inspect_service,
-    generate_broker_service,
+    generate_broker_service, generate_resolve_socket,
+    generate_resolve_service,
 )
 from container_run_args import RunSpec, volume_args, podman_run_args
 from gen_container_heads import (
@@ -401,6 +403,12 @@ def generate_system_service(workload, container, user_name, uid, mode="single"):
     if mode == "single" and container_uses_inspect(workload):
         u.add("Requires", f"workload-{name}-inspect.socket")
         u.add("After", f"workload-{name}-inspect.socket")
+    # And the responder's socket, on the same terms: it is the container's
+    # only nameserver that answers, so a container started with it unbound
+    # resolves nothing at all while looking healthy.
+    if mode == "single" and container_uses_resolve(workload):
+        u.add("Requires", f"workload-{name}-resolve.socket")
+        u.add("After", f"workload-{name}-resolve.socket")
     # And the broker instance, on the same terms and for the same reason its
     # twin is on the head unit in pod/bridge mode: the `Before=` the generator
     # gives the instance ORDERS it, and nothing else pulls it in. See
@@ -586,6 +594,22 @@ def generate_container_workload(config, user_name: str, uid: int) -> bool:
             inspect_dests[0].write_text(
                 generate_inspect_service(config, user_name, uid))
             log_msg("  Created egress inspector service")
+
+    # The synthesising responder, on the inspector's terms plus a network
+    # pasta carries (container_uses_resolve says why), from the same two
+    # generators the VM path calls.
+    if container_uses_resolve(config):
+        resolve_socket_dests = paths.get(("unit", "resolve-socket"), [])
+        if resolve_socket_dests:
+            resolve_socket_dests[0].write_text(
+                generate_resolve_socket(config, user_name, uid))
+            log_msg("  Created DNS responder socket")
+        resolve_dests = paths.get(("unit", "resolve"), [])
+        if resolve_dests:
+            resolve_dests[0].write_text(
+                generate_resolve_service(config, user_name, uid,
+                                         address6=False))
+            log_msg("  Created DNS responder service")
 
     # The credential broker instance (P2-2), on the same reuse terms:
     # generate_broker_service takes its substrate-specific values

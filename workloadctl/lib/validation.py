@@ -23,6 +23,8 @@ from container_validate import (
     validate_container_network, validate_publish_ports,
 )
 from vm_validate import validate_vm_config, vm_network_warnings
+from container_network_config import container_allow_entries
+from egress_policy import container_uses_resolve
 
 
 def validate_container_name(name: str):
@@ -401,6 +403,19 @@ def collect_config_warnings(config: dict, known_workload_names=None) -> list[str
         warnings.append(
             "workload-level [network].ports is ignored in bridge mode; publish "
             "ports per container under [containers.network]")
+
+    # The container twin of vm_network_warnings' port-53 `allow` warning.
+    if container_uses_resolve(config):
+        for entry in container_allow_entries(config.get("network", {})):
+            if entry.port != 53:
+                continue
+            target = entry.host or entry.address
+            warnings.append(
+                f"[[network.allow]] {target}:53 is a resolver the container "
+                f"can choose for itself, past the synthesising responder -- "
+                f"which returns both the ECHConfig that hides the name from "
+                f"the inspector and the DNS exfiltration channel synthesis "
+                f"exists to remove.")
 
     return warnings
 

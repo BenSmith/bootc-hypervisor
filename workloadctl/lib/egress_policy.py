@@ -33,16 +33,20 @@ Installed to /usr/libexec/workloadctl/egress_policy.py.
 import json
 from pathlib import Path
 
-from config_parser import parse_policy_entries, SOCKET_DIR
+from config_parser import infer_workload_mode, parse_policy_entries, SOCKET_DIR
 from container_network_config import (
     container_allowed_hosts,
     container_effective_tls_mode,
     container_internal_entries,
     container_policy_entries,
     container_splice_entries,
+    container_uses_inspect,
 )
-from customs.inspect_document import TLS_DEFAULT, VmPolicyEntry
+from customs.inspect_document import (
+    TLS_DEFAULT, VmPolicyEntry, normalise_hostname,
+)
 from vm_defs import EGRESS_DEFAULT, vm_allowed_hosts
+from workload_addr import RESOLVE_STATIC_FILE
 
 
 def vm_uses_inspect(config: dict) -> bool:
@@ -74,7 +78,7 @@ def vm_uses_inspect(config: dict) -> bool:
 
 
 # --- The responder knob, and [[vm.network.policy]] as parsed entries ---
-def uses_resolve(config: dict) -> bool:
+def vm_uses_resolve(config: dict) -> bool:
     """Whether this workload gets a synthesising responder.
 
     Everything vm_uses_inspect requires (a VM, not bridged, filtered) plus
@@ -85,13 +89,42 @@ def uses_resolve(config: dict) -> bool:
     told about it in the same breath, so a disagreement here is a guest pointed
     at a port with nothing behind it.
     """
-    # VM-only, and not an omission: a container resolves through the
-    # host/podman resolver rather than a per-workload nameserver, so there is
-    # no container analogue to extend this to.
     if not vm_uses_inspect(config):
         return False
     net = (config.get("vm", {}) or {}).get("network", {}) or {}
     return net.get("resolver", "host") != "none"
+
+
+def container_uses_resolve(config: dict) -> bool:
+    """Whether this container workload gets a synthesising responder.
+
+    Everything container_uses_inspect requires, on a network pasta carries:
+    single or pod topology with `[network].mode` pasta, the default. pasta is
+    what the responder is reached through -- podman starts it with
+    `--dns-forward`, and container_pasta_network adds `--dns-host` pointing
+    that address at the responder -- so a network pasta is not on has no way
+    to it. A bridge-mode workload resolves through aardvark-dns, which
+    forwards to the host's nameservers and takes no such option.
+
+    There is no `resolver` knob on this side. A container that needs a name
+    answered with its real address says so in `[[network.allow]]`, which the
+    static map serves.
+    """
+    if not container_uses_inspect(config):
+        return False
+    try:
+        if infer_workload_mode(config) == "bridge":
+            return False
+    except ValueError:
+        return False
+    return container_network_mode(config) == "pasta"
+
+
+def container_network_mode(config: dict) -> str:
+    """`[network].mode` without pasta's options: "pasta" for "pasta:..."."""
+    net = config.get("network", {})
+    mode = net.get("mode", "pasta") if isinstance(net, dict) else "pasta"
+    return str(mode).split(":", 1)[0]
 
 
 # The HTTP methods a [[vm.network.policy]] entry may name. Registered tokens
@@ -156,6 +189,42 @@ INSPECT_POLICY_FILE = "inspect.json"
 def inspect_policy_path(name: str) -> str:
     """Where one workload's inspector reads its lists from."""
     return f"{SOCKET_DIR}/{name}/{INSPECT_POLICY_FILE}"
+
+
+def resolve_static_path(name: str) -> str:
+    """Where one workload's responder reads its static map from."""
+    return f"{SOCKET_DIR}/{name}/{RESOLVE_STATIC_FILE}"
+
+
+def resolve_static(resolved) -> dict[str, list[str]]:
+    """The responder's static map for one workload: name to addresses.
+
+    The `allow`-by-name entries, which customs-resolve answers from this map
+    instead of with the inspector's address. Without it a synthesised answer
+    sends every named non-80/443 destination -- an SSH forge, a registry, an
+    internal API -- to a port the inspector does not serve, which presents as
+    a healthy-looking hang rather than as a refusal. The map wins over
+    synthesis, which costs nothing on 80 and 443 because the redirect is
+    keyed on uid and port alone; a name in both `hosts` and `allow` is
+    therefore legal.
+
+    `resolved` is the arming path's own resolution, (entry, [addr...]) with
+    either substrate's `allow` entry, so the map holds the addresses that were
+    ARMED -- see vm_filter_elements for why a second resolution is a
+    different question.
+    """
+    static: dict[str, list[str]] = {}
+    for entry, addresses in resolved:
+        if entry.host is None:
+            continue
+        # Normalised on the way in, so two spellings of one name cannot
+        # become two entries.
+        key = normalise_hostname(entry.host)
+        for addr in addresses:
+            text = str(addr)
+            if text not in static.setdefault(key, []):
+                static[key].append(text)
+    return static
 
 
 INSPECT_STATUS_FILE = "inspect-status.json"

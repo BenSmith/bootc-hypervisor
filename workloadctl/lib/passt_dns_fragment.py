@@ -33,7 +33,7 @@ depends on nothing about the host.
 
 AND WHAT THAT RULE BECOMES ONCE THE WORKLOAD HAS A RESPONDER
 
-A workload matching `uses_resolve` (filtered, not bridged, `resolver` not
+A workload matching `vm_uses_resolve` (filtered, not bridged, `resolver` not
 "none") has its own synthesising responder on 127.130.x.y:53, and `--dns-host`
 points there instead of at a nameserver from /etc/resolv.conf. Three things
 change, and the middle one is the one that looks unchanged and is not.

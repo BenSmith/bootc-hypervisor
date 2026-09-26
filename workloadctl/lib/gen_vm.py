@@ -25,7 +25,7 @@ from workload_lib import (
     virtiofs_tags, systemd_escape_path,
 )
 from run_files import GENERATED_BY
-from egress_policy import inspect_policy_path, vm_uses_inspect, uses_resolve
+from egress_policy import vm_uses_inspect, vm_uses_resolve
 from broker_config import (
     vm_uses_credentials, vm_broker_hosts, vm_broker_upstream_addresses,
     vm_broker_command,
@@ -42,16 +42,12 @@ from vm_defs import (
     find_ovmf_code,
     parse_memory_mib,
 )
-from workload_addr import (
-    MGMT_SSH_PORT, management_address, VM_RESOLVE_LISTENER_BIN, RESOLVE_PORT,
-    inspect_address, resolve_address,
-)
-from nft_elements import vm_resolve_status_path
-from vm_network_config import vm_resolve_static_path
+from workload_addr import MGMT_SSH_PORT, management_address
 from unit_file import Unit
 from gen_egress import (
     generate_inspect_socket, generate_inspect_service,
-    generate_broker_service, harden_sidecar,
+    generate_broker_service, generate_resolve_socket,
+    generate_resolve_service, harden_sidecar,
 )
 from gen_common import (
     services_dir, log_msg, _RunFileConfig, emitted_run_paths,
@@ -400,174 +396,6 @@ def build_passt_netdev(name: str, uid: int, net_cfg: dict, mac: str) -> str:
     return "-netdev " + ",".join(props)
 
 
-def generate_vm_resolve_socket(config, user_name: str, uid: int) -> str:
-    """Generate the socket unit for one VM's synthesising DNS responder.
-
-    A socket unit for ONE reason: port 53 is privileged and the responder runs
-    as _wl-<name>, so the bind has to happen in PID 1 and be handed over. It
-    borrows nothing else from the inspector's socket unit -- and specifically
-    there is NO ExecStartPre address-add here, which is the difference a reader
-    coming from generate_inspect_socket will look for.
-
-    The kernel treats all of 127/8 as local on `lo`, so the responder's address
-    needs no assignment: binding 127.130.1.4 succeeds with nothing
-    configured. A step adding a /32 would be a no-op, and worse, it would invent
-    an address whose absence the inspector's fail-at-bind argument would then
-    appear to depend on. There is likewise no
-    FreeBind= question to answer, and no teardown that would make the presence
-    of an address mean a running process.
-
-    Both transports. A static name with more addresses than fit in a datagram
-    is answered with the truncate bit set, and the client asks again over TCP;
-    clients also open TCP connections for their own reasons, and a UDP-only
-    responder leaves those hanging with nothing to diagnose from.
-    """
-    name = config["workload"]["name"]
-    # The uid is passed in, never looked up, for the reason
-    # generate_inspect_socket gives: on a first enable this runs before
-    # systemd-sysusers has created _wl-<name>.
-    address = resolve_address(uid)
-
-    unit = Unit()
-    unit.comment(f"synthesising DNS responder socket for {name}")
-    unit.comment(GENERATED_BY)
-
-    u = unit.section("Unit")
-    u.set("Description", f"Synthesising DNS responder socket for {name}")
-    # Ordered after setup.service like the inspector's pair, one step weaker in
-    # what it needs: this socket has no ExecStartPre and so no getpwnam of its
-    # own, but the service it triggers carries User=_wl-<name>, and leaving the
-    # socket unordered would invite a reader to conclude the inspector's
-    # ordering was the accident rather than the rule.
-    u.set("Requires", f"workload-{name}-setup.service")
-    u.set("After", f"workload-{name}-setup.service")
-    # The guest's first query can arrive as soon as the VM runs, so the socket
-    # is bound before it; PartOf= so it stops with the VM rather than lingering
-    # as a nameserver for a guest that is gone.
-    u.set("Before", f"workload-{name}.service")
-    u.set("PartOf", f"workload-{name}.service")
-    # No default dependencies, for the ordering cycle generate_inspect_socket
-    # describes: the After= on setup.service above and a socket's implicit
-    # Before=sockets.target close a loop through basic.target.
-    u.set("DefaultDependencies", "no")
-    u.set("Conflicts", "shutdown.target")
-    u.add("Before", "shutdown.target")
-
-    sock = unit.section("Socket")
-    # Both transports on the workload's own loopback address. IPv4 only: there
-    # is deliberately no v6 responder plane (§9 rejects one on cost), and a v6
-    # plane on `lo` would not be a substitute anyway -- the shipped `oif lo
-    # accept` would make it reachable from every workload on the host, which is
-    # the one property 127/8's unreachability from the guest is providing.
-    sock.add("ListenDatagram", f"{address}:{RESOLVE_PORT}")
-    sock.add("ListenStream", f"{address}:{RESOLVE_PORT}")
-    # One long-lived process, not one per connection -- and with Accept=no the
-    # trigger limit below is the meaningful knob. Set explicitly.
-    sock.set("Accept", "no")
-    # Accept=no silently lowers systemd's trigger-limit default to 20 per 2s,
-    # and hitting it fails the socket unit PERMANENTLY until something restarts
-    # it. A guest boot is a burst of lookups; 20 is inside what one `dnf
-    # makecache` costs. Both values explicit, for the reason the inspector's
-    # socket sets them.
-    sock.set("TriggerLimitIntervalSec", "2s")
-    sock.set("TriggerLimitBurst", "200")
-
-    return unit.render()
-
-
-def resolve_command(name: str, uid: int) -> list:
-    """The responder's argv: customs-resolve and the values it is handed.
-
-    The same seam as gen_egress.inspect_listener_command: customs-resolve
-    knows nothing about workloads, so where this one's lists, static map and
-    counters live, and what its uid makes the inspector's address, are
-    computed here and written into ExecStart= as flags.
-    tests/test_customs_seam.py holds this command to the program's flags.
-
-    `--address`/`--address6` are the inspector's, not the responder's: every
-    synthesised A/AAAA points the guest at the listener its 80 and 443 are
-    redirected to anyway, so a guest that ignores the redirect and one that
-    does not both arrive at the same place. `--policy` is the inspector's own
-    document, read to COUNT queries for names on no list, never to answer.
-    """
-    inspect = inspect_address(uid)
-    return [
-        VM_RESOLVE_LISTENER_BIN,
-        "--name", name,
-        "--address", inspect.v4,
-        "--address6", inspect.v6,
-        "--policy", inspect_policy_path(name),
-        "--static", vm_resolve_static_path(name),
-        "--status", vm_resolve_status_path(name),
-    ]
-
-
-def generate_vm_resolve_service(config, user_name: str, uid: int) -> str:
-    """Generate the service unit for one VM's synthesising DNS responder.
-
-    Socket-activated, and it never binds: the program refuses to open a socket
-    of its own, because port 53 is privileged and this process is not -- a
-    fallback bind would be a listener on some other port that nothing forwards
-    to, which is a working responder no guest can reach.
-
-    No cgroup exemptions here, unlike the inspector's service. Those exist
-    because the inspector ORIGINATES traffic that would otherwise be redirected
-    into itself or caught by the default-deny drop; the responder originates
-    none at all -- it has no upstream socket, which is the property that makes
-    DNS exfiltration absent rather than filtered. There is nothing to exempt.
-    """
-    name = config["workload"]["name"]
-
-    unit = Unit()
-    unit.comment(f"synthesising DNS responder service for {name}")
-    unit.comment(GENERATED_BY)
-
-    u = unit.section("Unit")
-    u.set("Description", f"Synthesising DNS responder for {name}")
-    u.set("Requires", f"workload-{name}-setup.service")
-    u.set("After", f"workload-{name}-setup.service")
-    # PartOf=, not Requires= in the other direction, for the reason the
-    # inspector's service gives: a socket-activated process that survived a VM
-    # restart would keep answering from the previous run's document while the
-    # VM runs the new one. The recovery contract is that an edited config
-    # applies on a restart, and this is what makes that true.
-    u.set("PartOf", f"workload-{name}.service")
-
-    svc = unit.section("Service")
-    svc.set("User", user_name)
-    svc.set("Group", user_name)
-    # Placement, not policy. The inspector pins this slice because two
-    # `socket cgroupv2 level 2` matches depend on the path being exactly two
-    # components; nothing keys on this unit's cgroup, so the pin here only
-    # keeps the responder out of the VM's own resource accounting. Stated so a
-    # later reader does not conclude the inspector's pin is decorative.
-    svc.set("Slice", SIDECAR_SLICE)
-    # Everything the responder needs to know about this workload, as flags;
-    # resolve_command says why. The name among them because it is
-    # socket-activated with two identically-named fds, so there is nothing on
-    # the socket to recover it from.
-    binary, *args = resolve_command(name, uid)
-    svc.add("ExecStart", " ".join(
-        [binary] + [a if a.startswith("--") else dq(a) for a in args]))
-    svc.blank()
-    # Narrower than the inspector on both axes, and the address families are
-    # the load-bearing half: this program must contain no call that could
-    # consult a resolver, and it opens no socket of its own at all -- its two
-    # listeners are handed to it. AF_NETLINK is absent for that reason, so a
-    # getaddrinfo that appeared here would fail at the socket rather than
-    # quietly reaching a nameserver. One process, one loop: 16 tasks is slack.
-    harden_sidecar(svc, name, families="AF_INET AF_UNIX",
-                       tasks_max=16, memory_max="128M")
-    svc.blank()
-    svc.add("StandardOutput", "journal")
-    svc.add("StandardError", "journal")
-    svc.blank()
-    svc.add("Restart", "on-failure")
-    svc.add("RestartSec", "5s")
-
-    return unit.render()
-
-
 def generate_vm_clock_timer(config) -> str:
     """Generate the timer that ticks one VM's clock keeper.
 
@@ -747,7 +575,7 @@ def generate_vm_service(config, user_name: str, uid: int, vfs_tags=None) -> str:
     # And the responder, on the same terms for the same reason: the guest has
     # exactly one nameserver, so a VM booted with its responder socket unbound
     # resolves nothing at all while looking healthy. Requires=, not Wants=.
-    if uses_resolve(config):
+    if vm_uses_resolve(config):
         prereqs.append(f"workload-{name}-resolve.socket")
     # And the broker instance, Requires= on the same terms once more: a
     # credential-backed host reached while the broker is down produces a
@@ -1112,16 +940,17 @@ def generate_vm_workload(config, user_name: str, uid: int):
     # The synthesising responder, on the inspector's terms plus `resolver` not
     # being "none" -- a separate predicate, not a second reading of this one,
     # so the knob has one meaning here and in the passt fragment.
-    if uses_resolve(config):
+    if vm_uses_resolve(config):
         resolve_socket_dests = paths.get(("unit", "resolve-socket"), [])
         if resolve_socket_dests:
             resolve_socket_dests[0].write_text(
-                generate_vm_resolve_socket(config, user_name, uid))
+                generate_resolve_socket(config, user_name, uid))
             log_msg("  Created DNS responder socket")
         resolve_dests = paths.get(("unit", "resolve"), [])
         if resolve_dests:
             resolve_dests[0].write_text(
-                generate_vm_resolve_service(config, user_name, uid))
+                generate_resolve_service(config, user_name, uid,
+                                         address6=True))
             log_msg("  Created DNS responder service")
 
     # The clock keeper, for every VM: it is about the guest's clock, not its

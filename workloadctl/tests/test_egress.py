@@ -1046,7 +1046,7 @@ class _FilterFixture:
         self.policy_dir = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, self.policy_dir, True)
         self.policy_path = os.path.join(self.policy_dir, "resolve-static.json")
-        self._patch("vm_resolve_static_path", lambda name: self.policy_path)
+        self._patch("resolve_static_path", lambda name: self.policy_path)
         self._patch("pwd", SimpleNamespace(
             getpwnam=lambda n: SimpleNamespace(pw_uid=10001, pw_gid=10001)))
         self.chowned = []
@@ -1229,22 +1229,25 @@ class TestFilterHelper(_FilterFixture, unittest.TestCase):
     def test_up_clears_the_previous_instances_resolver_status(self):
         """Same lifecycle trap as the inspector's: the run dir is preserved
         across a restart and the responder is socket-activated, so until the
-        guest's first query the file on disk is the last boot's query counts.
-        Cleared beside the policy write, which is the other thing this helper
-        does to that directory on every arm."""
-        source = (Path(__file__).resolve().parent.parent
-                  / "lib" / "filter_arm.py").read_text()
-        after = source[source.index("def vm_after_arm("):
-                       source.index("def _vm_unfiltered(")]
-        self.assertIn("clear_status(vm_resolve_status_path(name))", after)
-        # Inside the resolver branch: a workload with no synthesising responder
-        # has no such file, and clearing one unconditionally would claim a
-        # producer that this workload does not run.
-        self.assertLess(after.index("uses_resolve"),
-                        after.index("clear_status"))
-        # And the VM substrate is what runs it, once the elements are in.
-        self.assertIs(self.mod.VM.after_arm, self.mod.vm_after_arm)
-        self.assertIsNone(self.mod.CONTAINER.after_arm)
+        workload's first query the file on disk is the last start's query
+        counts. Cleared beside the static map, which is the other thing this
+        helper does to that directory on every arm."""
+        cleared = []
+        self._patch("clear_status", cleared.append)
+        self._patch("resolve_status_path", lambda name: f"/status/{name}")
+        self._net(egress="filtered", allow=[])
+        self.mod.up(self.sub, "vm1")
+        self.assertEqual(cleared, ["/status/vm1"])
+
+    def test_no_responder_clears_no_resolver_status(self):
+        """A workload with no synthesising responder has no such file, and
+        clearing one would claim a producer that this workload does not
+        run."""
+        cleared = []
+        self._patch("clear_status", cleared.append)
+        self._net(egress="filtered", allow=[], resolver="none")
+        self.mod.up(self.sub, "vm1")
+        self.assertEqual(cleared, [])
 
 
 class TestContainerFilterSubstrate(_FilterFixture, unittest.TestCase):
@@ -1287,8 +1290,36 @@ class TestContainerFilterSubstrate(_FilterFixture, unittest.TestCase):
         self.assertIn("10001",
                       " ".join(" ".join(c) for c in self._deletes()))
 
-    def test_a_container_writes_no_responder_map(self):
+    def test_a_filtered_container_writes_the_responder_map(self):
+        """A pasta container with a trigger has a responder, and the
+        responder is handed --static whatever the config holds."""
         self._net(hosts=["example.com"])
+        self.mod.up(self.sub, "web")
+        self.assertEqual(self._resolve_static(), {})
+
+    def test_a_named_container_allow_entry_reaches_the_map(self):
+        """From the same resolution the elements were armed from, as the
+        VM's."""
+        entry = SimpleNamespace(address=None, host="git.local", port=2222,
+                                reason="forge")
+        resolved = [(entry, [ipaddress.IPv4Address("192.0.2.9")])]
+        sub = dataclasses.replace(self.sub, resolved=lambda allow: resolved)
+        self._net(allow=[{"host": "git.local", "port": 2222,
+                          "reason": "forge"}])
+        self.mod.up(sub, "web")
+        self.assertEqual(self._resolve_static(),
+                         {"git.local": ["192.0.2.9"]})
+
+    def test_a_bridge_container_writes_no_responder_map(self):
+        """aardvark-dns answers a bridge-mode container, so it has no
+        responder and a map would be a file nothing reads."""
+        self._patch("load_workload_config", lambda name: {
+            "workload": {"mode": "bridge"}, "network": {"hosts": ["a"]}})
+        self.mod.up(self.sub, "web")
+        self.assertFalse(os.path.exists(self.policy_path))
+
+    def test_an_unfiltered_container_writes_no_responder_map(self):
+        self._net()
         self.mod.up(self.sub, "web")
         self.assertFalse(os.path.exists(self.policy_path))
 
@@ -1854,8 +1885,8 @@ class TestResolveDiagnose(unittest.TestCase):
         passed them all. The path looked at is the one the unit's --static
         names."""
         from diagnose_probe import PROBE
-        from gen_vm import resolve_command
-        cmd = resolve_command("vm1", 10001)
+        from gen_egress import resolve_command
+        cmd = resolve_command("vm1", 10001, address6=True)
         handed = cmd[cmd.index("--static") + 1]
         probed = []
         with mock.patch("os.path.exists",

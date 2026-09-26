@@ -86,7 +86,7 @@ def vm_filter_elements(uid: int, allow: list[str],
 RESOLVE_STATUS_FILE = "resolve-status.json"
 
 
-def vm_resolve_status_path(name: str) -> str:
+def resolve_status_path(name: str) -> str:
     """Where one workload's responder writes its counters."""
     return f"{SOCKET_DIR}/{name}/{RESOLVE_STATUS_FILE}"
 

@@ -29,6 +29,8 @@ from workload_lib import (
 from customs.egress_ca import ca_cert_path
 from guest_ca import CA_ENV_VARS, CA_BUNDLE_PATH
 from broker_config import container_uses_credentials
+from egress_policy import container_uses_resolve
+from workload_addr import resolve_address
 from secrets_template import SECRET_PATTERN, validate_env_key
 from gen_common import log_msg, _external_host_path
 from validation import valid_userns_mode
@@ -562,6 +564,25 @@ def _cgroup_args(spec):
     return args
 
 
+def container_network_mode_arg(workload, uid) -> str:
+    """The `--network=` value for a single-mode run or a pod create.
+
+    `[network].mode` as written, except that a workload with a synthesising
+    responder has pasta's `--dns-host` added. podman starts pasta with
+    `--dns-forward` and names that address first in the container's
+    resolv.conf; `--dns-host` sends what pasta catches there to the
+    responder on the workload's own 127.130.x.y instead of to the host's
+    nameservers. The other nameservers podman lists are dialled by the
+    workload's uid and meet the filter's drop, so the responder is the only
+    one that answers.
+    """
+    mode = workload.get("network", {}).get("mode", "pasta")
+    if not container_uses_resolve(workload):
+        return mode
+    dns_host = f"--dns-host,{resolve_address(uid)}"
+    return f"{mode},{dns_host}" if ":" in mode else f"{mode}:{dns_host}"
+
+
 def _network_args(spec):
     """--network/--publish/--network-alias flags: single/pod/bridge mode."""
     mode, workload = spec.mode, spec.workload
@@ -571,7 +592,8 @@ def _network_args(spec):
         network_config = workload.get("network", {})
         network_mode = network_config.get("mode", "pasta")  # Default to pasta (works in Podman 5.3+)
 
-        args.append(f"--network={dq(network_mode)}")
+        args.append(
+            f"--network={dq(container_network_mode_arg(workload, spec.uid))}")
         if network_mode not in ("host", "none"):
             for port in network_config.get("ports", []):
                 args.append(f"--publish {port}")

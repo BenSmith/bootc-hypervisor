@@ -495,7 +495,7 @@ lib/vm_image_fetch.py              # A cloud image fetched and sha256-verified i
 lib/vm_disk_build.py               # A VM's disks built: system.qcow2 from cloud/local/bootc image with rotate-and-restore on update, data.qcow2 if sized
 lib/passt_dns_host.py              # What the host has: default gateway and first nameserver per family
 lib/passt_dns_fragment.py          # What the guest is told: the netdev DNS fragment builders and the per-family rule
-lib/filter_arm.py                  # One workload's uid-keyed egress filter armed and retired (both substrates): the skeleton, the stale purge, the allow elements, and the VM's responder document; VM and CONTAINER are the Substrate each helper binds
+lib/filter_arm.py                  # One workload's uid-keyed egress filter armed and retired (both substrates): the skeleton, the stale purge, the allow elements, and the responder's static map where the workload has one; VM and CONTAINER are the Substrate each helper binds
 lib/secrets_env.py                 # One container's decrypted-secret EnvironmentFile: container selection, ${SECRET:name} resolution against CREDENTIALS_DIRECTORY, the 0600 write, and the stale-file removal
 lib/inspect_arm.py                 # One workload's inspection armed and retired (both substrates): both skeletons, the eight redirect elements, the internal exemptions, the broker's own; VM and CONTAINER are the Substrate each helper binds
 lib/inspect_figures.py             # FIGURES table: the single producer behind doctor and the exporter
@@ -513,7 +513,7 @@ libexec/workload-vm-*              # VM helpers: build-disk, qmp, shutdown, noti
                                    #   inspect
 /usr/libexec/customs/customs-inspect  # The inspector, from customs: policy path, state dir, status and record files and broker endpoint as flags written by gen_egress; derives nothing; both substrates
 /usr/libexec/customs/customs-broker   # The credential broker, from customs: everything as flags written by broker_config; derives nothing
-/usr/libexec/customs/customs-resolve  # The VM's synthesising DNS responder, from customs: addresses, inspector policy, static map and status file as flags written by gen_vm.resolve_command
+/usr/libexec/customs/customs-resolve  # The synthesising DNS responder, from customs: addresses, inspector policy, static map and status file as flags written by gen_egress.resolve_command; a filtered VM via passt, a filtered single/pod container via pasta's --dns-host
 libexec/workload-pcap              # Capture runner main() (SIGTERM → SystemExit)
 libexec/workload-exporter          # Prometheus metrics exporter: main() over lib/exporter_*.py
 workloads/<bundle>/                # Shipped bundles: workload.toml co-located with control files

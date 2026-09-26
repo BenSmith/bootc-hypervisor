@@ -22,7 +22,7 @@ import pathlib
 import re
 import unittest
 
-from workload_addr import VM_RESOLVE_LISTENER_BIN
+from workload_addr import RESOLVE_LISTENER_BIN
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 CIL = ROOT / "security" / "workload-resolve.cil"
@@ -48,7 +48,7 @@ class TestFilecon(unittest.TestCase):
         is indistinguishable from the module not existing, the state this was
         written to end."""
         filecons = re.findall(r'\(filecon\s+"([^"]+)"', _body())
-        self.assertEqual(filecons[0], VM_RESOLVE_LISTENER_BIN)
+        self.assertEqual(filecons[0], RESOLVE_LISTENER_BIN)
 
     def test_the_script_is_an_entrypoint_and_the_interpreter_is_not(self):
         """Retyping /usr/bin/python3 would move every workloadctl entrypoint
@@ -149,7 +149,7 @@ class TestPackaging(unittest.TestCase):
         spec = SPEC.read_text()
         self.assertRegex(
             spec, r"semodule -i %\{_datadir\}/workloadctl/workload-resolve\.cil"
-                  r"[^\n]*\n\s*restorecon " + re.escape(VM_RESOLVE_LISTENER_BIN))
+                  r"[^\n]*\n\s*restorecon " + re.escape(RESOLVE_LISTENER_BIN))
 
 
 if __name__ == "__main__":

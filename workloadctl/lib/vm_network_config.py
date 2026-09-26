@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Reading `[vm.network]`: what the operator wrote, parsed.
 
-The allow-entry parser and its host-side resolution, and the responder's
-static map (read by customs-resolve --static). Whether what was written is
-sayable is vm_validate's question; nothing here builds a unit, a command, a
+The allow-entry parser and its host-side resolution. The responder's
+static map is built from that resolution in egress_policy. Whether what was
+written is sayable is vm_validate's question; nothing here builds a unit, a command, a
 certificate or a config file.
 
 Installed to /usr/libexec/workloadctl/vm_network_config.py.
@@ -14,10 +14,8 @@ import re
 import socket
 from typing import NamedTuple
 
-from config_parser import SOCKET_DIR
-from customs.inspect_document import normalise_hostname
 from customs.egress_plane import CLEARTEXT, TLS
-from workload_addr import RESOLVE_STATIC_FILE, allow_reserved_reason
+from workload_addr import allow_reserved_reason
 
 # --- `allow`: the address-scoped bypass, now a table with a reason ---
 #
@@ -239,38 +237,3 @@ def vm_allow_resolved(allow):
     return out
 
 
-def vm_resolve_static_path(name: str) -> str:
-    """Where one workload's responder reads its static map from."""
-    return f"{SOCKET_DIR}/{name}/{RESOLVE_STATIC_FILE}"
-
-
-def vm_resolve_static(net: dict, resolved=None) -> dict[str, list[str]]:
-    """The responder's static map for one workload: name to addresses.
-
-    The `allow`-by-name entries, which customs-resolve answers from this map
-    instead of with the inspector's address. Without it a synthesised answer
-    sends every named non-80/443 destination -- an SSH forge, a registry, an
-    internal API -- to a port the inspector does not serve, which presents as
-    a healthy-looking hang rather than as a refusal. The map wins over
-    synthesis, which costs nothing on 80 and 443 because the redirect is
-    keyed on uid and port alone; a name in both `hosts` and `allow` is
-    therefore legal.
-
-    Addresses come from `resolved` when the caller has one, so the map holds
-    the addresses that were ARMED -- see vm_filter_elements for why a second
-    resolution is a different question.
-    """
-    if resolved is None:
-        resolved = vm_allow_resolved(net.get("allow", []) or [])
-    static: dict[str, list[str]] = {}
-    for entry, addresses in resolved:
-        if entry.host is None:
-            continue
-        # Normalised on the way in, so two spellings of one name cannot
-        # become two entries.
-        key = normalise_hostname(entry.host)
-        for addr in addresses:
-            text = str(addr)
-            if text not in static.setdefault(key, []):
-                static[key].append(text)
-    return static

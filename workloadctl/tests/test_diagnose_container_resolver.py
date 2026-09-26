@@ -25,6 +25,13 @@ to the whole unit suite for the same reason it is invisible to the rig -- it is
 a property of a file neither of them reads. Cf. the project's standing lesson
 that a control can enforce perfectly and name nothing.
 
+WHICH CONTAINERS. A filtered container on pasta, in single or pod mode, asks
+its own synthesising responder through pasta's `--dns-host` and never reaches
+the host's nameservers, so this check returns None for it (see
+tests/test_container_resolve.py). What is left is bridge mode, which
+aardvark-dns answers from the host's nameservers, and so the fixture here is
+a bridge-mode workload.
+
 The symptom carries no route to the cause: every unit is active, the inspector
 is listening, and inside the container every name fails at once. This check is
 the only thing on the host that sees both halves, so the wiring cases below go
@@ -49,6 +56,22 @@ UID = 10001
 FILTERED_TOML = """\
 [workload]
 name = "capp"
+mode = "bridge"
+
+[[containers]]
+name = "app"
+[containers.container]
+image = "localhost/app:latest"
+
+[network]
+hosts = ["example.invalid"]
+"""
+
+# The same trigger on pasta: the responder answers it, so this check has
+# nothing to say and container_resolve_check speaks instead.
+PASTA_TOML = """\
+[workload]
+name = "papp"
 
 [container]
 image = "localhost/app:latest"
@@ -66,8 +89,8 @@ name = "plain"
 image = "localhost/app:latest"
 """
 
-# A VM has a synthesising responder of its own (D7 gives containers none), so
-# its resolver path does not go through this rule at all.
+# A VM has a synthesising responder of its own, so its resolver path does not
+# go through this rule at all.
 VM_TOML = """\
 [workload]
 name = "vmw"
@@ -93,6 +116,7 @@ class ContainerResolverCheckTests(unittest.TestCase):
         self.enterContext(
             mock.patch.object(workload_lib, "WORKLOAD_CONFIG_DIR", self.tmp))
         for name, toml in (("capp", FILTERED_TOML),
+                           ("papp", PASTA_TOML),
                            ("plain", UNFILTERED_TOML),
                            ("vmw", VM_TOML)):
             (self.tmp / name).mkdir()
@@ -187,6 +211,12 @@ class ContainerResolverCheckTests(unittest.TestCase):
         self.assertIsNone(self._run("vmw", nameservers=_ip("192.168.0.1"),
                                     armed=set()))
 
+    def test_a_pasta_container_gets_no_line(self):
+        """Its responder answers it; a LAN resolver it never asks is not
+        its problem."""
+        self.assertIsNone(self._run("papp", nameservers=_ip("192.168.0.1"),
+                                    armed=set()))
+
     def test_an_unreadable_resolv_conf_asserts_nothing(self):
         # None and [] are different answers: unreadable is no opinion, and
         # reporting a failure off a file we could not open would be a guess.
@@ -248,7 +278,8 @@ class ResolverCheckIsWiredTests(unittest.TestCase):
         self.tmp = Path(self.enterContext(tempfile.TemporaryDirectory()))
         self.enterContext(
             mock.patch.object(workload_lib, "WORKLOAD_CONFIG_DIR", self.tmp))
-        for name, toml in (("capp", FILTERED_TOML), ("vmw", VM_TOML)):
+        for name, toml in (("capp", FILTERED_TOML), ("papp", PASTA_TOML),
+                           ("vmw", VM_TOML)):
             (self.tmp / name).mkdir()
             (self.tmp / name / "workload.toml").write_text(toml)
         self.manager = mock.Mock()
@@ -285,6 +316,13 @@ class ResolverCheckIsWiredTests(unittest.TestCase):
     def test_a_vm_does_not(self):
         names = {c["check"] for c in self._checks("vmw")}
         self.assertNotIn("container_resolver", names)
+
+    def test_a_pasta_container_gets_the_responders_line_instead(self):
+        """Its queries never reach the host's nameservers, so a verdict on
+        them would be about a path it does not take."""
+        names = {c["check"] for c in self._checks("papp")}
+        self.assertNotIn("container_resolver", names)
+        self.assertIn("container_resolve", names)
 
     def test_it_lands_before_the_allow_drift_line(self):
         # The workload resolves a name before it dials what it was told, and

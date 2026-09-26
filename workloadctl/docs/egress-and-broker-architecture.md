@@ -101,7 +101,7 @@ credential:
 ```mermaid
 flowchart TD
   IS["workload-web-inspect.socket<br/>binds 198.18.1.4:8080 / :8443"]
-  RS["workload-web-resolve.socket<br/>binds 127.130.0.4:53 — VM only"]
+  RS["workload-web-resolve.socket<br/>binds 127.130.0.4:53"]
   ISVC["workload-web-inspect.service<br/>customs-inspect"]
   RSVC["workload-web-resolve.service"]
   BR["workload-web-broker.service<br/>DynamicUser, 127.129.0.4:8081"]
@@ -156,7 +156,7 @@ sequenceDiagram
 
     W->>N: DNS A query for api.example.com
     N->>W: answer 198.18.1.4
-    Note over W,N: VM uses this workload's synthesising responder
+    Note over W,N: this workload's synthesising responder answers
     W->>N: TCP to 198.18.1.4 port 443
     Note over W,N: any address works, the redirect keys on the port
     N->>NAT: host socket with skuid 10004
@@ -211,7 +211,7 @@ flowchart LR
   UID["workload uid<br/>10004 (offset 4 from UID_MIN)"]
   UID --> L4["inspector 198.18.1.4:8080 / :8443<br/>on the shared workload-proxy dummy link"]
   UID --> L6["inspector 2001:2::c612:104"]
-  UID --> R["resolver 127.130.0.4:53<br/>(VM only)"]
+  UID --> R["resolver 127.130.0.4:53"]
   UID --> BK["broker 127.129.0.4:8081"]
   UID --> SETS["nft elements:<br/>wl_filtered, wl_allow4/6,<br/>wl_inspect4/6, wl_inspect_dst/self/live"]
 ```
@@ -258,7 +258,7 @@ flowchart TB
   subgraph ct["Container"]
     CT["[network] hosts / allow / policy / credential"]
     CA["workload-container-inspect + workload-container-filter"]
-    CN["no responder — resolves through the host's resolver"]
+    CN["customs-resolve through pasta --dns-host (not bridge mode)"]
     CE["no egress key: presence of a trigger IS the statement"]
   end
 
@@ -272,7 +272,7 @@ The genuine differences:
 |---|---|---|
 | re-originator | passt | pasta (or the bridge-mode equivalent) |
 | arming helper | `workload-vm-inspect` / `-filter` | `workload-container-inspect` / `-filter` |
-| DNS | per-workload synthesising responder on `127.130.x.y`; answers every A/AAAA with the inspector address and has no upstream socket at all | none; the host's resolver answers, and a `[network]` trigger drops port 53 unless that resolver is on loopback |
+| DNS | per-workload synthesising responder on `127.130.x.y`; answers every A/AAAA with the inspector address and has no upstream socket at all; passt's `dns-host` points at it | the same responder, reached through pasta's `--dns-host` on single and pod mode, answering A only (pasta can copy the inspector's v6 address onto the container); bridge mode has none, aardvark-dns asks the host's resolver, and a `[network]` trigger drops port 53 unless that resolver is on loopback |
 | turning it on | `egress = "filtered"` (stated explicitly; there is no safe default) plus a trigger | any one of `hosts`, `[[allow]]`, `[[policy]]` |
 | default deny | yes, keyed on the uid | no — the triggers are the whole statement |
 | schema | `[vm.network].*` | `[network].*` |
@@ -373,7 +373,7 @@ shape, which is that the wiring between two correct halves belongs to neither.
 | every unit active, feature inert | a generated unit that nothing `Requires=` — `Before=` orders, it does not start |
 | 401 on a fully authorised request | the rendered config could not name the provider's `auth_header`/`auth_format` |
 | workload unfiltered for the whole of member startup | arming attached to the umbrella, which is `After=` its members |
-| container resolves nothing once a `[network]` trigger is added | port 53 is dropped unless the host's resolver is on loopback |
+| bridge-mode container resolves nothing once a `[network]` trigger is added | port 53 is dropped unless the host's resolver is on loopback; pasta containers ask their responder instead |
 | `403` that names the host, on a host you did list | `hosts` patterns are fnmatch, not DNS suffix — `*.example.com` does not cover the apex |
 
 Diagnostics: `workloadctl egress <name>` for the per-request record,

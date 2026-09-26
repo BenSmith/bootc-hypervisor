@@ -12,8 +12,8 @@ the workload uid, which is the one selector a passt socket and a rootless
 podman socket hold in common. What differs is read from the config, not done
 to the table -- which table of the TOML holds the network section, what says
 the workload is filtered at all, how its allow entries are parsed, resolved
-and shaped into elements, and whether a responder needs a static map once
-the elements are in. That is a `Substrate`, and `up` is written once
+and shaped into elements, and whether it has a responder whose static map
+is written once the elements are in. That is a `Substrate`, and `up` is written once
 over it.
 
 - A VM is filtered when `egress = "filtered"`; a VM with a `bridge` has no
@@ -24,9 +24,8 @@ over it.
   not hold (`mode = "host"`) is excluded upstream, in
   container_uses_inspect() itself, so "has a trigger" already means "uid
   attribution holds".
-- Only a VM has a synthesising DNS responder, so only the VM substrate
-  writes its static map after arming. A container resolves through the
-  host's own resolver.
+- Either substrate may have a synthesising DNS responder, and each has its
+  own predicate for it; the static map is written after arming for both.
 
 WHY THIS IS A PROGRAM AND NOT THREE ExecStartPre= LINES
 
@@ -53,21 +52,20 @@ from container_network_config import (
     container_allow_entries,
     container_uses_inspect,
 )
-from egress_policy import uses_resolve
+from egress_policy import (
+    container_uses_resolve, resolve_static, resolve_static_path,
+    vm_uses_resolve,
+)
 from customs.egress_status import clear_status
 from helper_main import log, run
 from nft import purge_uid_elements
 from nft_constants import NFT_BIN, NFT_SKELETON
 from nft_elements import (
     container_allow_resolved, container_filter_commands, vm_filter_commands,
-    vm_resolve_status_path,
+    resolve_status_path,
 )
 from vm_defs import EGRESS_DEFAULT
-from vm_network_config import (
-    vm_allow_resolved,
-    vm_resolve_static,
-    vm_resolve_static_path,
-)
+from vm_network_config import vm_allow_resolved
 from workload_lib import load_workload_config
 
 
@@ -84,15 +82,15 @@ class Substrate:
     allow_entries: Callable[[dict], list]
     resolved: Callable[[list], list]
     commands: Callable[[int, list, str, list], list]
-    # Run once the elements are in: (name, net, uid, resolved) -> None.
-    after_arm: Callable[[str, dict, int, list], None] | None
+    # Whether the workload has a synthesising responder, from its config.
+    uses_resolve: Callable[[dict], bool]
 
 
 def workload_uid(name: str) -> int:
     return pwd.getpwnam(f"_wl-{name}").pw_uid
 
 
-def write_resolve_static(name: str, net: dict, resolved) -> str:
+def write_resolve_static(name: str, resolved) -> str:
     """Write the responder's static map. Returns its path.
 
     Written HERE, next to the arming, and from the SAME `resolved` the elements
@@ -109,13 +107,13 @@ def write_resolve_static(name: str, net: dict, resolved) -> str:
     cannot read a half-written file.
 
     Ordering is inherited rather than declared: this runs as an ExecStartPre of
-    the VM, and the responder is socket-activated by a guest query, which cannot
-    happen before the VM it comes from is running.
+    the workload, and the responder is socket-activated by the workload's
+    query, which cannot happen before the workload is running.
     """
-    path = vm_resolve_static_path(name)
+    path = resolve_static_path(name)
     tmp = f"{path}.tmp"
     with open(tmp, "w") as f:
-        json.dump(vm_resolve_static(net, resolved), f, indent=2,
+        json.dump(resolve_static(resolved), f, indent=2,
                   sort_keys=True)
         f.write("\n")
     os.chown(tmp, 0, pwd.getpwnam(f"_wl-{name}").pw_gid)
@@ -124,21 +122,20 @@ def write_resolve_static(name: str, net: dict, resolved) -> str:
     return path
 
 
-def vm_after_arm(name: str, net: dict, uid: int, resolved) -> None:
-    """The VM's responder static map, from the resolution just armed."""
-    if not uses_resolve({"vm": {"network": net}}):
-        return
+def arm_resolve(name: str, resolved) -> None:
+    """The responder's static map, from the resolution just armed."""
     # Not tolerant: a responder with no static map fails its start, and it
-    # fails it on a query the guest has already made. The guest has exactly
-    # one nameserver, so that is the whole of DNS for it -- better to fail the
-    # VM's start here, where the message names this helper.
-    path = write_resolve_static(name, net, resolved)
+    # fails it on a query the workload has already made. The responder is
+    # the workload's only nameserver, so that is the whole of DNS for it --
+    # better to fail the start here, where the message names this helper.
+    path = write_resolve_static(name, resolved)
     log(f"  Wrote {path}")
     # The previous instance's query counters, for the reason
     # egress_status.clear_status gives: the RuntimeDirectory is preserved
-    # across a restart and the responder does not start until the guest's
-    # first query, so the file on disk until then belongs to the last boot.
-    clear_status(vm_resolve_status_path(name))
+    # across a restart and the responder does not start until the
+    # workload's first query, so the file on disk until then belongs to the
+    # last start.
+    clear_status(resolve_status_path(name))
 
 
 def _vm_unfiltered(config: dict, net: dict) -> str | None:
@@ -155,7 +152,7 @@ VM = Substrate(
     allow_entries=lambda net: net.get("allow", []),
     resolved=vm_allow_resolved,
     commands=vm_filter_commands,
-    after_arm=vm_after_arm,
+    uses_resolve=vm_uses_resolve,
 )
 
 CONTAINER = Substrate(
@@ -166,7 +163,7 @@ CONTAINER = Substrate(
     allow_entries=container_allow_entries,
     resolved=container_allow_resolved,
     commands=container_filter_commands,
-    after_arm=None,
+    uses_resolve=container_uses_resolve,
 )
 
 
@@ -199,8 +196,8 @@ def up(sub: Substrate, name: str) -> int:
     log(f"  Filtered uid {uid} with {len(allow)} allow entr"
         f"{'y' if len(allow) == 1 else 'ies'}")
 
-    if sub.after_arm is not None:
-        sub.after_arm(name, net, uid, resolved)
+    if sub.uses_resolve(config):
+        arm_resolve(name, resolved)
     return 0
 
 

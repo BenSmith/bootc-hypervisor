@@ -1885,25 +1885,39 @@ ports = ["8080:80", "8443:443"]
 # neither the workload nor the destination, so the symptom is a timeout with
 # nothing anywhere saying it was a policy decision.
 #
-# DNS IS THE CASE THAT DEPENDS ON YOUR HOST, and it is worth checking before you
-# trigger anything. The container resolves through whatever
-# /etc/resolv.conf names, and the query leaves as a host socket owned by the
-# workload uid:
+# DNS IS ANSWERED ON THE HOST, BY THIS WORKLOAD'S OWN RESPONDER, and never
+# forwarded. A triggered container in single or pod mode on pasta (the default
+# network) gets the same synthesising responder a filtered VM does:
+# customs-resolve on 127.130.x.y, reached through pasta's `--dns-host`, which
+# the generator adds to `--network=`. Every A query, for any name, is
+# answered with this workload's inspector address, and everything else --
+# AAAA included -- with no records. (pasta can copy the inspector's own IPv6
+# address onto the container's interface, so an AAAA answer naming it would be
+# a dial the container refuses to itself.) So:
 #
-#   - nameserver on loopback (127.0.0.53, i.e. systemd-resolved, or 127.0.0.1):
-#     accepted by the `oif lo` rule above. Nothing to do.
-#   - nameserver on the LAN (a router, a homelab resolver, 8.8.8.8): NOT on
-#     loopback, not port 80 or 443, so it meets the default deny and the
-#     container loses name resolution entirely -- which looks like every
-#     destination being down at once, not like a firewall.
+#   - names resolve whatever the host's /etc/resolv.conf says; the host's
+#     nameservers are never asked;
+#   - a name on no list still resolves, and the dial is refused by the
+#     inspector, by name;
+#   - a destination this workload reaches on another port, by name, needs an
+#     [[network.allow]] entry written by name: the responder answers those
+#     from the addresses the entry was armed with, where a synthesised answer
+#     would send the dial to a port the inspector does not serve;
+#   - a nameserver the container picks for itself (8.8.8.8 in a tool's own
+#     config) is dialled by the workload uid on 53 and meets the default deny.
 #
-# The remedy for the second case is an ordinary allow entry, since the allowlist
+# Bridge mode is the exception. aardvark-dns answers a bridge-mode container,
+# it asks the host's nameservers, and pasta is not in front of it to point
+# anywhere else. Such a query leaves as a host socket owned by the workload
+# uid, so a nameserver on loopback (127.0.0.53) is accepted by `oif lo` and one
+# on the LAN meets the default deny, and the container loses name resolution
+# entirely. The remedy for that is an ordinary allow entry, since the allowlist
 # rules match `th dport` and are therefore not TCP-only:
 #
 #   [[network.allow]]
 #   address = "192.168.0.1"
 #   port    = 53
-#   reason  = "the host resolver; a filtered uid cannot reach it otherwise"
+#   reason  = "the host resolver; a bridge-mode filtered uid cannot reach it"
 #
 # `workloadctl doctor` and `workloadctl diagnose` report the effective mode and
 # the armed elements, but neither can tell you which destinations a workload was
@@ -1947,25 +1961,17 @@ ports = ["8080:80", "8443:443"]
 # re-originated by a host process owned by the workload uid, so all in-container
 # uids attribute correctly and the single-uid selectors are exact.
 #
-# TWO THINGS FILTERING HERE DOES NOT DO, both of which it DOES do for a VM.
-# They are consequences of one decision: a container resolves names through the
-# host's (or podman's) resolver, and there is no per-workload DNS responder in
-# front of it the way passt gives a VM one.
+# TWO THINGS FILTERING HERE DOES NOT DO.
 #
-#   1. FILTERING DOES NOT CONSTRAIN THE CONTENT OF DNS. A hostname allowlist
-#      here is an access control on HTTP and HTTPS destinations. It is NOT an
-#      exfiltration control: wherever the container CAN reach a resolver, it
-#      can emit arbitrary queries and read arbitrary answers, and that channel
-#      carries data in both directions. For a filtered VM the synthesising
-#      responder makes DNS tunnelling ABSENT rather than filtered; there is no
-#      such responder here, so nothing inspects a query. If that matters for a
-#      workload, the remedy is at the host resolver, not in this file.
-#
-#      WHETHER IT CAN REACH ONE AT ALL is a separate question, and the answer
-#      depends on your host -- see the default-deny section above. A loopback
-#      stub resolver is accepted by the `oif lo` rule; a resolver on the LAN
-#      needs an [[network.allow]] entry on port 53 or the workload has no name
-#      resolution. Do not read "DNS is not constrained" as "DNS keeps working".
+#   1. IN BRIDGE MODE, FILTERING DOES NOT CONSTRAIN THE CONTENT OF DNS. A
+#      hostname allowlist is an access control on HTTP and HTTPS
+#      destinations, and it is the responder above that makes it an
+#      exfiltration control too: it has no upstream socket, so a query has
+#      nowhere to go. A bridge-mode container has no responder; wherever it
+#      CAN reach a resolver it can emit arbitrary queries and read arbitrary
+#      answers, and that channel carries data in both directions. If that
+#      matters for a workload, run it in pod mode instead, where its members
+#      still talk on localhost.
 #   2. AN [[network.allow]] ENTRY WRITTEN BY NAME IS PINNED TO ITS ARM-TIME
 #      RESOLUTION. The name is resolved once, when the rules are armed, and
 #      the resulting addresses are what the kernel matches. If the name later

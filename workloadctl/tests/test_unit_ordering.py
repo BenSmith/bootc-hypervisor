@@ -222,7 +222,8 @@ class TestGeneratedUnitsAreAcyclic(unittest.TestCase):
 
     def test_a_filtered_container(self):
         units = self.assert_acyclic(FILTERED_CONTAINER)
-        for unit in ("workload-fct-inspect.socket", "workload-fct-broker.service"):
+        for unit in ("workload-fct-inspect.socket", "workload-fct-resolve.socket",
+                     "workload-fct-broker.service"):
             self.assertIn(unit, units)
 
 

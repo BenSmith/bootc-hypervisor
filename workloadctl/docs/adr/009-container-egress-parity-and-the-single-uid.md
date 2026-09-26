@@ -8,6 +8,12 @@ proposed again.
 Amended 2026-09-26: the broker and the listener are customs' programs
 (`customs-broker`, `customs-inspect`), which workloadctl requires; the
 `lib/` and `libexec/` paths below are where they lived when this was decided.
+Amended again 2026-09-26: a filtered container on pasta, in single or pod
+mode, gets the synthesising responder, reversing the rejected alternative of
+that name below. The analogue it said did not exist is pasta's `--dns-host`,
+which sends what pasta catches at podman's `--dns-forward` address to the
+workload's responder, as passt's does for a VM. Bridge mode still resolves
+through aardvark-dns and the host's nameservers.
 
 ## Context
 
@@ -158,7 +164,7 @@ arbitrary destinations and is never asked to cooperate.
 | Per-workload nft tables | Buy no safety — uid recycling is already closed by `purge_uid_elements()` in `lib/nft.py` — and cost N base chains at one hook instead of one shared chain's O(1) set lookup |
 | systemd `NFTSet=` | Auto-inserts a unit's *own* cgroup/uid/gid into one set and cannot populate the **destination** allowlists (`wl_allow4/6`, `wl_inspect_dst`) the TOML requires. Adopting it means running it alongside the hand-rolled wrapper: two mechanisms, no capability gained |
 | Warn-and-arm-what-resolved for an unresolvable `[[network.internal]]` name | Precisely the silent degrade the VM rule was written against: the workload runs and one LAN host is mysteriously refused, reading as a broken service rather than a policy decision |
-| A per-workload DNS responder for containers | A container resolves through the host/podman resolver, not a per-workload nameserver. Not free: a `[network]` trigger drops port 53 unless that resolver is on loopback, and no name the guest composes is rewritten to the inspector — the container's DNS is the host's |
+| A per-workload DNS responder for containers (reversed; see Status) | A container resolves through the host/podman resolver, not a per-workload nameserver. Not free: a `[network]` trigger drops port 53 unless that resolver is on loopback, and no name the guest composes is rewritten to the inspector — the container's DNS is the host's |
 | Image trust-store probing as a gate | A probe reports on the image, not on the binary that will make the request, so it can be confidently wrong. At most a `doctor` hint, never a gate |
 | Re-resolution on a timer | A second resolution with a second answer, which the filter-element builder already documents as its own problem |
 | Consolidating `workload-container-inspect` into `workload-vm-inspect` | Looks like duplication, isn't: the container helper is already the smaller one *because* it reuses the listener, `peer_identity` and every uid-keyed element builder. What remains in each is per-substrate by construction — the two halves state different rules, not the same rule twice |

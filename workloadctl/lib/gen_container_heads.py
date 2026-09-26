@@ -8,10 +8,11 @@ members'. Rendered text only; the per-container service is gen_container's.
 Installed to /usr/libexec/workloadctl/gen_container_heads.py.
 """
 from container_network_config import container_uses_inspect
+from egress_policy import container_uses_resolve
 from workload_lib import workload_state_dir, dq
 from run_files import GENERATED_BY
 from broker_config import container_uses_credentials
-from container_run_args import build_userns_args
+from container_run_args import build_userns_args, container_network_mode_arg
 from unit_file import Unit
 
 
@@ -43,7 +44,8 @@ def container_egress_exec(svc, name: str) -> None:
 
 
 def _head_unit(name, user_name, uid, slice_name, header_comment, description,
-                create_cmd, rm_cmd, uses_inspect=False, uses_credentials=False):
+                create_cmd, rm_cmd, uses_inspect=False, uses_credentials=False,
+                uses_resolve=False):
     """Shared skeleton for the pod-create and bridge-network-create head units.
 
     Both are single-command oneshot services that run before any member
@@ -96,6 +98,11 @@ def _head_unit(name, user_name, uid, slice_name, header_comment, description,
         # member container exists.
         u.add("Requires", f"workload-{name}-inspect.socket")
         u.add("After", f"workload-{name}-inspect.socket")
+    if uses_resolve:
+        # The responder's socket, for the same reason: bound before the first
+        # member container can ask it anything.
+        u.add("Requires", f"workload-{name}-resolve.socket")
+        u.add("After", f"workload-{name}-resolve.socket")
     if uses_credentials:
         # THE BROKER'S OWN `Before=` DOES NOT START IT. Ordering is not a
         # dependency: the instance was generated, ordered ahead of this unit,
@@ -163,7 +170,8 @@ def generate_pod_service(workload, user_name, uid):
     # patch in the image; we arrange never to trigger it rather than fixing it.
     # Revisit only if a workload ever needs genuine pod-level cgroup accounting or
     # a pod-scoped limit -- that real fix belongs upstream.
-    pod_args = [f"--name=workload-{name}", f"--network={network_mode}",
+    pod_args = [f"--name=workload-{name}",
+                f"--network={container_network_mode_arg(workload, uid)}",
                 "--share-parent=false"]
     if network_mode not in ("host", "none"):
         for port in network_config.get("ports", []):
@@ -185,6 +193,7 @@ def generate_pod_service(workload, user_name, uid):
         rm_cmd=f"/usr/bin/podman pod rm -f --ignore workload-{name}",
         uses_inspect=container_uses_inspect(workload),
         uses_credentials=container_uses_credentials(workload),
+        uses_resolve=container_uses_resolve(workload),
     )
 
 
@@ -206,6 +215,7 @@ def generate_net_service(workload, user_name, uid):
         rm_cmd=f"/usr/bin/podman network rm -f {net_name}",
         uses_inspect=container_uses_inspect(workload),
         uses_credentials=container_uses_credentials(workload),
+        uses_resolve=container_uses_resolve(workload),
     )
 
 

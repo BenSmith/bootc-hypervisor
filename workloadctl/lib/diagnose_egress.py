@@ -14,6 +14,7 @@ from container_network_config import (
     container_uses_inspect,
     ContainerAllowEntry,
 )
+from egress_policy import container_uses_resolve
 from diagnose_inspect import _uses_inspect
 from diagnose_probe import PROBE
 from netfilter_state import (
@@ -235,15 +236,18 @@ def container_resolver_check(config, *, nameservers=PROBE, armed=PROBE
     once. Hence this line: it is the only thing on the host that knows both
     halves.
 
-    CONTAINERS ONLY. A filtered VM has a per-workload synthesising responder
-    (D7 gives containers none), reached at a management address the guest is
-    handed, so its resolver path does not go through this rule at all.
+    ONLY A FILTERED CONTAINER WITH NO RESPONDER: bridge mode, which
+    aardvark-dns answers. A filtered VM and a filtered pasta container ask a
+    per-workload synthesising responder on loopback, so their resolver path
+    does not go through this rule at all.
 
     A FAILURE, not a warning, and the remedy is a real one: an
     `[[network.allow]]` entry for the resolver on port 53 arms exactly the
     element the drop is missing.
     """
     if config.is_vm or not container_uses_inspect(config.config):
+        return None
+    if container_uses_resolve(config.config):
         return None
     try:
         uid = config.uid

@@ -10,7 +10,7 @@ import os
 import pwd
 from pathlib import Path
 
-from egress_policy import uses_resolve
+from egress_policy import vm_uses_resolve
 from helper_main import log
 from passt_dns_fragment import (
     NO_RESOLVER,
@@ -26,7 +26,7 @@ from run_files import workload_env_dir
 def workload_config(name: str) -> dict:
     """This workload's parsed TOML, or {} if it cannot be read.
 
-    An empty dict is a workload that is not a VM as far as uses_resolve is
+    An empty dict is a workload that is not a VM as far as vm_uses_resolve is
     concerned, which lands on the no-responder path.
     """
     try:
@@ -65,7 +65,7 @@ def passt_dns(name: str) -> tuple[str, list[str]]:
         return (NO_RESOLVER,
                 ['[vm.network].resolver = "none": the guest is given no '
                  'resolver'])
-    if uses_resolve(config):
+    if vm_uses_resolve(config):
         try:
             responder = responder_address(name)
         except (KeyError, ValueError) as e:

@@ -714,8 +714,10 @@ The first rig here that needs **no KVM**. Everything the VM rigs prove about
 the egress path was proven on a guest; this asks the same questions of a
 container, where the traffic is re-originated by pasta as the workload's own
 uid rather than by passt on a guest's behalf. Needs root, podman and the
-installed RPM. Throwaway container workloads, all prefixed `ceg-`. **Last green all 153 rows on a
-bare-metal Fedora 44 host under enforcing, 2026-09-21** (broker-flags: the
+installed RPM. Throwaway container workloads, all prefixed `ceg-`. **Last green 2026-09-26
+on a bare-metal Fedora 44 host under enforcing** (container responder: the
+S11 section below, with `CEG_LAN_HOST` unset, so the LAN row skipped); before
+that all 153 rows on 2026-09-21 (broker-flags: the
 container substrate's broker instance started from the generator's
 `ExecStart=` flags and the brokered request reached the provider carrying the
 sealed key; the LAN row run with `CEG_LAN_HOST` set), earlier the same day
@@ -965,6 +967,43 @@ for the resolver **on port 53 specifically** — the element is
 (uid, address, port), and an entry written without the port arms nothing that
 matches, which is why `diagnose`'s message spells the TOML out rather than
 saying "add an allow entry".
+
+### A filtered container asks its own responder (S11)
+
+`check_container_responder`, plus two rows each in the pod and bridge
+sections. A triggered single or pod container on pasta resolves through
+customs-resolve on its own `127.130.x.y`, reached by pasta's `--dns-host`. S10
+still stands for bridge mode, which aardvark-dns answers, and for the uid's
+own port-53 dials. It found two product defects, and every unit test passed
+over both:
+
+- **The AAAA answer was the container's own address.** On a host with no
+  IPv6 default route, pasta copies whatever global v6 address the host has
+  onto the container's interface, and on a host running filtered workloads
+  that is an inspector's address on the `workload-proxy` link. The responder
+  answered AAAA with the inspector's v6 address, busybox wget tried v6 first,
+  and every HTTPS fetch by name was refused inside the container in half a
+  second. A container's responder now gets no `--address6`. The row that
+  caught it was not an S11 row: it was every pre-existing fetch in the rig,
+  red at once.
+- **The static map was read before it was written.** The responder service
+  was `PartOf=` the workload, which propagates a restart as a restart: a
+  responder already running came straight back up and loaded the previous
+  start's map a second before the workload's prestart rewrote it, so a new
+  `allow` name was answered with the inspector address. It is
+  `StopPropagatedFrom=` now, on both substrates. The first run passed this row
+  because nothing had queried yet; the row now starts one first and records
+  that as its premise.
+
+**nslookup, never getent.** podman builds the container's hosts file from the
+host's, so a name the rig put in `/etc/hosts` is answered there and the
+responder is never asked. That is also reported as a gap: such a name is
+neither synthesised nor counted.
+
+**The outside-resolver row has a real resolver behind it.** customs-resolve
+again, in the fixture namespace, answering a fixed address; the unfiltered
+container getting that answer is the control that makes the filtered one's
+timeout a drop.
 
 **The credential broker arm (P2) is 19 rows, and the last one is a real
 request.** A container holding only a placeholder makes a request that reaches

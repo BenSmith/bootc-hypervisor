@@ -963,7 +963,7 @@ Exit 0 when healthy, 1 when any problem was found, 1 with a one-line reason if t
 
 A journal tail is attached only to units that have a problem, so a healthy report stays short. `NRestarts > 0` counts as a problem even when the unit is active: that is the silent restart-loop class which `is-active` alone hides.
 
-For any filtered workload — a VM with `egress = "filtered"`, or a container with a `[network]` trigger — the report gains an **Egress (inspected)** section carrying the inspector's counters: connections by disposition, drop reasons, the minter's figures, and for a VM the resolver's. Those figures are **evidence, never a verdict**: they add nothing to the problem count, because a workload being denied is the filter working. The inspector's actual faults — a listener enforcing a different policy than the one on disk, a CA mismatch, a missing nft element — arrive through the setup checks like everything else.
+For any filtered workload — a VM with `egress = "filtered"`, or a container with a `[network]` trigger — the report gains an **Egress (inspected)** section carrying the inspector's counters: connections by disposition, drop reasons, the minter's figures, and the resolver's where the workload has a responder (a filtered VM, or a filtered container on pasta). Those figures are **evidence, never a verdict**: they add nothing to the problem count, because a workload being denied is the filter working. The inspector's actual faults — a listener enforcing a different policy than the one on disk, a CA mismatch, a missing nft element — arrive through the setup checks like everything else.
 
 [↑ top](#workloadctl-command-reference)
 

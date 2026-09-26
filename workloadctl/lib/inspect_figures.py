@@ -45,7 +45,7 @@ from typing import Callable
 
 from egress_policy import inspect_status_path
 from customs.inspect_document import INSPECT_DIGEST_KEY
-from nft_elements import vm_resolve_status_path
+from nft_elements import resolve_status_path
 
 # Group keys. A group is present or absent as a whole, because what makes it
 # absent is one missing block in the document rather than one missing counter.
@@ -292,7 +292,7 @@ def read_inspect_status(name: str):
 
 
 def read_resolve_status(name: str):
-    return _read(vm_resolve_status_path(name))
+    return _read(resolve_status_path(name))
 
 
 def _dig(doc, path: tuple) -> int:

@@ -357,20 +357,20 @@ class TestTheGeneratorHandsCustomsItsFlags(unittest.TestCase):
 
     def test_the_responder_is_handed_every_value(self):
         from egress_policy import inspect_policy_path
-        from gen_vm import resolve_command
-        from nft_elements import vm_resolve_status_path
-        from vm_network_config import vm_resolve_static_path
-        from workload_addr import VM_RESOLVE_LISTENER_BIN, inspect_address
-        cmd = resolve_command("web", 10004)
-        self.assertEqual(cmd[0], VM_RESOLVE_LISTENER_BIN)
+        from gen_egress import resolve_command
+        from nft_elements import resolve_status_path
+        from egress_policy import resolve_static_path
+        from workload_addr import RESOLVE_LISTENER_BIN, inspect_address
+        cmd = resolve_command("web", 10004, address6=True)
+        self.assertEqual(cmd[0], RESOLVE_LISTENER_BIN)
         flags = {cmd[i]: cmd[i + 1] for i in range(1, len(cmd), 2)}
         self.assertEqual(flags, {
             "--name": "web",
             "--address": inspect_address(10004).v4,
             "--address6": inspect_address(10004).v6,
             "--policy": inspect_policy_path("web"),
-            "--static": vm_resolve_static_path("web"),
-            "--status": vm_resolve_status_path("web"),
+            "--static": resolve_static_path("web"),
+            "--status": resolve_status_path("web"),
         })
 
     def test_the_responder_takes_each_handed_flag_and_requires_no_other(self):
@@ -476,9 +476,9 @@ class TestTheResponderRunsOnWhatWorkloadctlWrites(unittest.TestCase):
     this is the only one that sees what the program makes of the files."""
 
     def test_static_synthesised_and_unlisted(self):
-        from egress_policy import vm_inspect_policy_text
-        from gen_vm import resolve_command
-        from vm_network_config import VmAllowEntry, vm_resolve_static
+        from egress_policy import resolve_static, vm_inspect_policy_text
+        from gen_egress import resolve_command
+        from vm_network_config import VmAllowEntry
         from workload_addr import inspect_address
 
         d = tempfile.mkdtemp()
@@ -491,9 +491,9 @@ class TestTheResponderRunsOnWhatWorkloadctlWrites(unittest.TestCase):
             "policy": [{"host": "*.api.example"}]}))
         forge = VmAllowEntry(address=None, host="Git.Local", port=2222,
                              reason="forge")
-        Path(paths["--static"]).write_text(json.dumps(vm_resolve_static(
-            {}, [(forge, [ipaddress.IPv4Address("192.0.2.9")])])))
-        _binary, *args = resolve_command("web", 10004)
+        Path(paths["--static"]).write_text(json.dumps(resolve_static(
+            [(forge, [ipaddress.IPv4Address("192.0.2.9")])])))
+        _binary, *args = resolve_command("web", 10004, address6=True)
         for i in range(0, len(args), 2):
             args[i + 1] = paths.get(args[i], args[i + 1])
 
@@ -552,10 +552,10 @@ class TestTheProgramsAreCustoms(unittest.TestCase):
         installs them at, and the spec requires that RPM."""
         from broker_config import BROKER_BIN
         from workload_addr import (
-            INSPECT_LISTENER_BIN, VM_RESOLVE_LISTENER_BIN)
+            INSPECT_LISTENER_BIN, RESOLVE_LISTENER_BIN)
         self.assertEqual(INSPECT_LISTENER_BIN,
                          "/usr/libexec/customs/customs-inspect")
-        self.assertEqual(VM_RESOLVE_LISTENER_BIN,
+        self.assertEqual(RESOLVE_LISTENER_BIN,
                          "/usr/libexec/customs/customs-resolve")
         self.assertEqual(BROKER_BIN, "/usr/libexec/customs/customs-broker")
 

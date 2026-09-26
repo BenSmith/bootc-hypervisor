@@ -394,12 +394,12 @@ UID_RESOLVE = UidDerived("responder address", RESOLVE_ADDR_BASE,
 RESOLVE_PORT = 53
 
 # The responder's static map, one file beside the inspector's policy; see
-# vm_network_config.vm_resolve_static.
+# vm_network_config.resolve_static.
 RESOLVE_STATIC_FILE = "resolve-static.json"
 
 # The responder, customs', the resolve service's ExecStart; see
 # INSPECT_LISTENER_BIN.
-VM_RESOLVE_LISTENER_BIN = "/usr/libexec/customs/customs-resolve"
+RESOLVE_LISTENER_BIN = "/usr/libexec/customs/customs-resolve"
 
 
 def resolve_address(uid: int) -> str:

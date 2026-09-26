@@ -62,6 +62,12 @@ WHAT IT MEASURES, and the failure each row exists to catch:
          so the obvious Node example proves the opposite of the row, and Go
          reads SSL_CERT_FILE. A JVM reads none of them.
 
+ 10. S11: A FILTERED CONTAINER ASKS ITS OWN RESPONDER (check_container_
+     responder, and rows in the pod and bridge sections). customs-resolve on
+     127.130.x.y through pasta's --dns-host: the first lookup at start, the
+     synthesised and static answers, AAAA withheld, the count, and a
+     nameserver the container picks for itself being unreachable.
+
 WHAT IT STILL DOES NOT MEASURE:
 
   * A GLOBAL-SCOPE v6 destination. The redirect map keys on `tcp dport` alone,
@@ -87,7 +93,8 @@ target fails identically to a working internal-destination drop.
 
     sudo CEG_LAN_HOST=<lan-host-ip> python3 tests/manual/container_egress_rig.py
 
-Last green 2026-09-06, 78/78 on a bare-metal Fedora 44 host under enforcing.
+Last green 2026-09-26, 170/170 on a bare-metal Fedora 44 host under
+enforcing; see tests/manual/README.md for the earlier history.
 Getting there took seven product fixes and eight rig fixes, and the split is
 worth knowing before reading a failure here.
 
@@ -241,6 +248,248 @@ NODE_IMAGE = "docker.io/library/eclipse-temurin:21-jdk-alpine"
 # drop the workload to rung 2 and prove the remedy by removing the feature.
 NODE_OTHER = "example.org"
 
+# --- S11: a filtered container's synthesising responder ----------------------
+
+STATIC_HOST = "ceg-static.test"   # an allow entry by name; in the static map
+STATIC_ADDR = "10.99.98.41"       # its /etc/hosts answer; never bound
+STATIC_PORT = 8899
+FIRST_NAME = "ceg-first.test"     # the container's first lookup at start
+FIXTURE_ANSWER = "10.99.98.77"    # what the fixture resolver answers; unbound
+RESOLVE_V4_BASE = (127, 130, 0, 0)  # workload_addr.RESOLVE_ADDR_BASE
+
+
+def resolve_v4(uid):
+    """resolve_address(uid), re-derived. See INSPECT_V4_BASE."""
+    a, b, c, d = RESOLVE_V4_BASE
+    n = (a << 24 | b << 16 | c << 8 | d) + (uid - UID_MIN)
+    return ".".join(str((n >> s) & 0xFF) for s in (24, 16, 8, 0))
+
+
+def nslookup(name, host, server="", timeout=20):
+    """The A answers busybox nslookup got, as a list, and its raw text.
+
+    nslookup and not getent, because getent reads the container's hosts file
+    first and podman builds that file from the host's: a name this rig put in
+    /etc/hosts would be answered there and the responder never asked.
+    nslookup always asks a nameserver.
+    """
+    p = inside(name, f"timeout {timeout} nslookup -type=a {host} {server}",
+               timeout=timeout + 30)
+    out = p.stdout + p.stderr
+    answers = []
+    after_name = False
+    for line in out.splitlines():
+        if line.startswith("Name:"):
+            after_name = True
+        elif after_name and line.startswith("Address:"):
+            answers.append(line.split(":", 1)[1].strip())
+    return answers, " ".join(out.split())[:110]
+
+
+def _resolve_status(name):
+    try:
+        return json.loads(
+            Path(f"/run/workload-vm/{name}/resolve-status.json").read_text())
+    except (OSError, ValueError):
+        return None
+
+
+def check_container_responder():
+    """S11: does a filtered container ask its own responder, and only it?
+
+    A triggered single-mode container on pasta gets customs-resolve on
+    127.130.x.y, and `--dns-host` on its `--network=` points pasta's
+    forwarder at it. Every row that fetches by name ABOVE this one already
+    went through it -- so what this section adds is what those cannot see:
+    that the answer was synthesised rather than real, that the first query
+    at start was answered, that a named `allow` destination is answered from
+    the static map, and that a nameserver the container picks for itself is
+    not reachable at all.
+
+    THE FIXTURE IS A REAL RESOLVER. customs-resolve again, in the fixture
+    namespace, answering every name with FIXTURE_ANSWER. The control row
+    proves an unfiltered container reaches it and gets that answer, so the
+    filtered row's failure to is the drop and not a dead fixture.
+    """
+    say("\n== a filtered container's responder (S11) ==")
+    uid = workload_uid(FILTERED)
+    if uid is None:
+        record("responder: the filtered workload has a uid", False)
+        return
+    resolver, inspector = resolve_v4(uid), inspector_v4(uid)
+    unit = f"workload-{FILTERED}.service"
+    sock = f"workload-{FILTERED}-resolve.socket"
+
+    # THE PREMISE FOR THE STATIC-MAP ROW: a responder already running when
+    # the recreate lands. The first run of this section passed that row only
+    # because nothing had queried yet; with a responder up, PartOf= restarted
+    # it a second before the workload's prestart rewrote the map, and it
+    # answered the new `allow` name with the inspector address. So one is
+    # made to run here rather than left to whichever section came first.
+    nslookup(FILTERED, "ceg-warm.test")
+    record("responder: premise -- it is running before the recreate",
+           _show(f"workload-{FILTERED}-resolve.service", "ActiveState")
+           == "active")
+
+    hosts_write([(STATIC_ADDR, STATIC_HOST)])
+    write_config(FILTERED, toml_for(Arm(FILTERED, 2, variant="resolve")))
+    if cli("recreate", FILTERED, timeout=600).returncode != 0:
+        record("responder: recreate with the resolve variant", False)
+        return
+    record("responder: recreate with the resolve variant", True)
+    if not wait_up(FILTERED, "responder: up after the resolve variant"):
+        return
+
+    # The premise and the remedy, on the running manager: the container's
+    # unit pulls the socket in and is ordered after it. Before= on the
+    # socket alone would order it and start nothing.
+    after, req = _show(unit, "After"), _show(unit, "Requires")
+    record("responder: the container unit Requires= and After= the socket",
+           sock in after and sock in req,
+           f"After={sock in after} Requires={sock in req}")
+
+    # Observation over configuration: the socket was listening before the
+    # container's main process started.
+    t_sock = _show(sock, "ActiveEnterTimestampMonotonic")
+    t_main = _show(unit, "ExecMainStartTimestampMonotonic")
+    if t_sock.isdigit() and t_main.isdigit() and "0" not in (t_sock, t_main):
+        record("responder: the socket was listening before the container "
+               "started, measured", int(t_sock) < int(t_main),
+               f"socket +{(int(t_main) - int(t_sock)) / 1e6:.2f}s ahead")
+    else:
+        record_gap("responder: socket-vs-container timestamps",
+                   f"socket={t_sock} main={t_main}")
+
+    # What pasta was actually started with, not what the unit says.
+    p = run(["ps", "-u", str(uid), "-o", "args="], check=False, timeout=30)
+    pasta = [ln for ln in (p.stdout or "").splitlines()
+             if ln.lstrip().startswith(("/usr/bin/pasta", "pasta"))]
+    record("responder: the running pasta points its forwarder at the "
+           "responder",
+           any("--dns-host" in ln and resolver in ln for ln in pasta),
+           (pasta[0][:100] if pasta else "no pasta process for the uid"))
+
+    # THE WINDOW. The container's first action was a lookup; a responder
+    # bound late, or not pulled in, answers it with nothing.
+    first = inside(FILTERED, "cat /tmp/ceg-first-dns", timeout=30)
+    first_out = first.stdout + first.stderr
+    record("responder: the container's FIRST lookup at start was answered "
+           "with the inspector address",
+           f"Address: {inspector}" in first_out
+           or f"Address:\t{inspector}" in first_out,
+           " ".join(first_out.split())[:100])
+
+    unlisted = f"ceg-unlisted-{os.getpid()}.test"
+    answers, detail = nslookup(FILTERED, unlisted)
+    record("responder: an unlisted name is synthesised to the inspector "
+           "address", answers == [inspector], detail)
+
+    answers, detail = nslookup(FILTERED, ALLOWED)
+    record("responder: a listed name is synthesised too (the inspector "
+           "dials the name, not the answer)", answers == [inspector], detail)
+
+    answers, detail = nslookup(FILTERED, STATIC_HOST)
+    record("responder: a named allow destination is answered from the "
+           "static map", answers == [STATIC_ADDR], detail)
+
+    # AAAA gets no records. pasta copies a host v6 address onto the
+    # container's interface, and on a host with no v6 default route that can
+    # be the inspector's own; an answer naming it is a dial the container
+    # refuses to itself. The first run of this section found exactly that:
+    # every HTTPS fetch by name refused in half a second.
+    p6 = inside(FILTERED, f"timeout 20 nslookup -type=aaaa {unlisted}",
+                timeout=50)
+    out6 = " ".join((p6.stdout + p6.stderr).split())
+    record("responder: AAAA is not synthesised for a container",
+           "Address: 2001:2:" not in out6 and "has AAAA" not in out6,
+           out6[:100])
+    elapsed, ok, out = fetch(FILTERED, f"https://{ALLOWED}/")
+    record("responder: HTTPS by name round-trips through the synthesised "
+           "answer", ok, f"{elapsed:.1f}s  {out}")
+
+    # The responder replaces its status file every thirty seconds, so the
+    # count is read until it lands rather than once.
+    deadline = time.time() + 40
+    while True:
+        status = _resolve_status(FILTERED)
+        names = (status or {}).get("unlisted_names", {})
+        if unlisted in names or time.time() > deadline:
+            break
+        time.sleep(3)
+    record("responder: the unlisted query is counted as unlisted",
+           unlisted in names,
+           f"unlisted={(status or {}).get('unlisted')} "
+           f"names={list(names)[:3]}")
+
+    # The container's own view of what it is told, for the record.
+    rc = inside(FILTERED, "cat /etc/resolv.conf", timeout=30)
+    listed = [ln.split()[1] for ln in rc.stdout.splitlines()
+              if ln.startswith("nameserver ")]
+    record("responder: pasta's forwarder is the container's first "
+           "nameserver", bool(listed) and listed[0] == "169.254.1.1",
+           " ".join(listed))
+
+    # The hosts file podman copies from the host answers a name without
+    # asking anyone, so the responder neither answers nor counts it.
+    ge = inside(FILTERED, f"getent hosts {STATIC_HOST}", timeout=30)
+    record_gap("responder: names in the host's /etc/hosts bypass it",
+               f"getent {STATIC_HOST} -> {ge.stdout.split()[:1]} from the "
+               f"container's hosts file, which podman builds from the "
+               f"host's; nslookup asks the responder")
+
+    # A nameserver the container picks for itself. customs-resolve as the
+    # fixture, in the namespace, so the control's answer is a real one.
+    run(["ip", "-n", NETNS, "addr", "add", f"{DNS_ADDR}/24", "dev", VETH_NS],
+        check=False)
+    tmp = Path(tempfile.mkdtemp(prefix="ceg-dns-"))
+    (tmp / "policy.json").write_text('{"hosts": []}')
+    (tmp / "static.json").write_text("{}")
+    fixture = subprocess.Popen(
+        ["ip", "netns", "exec", NETNS, "systemd-socket-activate",
+         "--datagram", "-l", f"{DNS_ADDR}:{DNS_PORT}",
+         "/usr/libexec/customs/customs-resolve", "--name", "ceg-fixture",
+         "--address", FIXTURE_ANSWER, "--policy", str(tmp / "policy.json"),
+         "--static", str(tmp / "static.json"),
+         "--status", str(tmp / "status.json")],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    time.sleep(2)
+    try:
+        answers, detail = nslookup(OPEN, "ceg-direct.test", DNS_ADDR)
+        record("responder: an UNFILTERED container reaches an outside "
+               "resolver (control)", answers == [FIXTURE_ANSWER], detail)
+        if answers != [FIXTURE_ANSWER]:
+            record_gap("responder: the fixture resolver never answered",
+                       "the row below would read as a working drop")
+            return
+        answers, detail = nslookup(FILTERED, "ceg-direct.test", DNS_ADDR,
+                                   timeout=15)
+        record("responder: the filtered container cannot ask an outside "
+               "resolver directly", answers == [], detail)
+    finally:
+        fixture.terminate()
+        try:
+            fixture.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            fixture.kill()
+        shutil.rmtree(tmp, ignore_errors=True)
+        run(["ip", "-n", NETNS, "addr", "del", f"{DNS_ADDR}/24",
+             "dev", VETH_NS], check=False)
+        hosts_clear()
+
+    p = cli("diagnose", FILTERED, "--json")
+    try:
+        checks = {c["check"]: c for c in json.loads(p.stdout)["checks"]}
+    except (ValueError, KeyError, TypeError):
+        checks = {}
+    line = checks.get("container_resolve")
+    record("responder: `diagnose` reports the responder and passes it",
+           bool(line and line.get("passed")),
+           (line or {}).get("message", "no container_resolve line")[:100])
+    record("responder: `diagnose` no longer runs the host-resolver check "
+           "for it", "container_resolver" not in checks,
+           "absent" if "container_resolver" not in checks else "present")
+
+
 # --- the credential broker arm (P2) ------------------------------------------
 #
 # One workload, deliberately POD topology. The broker's ordering defect (P2-3)
@@ -371,6 +620,7 @@ ARMS = (
     Arm(POD, 3, topology="pod"),
     Arm(FILTERED, 2, variant="v6"),
     Arm(FILTERED, 2, variant="rotate"),
+    Arm(FILTERED, 2, variant="resolve"),
     Arm(NODE_WL, 1, variant="node-rung1"),
     Arm(NODE_WL, 3, variant="node"),
     Arm(NODE_WL, 3, variant="node-spliced"),
@@ -872,6 +1122,27 @@ def _variant_toml(arm):
             f"port   = {ROT_PORT}",
             'reason = "rig target for the D7 arm-time-pinning row: this '
             'address is resolved ONCE, when the element is armed"',
+        ]) + "\n"
+
+    if arm.variant == "resolve":
+        # Rung 2 with an allow entry BY NAME, which is what puts a name in the
+        # responder's static map. The command makes the container's FIRST
+        # action a lookup, written where a later exec can read it: that is
+        # the window row, the one query a responder bound late would miss.
+        head[head.index('command = ["sleep", "infinity"]')] = (
+            'command = ["sh", "-c", "nslookup ' + FIRST_NAME
+            + ' > /tmp/ceg-first-dns 2>&1; sleep infinity"]')
+        return "\n".join(head + [
+            "",
+            "[network]",
+            'mode = "pasta"',
+            f'hosts = ["{ALLOWED}"]',
+            "",
+            "[[network.allow]]",
+            f'host   = "{STATIC_HOST}"',
+            f"port   = {STATIC_PORT}",
+            'reason = "rig target for S11: a name the responder answers from '
+            'its static map rather than with the inspector address"',
         ]) + "\n"
 
     if arm.variant == "node-rung1":
@@ -1727,6 +1998,12 @@ def check_bridge_mode():
     check_head_unit_ordering(BRIDGE, f"workload-{BRIDGE}-net.service",
                              [f"workload-{BRIDGE}-app.service"])
 
+    # S11's exception: aardvark-dns answers a bridge-mode container, and pasta
+    # is not in front of it to point anywhere, so no responder is generated.
+    # HTTPS to a name above round-tripped, so aardvark resolved it.
+    load = _show(f"workload-{BRIDGE}-resolve.socket", "LoadState")
+    record("bridge: no responder is generated", load == "not-found", load)
+
     cli("disable", BRIDGE, "--purge", timeout=300)
     d = WORKLOAD_DIR / BRIDGE
     if d.exists():
@@ -1900,6 +2177,23 @@ def check_pod_mode():
     check_head_unit_ordering(
         POD, f"workload-{POD}-pod.service",
         [f"workload-{POD}-app.service", f"workload-{POD}-side.service"])
+
+    # S11 for pod mode: the responder is pulled in by the head unit, the one
+    # ordered before every member, and both members ask it. The pod's pasta
+    # is the pod's, so a member that did not share it would resolve through
+    # something else.
+    head = f"workload-{POD}-pod.service"
+    sock = f"workload-{POD}-resolve.socket"
+    after, req = _show(head, "After"), _show(head, "Requires")
+    record("pod: the head unit Requires= and After= the resolve socket",
+           sock in after and sock in req,
+           f"After={sock in after} Requires={sock in req}")
+    if uid is not None:
+        for member in ("app", "side"):
+            answers, detail = nslookup(f"{POD}/{member}",
+                                       f"ceg-pod-{member}.test")
+            record(f"pod: the {member} member is answered by the responder",
+                   answers == [inspector_v4(uid)], detail)
 
     cli("disable", POD, "--purge", timeout=300)
     d = WORKLOAD_DIR / POD
@@ -3626,6 +3920,7 @@ def main():
         # After the rotation, which also rewrites the filtered workload's
         # config, and before the JDK row, which is a different workload.
         section(check_container_resolver)
+        section(check_container_responder)
         section(check_embedded_root_store)
         # Last of the workload sections: it deploys a workload of its own, and
         # it rewrites /etc/hosts, so anything after it would be measuring this

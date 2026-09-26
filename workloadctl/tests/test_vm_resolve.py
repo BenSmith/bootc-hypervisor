@@ -17,15 +17,15 @@ import ipaddress
 import unittest
 from pathlib import Path
 
-from egress_policy import inspect_policy_path, uses_resolve
-from nft_constants import SIDECAR_SLICE
-from nft_elements import vm_filter_elements, vm_resolve_status_path
-from vm_network_config import (
-    vm_allow_resolved, vm_resolve_static, vm_resolve_static_path,
+from egress_policy import (
+    inspect_policy_path, resolve_static, resolve_static_path, vm_uses_resolve,
 )
+from nft_constants import SIDECAR_SLICE
+from nft_elements import vm_filter_elements, resolve_status_path
+from vm_network_config import vm_allow_resolved
 from workload_addr import (
     UID_MAX, UID_MIN, MGMT_NETWORK, RESOLVE_ADDR_BASE,
-    VM_RESOLVE_LISTENER_BIN, RESOLVE_STATIC_FILE, RESOLVE_PORT,
+    RESOLVE_LISTENER_BIN, RESOLVE_STATIC_FILE, RESOLVE_PORT,
     inspect_address, management_address, reserved_range, resolve_address,
 )
 
@@ -88,31 +88,31 @@ class TestAddress(unittest.TestCase):
 
 
 class TestPredicate(unittest.TestCase):
-    """uses_resolve: the inspector's terms plus `resolver` not "none"."""
+    """vm_uses_resolve: the inspector's terms plus `resolver` not "none"."""
 
     def test_a_filtered_vm_gets_one_by_default(self):
-        self.assertTrue(uses_resolve(net_config()))
-        self.assertTrue(uses_resolve(net_config(egress="filtered")))
+        self.assertTrue(vm_uses_resolve(net_config()))
+        self.assertTrue(vm_uses_resolve(net_config(egress="filtered")))
 
     def test_resolver_none_switches_it_off(self):
-        self.assertFalse(uses_resolve(net_config(resolver="none")))
+        self.assertFalse(vm_uses_resolve(net_config(resolver="none")))
 
     def test_resolver_host_keeps_it_on(self):
-        self.assertTrue(uses_resolve(net_config(resolver="host")))
+        self.assertTrue(vm_uses_resolve(net_config(resolver="host")))
 
     def test_open_egress_does_not_get_one(self):
         """A responder under `egress = "open"` would answer every name with an
         inspector address that nothing redirects to."""
-        self.assertFalse(uses_resolve(net_config(egress="open")))
+        self.assertFalse(vm_uses_resolve(net_config(egress="open")))
         self.assertFalse(
-            uses_resolve(net_config(egress="open", resolver="host")))
+            vm_uses_resolve(net_config(egress="open", resolver="host")))
 
     def test_a_bridged_vm_does_not_get_one(self):
-        self.assertFalse(uses_resolve(net_config(bridge="br0")))
+        self.assertFalse(vm_uses_resolve(net_config(bridge="br0")))
 
     def test_a_container_workload_does_not_get_one(self):
-        self.assertFalse(uses_resolve({"container": {"image": "x"}}))
-        self.assertFalse(uses_resolve({}))
+        self.assertFalse(vm_uses_resolve({"container": {"image": "x"}}))
+        self.assertFalse(vm_uses_resolve({}))
 
 
 class TestStaticMap(unittest.TestCase):
@@ -123,12 +123,12 @@ class TestStaticMap(unittest.TestCase):
         for -- and inventing a name for it would be a name the operator never
         wrote."""
         net = {"allow": [{"address": "192.0.2.7:2222", "reason": "forge"}]}
-        self.assertEqual(vm_resolve_static(net), {})
+        self.assertEqual(resolve_static(vm_allow_resolved(net["allow"])), {})
 
     def test_a_named_allow_entry_lands_in_the_map(self):
         resolved = [(_entry("git.local", 2222),
                      [ipaddress.IPv4Address("192.0.2.9")])]
-        self.assertEqual(vm_resolve_static({}, resolved),
+        self.assertEqual(resolve_static(resolved),
                          {"git.local": ["192.0.2.9"]})
 
     def test_the_map_key_is_normalised(self):
@@ -137,14 +137,14 @@ class TestStaticMap(unittest.TestCase):
         used."""
         resolved = [(_entry("Git.Local.", 2222),
                      [ipaddress.IPv4Address("192.0.2.9")])]
-        self.assertEqual(list(vm_resolve_static({}, resolved)),
+        self.assertEqual(list(resolve_static(resolved)),
                          ["git.local"])
 
     def test_both_families_of_one_name_are_kept(self):
         resolved = [(_entry("git.local", 2222),
                      [ipaddress.IPv4Address("192.0.2.9"),
                       ipaddress.IPv6Address("2001:db8::9")])]
-        self.assertEqual(vm_resolve_static({}, resolved),
+        self.assertEqual(resolve_static(resolved),
                          {"git.local": ["192.0.2.9", "2001:db8::9"]})
 
     def test_two_entries_for_one_name_are_one_key(self):
@@ -155,7 +155,7 @@ class TestStaticMap(unittest.TestCase):
                     (_entry("git.local", 2222),
                      [ipaddress.IPv4Address("192.0.2.9"),
                       ipaddress.IPv4Address("192.0.2.10")])]
-        self.assertEqual(vm_resolve_static({}, resolved),
+        self.assertEqual(resolve_static(resolved),
                          {"git.local": ["192.0.2.9", "192.0.2.10"]})
 
     def test_the_map_and_the_nft_elements_come_from_one_resolution(self):
@@ -172,7 +172,7 @@ class TestStaticMap(unittest.TestCase):
                       ipaddress.IPv4Address("192.0.2.10")])]
         elements = vm_filter_elements(UID, [], resolved)
         armed = {e.split(" . ")[1] for e in elements["wl_allow4"]}
-        served = set(vm_resolve_static({}, resolved)["git.local"])
+        served = set(resolve_static(resolved)["git.local"])
         self.assertEqual(served, armed)
 
     def test_resolution_is_shared_by_default_too(self):
@@ -184,7 +184,7 @@ class TestStaticMap(unittest.TestCase):
                                             vm_allow_resolved(net["allow"])))
 
     def test_the_map_is_beside_the_inspectors_policy(self):
-        path = vm_resolve_static_path("web")
+        path = resolve_static_path("web")
         self.assertTrue(path.endswith(f"/web/{RESOLVE_STATIC_FILE}"), path)
         self.assertEqual(Path(path).parent,
                          Path(inspect_policy_path("web")).parent)
@@ -201,11 +201,12 @@ class TestGeneratedUnits(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.gen = importlib.import_module("gen_vm")
+        cls.egress = importlib.import_module("gen_egress")
         config = {"workload": {"name": "web"}, "vm": {"network": {}}}
-        cls.socket_unit = cls.gen.generate_vm_resolve_socket(
+        cls.socket_unit = cls.egress.generate_resolve_socket(
             config, "_wl-web", UID)
-        cls.service = cls.gen.generate_vm_resolve_service(
-            config, "_wl-web", UID)
+        cls.service = cls.egress.generate_resolve_service(
+            config, "_wl-web", UID, address6=True)
         cls.address = resolve_address(UID)
 
     def test_both_transports_are_bound(self):
@@ -370,18 +371,18 @@ class TestGeneratedUnits(unittest.TestCase):
     def test_the_service_execs_customs_resolve_with_its_flags(self):
         inspect = inspect_address(UID)
         self.assertIn(
-            f'ExecStart={VM_RESOLVE_LISTENER_BIN} --name "web"'
+            f'ExecStart={RESOLVE_LISTENER_BIN} --name "web"'
             f' --address "{inspect.v4}" --address6 "{inspect.v6}"'
             f' --policy "{inspect_policy_path("web")}"'
-            f' --static "{vm_resolve_static_path("web")}"'
-            f' --status "{vm_resolve_status_path("web")}"',
+            f' --static "{resolve_static_path("web")}"'
+            f' --status "{resolve_status_path("web")}"',
             self.service.splitlines())
 
     def test_the_synthesised_addresses_are_the_inspectors(self):
         """Every synthesised A/AAAA points the guest at the listener its 80
         and 443 are redirected to anyway, so a guest that ignores the
         redirect and one that does not arrive at the same place."""
-        cmd = self.gen.resolve_command("web", UID)
+        cmd = self.egress.resolve_command("web", UID, address6=True)
         flags = {cmd[i]: cmd[i + 1] for i in range(1, len(cmd), 2)}
         self.assertEqual(flags["--address"], inspect_address(UID).v4)
         self.assertEqual(flags["--address6"], inspect_address(UID).v6)
@@ -394,10 +395,18 @@ class TestGeneratedUnits(unittest.TestCase):
         self.assertNotIn("wl_egress_cg", self.service)
         self.assertNotIn("nft", self.service)
 
-    def test_the_service_stops_with_the_vm(self):
-        """PartOf=, so an edited config applies on a plain restart rather than
-        the previous run's document being served alongside the new VM."""
-        self.assertIn("PartOf=workload-web.service", self.service.splitlines())
+    def test_the_service_stops_with_the_workload(self):
+        """So an edited config applies on a plain restart rather than the
+        previous run's map being served alongside the new workload."""
+        self.assertIn("StopPropagatedFrom=workload-web.service",
+                      self.service.splitlines())
+
+    def test_a_restart_is_not_propagated_as_a_restart(self):
+        """PartOf= restarts the responder with the workload, and on hardware
+        it came back up and read the static map a second before the
+        workload's prestart rewrote it. A propagated stop leaves it down
+        until the first query."""
+        self.assertNotIn("PartOf=", self.service)
 
     def test_the_slice_is_pinned(self):
         self.assertIn(f"Slice={SIDECAR_SLICE}", self.service.splitlines())

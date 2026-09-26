@@ -25,7 +25,7 @@ from diagnose_egress import (
     vm_egress_check, vm_network_check,
 )
 from diagnose_inspect import inspect_check
-from diagnose_resolve import vm_resolve_check
+from diagnose_resolve import container_resolve_check, vm_resolve_check
 from diagnose_provisioning import collect_host_artifact_checks, vm_provisioning_check
 from diagnose_vm_clock import vm_guest_clock_check
 from diagnose_selinux import (
@@ -641,22 +641,18 @@ def _egress_plane_checks(config, _check):
     if inspect_result:
         _check(*inspect_result)
 
-    if config.is_vm:
-        # After the inspector's line, because that is the order the guest
-        # meets them in: it resolves a name, then dials what it was told.
-        #
-        # VM-only, and stays that way: containers get no per-workload DNS
-        # responder, so there is no synthesising resolver here for this to
-        # report on.
-        resolve_result = vm_resolve_check(config)
+    # After the inspector's line, because that is the order the workload
+    # meets them in: it resolves a name, then dials what it was told. Each
+    # returns None for the other substrate.
+    for resolve_result in (vm_resolve_check(config),
+                           container_resolve_check(config)):
         if resolve_result:
             _check(*resolve_result)
 
-    # The container's half of the resolver question, in the slot a VM's
-    # vm_resolve_check occupies just above and for the same ordering reason:
-    # the workload resolves a name before it dials anything, so a reader who
-    # meets the dial's verdict first is sent after the wrong thing. The check
-    # returns None for a VM, which has a responder of its own.
+    # A filtered container with no responder of its own -- bridge mode --
+    # still resolves through the host's nameservers, in the same slot and
+    # for the same ordering reason. It returns None for a VM and for a
+    # container that has a responder.
     resolver_result = container_resolver_check(config)
     if resolver_result:
         _check(*resolver_result)

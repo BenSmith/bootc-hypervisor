@@ -13,7 +13,9 @@ from pathlib import Path
 
 from broker_config import container_uses_credentials, vm_uses_credentials
 from container_network_config import container_uses_inspect
-from egress_policy import uses_resolve, vm_uses_inspect
+from egress_policy import (
+    container_uses_resolve, vm_uses_resolve, vm_uses_inspect,
+)
 from workload_lib import (
     RUN_SYSTEMD_SYSTEM, WORKLOADCTL_VERSION, virtiofs_tags,
     workload_config_path, workload_service_name,
@@ -168,7 +170,7 @@ def workload_run_files(config) -> list[WorkloadRunFile]:
         # "none". Listed unconditionally so a workload that switches the knob
         # off has its stale units unlinked rather than left behind answering
         # for a guest that was told to ask nobody.
-        vm_resolves = uses_resolve(config.config)
+        vm_resolves = vm_uses_resolve(config.config)
         files.append(WorkloadRunFile(
             run / f"workload-{name}-resolve.socket", "unit", "resolve-socket",
             vm_resolves,
@@ -221,8 +223,7 @@ def workload_run_files(config) -> list[WorkloadRunFile]:
         # Container counterpart of the VM inspect-socket/service pair above
         # (P1-9). Superset semantics, same as -pod/-net: always listed so the
         # removable view unlinks stale units, emitted only when
-        # container_uses_inspect() fires. No resolve pair: containers get no
-        # synthesising DNS responder at all (D7).
+        # container_uses_inspect() fires.
         container_inspects = container_uses_inspect(config.config)
         files.append(WorkloadRunFile(
             run / f"workload-{name}-inspect.socket", "unit", "inspect-socket",
@@ -231,6 +232,18 @@ def workload_run_files(config) -> list[WorkloadRunFile]:
         files.append(WorkloadRunFile(
             run / f"workload-{name}-inspect.service", "unit", "inspect",
             container_inspects,
+        ))
+        # The responder pair, superset semantics as the VM's: listed for
+        # every container so a workload that moves to bridge mode or drops
+        # its last trigger has its stale units unlinked.
+        container_resolves = container_uses_resolve(config.config)
+        files.append(WorkloadRunFile(
+            run / f"workload-{name}-resolve.socket", "unit", "resolve-socket",
+            container_resolves,
+        ))
+        files.append(WorkloadRunFile(
+            run / f"workload-{name}-resolve.service", "unit", "resolve",
+            container_resolves,
         ))
         # The credential broker instance (P2-4), superset semantics again and
         # for the reason G16 flagged: listed for every container so a workload
