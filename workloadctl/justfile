@@ -216,14 +216,36 @@ rpm-install: rpm-build
   echo "Installing ${rpm}"
   sudo dnf install -y --allowerasing "$rpm"
 
-# customs' RPM, which workloadctl's requires, out of the image
-# hypervisor.Containerfile pins (FROM scratch, /customs.rpm), to DEST.
-customs-rpm dest="customs.rpm":
+# The image hypervisor.Containerfile pins for customs' RPM, its signature
+# verified against the repo's cosign.pub, printed as repo@digest. Every
+# consumer takes this ref rather than the tag, so what it installs is what
+# was signed, not whatever the tag names by the time it pulls. Signatures
+# are registry attachments, so the host needs use-sigstore-attachments for
+# the registry (registries.d/registry-local.yaml; the hypervisor image and
+# the runners carry it).
+customs-rpm-ref:
   #!/usr/bin/env bash
   set -euo pipefail
   image=$(sed -n 's/^ARG CUSTOMS_RPM=//p' ../hypervisor.Containerfile)
   [ -n "$image" ] || { echo "no ARG CUSTOMS_RPM in hypervisor.Containerfile" >&2; exit 1; }
-  ctr=$(podman create "$image" none)
+  repo="${image%:*}"
+  policy=$(mktemp)
+  trap 'rm -f "$policy"' EXIT
+  printf '{"default":[{"type":"reject"}],"transports":{"docker":{"%s":[{"type":"sigstoreSigned","keyPath":"%s","signedIdentity":{"type":"matchRepository"}}]}}}' \
+    "$repo" "$(realpath ../cosign.pub)" > "$policy"
+  podman pull -q --signature-policy="$policy" "$image" >/dev/null
+  digest=$(podman image inspect "$image" \
+    | python3 -c 'import json, sys; print(json.load(sys.stdin)[0]["Digest"])')
+  echo "verified: $image ($digest)" >&2
+  echo "$repo@$digest"
+
+# customs' RPM, which workloadctl's requires, out of the verified image
+# (FROM scratch, /customs.rpm), to DEST.
+customs-rpm dest="customs.rpm":
+  #!/usr/bin/env bash
+  set -euo pipefail
+  ref=$({{just_executable()}} -f {{justfile()}} customs-rpm-ref)
+  ctr=$(podman create "$ref" none)
   trap 'podman rm -f "$ctr" >/dev/null' EXIT
   podman cp "$ctr:/customs.rpm" "{{dest}}"
   rpm -qp "{{dest}}"

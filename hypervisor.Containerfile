@@ -9,7 +9,9 @@ ARG FEDORA_VERSION=44
 # customs' RPM as an image (FROM scratch, /customs.rpm), signed and pushed by
 # customs' own workflow. workloadctl requires it: the unit suite below imports
 # it, and the final image installs it and caches it for VM seed ISOs. Bump
-# with the spec's `Requires: customs >=`.
+# with the spec's `Requires: customs >=`. The tag is what gets verified:
+# builds pass the signed digest it resolves to (`just customs-rpm-ref` in
+# workloadctl/), and building from the bare tag skips the signature check.
 ARG CUSTOMS_RPM=registry.local/customs-rpm:0.2.0
 
 FROM ${CUSTOMS_RPM} AS customs

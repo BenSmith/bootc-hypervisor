@@ -90,15 +90,10 @@ jobs:
       # it by the digest whose signature verified, not by the pinned tag.
       - name: Verify customs RPM
         id: customs
+        working-directory: workloadctl
         run: |
-          IMAGE=$(sed -n 's/^ARG CUSTOMS_RPM=//p' hypervisor.Containerfile)
-          REPO="${IMAGE%:*}"
-          printf '{"default":[{"type":"reject"}],"transports":{"docker":{"%s":[{"type":"sigstoreSigned","keyPath":"%s","signedIdentity":{"type":"matchRepository"}}]}}}' \
-            "${REPO}" "$(pwd)/cosign.pub" > /tmp/customs-rpm-policy.json
-          sudo podman pull -q --signature-policy=/tmp/customs-rpm-policy.json "${IMAGE}" >/dev/null
-          DIGEST=$(sudo podman image inspect --format '{{.Digest}}' "${IMAGE}")
-          echo "verified: ${IMAGE} (${DIGEST})"
-          echo "ref=${REPO}@${DIGEST}" >> "$GITHUB_OUTPUT"
+          ref=$(sudo just customs-rpm-ref)
+          echo "ref=${ref}" >> "$GITHUB_OUTPUT"
 
       - name: Build base hypervisor
         env:
