@@ -279,10 +279,11 @@ BROKER_PORT = 8081                  # workload_addr.BROKER_INSTANCE_PORT
 # failure -- which is how it read on broker_rig's first run.
 AUTH_HEADER_DEFAULT = "x-api-key"
 
-# Both refusals are 403, so the STATUS cannot say whether a request was refused
-# for its Host or for its CALLER. Those are different claims with different
-# controls, and the caller one is the whole invariant here.
-DENY_UNKNOWN_CALLER = "caller not registered with the broker"
+# Both refusals are 403 with the status phrase for a body, so only the
+# broker's journal line says whether a request was refused for its Host or
+# for its CALLER. Those are different claims with different controls, and
+# the caller one is the whole invariant here.
+DENY_BODY = "Forbidden"
 
 # The rig's own trust drop-ins, so teardown removes what it created.
 TRUST_DROPIN = "10-ceg-trust.conf"
@@ -436,6 +437,33 @@ def run(argv, check=True, timeout=120, **kw):
     if check and p.returncode != 0:
         raise RuntimeError(f"{argv!r} rc={p.returncode}\n{p.stdout}\n{p.stderr}")
     return p
+
+
+def journal_cursor(unit):
+    """The unit's journal position now, so a later read sees only what
+    followed."""
+    p = run(["journalctl", "-u", unit, "-n", "0", "--show-cursor",
+             "--no-pager"], check=False)
+    m = re.search(r"^-- cursor: (\S+)", p.stdout, re.MULTILINE)
+    return m.group(1) if m else None
+
+
+def logged_since(unit, cursor, line, wait=10):
+    """Whether `line`, after the broker's time stamp, reached the unit's
+    journal after `cursor`. Polled: the journal lags the answer that
+    prompted it."""
+    argv = ["journalctl", "-u", unit, "-o", "cat", "--no-pager"]
+    if cursor:
+        argv += [f"--after-cursor={cursor}"]
+    deadline = time.monotonic() + wait
+    while True:
+        if any(entry.endswith(f"] {line}") for entry in
+               run(argv, check=False).stdout.splitlines()):
+            return True
+        if time.monotonic() > deadline:
+            return False
+        time.sleep(1)
+
 
 
 def cli(*args, check=False, timeout=300):
@@ -2697,9 +2725,7 @@ def unseal_credential():
 def dial_broker(addr, host, as_uid=None, as_gid=None, path="/v1/models"):
     """One dial at a broker instance from the host, optionally as another uid.
 
-    Returns (http_code, body). Reads the body rather than the exit status,
-    because the two refusals this measures are both 403 and differ only in what
-    they say.
+    Returns (http_code, body).
     """
     argv = []
     if as_uid is not None:
@@ -2823,12 +2849,16 @@ def check_broker_invariants():
     if other_uid is None:
         skip("another workload's uid is refused", f"no uid for {OPEN}")
     else:
+        cursor = journal_cursor(unit)
         code, body = dial_broker(addr, PROVIDER, other_uid, other_uid)
+        denied = logged_since(
+            unit, cursor, f"deny reason=unidentified caller=uid:{other_uid}")
         record("another workload's uid gets nothing, and is refused for being "
                "the wrong CALLER",
-               (code == "403" and DENY_UNKNOWN_CALLER in body
+               (code == "403" and body.strip() == DENY_BODY and denied
                 and CRED_SECRET not in body),
-               f"http={code} body={body[:140]!r} -- the sentence is matched "
+               f"http={code} body={body[:140]!r} logged={denied} -- the "
+               f"journal line is matched "
                f"because an unknown HOST is also a 403, and that is a "
                f"different claim")
 
@@ -2838,11 +2868,14 @@ def check_broker_invariants():
     # check has stopped running this is the probe that says so. A 403 for root
     # is also the only evidence that the refusals above came from the broker's
     # own check rather than from a packet filter in front of it.
+    cursor = journal_cursor(unit)
     code, body = dial_broker(addr, PROVIDER, None, None)
+    denied = logged_since(unit, cursor,
+                          "deny reason=unidentified caller=uid:0")
     record("root is refused at the same address and Host",
-           (code == "403" and DENY_UNKNOWN_CALLER in body
+           (code == "403" and body.strip() == DENY_BODY and denied
             and CRED_SECRET not in body),
-           f"http={code} body={body[:140]!r}")
+           f"http={code} body={body[:140]!r} logged={denied}")
 
     # --- ROW 1: the container cannot NAME it --------------------------------
     seen = inside(f"{CRED_WL}/app",

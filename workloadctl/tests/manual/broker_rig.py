@@ -130,10 +130,6 @@ PROVIDER_PORT = 443       # not configurable: `upstream` is https://<host>
 # a row for, which is the whole of claim 2.
 UNKNOWN_HOST = "elsewhere.wlbrk.test"
 
-# The broker's two refusal bodies, restated. Both are 403, so the STATUS alone
-# cannot say whether a request was refused for its Host or for its caller --
-# and those are different claims with different controls. Matching the sentence
-# is what makes each assertion attributable.
 # The header a generated instance attaches the credential in when the workload
 # says nothing. Restated here because a rig asserting `Authorization` against a
 # default of `x-api-key` reads a header nothing writes and calls a working
@@ -141,8 +137,10 @@ UNKNOWN_HOST = "elsewhere.wlbrk.test"
 # that DOES name a convention asserts its own; see Arm.header.
 AUTH_HEADER_DEFAULT = "x-api-key"
 
-DENY_UNKNOWN_CALLER = "caller not registered with the broker"
-DENY_UNKNOWN_HOST = "no credential is configured for that host"
+# Both refusals are 403 with the status phrase for a body, so only the
+# broker's journal line says whether a request was refused for its Host or for
+# its caller -- different claims with different controls.
+DENY_BODY = "Forbidden"
 
 HOSTS_FILE = Path("/etc/hosts")
 HOSTS_MARK = "# added by broker_rig.py -- removed at teardown"
@@ -250,6 +248,32 @@ def run(argv, check=True, timeout=120, **kw):
     if check and p.returncode != 0:
         raise RuntimeError(f"{argv!r} rc={p.returncode}\n{p.stdout}\n{p.stderr}")
     return p
+
+
+def journal_cursor(unit):
+    """The unit's journal position now, so a later read sees only what
+    followed."""
+    p = run(["journalctl", "-u", unit, "-n", "0", "--show-cursor",
+             "--no-pager"], check=False)
+    m = re.search(r"^-- cursor: (\S+)", p.stdout, re.MULTILINE)
+    return m.group(1) if m else None
+
+
+def logged_since(unit, cursor, line, wait=10):
+    """Whether `line`, after the broker's time stamp, reached the unit's
+    journal after `cursor`. Polled: the journal lags the answer that
+    prompted it."""
+    argv = ["journalctl", "-u", unit, "-o", "cat", "--no-pager"]
+    if cursor:
+        argv += [f"--after-cursor={cursor}"]
+    deadline = time.monotonic() + wait
+    while True:
+        if any(entry.endswith(f"] {line}") for entry in
+               run(argv, check=False).stdout.splitlines()):
+            return True
+        if time.monotonic() > deadline:
+            return False
+        time.sleep(1)
 
 
 def guest(name, script, timeout=90):
@@ -807,7 +831,10 @@ def claim_2(addresses):
     addr = addresses[arm.name]
     uid, gid = uid_of(arm.name), gid_of(arm.name)
 
-    def dial(as_uid, as_gid, host, label):
+    unit = f"workload-{arm.name}-broker.service"
+
+    def dial(as_uid, as_gid, host, label, reason):
+        cursor = journal_cursor(unit)
         argv = []
         if as_uid is not None:
             argv = ["setpriv", f"--reuid={as_uid}", f"--regid={as_gid}",
@@ -818,44 +845,55 @@ def claim_2(addresses):
         p = run(argv, check=False, timeout=60)
         body, code, rc = parse(p)
         say(f"    {label}: rc={rc} http={code} body={body[:120]!r}")
-        return body, code, rc
+        denied = bool(reason) and logged_since(unit, cursor, reason)
+        return body, code, denied
 
     # The control FIRST, so a refusal below cannot be a rig that never reached
     # a broker at all.
-    body, code, _ = dial(uid, gid, PROVIDER, "control: the Host it does know")
+    body, code, _ = dial(uid, gid, PROVIDER,
+                         "control: the Host it does know", None)
     record("the workload uid reaches its own broker for a known Host",
            code == "200" and arm.secret in body,
            f"http={code} — without this, every refusal below is also "
            f"consistent with nothing listening")
 
-    body, code, _ = dial(uid, gid, UNKNOWN_HOST, "the unknown Host")
+    body, code, denied = dial(
+        uid, gid, UNKNOWN_HOST, "the unknown Host",
+        f"deny reason=host-not-configured sandbox={arm.name} "
+        f"host={UNKNOWN_HOST}")
     record("an unknown Host is refused, carrying no credential",
-           (code == "403" and DENY_UNKNOWN_HOST in body
+           (code == "403" and body == DENY_BODY and denied
             and not any(a.secret in body for a in ARMS)),
-           f"http={code} body={body[:160]!r} — 200 would mean a credential "
-           f"was attached to a destination no config named, and the CALLER "
-           f"refusal is also a 403, which is why the sentence is matched")
+           f"http={code} body={body[:160]!r} logged={denied} — 200 would "
+           f"mean a credential was attached to a destination no config "
+           f"named, and the CALLER refusal is also a 403, which is why the "
+           f"journal line is matched")
 
     # Root, against the same address and the same known Host. Without this, the
     # 403 above is equally consistent with a broker that has stopped checking
     # WHO is calling and refuses on the Host alone.
-    body, code, _ = dial(None, None, PROVIDER, "control: root")
+    body, code, denied = dial(None, None, PROVIDER, "control: root",
+                              "deny reason=unidentified caller=uid:0")
     record("root is not served, at the same address and Host",
-           (code == "403" and DENY_UNKNOWN_CALLER in body
+           (code == "403" and body == DENY_BODY and denied
             and not any(a.secret in body for a in ARMS)),
-           f"http={code} body={body[:160]!r} — refused for its CALLER, which "
+           f"http={code} body={body[:160]!r} logged={denied} — refused for "
+           f"its CALLER, which "
            f"is the half the unknown-Host probe cannot show")
 
     # The cross-workload claim, stated positively. Both instances are on the
     # same host's loopback: nothing but the uid check keeps b's caller out of
     # a's credential.
     other = BY_NAME["wlbrk-b"]
-    body, code, _ = dial(uid_of(other.name), gid_of(other.name), PROVIDER,
-                         "control: the other workload's uid")
+    other_uid = uid_of(other.name)
+    body, code, denied = dial(other_uid, gid_of(other.name), PROVIDER,
+                              "control: the other workload's uid",
+                              f"deny reason=unidentified caller=uid:{other_uid}")
     record("the other workload's uid gets nothing from this instance",
-           (code == "403" and DENY_UNKNOWN_CALLER in body
+           (code == "403" and body == DENY_BODY and denied
             and not any(a.secret in body for a in ARMS)),
-           f"http={code} body={body[:160]!r} — a's key reaching b's uid is "
+           f"http={code} body={body[:160]!r} logged={denied} — a's key "
+           f"reaching b's uid is "
            f"the hole ADR 007 decision 6 closes")
 
 
