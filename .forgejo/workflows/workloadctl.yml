@@ -26,6 +26,16 @@ jobs:
           python3 --version
           just --version
 
+      # workloadctl requires customs, and the unit suite imports it. The
+      # version is the one hypervisor.Containerfile pins, taken from the
+      # signed image customs' own workflow pushes.
+      - name: Install customs
+        working-directory: workloadctl
+        run: |
+          sudo just customs-rpm /tmp/customs.rpm
+          sudo dnf install -y /tmp/customs.rpm
+          sudo rm -f /tmp/customs.rpm
+
       # The unit suite runs as a non-root user, exactly as it does on the gate
       # host (tp). Run as root on this runner, the suite writes real
       # /var/lib/workloads/<name> trees that the selinux_labels checks then

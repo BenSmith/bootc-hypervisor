@@ -61,6 +61,9 @@ jobs:
       # with no HOME in its environment, so "$HOME/wlrt-cache" resolved to the
       # filesystem root.
       WLRT_CACHE: /var/cache/wlrt
+      # dev mode installs it in the guest before workloadctl, which requires
+      # it; gate's image already carries it.
+      WLRT_CUSTOMS_RPM: /var/cache/wlrt/customs.rpm
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -119,6 +122,11 @@ jobs:
           mkdir -p "$WLRT_CACHE"
           rm -rf workloadctl/tests/runtime/.cache
           ln -s "$WLRT_CACHE" workloadctl/tests/runtime/.cache
+
+      - name: Fetch customs RPM
+        if: steps.kvm.outputs.available == 'true'
+        working-directory: workloadctl
+        run: sudo just customs-rpm "$WLRT_CUSTOMS_RPM"
 
       - name: Reap stale harness VMs
         if: steps.kvm.outputs.available == 'true'

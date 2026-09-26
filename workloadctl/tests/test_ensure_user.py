@@ -2528,32 +2528,51 @@ class TestReadSshPubkey(unittest.TestCase):
             self.assertEqual(self.mod._read_ssh_pubkey(pw), "")
 
 
-class TestBundleWorkloadctlRpm(unittest.TestCase):
+class TestBundleRpms(unittest.TestCase):
+    """workloadctl's RPM requires customs', so the seed ISO carries both or
+    neither: a guest handed workloadctl's alone fails at dnf, not at the
+    warning that says why."""
+
     def setUp(self):
         self.mod = ensure_vm
 
-    def test_copies_when_cached_rpm_present(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            cached = Path(tmp) / "cached.rpm"
-            cached.write_bytes(b"RPMDATA")
-            seed_dir = Path(tmp) / "seed"
-            seed_dir.mkdir()
-            with mock.patch.object(self.mod, "Path", side_effect=lambda p: (
-                cached if p == "/usr/share/workloadctl/workloadctl.rpm" else Path(p))):
-                result = self.mod._bundle_workloadctl_rpm(seed_dir)
-            self.assertTrue(result)
-            self.assertEqual((seed_dir / "workloadctl.rpm").read_bytes(), b"RPMDATA")
+    def _bundle(self, tmp, present):
+        cache = Path(tmp) / "cache"
+        cache.mkdir()
+        for name in present:
+            (cache / name).write_bytes(name.encode())
+        seed_dir = Path(tmp) / "seed"
+        seed_dir.mkdir()
+        prefix = "/usr/share/workloadctl/"
+        with mock.patch.object(self.mod, "Path", side_effect=lambda p: (
+                cache / p[len(prefix):] if p.startswith(prefix)
+                else Path(p))):
+            return self.mod._bundle_rpms(seed_dir), seed_dir
 
-    def test_returns_false_when_no_cached_rpm(self):
+    def test_copies_both_when_both_cached(self):
         with tempfile.TemporaryDirectory() as tmp:
-            missing = Path(tmp) / "nope.rpm"
-            seed_dir = Path(tmp) / "seed"
-            seed_dir.mkdir()
-            with mock.patch.object(self.mod, "Path", side_effect=lambda p: (
-                missing if p == "/usr/share/workloadctl/workloadctl.rpm" else Path(p))):
-                result = self.mod._bundle_workloadctl_rpm(seed_dir)
+            result, seed_dir = self._bundle(
+                tmp, ("workloadctl.rpm", "customs.rpm"))
+            self.assertTrue(result)
+            self.assertEqual(
+                (seed_dir / "workloadctl.rpm").read_bytes(),
+                b"workloadctl.rpm")
+            self.assertEqual(
+                (seed_dir / "customs.rpm").read_bytes(), b"customs.rpm")
+
+    def test_copies_neither_when_one_is_missing(self):
+        for present in ("workloadctl.rpm", "customs.rpm"):
+            with self.subTest(present=present), \
+                    tempfile.TemporaryDirectory() as tmp:
+                result, seed_dir = self._bundle(tmp, (present,))
+                self.assertFalse(result)
+                self.assertEqual(list(seed_dir.iterdir()), [])
+
+    def test_returns_false_when_nothing_cached(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            result, seed_dir = self._bundle(tmp, ())
             self.assertFalse(result)
-            self.assertFalse((seed_dir / "workloadctl.rpm").exists())
+            self.assertEqual(list(seed_dir.iterdir()), [])
 
 
 class TestDecryptSystemdCredentialMore(unittest.TestCase):

@@ -6,16 +6,25 @@ ARG BASE_IMAGE=ghcr.io/bensmith/fedora-bootc-minimal:latest
 # Every caller passes it explicitly (justfile + CI workflows); the default
 # tracks current stable.
 ARG FEDORA_VERSION=44
+# customs' RPM as an image (FROM scratch, /customs.rpm), signed and pushed by
+# customs' own workflow. workloadctl requires it: the unit suite below imports
+# it, and the final image installs it and caches it for VM seed ISOs. Bump
+# with the spec's `Requires: customs >=`.
+ARG CUSTOMS_RPM=registry.local/customs-rpm:0.2.0
+
+FROM ${CUSTOMS_RPM} AS customs
 
 FROM fedora:${FEDORA_VERSION} AS rpm-builder
 COPY workloadctl/ /workloadctl/
+COPY --from=customs /customs.rpm /tmp/customs.rpm
 # openssl is the CLI, not the library: the test suite mints a CA and its leaves
 # by shelling out to it (tests/test_ca.py, test_mint.py and three others),
 # and the fedora base image ships openssl-libs without it. Absent, `just test`
 # fails here with FileNotFoundError rather than in the PR gate, whose runner
 # happens to have it.
 RUN dnf install -y --nodocs --setopt=install_weak_deps=False \
-        rpm-build python3 just systemd-rpm-macros python3-rpm-macros openssl && \
+        rpm-build python3 just systemd-rpm-macros python3-rpm-macros openssl \
+        /tmp/customs.rpm && \
     dnf clean all && \
     cd /workloadctl && \
     rm -rf rpmbuild && \
@@ -386,10 +395,12 @@ RUN if [ "$ENABLE_PASSWORDLESS_SUDO" = "true" ]; then \
         chmod 0440 /etc/sudoers.d/wheel-nopasswd; \
     fi
 
-# Install workload provisioning system, built from source in the rpm-builder stage.
-# The RPM is also cached at a known path so workload-ensure-user can bundle it
-# into VM cloud-init ISOs at runtime.
+# Install workload provisioning system, built from source in the rpm-builder
+# stage, and customs, which it requires. Both RPMs are also cached at a known
+# path so workload-ensure-user can bundle them into VM cloud-init ISOs at
+# runtime.
 COPY --from=rpm-builder /workloadctl/rpmbuild/RPMS/noarch/ /tmp/wl-rpms/
+COPY --from=customs /customs.rpm /tmp/customs.rpm
 # Exactly one RPM, asserted out loud. The release is timestamped, so the only way
 # to name it is a glob — and a glob that matches several expands to a list that
 # `dnf install` would happily take, silently installing whichever came last and
@@ -403,9 +414,10 @@ RUN /usr/libexec/hypervisor-build/selinux-store-copyup && \
         ls -l /tmp/wl-rpms >&2; \
         exit 1; \
     fi && \
-    dnf install -y "$1" && \
+    dnf install -y "$1" /tmp/customs.rpm && \
     install -Dpm 0644 "$1" /usr/share/workloadctl/workloadctl.rpm && \
-    rm -rf /tmp/wl-rpms && \
+    install -Dpm 0644 /tmp/customs.rpm /usr/share/workloadctl/customs.rpm && \
+    rm -rf /tmp/wl-rpms /tmp/customs.rpm && \
     dnf clean all
 
 # The tinyproxy sysusers fragment is gone, and its absence has a reason.

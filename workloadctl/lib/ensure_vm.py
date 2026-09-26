@@ -150,24 +150,29 @@ def _decrypt_systemd_credential(name: str) -> str:
     )
 
 
-def _bundle_workloadctl_rpm(seed_dir: Path) -> bool:
-    """Copy the workloadctl RPM into seed_dir for in-VM installation.
+BUNDLED_RPMS = ("workloadctl.rpm", "customs.rpm")
 
-    Uses the copy pre-cached by the hypervisor image build at
-    /usr/share/workloadctl/workloadctl.rpm (placed there by `dnf download`
-    during the image build so the ISO is self-contained).
+
+def _bundle_rpms(seed_dir: Path) -> bool:
+    """Copy workloadctl's RPM and customs', which it requires, into seed_dir
+    for in-VM installation.
+
+    Uses the copies the hypervisor image build caches under
+    /usr/share/workloadctl, so the ISO is self-contained. Both or neither:
+    workloadctl's RPM cannot install without customs'.
     """
-    dest = seed_dir / "workloadctl.rpm"
+    cached = [Path(f"/usr/share/workloadctl/{name}") for name in BUNDLED_RPMS]
+    missing = [str(path) for path in cached if not path.exists()]
+    if missing:
+        ensure_common.log(
+            f"  WARNING: no cached RPM at {', '.join(missing)}; bootstrap "
+            "will not be able to install workloadctl from the ISO.")
+        return False
 
-    cached = Path("/usr/share/workloadctl/workloadctl.rpm")
-    if cached.exists():
-        shutil.copy2(cached, dest)
-        ensure_common.log("  Bundled workloadctl RPM (cached copy)")
-        return True
-
-    ensure_common.log("  WARNING: no cached workloadctl RPM at /usr/share/workloadctl/workloadctl.rpm; "
-        "bootstrap will not be able to install workloadctl from the ISO.")
-    return False
+    for name, path in zip(BUNDLED_RPMS, cached):
+        shutil.copy2(path, seed_dir / name)
+    ensure_common.log("  Bundled workloadctl and customs RPMs (cached copies)")
+    return True
 
 
 def _resolve_cloud_init_instance_id(name: str, instance_id_file: Path,
@@ -678,10 +683,10 @@ def build_cloud_init_iso(pw, config: dict, name: str, config_path: Path | None =
     finally:
         os.close(fd)
 
-    # For VM workloads: bundle the workloadctl RPM so the bootstrap can install
-    # it directly from the cdrom instead of fetching it from a git repo.
+    # For VM workloads: bundle workloadctl's and customs' RPMs so the
+    # bootstrap can install them directly from the cdrom.
     if vm_cfg:
-        _bundle_workloadctl_rpm(seed_dir)
+        _bundle_rpms(seed_dir)
 
     # Build ISO using genisoimage or mkisofs
     iso_tool = None

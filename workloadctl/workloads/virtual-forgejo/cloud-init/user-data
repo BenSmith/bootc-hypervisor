@@ -283,12 +283,13 @@ write_files:
         fi
       fi
 
-      # 2. Install workloadctl from the RPM bundled in the cloud-init ISO.
-      # The ISO is labelled CIDATA; mount it, install, unmount.
+      # 2. Install workloadctl, and customs, which it requires, from the RPMs
+      # bundled in the cloud-init ISO. The ISO is labelled CIDATA; mount it,
+      # install, unmount.
       CIDATA_DEV=$(blkid -L CIDATA 2>/dev/null || echo /dev/sr0)
       CIDATA_MNT=$(mktemp -d)
       mount -r "$CIDATA_DEV" "$CIDATA_MNT"
-      dnf install -y "$CIDATA_MNT/workloadctl.rpm"
+      dnf install -y "$CIDATA_MNT/workloadctl.rpm" "$CIDATA_MNT/customs.rpm"
       umount "$CIDATA_MNT" && rmdir "$CIDATA_MNT"
 
       # 3. Drop the in-VM workload TOMLs into the locations workloadctl expects.

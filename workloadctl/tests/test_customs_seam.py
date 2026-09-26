@@ -16,6 +16,7 @@ or a checkout's when CUSTOMS_CHECKOUT is set.
 import ast
 import json
 import os
+import re
 import shutil
 import tempfile
 import unittest
@@ -315,6 +316,40 @@ class TestTheProgramsAreCustoms(unittest.TestCase):
         spec = (Path(REPO_ROOT) / "rpm" / "workloadctl.spec").read_text()
         self.assertRegex(spec, r"(?m)^Requires:\s+customs >= ")
 
+    def test_seed_isos_carry_customs(self):
+        """A VM's seed ISO carries customs' RPM beside workloadctl's, which
+        its bootstrap cannot install alone."""
+        from ensure_vm import BUNDLED_RPMS
+        self.assertIn("customs.rpm", BUNDLED_RPMS)
+
+
+CONTAINERFILE = Path(REPO_ROOT).parent / "hypervisor.Containerfile"
+
+
+@unittest.skipUnless(CONTAINERFILE.is_file(),
+                     "image half not present (standalone workloadctl checkout)")
+class TestTheImageInstallsCustoms(unittest.TestCase):
+
+    def test_the_pinned_customs_satisfies_the_spec(self):
+        """The hypervisor image takes customs' RPM from the image its build
+        pins, installs it in the stage that runs this suite and in the
+        image, and caches it for VM seed ISOs. The pinned tag satisfies the
+        spec's minimum, or the image's `dnf install` refuses workloadctl."""
+        spec = (Path(REPO_ROOT) / "rpm" / "workloadctl.spec").read_text()
+        minimum = re.search(
+            r"(?m)^Requires:\s+customs >= (\S+)$", spec).group(1)
+        containerfile = CONTAINERFILE.read_text()
+        pinned = re.search(
+            r"(?m)^ARG CUSTOMS_RPM=\S+:(\S+)$", containerfile).group(1)
+
+        def version(text):
+            return tuple(int(part) for part in text.split("."))
+
+        self.assertGreaterEqual(version(pinned), version(minimum))
+        self.assertIn("FROM ${CUSTOMS_RPM} AS customs", containerfile)
+        self.assertEqual(containerfile.count(
+            "COPY --from=customs /customs.rpm /tmp/customs.rpm"), 2)
+        self.assertIn("/usr/share/workloadctl/customs.rpm", containerfile)
 
 if __name__ == "__main__":
     unittest.main()

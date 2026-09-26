@@ -216,6 +216,18 @@ rpm-install: rpm-build
   echo "Installing ${rpm}"
   sudo dnf install -y --allowerasing "$rpm"
 
+# customs' RPM, which workloadctl's requires, out of the image
+# hypervisor.Containerfile pins (FROM scratch, /customs.rpm), to DEST.
+customs-rpm dest="customs.rpm":
+  #!/usr/bin/env bash
+  set -euo pipefail
+  image=$(sed -n 's/^ARG CUSTOMS_RPM=//p' ../hypervisor.Containerfile)
+  [ -n "$image" ] || { echo "no ARG CUSTOMS_RPM in hypervisor.Containerfile" >&2; exit 1; }
+  ctr=$(podman create "$image" none)
+  trap 'podman rm -f "$ctr" >/dev/null' EXIT
+  podman cp "$ctr:/customs.rpm" "{{dest}}"
+  rpm -qp "{{dest}}"
+
 # Remove old build artifacts
 rpm-clean:
   rm -rf rpmbuild
