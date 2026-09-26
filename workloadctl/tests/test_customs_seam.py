@@ -23,7 +23,7 @@ import unittest
 from pathlib import Path
 
 from customs.inspect_policy import Policy, load_policy
-from tests import CUSTOMS_LIBEXEC, REPO_ROOT
+from tests import CUSTOMS_CHECKOUT, CUSTOMS_LIBEXEC, REPO_ROOT, script_env
 
 # customs' interface document, "Imported names": what customs keeps stable
 # for workloadctl. Copied, not read, because an install without docs has no
@@ -120,6 +120,26 @@ class TestTheScannerSeesTheTree(unittest.TestCase):
         self.assertTrue(_program_flags(INSPECT)["--policy"])
         self.assertFalse(_program_flags(INSPECT)["--broker"])
         self.assertTrue(_program_flags(BROKER)["--listen"])
+
+    def test_one_customs_is_under_test(self):
+        """This process, a child launched with script_env(), and the
+        programs read from CUSTOMS_LIBEXEC are one customs. With a checkout
+        named on a host that also has customs installed, a checkout behind
+        site-packages splits them: the imports here are the installed
+        release, the programs and the children the checkout."""
+        import subprocess
+        import sys
+
+        import customs
+        here = Path(customs.__file__).resolve()
+        child = subprocess.run(
+            [sys.executable, "-c", "import customs; print(customs.__file__)"],
+            capture_output=True, text=True, check=True, env=script_env(),
+            cwd="/")
+        self.assertEqual(Path(child.stdout.strip()).resolve(), here)
+        if CUSTOMS_CHECKOUT:
+            self.assertEqual(here.parent.parent, Path(CUSTOMS_CHECKOUT))
+            self.assertEqual(CUSTOMS_LIBEXEC, Path(CUSTOMS_CHECKOUT) / "libexec")
 
     def test_the_import_scan_finds_imports(self):
         found = [p for p, text in _shipped_sources()

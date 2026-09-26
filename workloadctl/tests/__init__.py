@@ -56,8 +56,12 @@ CUSTOMS_CHECKOUT = os.environ.get("CUSTOMS_CHECKOUT")
 if CUSTOMS_CHECKOUT:
     CUSTOMS_CHECKOUT = str(Path(CUSTOMS_CHECKOUT).resolve())
     os.environ["CUSTOMS_CHECKOUT"] = CUSTOMS_CHECKOUT
+# Right after lib/, as script_env() orders it for a child: ahead of
+# site-packages, so that on a host with customs installed this process and
+# its children import the same customs -- the checkout's, whose programs
+# CUSTOMS_LIBEXEC names.
 if CUSTOMS_CHECKOUT and CUSTOMS_CHECKOUT not in sys.path:
-    sys.path.append(CUSTOMS_CHECKOUT)
+    sys.path.insert(sys.path.index(LIB_DIR) + 1, CUSTOMS_CHECKOUT)
 # The directory customs' programs are read from: the installed one, or the
 # checkout's own.
 CUSTOMS_LIBEXEC = (Path(CUSTOMS_CHECKOUT) / "libexec" if CUSTOMS_CHECKOUT
