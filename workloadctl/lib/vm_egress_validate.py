@@ -652,11 +652,11 @@ def validate_egress(net: dict) -> list[str]:
 
     # The inspector relays no HTTP/2: every terminated connection is offered
     # http/1.1 alone. A host that needs h2 is spliced, and saying so is the
-    # operator's decision, since a splice is never decrypted and an entry
-    # here was.
+    # operator's decision, since a splice is never decrypted and a
+    # terminated host is.
     if "http2" in net:
         errors.append(
-            "[[vm.network.http2]] is no longer accepted: the egress inspector "
+            "[[vm.network.http2]] is not accepted: the egress inspector "
             "relays no HTTP/2, so a terminated host is offered http/1.1 "
             "alone. A host that must keep h2 is spliced: move the entry, "
             "with its reason, to [[vm.network.splice]], and it is not "

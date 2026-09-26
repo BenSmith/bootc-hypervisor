@@ -241,21 +241,14 @@ def inspect_listener_command(name: str, uid: int) -> list:
 
     THIS IS WHERE THE INSPECTOR AND WORKLOADCTL MEET, and it is the only
     place. The inspector (customs-inspect, from the customs package) knows
-    nothing about workloads -- not where one
-    keeps its policy, its state, its counters or its record, and not what a
-    uid becomes. Each of those is a fact about how workloadctl lays out a
-    host, computed HERE from the name and uid the generator already holds,
-    and written into ExecStart= as a flag. The entrypoint parses; it derives
-    nothing. tests/test_customs_seam.py asserts that this command names
-    every one of the five and that customs-inspect takes each.
-
-    It used to be `workload-inspect-listener <name>`, with the entrypoint
-    importing egress_policy, workload_lib and workload_addr to compute the
-    rest for itself -- a launcher. The generator already imported all three
-    for other lines of this unit, so moving the derivation cost nothing
-    here and removed the last workload-side import from the inspector's
-    side of the line. A third launcher on a third substrate now writes a
-    unit, not a program.
+    nothing about workloads -- not where one keeps its policy, its state, its
+    counters or its record, and not what a uid becomes. Each of those is a
+    fact about how workloadctl lays out a host, computed HERE from the name
+    and uid the generator already holds, and written into ExecStart= as a
+    flag. The entrypoint parses; it derives nothing, so a third substrate
+    writes a unit, not a program. tests/test_customs_seam.py asserts that
+    this command names every one of the five and that customs-inspect takes
+    each.
 
     The broker pair is computed from the uid with the same function the
     broker's own `--listen` flag is (broker_config.broker_command, when its

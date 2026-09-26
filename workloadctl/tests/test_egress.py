@@ -3017,7 +3017,7 @@ class TestRung2Schema(unittest.TestCase):
                      "http2": [{"host": "x.example.com", "reason": "r"}]}):
             errors = [e for e in self._egress(net) if "http2" in e]
             self.assertEqual(len(errors), 1, (net, errors))
-            self.assertIn("no longer accepted", errors[0])
+            self.assertIn("is not accepted", errors[0])
 
     # --- allow ---
 
