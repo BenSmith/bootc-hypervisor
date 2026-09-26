@@ -1353,6 +1353,53 @@ class TestCapabilityMatrix(unittest.TestCase):
                           return_value=[]):
             self.assertEqual(substrate.teardown_plan(purge=True), [])
 
+    def test_container_purge_removes_the_runtime_directory(self):
+        """A filtered container's /run/workload-vm/<name> goes on purge.
+
+        It holds the inspector's policy and counters, is owned by the uid purge
+        deletes, and outlives every stop, so a same-name workload created later
+        would find another uid's directory with the old workload's counters.
+        A plain disable keeps it, as it keeps the user."""
+        substrate = ContainerSubstrate(self._container_config(), MagicMock())
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / substrate.config.name
+            run_dir.mkdir()
+            (run_dir / 'inspect-status.json').write_text('{}')
+            with patch.object(_container_mod, 'SOCKET_DIR', Path(tmp)), \
+                 patch.object(_container_mod, 'remove_subid_entries'):
+                self.assertEqual(substrate.teardown(purge=False), [])
+                self.assertTrue(run_dir.exists())
+                self.assertEqual(substrate.teardown(purge=True), [])
+                self.assertFalse(run_dir.exists())
+                # Gone already, as for an unfiltered container: no failure.
+                self.assertEqual(substrate.teardown(purge=True), [])
+
+    def test_container_purge_reports_a_runtime_directory_it_cannot_remove(self):
+        substrate = ContainerSubstrate(self._container_config(), MagicMock())
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / substrate.config.name).mkdir()
+            with patch.object(_container_mod, 'SOCKET_DIR', Path(tmp)), \
+                 patch.object(_container_mod, 'remove_subid_entries'), \
+                 patch.object(_container_mod.shutil, 'rmtree',
+                              side_effect=OSError('busy')):
+                failures = substrate.teardown(purge=True)
+        self.assertEqual(len(failures), 1)
+        self.assertIn('runtime directory', failures[0])
+        self.assertIn('busy', failures[0])
+
+    def test_container_teardown_plan_names_the_runtime_directory(self):
+        substrate = ContainerSubstrate(self._container_config(), MagicMock())
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / substrate.config.name
+            with patch.object(_container_mod, 'SOCKET_DIR', Path(tmp)), \
+                 patch.object(_container_mod, 'subid_files_with_entries',
+                              return_value=[]):
+                self.assertEqual(substrate.teardown_plan(purge=True), [])
+                run_dir.mkdir()
+                self.assertEqual(substrate.teardown_plan(purge=False), [])
+                self.assertEqual(substrate.teardown_plan(purge=True),
+                                 [f'remove runtime directory: {run_dir}'])
+
     def test_vm_teardown_removes_socket_dir_only_on_purge(self):
         config = self._vm_config()
         manager = MagicMock()

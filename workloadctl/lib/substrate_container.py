@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import datetime
 import json
+import shutil
 import subprocess
 import sys
 import time
@@ -33,6 +34,7 @@ from substrate import (
     service_active,
     systemctl_or_raise,
 )
+from config_parser import SOCKET_DIR
 from container_network_config import container_uses_inspect
 from workload_lib import RUN_SYSTEMD_SYSTEM
 from run_files import workload_service_units
@@ -570,10 +572,14 @@ class ContainerSubstrate(Substrate):
     def teardown(self, *, purge: bool) -> list[str]:
         """Remove what a container workload owns beyond its generated files.
 
-        Two things: the ``user@<uid>.service.d`` drop-in directory, which pins the
-        user manager into workloads.slice and is left empty once the fragment is
-        unlinked, and — on purge only — the subuid/subgid ranges, which outlive the
-        user and would otherwise be handed to whoever next claims the UID.
+        The ``user@<uid>.service.d`` drop-in directory, which pins the user
+        manager into workloads.slice and is left empty once the fragment is
+        unlinked; and on purge only, the subuid/subgid ranges, which outlive the
+        user and would otherwise be handed to whoever next claims the UID, and a
+        filtered container's runtime directory. That directory holds the
+        inspector's policy and counters, is owned by the uid purge deletes, and
+        is preserved across stops, so a later workload of the same name would
+        inherit both.
         """
         failures: list[str] = []
 
@@ -590,6 +596,14 @@ class ContainerSubstrate(Substrate):
             except Exception as e:
                 failures.append(f"remove subuid/subgid entries: {e}")
 
+            sock_dir = SOCKET_DIR / self.config.name
+            if sock_dir.exists():
+                try:
+                    info("  Removing runtime directory...")
+                    shutil.rmtree(sock_dir)
+                except OSError as e:
+                    failures.append(f"remove runtime directory {sock_dir}: {e}")
+
         return failures
 
     def teardown_plan(self, *, purge: bool) -> list[str]:
@@ -598,11 +612,15 @@ class ContainerSubstrate(Substrate):
         a separate act on operator-visible state."""
         if not purge:
             return []
+        lines = []
         subid = subid_files_with_entries(self.config.username)
-        if not subid:
-            return []
-        return ["remove subuid/subgid entries from: "
-                + ", ".join(str(p) for p in subid)]
+        if subid:
+            lines.append("remove subuid/subgid entries from: "
+                         + ", ".join(str(p) for p in subid))
+        sock_dir = SOCKET_DIR / self.config.name
+        if sock_dir.exists():
+            lines.append(f"remove runtime directory: {sock_dir}")
+        return lines
 
     def _has_any_rollback_tag(self) -> bool:
         """Return True if any rollback tag exists (even if already applied)."""
