@@ -21,11 +21,13 @@ from unittest import mock
 
 from customs.egress_ca import (CA_BACKDATE_SECONDS, CA_CERT_NAME, CA_KEY_NAME,
                        CA_VALIDITY_DAYS, ca_cert_path, ca_dir,
-                       ca_key_path, ca_openssl_argv, ca_subject)
+                       ca_key_path, ca_openssl_argv, ca_subject,
+                       leaf_dir)
 
 
 # `lib/` reaches sys.path via tests/__init__, so this import follows it.
 import ensure_common
+from tests import CUSTOMS_CHECKOUT, CUSTOMS_LIBEXEC
 import vm_default_seed
 
 HAVE_OPENSSL = shutil.which("openssl") is not None
@@ -187,6 +189,16 @@ class TestGeneratorIsIdempotent(unittest.TestCase):
         mod.os.chown = lambda *a, **k: None
         self.addCleanup(setattr, mod, "workload_state_dir", self._orig_state)
         self.addCleanup(setattr, mod.os, "chown", self._orig_chown)
+        # The mint is customs' program: the checkout's, when one is named,
+        # which then has to find the checkout's package too.
+        patches = [mock.patch.object(mod, "CA_MINT_BIN",
+                                     str(CUSTOMS_LIBEXEC / "customs-mint-ca"))]
+        if CUSTOMS_CHECKOUT:
+            patches.append(mock.patch.dict(
+                os.environ, {"PYTHONPATH": CUSTOMS_CHECKOUT}))
+        for patch in patches:
+            patch.start()
+            self.addCleanup(patch.stop)
 
     @unittest.skipUnless(HAVE_OPENSSL, "needs openssl")
     def test_it_mints_once_and_leaves_it_alone(self):
@@ -209,6 +221,53 @@ class TestGeneratorIsIdempotent(unittest.TestCase):
         # both read it -- so it is deliberately NOT 0600.
         self.assertEqual(ca_cert_path(self.state).stat().st_mode & 0o777, 0o644)
         self.assertEqual(ca_dir(self.state).stat().st_mode & 0o777, 0o700)
+
+    @unittest.skipUnless(HAVE_OPENSSL, "needs openssl")
+    def test_the_certificate_is_readable_under_a_tight_umask(self):
+        """openssl writes under the caller's umask, and the seed builder and
+        `diagnose` read the certificate as another user."""
+        old = os.umask(0o077)
+        try:
+            self.mod.generate_egress_ca(self.pw, "myvm")
+        finally:
+            os.umask(old)
+        self.assertEqual(ca_cert_path(self.state).stat().st_mode & 0o777,
+                         0o644)
+
+    @unittest.skipUnless(HAVE_OPENSSL, "needs openssl")
+    def test_a_kept_ca_keeps_its_leaf_caches(self):
+        """The caches go only with a NEW CA. Cleared on every start, the
+        inspector re-mints every leaf after each restart and the denial
+        cache forgets what it refused."""
+        self.mod.generate_egress_ca(self.pw, "myvm")
+        leaf = leaf_dir(self.state) / "kept.pem"
+        leaf.parent.mkdir(parents=True, exist_ok=True)
+        leaf.write_text("x")
+        self.mod.generate_egress_ca(self.pw, "myvm")
+        self.assertTrue(leaf.exists(), "a start that kept the CA cleared "
+                        "its leaf cache")
+
+    @unittest.skipUnless(HAVE_OPENSSL, "needs openssl")
+    def test_half_a_ca_is_refused_not_minted_over(self):
+        """The certificate left behind may be the guest's anchor, so a lost
+        key is the operator's to resolve; minting over it would strand a
+        provisioned guest without a word."""
+        self.mod.generate_egress_ca(self.pw, "myvm")
+        cert = ca_cert_path(self.state)
+        before = cert.read_bytes()
+        ca_key_path(self.state).unlink()
+        with self.assertRaises(RuntimeError) as ctx:
+            self.mod.generate_egress_ca(self.pw, "myvm")
+        self.assertIn(str(cert), str(ctx.exception))
+        self.assertEqual(cert.read_bytes(), before)
+        self.assertFalse(ca_key_path(self.state).exists())
+
+    def test_a_mint_that_cannot_run_raises_naming_it(self):
+        with mock.patch.object(self.mod.subprocess, "run",
+                               side_effect=FileNotFoundError("no such file")):
+            with self.assertRaises(RuntimeError) as ctx:
+                self.mod.generate_egress_ca(self.pw, "myvm")
+        self.assertIn("customs-mint-ca", str(ctx.exception))
 
     def test_openssl_failing_raises_rather_than_returning_quietly(self):
         # A silent failure here yields a filtered VM with no CA, which does not

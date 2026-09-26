@@ -26,8 +26,8 @@ import struct
 import subprocess
 import sys
 import tempfile
-import time
 import unittest
+from unittest import mock
 from pathlib import Path
 
 from customs.inspect_policy import Policy, load_policy
@@ -66,6 +66,7 @@ PUBLISHED = {
 INSPECT = CUSTOMS_LIBEXEC / "customs-inspect"
 BROKER = CUSTOMS_LIBEXEC / "customs-broker"
 RESOLVE = CUSTOMS_LIBEXEC / "customs-resolve"
+MINT = CUSTOMS_LIBEXEC / "customs-mint-ca"
 
 # customs' interface document, "The responder's status file": the keys
 # workloadctl may read from it. Copied for the reason PUBLISHED is.
@@ -94,6 +95,11 @@ RESOLVE_HANDED = frozenset({
     "--policy",    # the inspector's document, read to count unlisted names
     "--static",    # the allow-by-name map
     "--status",    # where the counters go
+})
+# The CA mint's, every one it takes.
+MINT_HANDED = frozenset({
+    "--name",       # carried on the CA's subject
+    "--state-dir",  # the inspector's --state-dir, where the CA goes
 })
 BROKER_HANDED = BROKER_REQUIRED | {
     "--placeholder", "--auth-header", "--auth-format"}
@@ -383,6 +389,57 @@ class TestTheResponderStatusIsReadByPublishedKeys(unittest.TestCase):
                 if fig.group == NAMES and fig.derive is None}
         self.assertTrue(read)
         self.assertLessEqual(read, RESOLVE_STATUS_PUBLISHED)
+
+
+class TestTheCaMintIsHandedItsFlags(unittest.TestCase):
+    """generate_egress_ca runs customs-mint-ca: a flag it does not take is
+    a workload that cannot start, found at the first boot of a filtered
+    one."""
+
+    def _argv(self):
+        import ensure_common
+        state = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, state, ignore_errors=True)
+        pw = type("pw", (), {"pw_uid": os.getuid(), "pw_gid": os.getgid()})
+        ran = []
+
+        def fake_run(argv, **kwargs):
+            ran.append(argv)
+            raise OSError("stop here")
+
+        with mock.patch.object(ensure_common, "workload_state_dir",
+                               return_value=state), \
+                mock.patch.object(ensure_common.os, "chown"), \
+                mock.patch.object(ensure_common.subprocess, "run", fake_run):
+            with self.assertRaises(RuntimeError):
+                ensure_common.generate_egress_ca(pw, "web")
+        self.assertEqual(len(ran), 1)
+        return ran[0], state
+
+    def test_the_command_is_the_program_and_its_two_flags(self):
+        import ensure_common
+        argv, state = self._argv()
+        self.assertEqual(argv[0], ensure_common.CA_MINT_BIN)
+        self.assertEqual(Path(argv[0]).name, MINT.name)
+        self.assertEqual(Path(argv[0]).parent,
+                         Path("/usr/libexec/customs"))
+        flags = {argv[i]: argv[i + 1] for i in range(1, len(argv), 2)}
+        self.assertEqual(flags, {"--name": "web", "--state-dir": str(state)})
+
+    def test_the_state_dir_is_the_inspectors(self):
+        """The CA the mint writes is the one the inspector signs with, so
+        the two are handed one directory."""
+        from gen_egress import inspect_listener_command
+        argv, state = self._argv()
+        mint_dir = argv[argv.index("--state-dir") + 1]
+        with mock.patch("gen_egress.workload_state_dir", return_value=state):
+            cmd = inspect_listener_command("web", 10004)
+        self.assertEqual(cmd[cmd.index("--state-dir") + 1], mint_dir)
+
+    def test_the_mint_takes_each_handed_flag_and_requires_it(self):
+        taken = _program_flags(MINT)
+        self.assertEqual(set(taken), MINT_HANDED)
+        self.assertTrue(all(taken.values()), taken)
 
 
 def _query(ident, name, qtype):

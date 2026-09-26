@@ -36,11 +36,9 @@ Recommends:     udica
 # managed bridge: passt serves the guest DHCP and DNS itself.
 Requires:       passt
 Requires:       nftables
-# The `openssl` command line, not just the library. Nothing here links against
-# libcrypto -- customs' egress_ca builds argv for the per-workload CA and its
-# leaves and `workload-ensure-user` mints the CA at first boot, so a host
-# without the CLI fails a VM start rather than a build. cmd_secret shells out
-# to it as well.
+# The `openssl` command line, not just the library: cmd_secret shells out to
+# it. The egress CA and its leaves are minted by customs' programs, which
+# require it themselves.
 # openssl-libs arrives with half the base system; the CLI does not.
 Requires:       openssl
 # The egress inspector, the credential broker and the DNS responder:

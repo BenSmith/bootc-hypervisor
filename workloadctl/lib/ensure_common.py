@@ -28,7 +28,6 @@ nothing patches it -- the difference is the traffic, not the taste.)
 import os
 import shutil
 import subprocess
-import time
 
 import deployment
 from config_parser import workload_root_dir
@@ -36,9 +35,14 @@ from workload_lib import workload_state_dir, workload_data_dir
 from run_files import workload_env_dir
 from customs.egress_ca import (
     ca_cert_path, ca_dir, denial_dir, leaf_dir, ca_key_path,
-    ca_openssl_argv,
 )
 from config_parser import SOCKET_DIR
+
+# customs' CA mint: the one place the CA's openssl invocation and its
+# refusals live, so the inspector that signs with the CA and the step that
+# makes it cannot disagree about what a CA is.
+CA_MINT_BIN = "/usr/libexec/customs/customs-mint-ca"
+
 
 def log(msg):
     """Print to stdout (captured by systemd journal)."""
@@ -315,7 +319,7 @@ def setup_workload_runtime_dir(pw, name: str):
 
 
 def generate_egress_ca(pw, name: str):
-    """Generate this workload's egress CA if absent, or raise with openssl's words.
+    """Mint this workload's egress CA if absent, or raise with the mint's words.
 
     Symmetric to generate_vm_host_keypair, and here for the same reason it is:
     the seed ISO carries this certificate, so "before the seed" has to be a fact
@@ -338,9 +342,10 @@ def generate_egress_ca(pw, name: str):
     provision_egress_pki_dirs recreates and relabels them a moment later, which is
     why removing them here is safe.
     """
-    dir_path = ca_dir(workload_state_dir(name))
-    key_path = ca_key_path(workload_state_dir(name))
-    cert_path = ca_cert_path(workload_state_dir(name))
+    state_dir = workload_state_dir(name)
+    dir_path = ca_dir(state_dir)
+    key_path = ca_key_path(state_dir)
+    cert_path = ca_cert_path(state_dir)
 
     if key_path.exists() and cert_path.exists():
         return  # already minted -- keep the guest's anchor valid
@@ -348,18 +353,23 @@ def generate_egress_ca(pw, name: str):
     dir_path.mkdir(mode=0o700, parents=True, exist_ok=True)
     os.chown(dir_path, pw.pw_uid, pw.pw_gid)
 
-    result = subprocess.run(
-        ca_openssl_argv(name, key_path, cert_path, now=time.time()),
-        capture_output=True, text=True,
-    )
+    # Half a CA is refused by the mint, naming both files, rather than
+    # re-minted over: the half that is there may be the guest's anchor.
+    try:
+        result = subprocess.run(
+            [CA_MINT_BIN, "--name", name, "--state-dir", str(state_dir)],
+            capture_output=True, text=True,
+        )
+    except OSError as exc:
+        raise RuntimeError(
+            f"customs-mint-ca (egress CA) could not run: {exc}") from exc
     if result.returncode != 0:
-        # Same both-streams reasoning as _ssh_keygen: openssl splits its
-        # diagnostics across stdout and stderr depending on the failure, so
-        # reporting one of them yields an empty message on some runs.
+        # Both streams, as _ssh_keygen reports them: a program that could
+        # not start says so on either, and one of them is empty.
         said = " / ".join(s.strip() for s in (result.stdout, result.stderr)
                           if s.strip())
         raise RuntimeError(
-            f"openssl (egress CA) failed: "
+            f"customs-mint-ca (egress CA) failed: "
             f"{said or f'no output, exit {result.returncode}'}")
 
     os.chown(key_path, pw.pw_uid, pw.pw_gid)
