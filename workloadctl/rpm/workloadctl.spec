@@ -43,11 +43,12 @@ Requires:       nftables
 # to it as well.
 # openssl-libs arrives with half the base system; the CLI does not.
 Requires:       openssl
-# The egress inspector and the credential broker: customs-inspect and
-# customs-broker, which the generated units run, and the customs package whose
-# published names lib/ imports (tests/test_customs_seam.py). 0.2.0 is the first
-# release that installs the package where Python finds it.
-Requires:       customs >= 0.2.0
+# The egress inspector, the credential broker and the DNS responder:
+# customs-inspect, customs-broker and customs-resolve, which the generated
+# units run, and the customs package whose published names lib/ imports
+# (tests/test_customs_seam.py). 0.3.0 is the first release whose responder
+# takes --static.
+Requires:       customs >= 0.3.0
 # There is deliberately NO proxy dependency here. Through rung 1 this was a hard
 # `Requires: tinyproxy`, because a VM declaring [vm.network].hosts was filtered
 # default-deny with its own proxy as the only route out. Rung 2 replaced that
@@ -139,8 +140,6 @@ install -Dpm 0755 %{_sourcedir}/libexec/workload-vm-inspect \
     %{buildroot}%{_libexecdir}/workloadctl/workload-vm-inspect
 install -Dpm 0755 %{_sourcedir}/libexec/workload-vm-svcaddr \
     %{buildroot}%{_libexecdir}/workloadctl/workload-vm-svcaddr
-install -Dpm 0755 %{_sourcedir}/libexec/workload-vm-resolve \
-    %{buildroot}%{_libexecdir}/workloadctl/workload-vm-resolve
 install -Dpm 0755 %{_sourcedir}/libexec/workload-vm-clock \
     %{buildroot}%{_libexecdir}/workloadctl/workload-vm-clock
 install -Dpm 0755 %{_sourcedir}/libexec/workload-vm-notify \
@@ -405,14 +404,13 @@ if [ -x /usr/sbin/semodule ] && [ -f %{_datadir}/workloadctl/workload-inspect.ci
 fi
 # The synthesising responder's domain, on the same terms and for the same
 # reason the inspector has one: it parses guest-supplied wire format. Without
-# this module the script is bin_t, systemd's own rules run it as
-# unconfined_service_t, and NOTHING fails -- which is how it shipped unconfined
-# (see the module header). The restorecon is not optional on an upgrade: the
-# installed file keeps its old bin_t label until it is relabelled, and a
+# this module the program is bin_t, systemd's own rules run it as
+# unconfined_service_t, and NOTHING fails (see the module header). customs is
+# installed before this package, so its file already carries a label, and a
 # freshly loaded filecon does not retroactively touch it.
 if [ -x /usr/sbin/semodule ] && [ -f %{_datadir}/workloadctl/workload-resolve.cil ]; then
     if semodule -i %{_datadir}/workloadctl/workload-resolve.cil 2>/dev/null; then
-        restorecon /usr/libexec/workloadctl/workload-vm-resolve 2>/dev/null || :
+        restorecon /usr/libexec/customs/customs-resolve 2>/dev/null || :
     fi
 fi
 # The clock keeper's domain, on the same terms: it parses what the guest's
@@ -488,7 +486,7 @@ if [ $1 -eq 0 ]; then
         semodule -r workload-inspect 2>/dev/null || :
         restorecon /usr/libexec/customs/customs-inspect 2>/dev/null || :
         semodule -r workload-resolve 2>/dev/null || :
-        restorecon /usr/libexec/workloadctl/workload-vm-resolve 2>/dev/null || :
+        restorecon /usr/libexec/customs/customs-resolve 2>/dev/null || :
         semodule -r workload-clock 2>/dev/null || :
         restorecon /usr/libexec/workloadctl/workload-vm-clock 2>/dev/null || :
     fi
@@ -514,7 +512,6 @@ fi
 %{_libexecdir}/workloadctl/workload-vm-notify
 %{_libexecdir}/workloadctl/workload-vm-inspect
 %{_libexecdir}/workloadctl/workload-vm-svcaddr
-%{_libexecdir}/workloadctl/workload-vm-resolve
 %{_libexecdir}/workloadctl/workload-vm-clock
 %{_libexecdir}/workloadctl/workload-vm-qmp
 %{_libexecdir}/workloadctl/workload-vm-shutdown

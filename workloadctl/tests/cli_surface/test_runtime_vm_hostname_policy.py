@@ -37,8 +37,8 @@ WHY THE REFUSED PROBES DIAL A LITERAL AND SET THEIR OWN Host HEADER
 
 Not because DNS refuses the name — it does not, and this file used to say it
 did. Synthesis is UNCONDITIONAL: the responder answers every name it is asked
-about with the inspector's own address (lib/vm_network_config.py vm_resolve_policy, and the
-matching comment in lib/resolve_policy.py Policy). `hosts` changes no answer it
+about with the inspector's own address (lib/gen_vm.py resolve_command, and
+customs' resolve_policy.Policy). `hosts` changes no answer it
 gives; the list is carried so unlisted queries can be COUNTED. The refusal is
 the listener's, and only the listener's.
 
@@ -563,7 +563,7 @@ def test_every_name_resolves_to_the_inspector_and_unlisted_ones_are_counted(targ
     is supposed to: synthesis is unconditional. Every name the guest asks about
     that is not in the `allow`-derived static map is answered with the
     inspector's own address, so `hosts` changes no answer this responder gives
-    (lib/vm_network_config.py vm_resolve_policy states it; lib/resolve_policy.py's
+    (lib/gen_vm.py resolve_command states it; customs' resolve_policy
     Policy.answers is where it happens). The old assertion described a design
     the project considered and rejected, and it had never run: dev mode skips
     the VM modules and the VM half had never run in gate mode, so it failed the

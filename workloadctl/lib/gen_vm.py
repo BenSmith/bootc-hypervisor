@@ -25,7 +25,7 @@ from workload_lib import (
     virtiofs_tags, systemd_escape_path,
 )
 from run_files import GENERATED_BY
-from egress_policy import vm_uses_inspect, uses_resolve
+from egress_policy import inspect_policy_path, vm_uses_inspect, uses_resolve
 from broker_config import (
     vm_uses_credentials, vm_broker_hosts, vm_broker_upstream_addresses,
     vm_broker_command,
@@ -44,8 +44,10 @@ from vm_defs import (
 )
 from workload_addr import (
     MGMT_SSH_PORT, management_address, VM_RESOLVE_LISTENER_BIN, RESOLVE_PORT,
-    resolve_address,
+    inspect_address, resolve_address,
 )
+from nft_elements import vm_resolve_status_path
+from vm_network_config import vm_resolve_static_path
 from unit_file import Unit
 from gen_egress import (
     generate_inspect_socket, generate_inspect_service,
@@ -409,15 +411,16 @@ def generate_vm_resolve_socket(config, user_name: str, uid: int) -> str:
 
     The kernel treats all of 127/8 as local on `lo`, so the responder's address
     needs no assignment: binding 127.130.1.4 succeeds with nothing
-    configured. A `workload-vm-resolve up` twin adding a /32 would be a no-op, and worse, it would invent an address whose absence the inspector's
-    fail-at-bind argument would then appear to depend on. There is likewise no
+    configured. A step adding a /32 would be a no-op, and worse, it would invent
+    an address whose absence the inspector's fail-at-bind argument would then
+    appear to depend on. There is likewise no
     FreeBind= question to answer, and no teardown that would make the presence
     of an address mean a running process.
 
-    Both transports. Answers do not normally set the truncate bit -- a
-    synthesised answer is one record -- but clients open TCP connections for
-    their own reasons, and a UDP-only responder leaves those hanging with
-    nothing to diagnose from.
+    Both transports. A static name with more addresses than fit in a datagram
+    is answered with the truncate bit set, and the client asks again over TCP;
+    clients also open TCP connections for their own reasons, and a UDP-only
+    responder leaves those hanging with nothing to diagnose from.
     """
     name = config["workload"]["name"]
     # The uid is passed in, never looked up, for the reason
@@ -472,7 +475,34 @@ def generate_vm_resolve_socket(config, user_name: str, uid: int) -> str:
     return unit.render()
 
 
-def generate_vm_resolve_service(config, user_name: str) -> str:
+def resolve_command(name: str, uid: int) -> list:
+    """The responder's argv: customs-resolve and the values it is handed.
+
+    The same seam as gen_egress.inspect_listener_command: customs-resolve
+    knows nothing about workloads, so where this one's lists, static map and
+    counters live, and what its uid makes the inspector's address, are
+    computed here and written into ExecStart= as flags.
+    tests/test_customs_seam.py holds this command to the program's flags.
+
+    `--address`/`--address6` are the inspector's, not the responder's: every
+    synthesised A/AAAA points the guest at the listener its 80 and 443 are
+    redirected to anyway, so a guest that ignores the redirect and one that
+    does not both arrive at the same place. `--policy` is the inspector's own
+    document, read to COUNT queries for names on no list, never to answer.
+    """
+    inspect = inspect_address(uid)
+    return [
+        VM_RESOLVE_LISTENER_BIN,
+        "--name", name,
+        "--address", inspect.v4,
+        "--address6", inspect.v6,
+        "--policy", inspect_policy_path(name),
+        "--static", vm_resolve_static_path(name),
+        "--status", vm_resolve_status_path(name),
+    ]
+
+
+def generate_vm_resolve_service(config, user_name: str, uid: int) -> str:
     """Generate the service unit for one VM's synthesising DNS responder.
 
     Socket-activated, and it never binds: the program refuses to open a socket
@@ -512,11 +542,13 @@ def generate_vm_resolve_service(config, user_name: str) -> str:
     # keeps the responder out of the VM's own resource accounting. Stated so a
     # later reader does not conclude the inspector's pin is decorative.
     svc.set("Slice", SIDECAR_SLICE)
-    # The workload name is an argument, not something the responder derives:
-    # it is socket-activated with two identically-named fds, so there is
-    # nothing on the socket to recover it from. It is what the responder
-    # resolves its answer document's path from.
-    svc.add("ExecStart", f"{VM_RESOLVE_LISTENER_BIN} {dq(name)}")
+    # Everything the responder needs to know about this workload, as flags;
+    # resolve_command says why. The name among them because it is
+    # socket-activated with two identically-named fds, so there is nothing on
+    # the socket to recover it from.
+    binary, *args = resolve_command(name, uid)
+    svc.add("ExecStart", " ".join(
+        [binary] + [a if a.startswith("--") else dq(a) for a in args]))
     svc.blank()
     # Narrower than the inspector on both axes, and the address families are
     # the load-bearing half: this program must contain no call that could
@@ -1089,7 +1121,7 @@ def generate_vm_workload(config, user_name: str, uid: int):
         resolve_dests = paths.get(("unit", "resolve"), [])
         if resolve_dests:
             resolve_dests[0].write_text(
-                generate_vm_resolve_service(config, user_name))
+                generate_vm_resolve_service(config, user_name, uid))
             log_msg("  Created DNS responder service")
 
     # The clock keeper, for every VM: it is about the guest's clock, not its

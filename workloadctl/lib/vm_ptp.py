@@ -114,7 +114,7 @@ def vm_ptp_kvm_runcmd_lines() -> list[str]:
         f" ! grep -qF '{VM_PTP_KVM_CHRONY_MARKER}' {VM_PTP_KVM_CHRONY_PATH}; then",
         # The stock `pool 2.fedora.pool.ntp.org iburst` goes, and not for
         # tidiness. In a filtered guest the synthesising resolver answers
-        # EVERY name with the listener's address (resolve_policy: synthesis
+        # EVERY name with the listener's address (customs-resolve: synthesis
         # is unconditional), so the pool resolves, chrony dials UDP 123 at a
         # listener that serves no such thing, and the filter drops it: eight
         # packets per boot and one every poll interval for the life of the

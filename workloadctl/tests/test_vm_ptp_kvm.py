@@ -132,7 +132,7 @@ class TestTheStockPoolGoes(unittest.TestCase):
     """The refclock is the guest's only source; the stock `pool` line is removed.
 
     Not tidiness. A filtered guest's resolver synthesises the listener address
-    for EVERY name (resolve_policy: unconditional, by design), so the pool
+    for EVERY name (customs-resolve: unconditional, by design), so the pool
     resolves and chrony dials UDP 123 at a listener that serves no such thing.
     The filter drops it on the wrong-port self-dial element, which is the one
     `diagnose` reads out as "the guest expects a service it was not given" --

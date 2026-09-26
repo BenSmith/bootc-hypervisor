@@ -12,8 +12,8 @@ the workload uid, which is the one selector a passt socket and a rootless
 podman socket hold in common. What differs is read from the config, not done
 to the table -- which table of the TOML holds the network section, what says
 the workload is filtered at all, how its allow entries are parsed, resolved
-and shaped into elements, and whether a responder needs an answer document
-once the elements are in. That is a `Substrate`, and `up` is written once
+and shaped into elements, and whether a responder needs a static map once
+the elements are in. That is a `Substrate`, and `up` is written once
 over it.
 
 - A VM is filtered when `egress = "filtered"`; a VM with a `bridge` has no
@@ -25,7 +25,7 @@ over it.
   container_uses_inspect() itself, so "has a trigger" already means "uid
   attribution holds".
 - Only a VM has a synthesising DNS responder, so only the VM substrate
-  writes an answer document after arming. A container resolves through the
+  writes its static map after arming. A container resolves through the
   host's own resolver.
 
 WHY THIS IS A PROGRAM AND NOT THREE ExecStartPre= LINES
@@ -65,8 +65,8 @@ from nft_elements import (
 from vm_defs import EGRESS_DEFAULT
 from vm_network_config import (
     vm_allow_resolved,
-    vm_resolve_policy,
-    vm_resolve_policy_path,
+    vm_resolve_static,
+    vm_resolve_static_path,
 )
 from workload_lib import load_workload_config
 
@@ -92,8 +92,8 @@ def workload_uid(name: str) -> int:
     return pwd.getpwnam(f"_wl-{name}").pw_uid
 
 
-def write_resolve_policy(name: str, net: dict, uid: int, resolved) -> str:
-    """Write the responder's answer document. Returns its path.
+def write_resolve_static(name: str, net: dict, resolved) -> str:
+    """Write the responder's static map. Returns its path.
 
     Written HERE, next to the arming, and from the SAME `resolved` the elements
     were built from. The responder answers named `allow` destinations with the
@@ -106,16 +106,16 @@ def write_resolve_policy(name: str, net: dict, uid: int, resolved) -> str:
     policy is: the responder runs as _wl-<name> and needs to read it, and 0640
     keeps one workload's answers from being enumerable by another. Replaced
     rather than truncated in place, so a responder starting alongside a rewrite
-    cannot read a half-written document.
+    cannot read a half-written file.
 
     Ordering is inherited rather than declared: this runs as an ExecStartPre of
     the VM, and the responder is socket-activated by a guest query, which cannot
     happen before the VM it comes from is running.
     """
-    path = vm_resolve_policy_path(name)
+    path = vm_resolve_static_path(name)
     tmp = f"{path}.tmp"
     with open(tmp, "w") as f:
-        json.dump(vm_resolve_policy(net, uid, resolved), f, indent=2,
+        json.dump(vm_resolve_static(net, resolved), f, indent=2,
                   sort_keys=True)
         f.write("\n")
     os.chown(tmp, 0, pwd.getpwnam(f"_wl-{name}").pw_gid)
@@ -125,14 +125,14 @@ def write_resolve_policy(name: str, net: dict, uid: int, resolved) -> str:
 
 
 def vm_after_arm(name: str, net: dict, uid: int, resolved) -> None:
-    """The VM's responder document, from the resolution just armed."""
+    """The VM's responder static map, from the resolution just armed."""
     if not uses_resolve({"vm": {"network": net}}):
         return
-    # Not tolerant: a responder with no answer document fails its start, and
-    # it fails it on a query the guest has already made. The guest has exactly
+    # Not tolerant: a responder with no static map fails its start, and it
+    # fails it on a query the guest has already made. The guest has exactly
     # one nameserver, so that is the whole of DNS for it -- better to fail the
     # VM's start here, where the message names this helper.
-    path = write_resolve_policy(name, net, uid, resolved)
+    path = write_resolve_static(name, net, resolved)
     log(f"  Wrote {path}")
     # The previous instance's query counters, for the reason
     # egress_status.clear_status gives: the RuntimeDirectory is preserved
@@ -190,7 +190,7 @@ def up(sub: Substrate, name: str) -> int:
         return 0
 
     allow = sub.allow_entries(net)
-    # One resolution, every consumer. See write_resolve_policy for what a
+    # One resolution, every consumer. See write_resolve_static for what a
     # second one costs, and vm_allow_resolved for why it is a function of its
     # own.
     resolved = sub.resolved(allow)

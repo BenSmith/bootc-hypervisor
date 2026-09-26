@@ -125,9 +125,9 @@ class TestRuntimeDirectory(unittest.TestCase):
             _body(),
             r"\(allow\s+wlresolve_t\s+qemu_var_run_t\s+\(file\s+\([^)]*setattr")
 
-    def test_the_policy_document_can_be_read(self):
-        """resolve.json is read at start; without it the process exits and the
-        socket restart-loops."""
+    def test_the_policy_and_static_map_can_be_read(self):
+        """inspect.json and resolve-static.json are read at start; without
+        either the process exits and the socket restart-loops."""
         self.assertRegex(
             _body(),
             r"\(allow\s+wlresolve_t\s+qemu_var_run_t\s+\(file\s+\([^)]*read")
@@ -143,7 +143,7 @@ class TestPackaging(unittest.TestCase):
 
     def test_loading_restorecons_the_responder(self):
         """semodule does not relabel existing files. On an UPGRADE the
-        installed script keeps bin_t until something relabels it, so a load
+        installed program keeps bin_t until something relabels it, so a load
         without this leaves the responder unconfined exactly as before -- the
         module present, the finding unfixed, and nothing failing."""
         spec = SPEC.read_text()

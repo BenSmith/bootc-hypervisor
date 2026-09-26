@@ -192,7 +192,7 @@ class TestPostunScriptlet(unittest.TestCase):
              "semodule -r workload-inspect",
              "restorecon /usr/libexec/customs/customs-inspect",
              "semodule -r workload-resolve",
-             "restorecon /usr/libexec/workloadctl/workload-vm-resolve",
+             "restorecon /usr/libexec/customs/customs-resolve",
              "semodule -r workload-clock",
              "restorecon /usr/libexec/workloadctl/workload-vm-clock"])
 

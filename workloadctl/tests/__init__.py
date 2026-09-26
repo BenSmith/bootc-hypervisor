@@ -12,8 +12,9 @@ and ``libexec/`` have no ``.py`` extension and so cannot be imported by name --
 use :func:`load_script`. Subprocess launches of those scripts need the same lib
 path handed down in the child env -- use :func:`script_env`.
 
-The egress inspector and the credential broker are customs': its package
-(``import customs``) and its programs, which the generator names. Installed,
+The egress inspector, the credential broker and the DNS responder are
+customs': its package (``import customs``) and its programs, which the
+generator names. Installed,
 the package is in site-packages and the programs in ``/usr/libexec/customs``;
 ``CUSTOMS_CHECKOUT`` names a customs checkout to use instead, for a host that
 has not installed it.

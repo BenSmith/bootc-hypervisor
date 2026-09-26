@@ -3,16 +3,13 @@
 ;
 ; WHY THIS MODULE EXISTS AT ALL
 ;
-; Measured, not assumed: with no filecon for the script, matchpathcon reports
-;
-;   /usr/libexec/workloadctl/workload-vm-resolve -> bin_t
-;
-; and the running service reports scontext=unconfined_service_t. bin_t carries
-; entry_type, systemd's own transition rules take it from there, and NOTHING
-; fails — so a responder that terminates guest-supplied DNS packets ran
-; unconfined for as long as it has existed, and no test could see it. The
-; inspect module has a filecon and a type_transition; this one did not, and the
-; difference is invisible from every side except the label of the process.
+; The responder is customs', /usr/libexec/customs/customs-resolve. With no
+; filecon for it, it is bin_t like everything under libexec/: bin_t carries
+; entry_type, systemd's own transition rules take it from there, and the
+; running service reports scontext=unconfined_service_t. NOTHING fails, so a
+; responder that terminates guest-supplied DNS packets would run unconfined
+; and no test could see it; the difference is invisible from every side
+; except the label of the process.
 ;
 ; The threat is the same shape as the inspector's, which is why the two modules
 ; are near-identical: the responder parses attacker-controlled wire format from
@@ -33,8 +30,8 @@
 ;     `semodule -DB` or converge one rule short of working, with an empty audit
 ;     log and a systemd error naming no SELinux concept.
 ;   * the script is the entrypoint, not the interpreter, and the filecon names
-;     ONE file rather than globbing /usr/libexec/workloadctl — a glob would make
-;     every helper an entrypoint into this domain.
+;     ONE file rather than globbing /usr/libexec/customs — customs-broker is
+;     there too, and holds a key this domain must never reach.
 ;   * the script is exec'd from init_t, and what the DOMAIN needs on the
 ;     interpreter is `execute map` on bin_t -- NOT execute_no_trans, and not
 ;     the base_ro_file_type attribute. The analogy with sshd_keygen_t is
@@ -63,7 +60,7 @@
 (typeattributeset file_type (wlresolve_exec_t))
 (typeattributeset exec_type (wlresolve_exec_t))
 (typeattributeset entry_type (wlresolve_exec_t))
-(filecon "/usr/libexec/workloadctl/workload-vm-resolve" file (system_u object_r wlresolve_exec_t ((s0) (s0))))
+(filecon "/usr/libexec/customs/customs-resolve" file (system_u object_r wlresolve_exec_t ((s0) (s0))))
 
 (typetransition init_t wlresolve_exec_t process wlresolve_t)
 (allow init_t wlresolve_exec_t (file (getattr open read execute map)))
@@ -93,8 +90,8 @@
 ;     user, so the probe crosses /var/lib/workloads. There is no user
 ;     site-packages dir to find, and one must never be on this path anyway.
 ;   search on cert_t:dir ("pki")                  libcrypto reading its
-;     OPENSSLDIR config, pulled in transitively: the responder imports vm.py,
-;     which imports hashlib. This domain terminates no TLS and verifies
+;     OPENSSLDIR config, pulled in transitively: the customs package imports
+;     hashlib. This domain terminates no TLS and verifies
 ;     nothing, so the trust store is not its to read -- contrast the
 ;     inspector, which cannot work without it.
 
@@ -146,8 +143,9 @@
 (allow wlresolve_t self (udp_socket (getattr getopt read write)))
 (allow wlresolve_t self (tcp_socket (accept getattr getopt read write)))
 
-; Its own runtime directory: /run/workload-vm/<name>, qemu_var_run_t. resolve.json
-; is READ at start (without it the process exits and the socket restart-loops);
+; Its own runtime directory: /run/workload-vm/<name>, qemu_var_run_t.
+; inspect.json and resolve-static.json are READ at start (without either the
+; process exits and the socket restart-loops);
 ; resolve-status.json is WRITTEN via a temp file and os.replace, which is why
 ; `rename` is present here and in no sibling grant, and `setattr` is the
 ; fchmod to 0600 — see the same block in

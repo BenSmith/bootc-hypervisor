@@ -393,17 +393,13 @@ UID_RESOLVE = UidDerived("responder address", RESOLVE_ADDR_BASE,
 # it is where passt is told to forward.
 RESOLVE_PORT = 53
 
-# The one stated TTL. Long, because the inspector's address never moves: there
-# is no upstream truth for a short TTL to track, and a long one collapses a
-# guest's repeat lookups into its own cache instead of a syscall per request.
-#
-# Not a library default, and not "as large as the field allows" either: a TTL
-# past a stub's own cache ceiling is silently clamped, and a stated constant
-# that is not the constant in effect is worse than a smaller one that is.
-RESOLVE_TTL = 3600
+# The responder's static map, one file beside the inspector's policy; see
+# vm_network_config.vm_resolve_static.
+RESOLVE_STATIC_FILE = "resolve-static.json"
 
-RESOLVE_POLICY_FILE = "resolve.json"
-VM_RESOLVE_LISTENER_BIN = "/usr/libexec/workloadctl/workload-vm-resolve"
+# The responder, customs', the resolve service's ExecStart; see
+# INSPECT_LISTENER_BIN.
+VM_RESOLVE_LISTENER_BIN = "/usr/libexec/customs/customs-resolve"
 
 
 def resolve_address(uid: int) -> str:
@@ -415,10 +411,9 @@ def resolve_address(uid: int) -> str:
 
     There is no address-add helper to go with this, and writing one is the trap.
     The kernel treats all of 127/8 as local on `lo`, so binding 127.130.1.4
-    succeeds with nothing assigned: a `workload-vm-resolve
-    up` twin adding a /32 would be a no-op, and worse, it would invent an
-    address whose absence the inspector's fail-at-bind argument would then
-    appear to depend on.
+    succeeds with nothing assigned: a step adding a /32 would be a no-op, and
+    worse, it would invent an address whose absence the inspector's
+    fail-at-bind argument would then appear to depend on.
     """
     return str(ipaddress.IPv4Address(_uid_derived_value(UID_RESOLVE, uid)))
 

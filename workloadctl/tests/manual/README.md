@@ -408,9 +408,10 @@ Loud, at least, unlike the status write. Note that no sibling grant includes
 verbatim gives a half-grant that reaches the replace and fails there.
 
 **Domains.** `customs-inspect` has a filecon and a
-`type_transition` and should be `wlinspect_t`. `workload-vm-resolve` has
-neither, so it entrypoints `bin_t` from `init_t` with nothing to retype it and
-runs in PID 1's own domain — a process terminating guest-supplied DNS packets,
+`type_transition` and should be `wlinspect_t`. The responder (then
+`workload-vm-resolve`, now customs' `customs-resolve`) had
+neither, so it entrypointed `bin_t` from `init_t` with nothing to retype it and
+ran in PID 1's own domain — a process terminating guest-supplied DNS packets,
 outside the boundary `wlinspect_t` exists to draw. Measured on the host, it ran as
 `unconfined_service_t` — a process parsing guest-supplied DNS wire format,
 unconfined for as long as it had existed, with nothing anywhere failing.

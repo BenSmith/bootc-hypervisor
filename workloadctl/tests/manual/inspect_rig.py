@@ -64,11 +64,12 @@ restart.
 WHAT THE DOMAIN CHECKS ARE FOR
 
 customs-inspect carries a filecon and a type_transition, so it
-should be wlinspect_t. workload-vm-resolve carries neither, so it entrypoints
-bin_t from init_t with nothing to retype it and runs in PID 1's own domain --
-a process terminating guest-supplied DNS packets, unconfined by the boundary
-wlinspect_t exists to draw. domains() states the expectation and lets the host
-answer; until a wlresolve_t module ships, that check failing IS the finding.
+should be wlinspect_t; customs-resolve likewise, wlresolve_t
+(security/workload-resolve.cil). Without its module it entrypoints bin_t from
+init_t with nothing to retype it and runs unconfined -- a process terminating
+guest-supplied DNS packets, outside the boundary wlinspect_t exists to draw,
+with nothing failing. domains() states the expectation and lets the host
+answer.
 """
 
 import argparse
@@ -167,8 +168,8 @@ STATUS_SETTLE = STATUS_INTERVAL + 6
 # ignored.
 EXPECTED_DENIAL_TCONTEXTS = ("init_t", "cert_t", "container_file_t")
 
-# The domain each producer is expected to run in. wlresolve_t does not exist
-# yet; naming it here is the assertion, not a description of the host.
+# The domain each producer is expected to run in; naming it here is the
+# assertion, not a description of the host.
 EXPECTED_DOMAINS = {
     "inspect": "wlinspect_t",
     "resolve": "wlresolve_t",

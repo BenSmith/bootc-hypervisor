@@ -994,7 +994,7 @@ class TestUnitWiring(unittest.TestCase):
 
 
 class _FilterFixture:
-    """nft faked at helper_main.subprocess.run, the answer document
+    """nft faked at helper_main.subprocess.run, the responder's static map
     redirected into a tmpdir, and the workload uid pinned."""
 
     sub = None
@@ -1036,7 +1036,7 @@ class _FilterFixture:
         self.addCleanup(patcher.stop)
         self._patch("workload_uid", lambda name: 10001)
 
-        # The responder's answer document is written by this helper, from the
+        # The responder's static map is written by this helper, from the
         # same resolution the elements were armed from. Redirected into a
         # tmpdir rather than stubbed out: the write is part of `up`, and a
         # stub here would make every assertion below true of a helper that
@@ -1045,8 +1045,8 @@ class _FilterFixture:
         import tempfile
         self.policy_dir = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, self.policy_dir, True)
-        self.policy_path = os.path.join(self.policy_dir, "resolve.json")
-        self._patch("vm_resolve_policy_path", lambda name: self.policy_path)
+        self.policy_path = os.path.join(self.policy_dir, "resolve-static.json")
+        self._patch("vm_resolve_static_path", lambda name: self.policy_path)
         self._patch("pwd", SimpleNamespace(
             getpwnam=lambda n: SimpleNamespace(pw_uid=10001, pw_gid=10001)))
         self.chowned = []
@@ -1054,7 +1054,7 @@ class _FilterFixture:
             chown=lambda p, u, g: self.chowned.append((p, u, g)),
             chmod=os.chmod, replace=os.replace))
 
-    def _resolve_document(self):
+    def _resolve_static(self):
         with open(self.policy_path) as f:
             return json.load(f)
 
@@ -1083,22 +1083,20 @@ class TestFilterHelper(_FilterFixture, unittest.TestCase):
         super().setUpClass()
         cls.sub = cls.mod.VM
 
-    # --- the responder's answer document, written here ---
+    # --- the responder's static map, written here ---
 
-    def test_up_writes_the_responder_document(self):
+    def test_up_writes_the_responder_static_map(self):
         """The responder is socket-activated by a guest query, and the guest
         cannot query before the VM it comes from is running -- which is after
         this ExecStartPre. Ordering is inherited rather than declared, so the
-        thing to assert is that the write happens at all."""
-        from workload_addr import RESOLVE_TTL, inspect_address
+        thing to assert is that the write happens at all, and that a workload
+        with no named `allow` entry gets an empty map rather than none: the
+        responder is handed --static whatever the config holds."""
         self._net(egress="filtered", allow=[])
         self.mod.up(self.sub, "vm1")
-        doc = self._resolve_document()
-        self.assertEqual(doc["address"], inspect_address(10001).v4)
-        self.assertEqual(doc["address6"], inspect_address(10001).v6)
-        self.assertEqual(doc["ttl"], RESOLVE_TTL)
+        self.assertEqual(self._resolve_static(), {})
 
-    def test_the_document_is_readable_only_by_the_workload(self):
+    def test_the_map_is_readable_only_by_the_workload(self):
         """0640 with the workload's group, like the inspector's policy: the
         responder runs as _wl-<name> and must read it, and one workload's
         answers are not another's to enumerate."""
@@ -1107,7 +1105,7 @@ class TestFilterHelper(_FilterFixture, unittest.TestCase):
         self.assertEqual(os.stat(self.policy_path).st_mode & 0o777, 0o640)
         self.assertEqual(self.chowned, [(self.policy_path + ".tmp", 0, 10001)])
 
-    def test_a_named_allow_entry_reaches_the_document(self):
+    def test_a_named_allow_entry_reaches_the_map(self):
         """And it reaches it from the SAME resolution the elements were armed
         from -- here one stub answers once, and both consumers read it."""
         entry = SimpleNamespace(address=None, host="git.local", port=2222,
@@ -1117,25 +1115,24 @@ class TestFilterHelper(_FilterFixture, unittest.TestCase):
         self._net(egress="filtered",
                   allow=[{"address": "git.local:2222", "reason": "forge"}])
         self.mod.up(sub, "vm1")
-        self.assertEqual(self._resolve_document()["static"],
+        self.assertEqual(self._resolve_static(),
                          {"git.local": ["192.0.2.9"]})
         armed = [c for c in self._adds() if c[-2] == "wl_allow4"]
         self.assertIn("192.0.2.9", armed[0][-1])
 
-    def test_resolver_none_writes_no_document(self):
+    def test_resolver_none_writes_no_map(self):
         """One knob, one meaning. A guest told to ask nobody gets no
-        responder unit, so a document for one would be a file nothing reads
-        holding a policy nobody applied."""
+        responder unit, so a map for one would be a file nothing reads."""
         self._net(egress="filtered", allow=[], resolver="none")
         self.mod.up(self.sub, "vm1")
         self.assertFalse(os.path.exists(self.policy_path))
 
-    def test_open_egress_writes_no_document(self):
+    def test_open_egress_writes_no_map(self):
         self._net(egress="open", allow=[])
         self.mod.up(self.sub, "vm1")
         self.assertFalse(os.path.exists(self.policy_path))
 
-    def test_a_bridged_vm_writes_no_document(self):
+    def test_a_bridged_vm_writes_no_map(self):
         self._net(bridge="br0", allow=[])
         self.mod.up(self.sub, "vm1")
         self.assertFalse(os.path.exists(self.policy_path))
@@ -1290,7 +1287,7 @@ class TestContainerFilterSubstrate(_FilterFixture, unittest.TestCase):
         self.assertIn("10001",
                       " ".join(" ".join(c) for c in self._deletes()))
 
-    def test_a_container_writes_no_responder_document(self):
+    def test_a_container_writes_no_responder_map(self):
         self._net(hosts=["example.com"])
         self.mod.up(self.sub, "web")
         self.assertFalse(os.path.exists(self.policy_path))
@@ -1805,7 +1802,7 @@ class TestResolveDiagnose(unittest.TestCase):
 
     def _run(self, config=None, **kw):
         kw.setdefault("socket_active", True)
-        kw.setdefault("policy_present", True)
+        kw.setdefault("static_present", True)
         kw.setdefault("vm_active", True)
         # None is "nothing written, or nothing to read", which the check
         # treats as nothing to say. The arm itself is exercised by the tests
@@ -1842,17 +1839,33 @@ class TestResolveDiagnose(unittest.TestCase):
         self.assertIn("ONLY", msg)
         self.assertIn("workload-vm1-resolve.socket", msg)
 
-    def test_a_missing_answer_document_fails_and_names_the_prestart(self):
+    def test_a_missing_static_map_fails_and_names_the_prestart(self):
         """The second way a booted VM loses DNS. The responder is
-        socket-activated, so a missing document is not noticed until the
-        guest's first query -- and then it fails the start, on a query that
-        has already been made."""
-        _, passed, msg = self._run(policy_present=False)
+        socket-activated, so a missing map is not noticed until the guest's
+        first query -- and then it fails the start, on a query that has
+        already been made."""
+        _, passed, msg = self._run(static_present=False)
         self.assertFalse(passed)
         self.assertIn("first query", msg)
         self.assertIn("workload-vm1.service", msg)
 
-    def test_a_listening_responder_with_its_document_passes(self):
+    def test_the_probe_is_the_file_the_responder_is_handed(self):
+        """Every other row injects the answer, so a probe of the wrong path
+        passed them all. The path looked at is the one the unit's --static
+        names."""
+        from diagnose_probe import PROBE
+        from gen_vm import resolve_command
+        cmd = resolve_command("vm1", 10001)
+        handed = cmd[cmd.index("--static") + 1]
+        probed = []
+        with mock.patch("os.path.exists",
+                        side_effect=lambda p: probed.append(p)):
+            _, passed, msg = self._run(static_present=PROBE)
+        self.assertEqual(probed, [handed])
+        self.assertFalse(passed)
+        self.assertIn(handed, msg)
+
+    def test_a_listening_responder_with_its_map_passes(self):
         name, passed, msg = self._run()
         self.assertEqual(name, "vm_resolve")
         self.assertTrue(passed)
@@ -1889,7 +1902,7 @@ class TestResolveDiagnose(unittest.TestCase):
 
     def test_dhcp_dns_off_fails_though_the_responder_is_perfect(self):
         """The failure no other line can see. The socket is listening, the
-        answer document is loaded, the redirect is armed and the guest was
+        static map is written, the redirect is armed and the guest was
         handed no nameserver at all -- and workload-vm-netdev fails CLOSED
         rather than falling back to the host's resolvers, so nothing masks
         it."""

@@ -3,7 +3,7 @@
 A filtered VM's guest is told one nameserver, the per-workload responder on
 the host, so a responder that is not listening is the whole of DNS for that
 guest while every other line in `diagnose` still passes. vm_resolve_check()
-is the one verdict: the socket unit, the policy document it reads, and the
+is the one verdict: the socket unit, the static map it reads, and the
 passt netdev line that tells the guest where to look, each named when it
 is the thing that is wrong.
 """
@@ -14,7 +14,7 @@ from diagnose_probe import PROBE
 from egress_policy import uses_resolve
 from run_files import workload_env_dir
 from substrate import service_active
-from vm_network_config import vm_resolve_policy_path
+from vm_network_config import vm_resolve_static_path
 from workload_addr import RESOLVE_PORT, resolve_address
 
 
@@ -47,7 +47,7 @@ def _netdev_dns_fragment(name: str) -> str | None:
     return None
 
 
-def vm_resolve_check(config, *, socket_active=PROBE, policy_present=PROBE,
+def vm_resolve_check(config, *, socket_active=PROBE, static_present=PROBE,
                      vm_active=PROBE, netdev_dns=PROBE
                      ) -> tuple[str, bool, str] | None:
     """Report whether a VM's synthesising responder can actually answer it.
@@ -70,9 +70,9 @@ def vm_resolve_check(config, *, socket_active=PROBE, policy_present=PROBE,
         hitting it fails the socket unit PERMANENTLY until something restarts
         it. The service's own Restart=on-failure does not rebind it -- only
         the socket can, and it is the thing that failed.
-      - The answer document is written by the VM's own ExecStartPre
+      - The static map is written by the VM's own ExecStartPre
         (workload-vm-filter up) and read by the responder at start. The
-        responder is socket-activated, so a missing document is not noticed
+        responder is socket-activated, so a missing map is not noticed
         until the guest's first query, and then it fails the START -- on a
         query the guest has already made.
 
@@ -119,20 +119,20 @@ def vm_resolve_check(config, *, socket_active=PROBE, policy_present=PROBE,
                 f"here passes. Inside the guest that reads as a broken guest. "
                 f"Start it: {restart}")
 
-    path = vm_resolve_policy_path(name)
-    if policy_present is PROBE:
-        policy_present = os.path.exists(path)
-    if not policy_present:
+    path = vm_resolve_static_path(name)
+    if static_present is PROBE:
+        static_present = os.path.exists(path)
+    if not static_present:
         return ("vm_resolve", False,
                 f"{unit} is listening but {path} is missing, so the responder "
                 f"will fail its start on the guest's first query rather than "
                 f"answer it — and it is socket-activated, so nothing has "
-                f"noticed yet. The document is written by this VM's own "
+                f"noticed yet. The map is written by this VM's own "
                 f"prestart: systemctl restart workload-{name}.service")
 
     address = resolve_address(uid)
     told = f"synthesising responder on {address}:{RESOLVE_PORT}, " \
-           f"{unit} listening, answers from {path}"
+           f"{unit} listening, static map {path}"
 
     # Gated on the VM being up, like the other VM-runtime observations here:
     # the fragment describes the LAST start, so on a stopped VM it is a

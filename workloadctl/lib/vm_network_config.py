@@ -2,7 +2,7 @@
 """Reading `[vm.network]`: what the operator wrote, parsed.
 
 The allow-entry parser and its host-side resolution, and the responder's
-policy document (read back by resolve_policy). Whether what was written is
+static map (read by customs-resolve --static). Whether what was written is
 sayable is vm_validate's question; nothing here builds a unit, a command, a
 certificate or a config file.
 
@@ -17,10 +17,7 @@ from typing import NamedTuple
 from config_parser import SOCKET_DIR
 from customs.inspect_document import normalise_hostname
 from customs.egress_plane import CLEARTEXT, TLS
-from egress_policy import vm_policy_entries
-from workload_addr import (RESOLVE_POLICY_FILE, RESOLVE_TTL,
-                           allow_reserved_reason, inspect_address)
-from vm_defs import vm_allowed_hosts
+from workload_addr import RESOLVE_STATIC_FILE, allow_reserved_reason
 
 # --- `allow`: the address-scoped bypass, now a table with a reason ---
 #
@@ -242,71 +239,38 @@ def vm_allow_resolved(allow):
     return out
 
 
-def vm_resolve_policy_path(name: str) -> str:
-    """Where one workload's responder reads its answers from."""
-    return f"{SOCKET_DIR}/{name}/{RESOLVE_POLICY_FILE}"
+def vm_resolve_static_path(name: str) -> str:
+    """Where one workload's responder reads its static map from."""
+    return f"{SOCKET_DIR}/{name}/{RESOLVE_STATIC_FILE}"
 
 
-def vm_resolve_policy(net: dict, uid: int, resolved=None) -> dict:
-    """The responder's answer document for one workload.
+def vm_resolve_static(net: dict, resolved=None) -> dict[str, list[str]]:
+    """The responder's static map for one workload: name to addresses.
 
-    `address`/`address6` are the inspector's, not the responder's: every
-    synthesised A/AAAA points the guest at the listener its 80 and 443 are
-    redirected to anyway, so a guest that ignores the redirect and one that does
-    not both arrive at the same place.
+    The `allow`-by-name entries, which customs-resolve answers from this map
+    instead of with the inspector's address. Without it a synthesised answer
+    sends every named non-80/443 destination -- an SSH forge, a registry, an
+    internal API -- to a port the inspector does not serve, which presents as
+    a healthy-looking hang rather than as a refusal. The map wins over
+    synthesis, which costs nothing on 80 and 443 because the redirect is
+    keyed on uid and port alone; a name in both `hosts` and `allow` is
+    therefore legal.
 
-    `static` is the `allow`-by-name map, and it lands WITH the responder rather
-    than after it. Without it a synthesised answer sends every named non-80/443
-    destination -- an SSH forge, a registry, an internal API -- to a port the
-    inspector does not serve, which presents as a healthy-looking hang rather
-    than as a refusal. The map wins over synthesis, which costs nothing on 80
-    and 443 because the redirect is keyed on uid and port alone; a name in both
-    `hosts` and `allow` is therefore legal.
-
-    Addresses come from `resolved` when the caller has one, so the map holds the
-    addresses that were ARMED -- see vm_filter_elements for why a second
+    Addresses come from `resolved` when the caller has one, so the map holds
+    the addresses that were ARMED -- see vm_filter_elements for why a second
     resolution is a different question.
-
-    `hosts` changes NO answer this responder gives. Synthesis is unconditional
-    by design: an unlisted name is answered like any other, and the refusal
-    happens later, at the listener. The list is carried so the responder can
-    COUNT queries for names on no list -- the tunnelling signature, since
-    synthesis makes the channel absent rather than filtered, so a burst of
-    unique unlisted names exfiltrates nothing and is still the cleanest
-    evidence that something in the guest is trying. A responder that REFUSED
-    those names would be a different design; this one only notices.
-
-    `policy` is carried BESIDE `hosts` and for the same counting reason, not as
-    a second thing to answer from. §3 lets a name be allowlisted by a
-    [[vm.network.policy]] entry alone, so a workload whose whole allowlist is
-    written as policy entries has an empty `hosts` and is perfectly valid --
-    and a responder that knew only `hosts` would count every legitimate lookup
-    it makes as unlisted. That fails in the direction that costs the most: the
-    tunnelling signature reads loud and constant on a correct config, which is
-    how a detector stops being read at all. Kept as its own key rather than
-    merged into `hosts` because the document describes the FILE, and the two
-    keys are two different statements about a name.
     """
-    inspect = inspect_address(uid)
     if resolved is None:
         resolved = vm_allow_resolved(net.get("allow", []) or [])
     static: dict[str, list[str]] = {}
     for entry, addresses in resolved:
         if entry.host is None:
             continue
-        # Normalised on the way in, so the responder's lookup is one dict hit
-        # against a name already in the form every match in this design is made
-        # against -- and two spellings of one name cannot become two entries.
+        # Normalised on the way in, so two spellings of one name cannot
+        # become two entries.
         key = normalise_hostname(entry.host)
         for addr in addresses:
             text = str(addr)
             if text not in static.setdefault(key, []):
                 static[key].append(text)
-    return {
-        "address": inspect.v4,
-        "address6": inspect.v6,
-        "ttl": RESOLVE_TTL,
-        "static": static,
-        "hosts": vm_allowed_hosts(net),
-        "policy": [e.host for e in vm_policy_entries(net)],
-    }
+    return static

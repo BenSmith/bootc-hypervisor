@@ -322,7 +322,7 @@ class TestANameIsImportedFromTheModuleThatDefinesIt(unittest.TestCase):
         """Every Python file in the tree, including the extensionless ones.
 
         The entrypoints are the reason this walks paths rather than importing:
-        `libexec/workload-vm-resolve` has no `.py`, is invisible to
+        `libexec/workload-vm-clock` has no `.py`, is invisible to
         `_lib_modules()`, and importing it runs its argv parsing.
 
         An extensionless file is taken as Python only if it says so in a
@@ -357,7 +357,7 @@ class TestANameIsImportedFromTheModuleThatDefinesIt(unittest.TestCase):
         """
         sources = list(self._sources())
         self.assertGreater(len(sources), 100, len(sources))
-        self.assertIn("workload-vm-resolve",
+        self.assertIn("workload-vm-clock",
                       [p.name for p in sources])
         defines = self._defines()
         self.assertGreater(len(defines), 30, sorted(defines))

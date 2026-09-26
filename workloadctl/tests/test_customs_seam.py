@@ -1,9 +1,10 @@
 """Where workloadctl meets customs, held from workloadctl's side.
 
-The egress inspector and the credential broker are customs' programs:
-workloadctl writes the policy document the inspector reads, and the units
-whose ExecStart= hands each program its flags, and imports a published set
-of names. customs' own suite holds its side of each of these (its
+The egress inspector, the credential broker and the DNS responder are
+customs' programs: workloadctl writes the policy document the inspector
+reads, the static map the responder reads, and the units whose ExecStart=
+hands each program its flags, reads the responder's status file, and
+imports a published set of names. customs' own suite holds its side of each of these (its
 test_interface and test_closure); what can drift unseen is the half
 written here, since a document key the reader ignores, a flag the program
 does not take, or a name customs does not publish all fail at a workload's
@@ -14,11 +15,18 @@ or a checkout's when CUSTOMS_CHECKOUT is set.
 """
 
 import ast
+import ipaddress
 import json
 import os
 import re
 import shutil
+import signal
+import socket
+import struct
+import subprocess
+import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -57,6 +65,14 @@ PUBLISHED = {
 
 INSPECT = CUSTOMS_LIBEXEC / "customs-inspect"
 BROKER = CUSTOMS_LIBEXEC / "customs-broker"
+RESOLVE = CUSTOMS_LIBEXEC / "customs-resolve"
+
+# customs' interface document, "The responder's status file": the keys
+# workloadctl may read from it. Copied for the reason PUBLISHED is.
+RESOLVE_STATUS_PUBLISHED = frozenset({
+    ("queries", "synthesised"), ("queries", "static"), ("queries", "nodata"),
+    ("queries", "malformed"), ("unlisted",), ("unlisted_names",),
+    ("written_at",)})
 
 # The inspector's flags the generator hands, exactly: one per value the
 # inspector must be told and cannot derive. customs-inspect takes two more,
@@ -70,6 +86,15 @@ INSPECT_HANDED = frozenset({
     "--broker",     # what the uid became, and the broker's port
 })
 BROKER_REQUIRED = frozenset({"--name", "--listen", "--caller-uid", "--host"})
+# The responder's, every one it takes.
+RESOLVE_HANDED = frozenset({
+    "--name",      # a label: the log lines
+    "--address",   # the inspector's v4 address, every synthesised A
+    "--address6",  # its v6 twin, every synthesised AAAA
+    "--policy",    # the inspector's document, read to count unlisted names
+    "--static",    # the allow-by-name map
+    "--status",    # where the counters go
+})
 BROKER_HANDED = BROKER_REQUIRED | {
     "--placeholder", "--auth-header", "--auth-format"}
 
@@ -115,11 +140,13 @@ class TestTheScannerSeesTheTree(unittest.TestCase):
     def test_the_programs_are_there(self):
         self.assertTrue(INSPECT.exists(), INSPECT)
         self.assertTrue(BROKER.exists(), BROKER)
+        self.assertTrue(RESOLVE.exists(), RESOLVE)
 
     def test_the_flag_reader_finds_the_programs_flags(self):
         self.assertTrue(_program_flags(INSPECT)["--policy"])
         self.assertFalse(_program_flags(INSPECT)["--broker"])
         self.assertTrue(_program_flags(BROKER)["--listen"])
+        self.assertFalse(_program_flags(RESOLVE)["--static"])
 
     def test_one_customs_is_under_test(self):
         """This process, a child launched with script_env(), and the
@@ -322,6 +349,144 @@ class TestTheGeneratorHandsCustomsItsFlags(unittest.TestCase):
         required = {f for f, req in taken.items() if req}
         self.assertLessEqual(required, BROKER_REQUIRED)
 
+    def test_the_responder_is_handed_every_value(self):
+        from egress_policy import inspect_policy_path
+        from gen_vm import resolve_command
+        from nft_elements import vm_resolve_status_path
+        from vm_network_config import vm_resolve_static_path
+        from workload_addr import VM_RESOLVE_LISTENER_BIN, inspect_address
+        cmd = resolve_command("web", 10004)
+        self.assertEqual(cmd[0], VM_RESOLVE_LISTENER_BIN)
+        flags = {cmd[i]: cmd[i + 1] for i in range(1, len(cmd), 2)}
+        self.assertEqual(flags, {
+            "--name": "web",
+            "--address": inspect_address(10004).v4,
+            "--address6": inspect_address(10004).v6,
+            "--policy": inspect_policy_path("web"),
+            "--static": vm_resolve_static_path("web"),
+            "--status": vm_resolve_status_path("web"),
+        })
+
+    def test_the_responder_takes_each_handed_flag_and_requires_no_other(self):
+        taken = _program_flags(RESOLVE)
+        self.assertEqual(set(taken), RESOLVE_HANDED)
+
+
+class TestTheResponderStatusIsReadByPublishedKeys(unittest.TestCase):
+
+    def test_every_figure_read_is_a_published_key(self):
+        """A key customs does not publish is one it may rename, and a
+        figure read from a missing key reads 0 -- a legal value, so the
+        rename shows as a quiet responder."""
+        from inspect_figures import FIGURES, NAMES
+        read = {fig.path for fig in FIGURES
+                if fig.group == NAMES and fig.derive is None}
+        self.assertTrue(read)
+        self.assertLessEqual(read, RESOLVE_STATUS_PUBLISHED)
+
+
+def _query(ident, name, qtype):
+    labels = b"".join(bytes([len(part)]) + part.encode()
+                      for part in name.split("."))
+    return (struct.pack("!HHHHHH", ident, 0x0100, 1, 0, 0, 0)
+            + labels + b"\0" + struct.pack("!HH", qtype, 1))
+
+
+def _addresses(reply):
+    """The A/AAAA rdata of a reply to one of _query's questions."""
+    ancount = struct.unpack("!H", reply[6:8])[0]
+    offset = 12
+    while reply[offset]:
+        offset += reply[offset] + 1
+    offset += 5
+    out = []
+    for _ in range(ancount):
+        offset += 2    # a pointer back to the question
+        rtype, _cls, _ttl, length = struct.unpack(
+            "!HHIH", reply[offset:offset + 10])
+        offset += 10
+        rdata = reply[offset:offset + length]
+        offset += length
+        if rtype in (1, 28):
+            out.append(str(ipaddress.ip_address(rdata)))
+    return out
+
+
+class TestTheResponderRunsOnWhatWorkloadctlWrites(unittest.TestCase):
+    """customs-resolve started with the generator's command, on the
+    inspector policy and static map workloadctl renders, and asked over a
+    real socket. The rows above hold the flags and the keys one at a time;
+    this is the only one that sees what the program makes of the files."""
+
+    def test_static_synthesised_and_unlisted(self):
+        from egress_policy import vm_inspect_policy_text
+        from gen_vm import resolve_command
+        from vm_network_config import VmAllowEntry, vm_resolve_static
+        from workload_addr import inspect_address
+
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d)
+        paths = {flag: os.path.join(d, name) for flag, name in (
+            ("--policy", "inspect.json"), ("--static", "static.json"),
+            ("--status", "status.json"))}
+        Path(paths["--policy"]).write_text(vm_inspect_policy_text({
+            "hosts": ["listed.example"],
+            "policy": [{"host": "*.api.example"}]}))
+        forge = VmAllowEntry(address=None, host="Git.Local", port=2222,
+                             reason="forge")
+        Path(paths["--static"]).write_text(json.dumps(vm_resolve_static(
+            {}, [(forge, [ipaddress.IPv4Address("192.0.2.9")])])))
+        _binary, *args = resolve_command("web", 10004)
+        for i in range(0, len(args), 2):
+            args[i + 1] = paths.get(args[i], args[i + 1])
+
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.addCleanup(sock.close)
+        sock.bind(("127.0.0.1", 0))
+        proc = subprocess.Popen(
+            ["/bin/sh", "-c", 'LISTEN_PID=$$ LISTEN_FDS=1 exec "$@"', "sh",
+             sys.executable, str(RESOLVE), *args],
+            env=script_env(), pass_fds=(3,),
+            preexec_fn=lambda: os.dup2(sock.fileno(), 3),
+            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        self.addCleanup(proc.stderr.close)
+        self.addCleanup(lambda: proc.poll() is None and proc.kill())
+
+        client = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.addCleanup(client.close)
+        client.settimeout(10)
+        inspect = inspect_address(10004)
+        asked = [("git.local", 1, ["192.0.2.9"]),
+                 ("git.local", 28, []),
+                 ("elsewhere.example", 1, [inspect.v4]),
+                 ("elsewhere.example", 28, [inspect.v6]),
+                 ("listed.example", 1, [inspect.v4]),
+                 ("v1.api.example", 1, [inspect.v4]),
+                 ("api.example", 1, [inspect.v4])]
+        for ident, (name, qtype, want) in enumerate(asked, 1):
+            client.sendto(_query(ident, name, qtype), sock.getsockname())
+            try:
+                reply = client.recv(512)
+            except TimeoutError:
+                proc.kill()
+                self.fail(f"no answer for {name}: "
+                          f"{proc.stderr.read().decode()}")
+            self.assertEqual(struct.unpack("!H", reply[:2])[0], ident)
+            self.assertEqual(_addresses(reply), want, (name, qtype))
+
+        proc.send_signal(signal.SIGTERM)
+        self.assertEqual(proc.wait(timeout=10), 0,
+                         proc.stderr.read().decode())
+        status = json.loads(Path(paths["--status"]).read_text())
+        self.assertEqual(status["queries"]["static"], 2)
+        self.assertEqual(status["queries"]["synthesised"], 5)
+        # A `hosts` name, a policy wildcard and a static name are listed;
+        # the policy wildcard's apex is not.
+        self.assertEqual(status["unlisted"], 3)
+        self.assertEqual(set(status["unlisted_names"]),
+                         {"elsewhere.example", "api.example"})
+        self.assertIn("written_at", status)
+
 
 class TestTheProgramsAreCustoms(unittest.TestCase):
 
@@ -329,12 +494,24 @@ class TestTheProgramsAreCustoms(unittest.TestCase):
         """The generated units run customs' programs by the path its RPM
         installs them at, and the spec requires that RPM."""
         from broker_config import BROKER_BIN
-        from workload_addr import INSPECT_LISTENER_BIN
+        from workload_addr import (
+            INSPECT_LISTENER_BIN, VM_RESOLVE_LISTENER_BIN)
         self.assertEqual(INSPECT_LISTENER_BIN,
                          "/usr/libexec/customs/customs-inspect")
+        self.assertEqual(VM_RESOLVE_LISTENER_BIN,
+                         "/usr/libexec/customs/customs-resolve")
         self.assertEqual(BROKER_BIN, "/usr/libexec/customs/customs-broker")
+
+    def test_the_spec_requires_a_customs_with_everything_used_here(self):
+        """0.3.0 is the first release whose customs-resolve takes --static.
+        A lower floor installs against an older customs, and the responder
+        then fails its start on an unrecognised flag, at the guest's first
+        query."""
         spec = (Path(REPO_ROOT) / "rpm" / "workloadctl.spec").read_text()
-        self.assertRegex(spec, r"(?m)^Requires:\s+customs >= ")
+        minimum = re.search(
+            r"(?m)^Requires:\s+customs >= (\S+)$", spec).group(1)
+        self.assertGreaterEqual(
+            tuple(int(part) for part in minimum.split(".")), (0, 3, 0))
 
     def test_seed_isos_carry_customs(self):
         """A VM's seed ISO carries customs' RPM beside workloadctl's, which

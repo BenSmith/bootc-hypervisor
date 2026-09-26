@@ -251,7 +251,7 @@ flowchart TB
   subgraph vm["VM"]
     VT["[vm.network] hosts / allow / policy / credential"]
     VA["workload-vm-inspect + workload-vm-filter"]
-    VR["workload-vm-resolve — synthesising DNS responder"]
+    VR["customs-resolve — synthesising DNS responder"]
     VE["egress = filtered/open, default-deny for the uid"]
   end
 
