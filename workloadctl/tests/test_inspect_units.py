@@ -24,7 +24,6 @@ from nft_elements import (
     inspect_cgroup, inspect_cgroup_command,
     inspect_cgroup_filter_command,
 )
-from nft_constants import NFT_SET_INSPECT_CG, NFT_SET_EGRESS_CG
 from customs.inspect_listener import MAX_CONNECTIONS
 from nft_constants import SIDECAR_SLICE
 from vm_defs import EGRESS_DEFAULT
@@ -413,8 +412,8 @@ class TestSidecarHardening(unittest.TestCase):
         """Losing AF_NETLINK or AF_UNIX turns every upstream dial into
         `upstream unreachable` -- a policy gap wearing a network error's
         clothes."""
-        line = [l for l in self.inspect.splitlines()
-                if l.startswith("RestrictAddressFamilies=")]
+        line = [ln for ln in self.inspect.splitlines()
+                if ln.startswith("RestrictAddressFamilies=")]
         self.assertEqual(len(line), 1, self.inspect)
         families = set(line[0].split("=", 1)[1].split())
         self.assertEqual(
@@ -424,8 +423,8 @@ class TestSidecarHardening(unittest.TestCase):
         """It must contain no call that could consult a resolver. AF_NETLINK's
         absence is what makes a getaddrinfo that appeared here fail at the
         socket rather than quietly reach a nameserver."""
-        line = [l for l in self.resolve.splitlines()
-                if l.startswith("RestrictAddressFamilies=")]
+        line = [ln for ln in self.resolve.splitlines()
+                if ln.startswith("RestrictAddressFamilies=")]
         self.assertEqual(len(line), 1, self.resolve)
         families = set(line[0].split("=", 1)[1].split())
         self.assertNotIn("AF_NETLINK", families)
@@ -434,8 +433,8 @@ class TestSidecarHardening(unittest.TestCase):
     def test_the_inspectors_task_ceiling_covers_its_connection_ceiling(self):
         """One thread per connection, so a TasksMax below MAX_CONNECTIONS is a
         listener that refuses connections it counted as admitted."""
-        tasks = [l for l in self.inspect.splitlines()
-                 if l.startswith("TasksMax=")]
+        tasks = [ln for ln in self.inspect.splitlines()
+                 if ln.startswith("TasksMax=")]
         self.assertEqual(len(tasks), 1)
         self.assertGreater(int(tasks[0].split("=", 1)[1]), MAX_CONNECTIONS)
 
@@ -443,7 +442,7 @@ class TestSidecarHardening(unittest.TestCase):
         for which, unit in self.units():
             with self.subTest(unit=which):
                 self.assertTrue(
-                    any(l.startswith("MemoryMax=") for l in unit.splitlines()),
+                    any(ln.startswith("MemoryMax=") for ln in unit.splitlines()),
                     unit)
 
 

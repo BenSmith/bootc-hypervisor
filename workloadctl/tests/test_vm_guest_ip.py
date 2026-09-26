@@ -12,9 +12,7 @@ qemu-guest-agent is the source that does not depend on host-side state, so it is
 tried first.
 """
 
-import tempfile
 import unittest
-from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 

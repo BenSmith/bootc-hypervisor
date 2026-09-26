@@ -14,12 +14,16 @@ and v6 sets are one logical object -- and separating them is how an element
 lands in the family that matches nothing. Nothing here builds an argv or runs
 nft; that is lib/nft.py.
 
-Imports nothing of ours.
+Imports nothing of ours at runtime; the one annotation it names from
+workload_addr is imported for type checkers alone.
 
 Installed to /usr/libexec/workloadctl/nft_constants.py.
 """
 
-from typing import NamedTuple
+from typing import TYPE_CHECKING, NamedTuple
+
+if TYPE_CHECKING:
+    from workload_addr import VmInspectAddress
 
 
 # The uid-keyed egress layer (ADR 006 §4). One table shared by every VM;

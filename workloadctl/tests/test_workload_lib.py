@@ -56,7 +56,7 @@ from workload_lib import (
     systemd_escape_path, selinux_module_name, selinux_type_name,
 )
 from nft_elements import (
-    container_allow_resolved, container_filter_elements,
+    container_filter_elements,
     container_filter_commands, container_internal_resolve,
 )
 from egress_policy import container_inspect_policy, container_inspect_policy_text

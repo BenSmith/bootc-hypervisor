@@ -312,7 +312,7 @@ class TestListCaptures(PcapTestCase):
     def test_the_workload_name_is_recovered_from_the_unit(self):
         with mock.patch("cmd_pcap.subprocess.run", FakeRun(list_out=self.UNITS)):
             self.call(_list_captures, _args("--list"))
-        line = [l for l in self.stdout.splitlines() if "fj" in l][0]
+        line = [ln for ln in self.stdout.splitlines() if "fj" in ln][0]
         self.assertTrue(line.strip().startswith("fj"), line)
 
     def test_nothing_running_says_so_rather_than_printing_a_header(self):

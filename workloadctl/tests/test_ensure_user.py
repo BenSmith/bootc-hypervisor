@@ -551,8 +551,8 @@ class TestBuildCloudInitIsoTemplateMode(unittest.TestCase):
         # anywhere above it leaves none.
         self.assertEqual(
             "touch /run/forgejo-runner-bootstrap.ok",
-            [l.strip() for l in script.splitlines()
-             if l.strip() and not l.strip().startswith("#")][-1])
+            [ln.strip() for ln in script.splitlines()
+             if ln.strip() and not ln.strip().startswith("#")][-1])
         self.assertIn("systemd-run --unit=forgejo-runner-bootstrap --no-block", runcmd)
         self.assertIn("test -f /run/forgejo-runner-bootstrap.ok", runcmd)
         self.assertIn("systemctl show -p ActiveState --value forgejo-runner-bootstrap", runcmd)
@@ -1680,7 +1680,7 @@ class TestSeedVmHomeShareSshKey(unittest.TestCase):
         self.assertIn("AAAAOPERATOR", body)
         self.assertIn(self.PUBKEY, body)
         # The missing trailing newline must not glue the two keys together.
-        self.assertEqual(len([l for l in body.splitlines() if l.strip()]), 2)
+        self.assertEqual(len([ln for ln in body.splitlines() if ln.strip()]), 2)
 
     def test_share_at_home_parent_seeds_the_users_subdir(self):
         self._run(["./homes:/home"])

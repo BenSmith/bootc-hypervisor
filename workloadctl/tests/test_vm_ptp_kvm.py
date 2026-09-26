@@ -17,7 +17,7 @@ pinned here rather than left to the seeds.
 import re
 import unittest
 
-from tests import REPO_ROOT, load_script
+from tests import REPO_ROOT
 from vm_ptp import (
     VM_PTP_KVM_CHRONY_MARKER, VM_PTP_KVM_CHRONY_PATH, VM_PTP_KVM_CLOCK_NAME,
     VM_PTP_KVM_DEVICE, VM_PTP_KVM_MODULE, VM_PTP_KVM_MODULES_LOAD_PATH,
@@ -155,7 +155,7 @@ class TestTheStockPoolGoes(unittest.TestCase):
     def test_only_pool_lines_and_only_at_line_start(self):
         """`^pool ` and nothing wider. A `server` line is an operator's
         deliberate addition and stays; a commented-out `#pool` is prose."""
-        line = next(l for l in vm_ptp_kvm_runcmd_lines() if "sed -i" in l)
+        line = next(ln for ln in vm_ptp_kvm_runcmd_lines() if "sed -i" in ln)
         self.assertIn("'/^pool /d'", line)
         self.assertNotIn("server", line)
 
@@ -171,7 +171,7 @@ class TestTheStockPoolGoes(unittest.TestCase):
                  "driftfile /var/lib/chrony/drift\n")
         with tempfile.NamedTemporaryFile("w", suffix=".conf", delete=False) as f:
             f.write(stock)
-        line = next(l for l in vm_ptp_kvm_runcmd_lines() if "sed -i" in l)
+        line = next(ln for ln in vm_ptp_kvm_runcmd_lines() if "sed -i" in ln)
         subprocess.run(line.strip().replace(VM_PTP_KVM_CHRONY_PATH, f.name),
                        shell=True, check=True)
         got = open(f.name).read()

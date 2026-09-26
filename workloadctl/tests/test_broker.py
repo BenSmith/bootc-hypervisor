@@ -156,9 +156,9 @@ class TestTheGeneratedCommand(unittest.TestCase):
         LoadCredentialEncrypted= writes there -- the two are one string."""
         cfg = cred_config()
         unit = TestTheGeneratedUnit().unit(cfg)
-        loaded = [l.split("=", 1)[1].split(":", 1)[0]
-                  for l in unit.splitlines()
-                  if l.startswith("LoadCredentialEncrypted=")]
+        loaded = [ln.split("=", 1)[1].split(":", 1)[0]
+                  for ln in unit.splitlines()
+                  if ln.startswith("LoadCredentialEncrypted=")]
         named = [v.split("=", 1)[1] for v in self.flags(cfg)["--host"]]
         self.assertEqual(loaded, named)
 
@@ -272,8 +272,8 @@ class TestTheGeneratedUnit(unittest.TestCase):
         cfg["vm"]["network"]["hosts"].append("api2.example.test")
         cfg["vm"]["network"]["policy"].append(
             {"host": "api2.example.test", "credential": "example-token"})
-        lines = [l for l in self.unit(cfg).splitlines()
-                 if l.startswith("LoadCredentialEncrypted=")]
+        lines = [ln for ln in self.unit(cfg).splitlines()
+                 if ln.startswith("LoadCredentialEncrypted=")]
         self.assertEqual(lines, [
             "LoadCredentialEncrypted=broker-agent-example-token:"
             "/etc/credstore.encrypted/broker/agent/example-token"])
@@ -337,8 +337,8 @@ class TestTheGeneratedUnit(unittest.TestCase):
         line an operator writes freely."""
         cfg = cred_config()
         cfg["vm"]["network"]["credential"][0]["placeholder"] = 'a"b\\c$d%e'
-        line = [l for l in self.unit(cfg).splitlines()
-                if l.startswith("ExecStart=")][0]
+        line = [ln for ln in self.unit(cfg).splitlines()
+                if ln.startswith("ExecStart=")][0]
         self.assertIn('=a\\"b\\\\c$$d%%e"', line)
 
     def test_there_is_no_config_file_no_writer_and_no_runtime_directory(self):
@@ -514,7 +514,6 @@ class TestDriftSeesAHandEditedInstance(unittest.TestCase):
     """
 
     def setUp(self):
-        import os
         import shutil
         import cmd_drift
         from unittest import mock
@@ -604,7 +603,6 @@ import json
 import os
 import socket
 import threading
-import time
 
 from customs.egress_record import (
     DROP_BROKER_UNREACHABLE,
@@ -614,10 +612,9 @@ from customs.egress_record import (
     RECORD_FIELDS,
     Where,
 )
-from egress_policy import vm_inspect_policy, vm_inspect_policy_text
+from egress_policy import vm_inspect_policy_text
 from customs.inspect_document import VmPolicyEntry
 from customs.inspect_policy import Policy, load_policy
-from workload_addr import broker_listen_address
 from customs import egress_relay
 from customs.egress_upstream import Upstream
 from customs import inspect_http

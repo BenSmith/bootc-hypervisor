@@ -47,12 +47,9 @@ from egress_record_query import (
     resolve_id, resolve_reason, resolve_status, select,
 )
 from customs.egress_record import (
-    DROP_REASONS,
     LOG_ID_FIELD,
     LOG_REQ_FIELD,
-    RECORD_DECISIONS,
     RECORD_FIELDS,
-    RECORD_MODES,
 )
 from customs.egress_plane import PLANES, plane_for_port
 

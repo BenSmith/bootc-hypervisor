@@ -44,7 +44,6 @@ to send from, so it is a host rig and not a `just test` case.
 import json
 import os
 import pwd
-import socket
 import subprocess
 import sys
 
@@ -212,7 +211,7 @@ name, ok, detail = diagnose_inspect.inspect_check(
 print(json.dumps({"ok": ok, "detail": detail}))
 ''' % (LIBDIR, UID)
     r = ns("python3", "-c", script, check=False)
-    line = [l for l in r.stdout.splitlines() if l.startswith("{")]
+    line = [ln for ln in r.stdout.splitlines() if ln.startswith("{")]
     if not line:
         record("diagnose produced a line", False,
                (r.stderr.strip().splitlines() or ["<no output>"])[-1])

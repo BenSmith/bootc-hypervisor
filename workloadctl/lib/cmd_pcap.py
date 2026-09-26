@@ -13,14 +13,13 @@ object, so a dropped session or a `kill -9` cannot leave either behind. See
 lib/pcap.py.
 """
 import json
-import os
 import subprocess
 import sys
 
 import cli_log
 from pcap import (
     DIRECTION_DEFAULT, DURATION_DEFAULT, MAX_SIZE_DEFAULT, PCAP_UNIT_PREFIX,
-    VANTAGE_GUEST, VANTAGE_HOST, available_vantages, build_plan, parse_duration,
+    VANTAGE_HOST, available_vantages, build_plan, parse_duration,
     parse_size, parse_snaplen, pcap_unit_name, pcap_vantages, render_plan,
     systemd_run_argv, validate_request,
 )

@@ -2884,7 +2884,7 @@ def check_broker_invariants():
     text = seen.stdout + seen.stderr
     record("nothing inside the container names the broker's address",
            "127.129." not in text,
-           f"found it: {[l for l in text.splitlines() if '127.129.' in l][:2]}"
+           f"found it: {[ln for ln in text.splitlines() if '127.129.' in ln][:2]}"
            if "127.129." in text else "no 127.129.x.y anywhere in env, "
                                       "/etc/hosts or resolv.conf")
     record("the container holds the PLACEHOLDER, never the key",
@@ -3081,7 +3081,6 @@ def check_record_reader():
     # every selection row below can be pinned to a record this function knows
     # the contents of rather than to whatever the earlier sections left.
     token = f"/p3-{int(time.time())}"
-    before = time.time()
     fetch(FILTERED, f"http://{ALLOWED}{token}")
     rec = latest_for(FILTERED, ALLOWED, path=token)
     record("control: a request this section made is in the record",

@@ -161,8 +161,8 @@ class TestSubstrateClaimsInHelp(unittest.TestCase):
             ["python3", str(REPO / "bin" / "workloadctl"), "--help"],
             capture_output=True, text=True, env=script_env(),
             timeout=60).stdout
-        line = next((l for l in out.splitlines()
-                     if l.strip().startswith("egress")), None)
+        line = next((ln for ln in out.splitlines()
+                     if ln.strip().startswith("egress")), None)
         self.assertIsNotNone(line, "no `egress` line in the top-level help")
         self.assertNotIn(
             "VM", line,

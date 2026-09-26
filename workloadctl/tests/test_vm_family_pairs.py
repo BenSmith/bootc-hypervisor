@@ -35,9 +35,7 @@ import nft_constants
 import nft_elements
 import vm_network_config
 import workload_addr
-from nft_constants import (FamilyPair, NFT_PAIR_ALLOW, NFT_PAIR_INSPECT_DST,
-                           NFT_PAIR_INSPECT_LIVE, NFT_PAIR_INSPECT_MAP,
-                           NFT_PAIR_INSPECT_SELF, NFT_PAIR_INTERNAL,
+from nft_constants import (FamilyPair, NFT_PAIR_ALLOW, NFT_PAIR_INTERNAL,
                            NFT_PAIR_INTERNAL_OK, NFT_SET_FILTERED)
 
 UID = 10004

@@ -24,7 +24,6 @@ import cmd_images
 import cmd_info
 import cmd_inspect
 import cmd_stats
-import provisioning
 import workload_selinux
 import cmd_secret
 import substrate

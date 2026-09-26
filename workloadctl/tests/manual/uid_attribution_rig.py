@@ -147,7 +147,7 @@ def subid_range(name, uid):
 
 
 def ifnames(text):
-    return {l.split(":")[1].strip() for l in text.splitlines() if ":" in l}
+    return {ln.split(":")[1].strip() for ln in text.splitlines() if ":" in ln}
 
 
 def toml_for(arm):
@@ -347,8 +347,8 @@ def main():
 
             e = run(["workloadctl", "exec", name, "--", "sh", "-c",
                      "id -u; cat /proc/self/uid_map"], timeout=60)
-            say(f"  in-container id -u / uid_map:\n"
-                + "\n".join("    " + l for l in e.stdout.strip().splitlines()))
+            say("  in-container id -u / uid_map:\n"
+                + "\n".join("    " + ln for ln in e.stdout.strip().splitlines()))
 
             # Everything below is meaningless if podman gave it its own netns.
             host_names = ifnames(run(["ip", "-o", "link"]).stdout)

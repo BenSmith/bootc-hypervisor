@@ -26,7 +26,7 @@ from dataclasses import dataclass, field
 from egress_policy import vm_uses_inspect
 from nft_constants import NFT_BIN, NFT_TABLE
 from container_network_config import container_uses_inspect
-from workload_addr import UID_MIN, nflog_group
+from workload_addr import nflog_group
 
 
 # --- what a vantage is ---

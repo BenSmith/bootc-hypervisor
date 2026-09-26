@@ -52,7 +52,7 @@ class TestTheTimer(unittest.TestCase):
         period = f"{vm_clock.CLOCK_KEEPER_PERIOD_SECONDS}s"
         self.assertIn(f"OnUnitActiveSec={period}", self.lines)
         self.assertIn(f"OnActiveSec={period}", self.lines)
-        self.assertFalse([l for l in self.lines if l.startswith("OnCalendar")])
+        self.assertFalse([ln for ln in self.lines if ln.startswith("OnCalendar")])
 
     def test_the_accuracy_is_tighter_than_the_period(self):
         """The default AccuracySec= is a minute. On a one-minute period that
@@ -69,7 +69,7 @@ class TestTheTimer(unittest.TestCase):
         so a VM that is disabled leaves no timer ticking at a socket that
         will never exist."""
         self.assertNotIn("[Install]", self.lines)
-        self.assertFalse([l for l in self.lines if l.startswith("WantedBy")])
+        self.assertFalse([ln for ln in self.lines if ln.startswith("WantedBy")])
 
 
 class TestTheService(unittest.TestCase):
@@ -129,7 +129,7 @@ class TestTheVmPullsItIn(unittest.TestCase):
         text = gen_vm.generate_vm_service(CONFIG, "_wl-web", 10000)
         lines = text.splitlines()
         self.assertIn("Wants=workload-web-clock.timer", lines)
-        requires = [l for l in lines if l.startswith("Requires=")]
+        requires = [ln for ln in lines if ln.startswith("Requires=")]
         self.assertTrue(requires)
         self.assertNotIn("clock", " ".join(requires))
 

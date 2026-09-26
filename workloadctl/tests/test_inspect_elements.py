@@ -31,7 +31,7 @@ from nft_elements import (
 )
 from nft_constants import (
     NFT_SET_INSPECT_DST, NFT_SET_INSPECT_DST6, NFT_SET_INSPECT_SELF,
-    NFT_SET_INSPECT_SELF6, NFT_SET_INSPECT_LIVE, NFT_SET_INSPECT_LIVE6,
+    NFT_SET_INSPECT_LIVE, NFT_SET_INSPECT_LIVE6,
     NFT_TABLE,
 )
 from workload_addr import inspect_address

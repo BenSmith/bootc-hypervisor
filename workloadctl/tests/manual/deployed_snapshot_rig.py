@@ -237,7 +237,7 @@ def main():
         print("== collecting deployed configs ==")
         for host in args.hosts:
             n = fetch(host, root / "deployed" / host.replace("@", "_"))
-            record(f"read /etc/workloads.d from a host", n > 0, f"{n} configs")
+            record("read /etc/workloads.d from a host", n > 0, f"{n} configs")
 
         configs = sorted((root / "deployed").glob("*/*/workload.toml"))
         if not configs:
@@ -248,7 +248,7 @@ def main():
         after_tree = materialise(args.after, root / "after")
 
         print(f"\n== {len(configs)} configs, {args.before} -> {args.after} ==")
-        differing = compare(before_tree, after_tree, configs)
+        compare(before_tree, after_tree, configs)
 
         print("\n== the mode = \"host\" refusal against live configs ==")
         # "No shipped bundle uses that combination" was a claim about this

@@ -243,7 +243,6 @@ def container_resolver_check(config, *, nameservers=PROBE, armed=PROBE
     `[[network.allow]]` entry for the resolver on port 53 arms exactly the
     element the drop is missing.
     """
-    import ipaddress
     if config.is_vm or not container_uses_inspect(config.config):
         return None
     try:

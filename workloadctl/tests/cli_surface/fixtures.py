@@ -286,7 +286,7 @@ def _wait_active(target: Target, name: str, timeout: int = 120):
         time.sleep(2)
     # Last check with output for diagnosis
     r = target.run(["systemctl", "status", "--no-pager", service], sudo=False, check=False)
-    how = (f"entered 'failed' state" if state == "failed"
+    how = ("entered 'failed' state" if state == "failed"
            else f"did not become active within {timeout}s (last state: {state or '?'})")
     raise TimeoutError(
         f"Workload '{name}' {how}:\n{r.stdout}\n{r.stderr}"

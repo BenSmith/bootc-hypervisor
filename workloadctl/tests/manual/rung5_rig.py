@@ -357,7 +357,7 @@ def rules_checks():
     out = p.stdout
     record("a governed host says the allowlist is NOT consulted",
            "allowlist is NOT consulted" in out,
-           "; ".join(l.strip() for l in out.splitlines() if "policy" in l)[:160])
+           "; ".join(ln.strip() for ln in out.splitlines() if "policy" in ln)[:160])
     record("BOTH governing entries are printed, because they union",
            out.count("methods:") >= 2,
            f"{out.count('methods:')} entry line(s)")
@@ -370,7 +370,7 @@ def rules_checks():
     out = p.stdout
     record("an unlisted host is refused",
            "refused" in out,
-           next((l.strip() for l in out.splitlines() if "refused" in l),
+           next((ln.strip() for ln in out.splitlines() if "refused" in ln),
                 out[:120]))
     record("the refusal names the two lists that admit",
            "`hosts`" in out and "policy entry" in out,
@@ -438,8 +438,8 @@ def doctor_figures():
     text = p.stdout
     record("the human report prints the section and disclaims a verdict",
            "Egress (inspected)" in text and "evidence, not a verdict" in text,
-           next((l.strip() for l in text.splitlines()
-                 if "evidence, not" in l), text[:120]))
+           next((ln.strip() for ln in text.splitlines()
+                 if "evidence, not" in ln), text[:120]))
     # THE POINT OF THE DISCLAIMER, tested rather than trusted: the run above
     # dropped at least one connection, and doctor's verdict must not have moved
     # because of it. A doctor that went UNHEALTHY over a drop count would teach
@@ -449,7 +449,7 @@ def doctor_figures():
                                     if not c.get("passed")])
     record("a dropped connection did not make the workload UNHEALTHY",
            not unhealthy_for_drops,
-           next((l for l in text.splitlines() if l.startswith("Overall:")),
+           next((ln for ln in text.splitlines() if ln.startswith("Overall:")),
                 "(no verdict line)"))
 
     p = cli("doctor", PLAIN, "--json", timeout=300)
@@ -491,8 +491,8 @@ def exporter_checks(doctor_figs):
            f"rc={p.returncode} bytes={len(text)} {p.stderr[:120]}")
 
     samples, order = parse_exposition(text)
-    mine = {(m, l): v for (m, l), v in samples.items()
-            if m.startswith("workload_vm_inspect_") and f'workload="{NAME}"' in l}
+    mine = {(m, lbl): v for (m, lbl), v in samples.items()
+            if m.startswith("workload_vm_inspect_") and f'workload="{NAME}"' in lbl}
     record("the inspected workload has inspector series",
            bool(mine),
            f"{len(mine)} series for {NAME}")
@@ -501,17 +501,17 @@ def exporter_checks(doctor_figs):
                         f'workload="{NAME}"')) == "1",
            f"status_present="
            f"{samples.get(('workload_vm_inspect_status_present', f'workload=\"{NAME}\"'))}")
-    plain_series = [m for (m, l) in samples
+    plain_series = [m for (m, lbl) in samples
                     if m.startswith("workload_vm_inspect_")
-                    and f'workload="{PLAIN}"' in l]
+                    and f'workload="{PLAIN}"' in lbl]
     record("an UNFILTERED workload gets no inspector series — a series would "
            "assert a filter exists and is idle",
            not plain_series,
            f"{len(plain_series)} series for {PLAIN}")
 
-    reasons = [l for (m, l) in samples
+    reasons = [lbl for (m, lbl) in samples
                if m == "workload_vm_inspect_drop_events_total"
-               and f'workload="{NAME}"' in l]
+               and f'workload="{NAME}"' in lbl]
     record("the drop breakdown reaches the wire with its reason label",
            bool(reasons),
            f"{len(reasons)} reason series, e.g. {reasons[0] if reasons else '-'}")
@@ -542,9 +542,9 @@ def exporter_checks(doctor_figs):
         dropped = ""
         say(f"  could not read {EXPORTER_DROP}: {exc}")
     drop_samples, _order = parse_exposition(dropped)
-    unit_series = [m for (m, l) in drop_samples
+    unit_series = [m for (m, lbl) in drop_samples
                    if m.startswith("workload_vm_inspect_")
-                   and f'workload="{NAME}"' in l]
+                   and f'workload="{NAME}"' in lbl]
     record("the exporter UNIT — not just the binary — writes the inspector "
            "series to the real drop file",
            bool(unit_series),

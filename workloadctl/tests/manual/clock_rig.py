@@ -637,7 +637,7 @@ def measure():
             "Measurements 4 to 8, the host-side remedy, run as normal.")
 
     if ptp_possible:
-        say(f"== 3b. the same pause, with the guest-side remedy ON ==")
+        say("== 3b. the same pause, with the guest-side remedy ON ==")
         t_stop = time.time()
         qmp(["stop"])
         time.sleep(PAUSE_SECONDS)

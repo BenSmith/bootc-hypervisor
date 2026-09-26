@@ -281,7 +281,8 @@ def measure_doubling():
             # a short settle is what makes an exact doubling read as inexact.
             time.sleep(5)
         finally:
-            tcpdump.terminate(); tcpdump.wait()
+            tcpdump.terminate()
+            tcpdump.wait()
             listener.kill()
 
         out = run(["ip", "netns", "exec", NS, "tcpdump", "-r", cap, "-nn"],

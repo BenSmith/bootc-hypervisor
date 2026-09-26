@@ -458,8 +458,8 @@ class TestTheGeneratedUnit(unittest.TestCase):
         broker's own unit and nowhere the workload reads."""
         self._generate("capp", SINGLE)
         addr = broker_listen_address(
-            int([l for l in (Path(self.sysusers_dir) / "workload-capp.conf")
-                 .read_text().split("\n") if l.startswith("u ")][0].split()[2]))
+            int([ln for ln in (Path(self.sysusers_dir) / "workload-capp.conf")
+                 .read_text().split("\n") if ln.startswith("u ")][0].split()[2]))
         service = (Path(self.services_dir)
                    / "workload-capp.service").read_text()
         self.assertNotIn(addr, service)

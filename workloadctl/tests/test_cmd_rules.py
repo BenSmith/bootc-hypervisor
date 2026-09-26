@@ -18,7 +18,7 @@ asks the matcher the same question the listener asks it.
 import io
 import json
 import unittest
-from contextlib import redirect_stderr, redirect_stdout
+from contextlib import redirect_stdout
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest import mock

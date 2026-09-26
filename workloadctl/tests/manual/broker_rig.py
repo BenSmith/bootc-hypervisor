@@ -997,8 +997,8 @@ def selinux(since):
     record(f"no {INSPECT_DOMAIN} or broker denial during this run",
            not denials,
            "\n      ".join(denials) if denials
-           else f"0 unexplained AVCs since the run started (the documented "
-                f"stdout probe is excluded by shape, not by domain)")
+           else "0 unexplained AVCs since the run started (the documented "
+                "stdout probe is excluded by shape, not by domain)")
 
 
 # --- teardown ---------------------------------------------------------------

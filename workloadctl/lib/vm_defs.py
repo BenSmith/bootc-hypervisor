@@ -25,7 +25,6 @@ import hashlib
 import ipaddress
 import re
 from pathlib import Path
-from typing import NamedTuple
 
 from config_parser import SOCKET_DIR
 from workload_addr import VmInspectAddress  # noqa: F401  (FamilyPair annotation)

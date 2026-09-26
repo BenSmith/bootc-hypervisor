@@ -170,7 +170,7 @@ def _seed_authorized_keys(root_dir, ssh_dir: Path, pubkey: str, uid, gid) -> boo
                 raise RuntimeError(
                     f"{ssh_dir}/authorized_keys is {st.st_size} bytes — refusing to read")
             existing = os.read(fd, st.st_size).decode("utf-8", "replace")
-            present = pubkey.strip() in (l.strip() for l in existing.splitlines())
+            present = pubkey.strip() in (ln.strip() for ln in existing.splitlines())
             if not present:
                 os.lseek(fd, 0, os.SEEK_END)
                 if existing and not existing.endswith("\n"):

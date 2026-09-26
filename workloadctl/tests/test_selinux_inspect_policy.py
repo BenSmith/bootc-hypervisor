@@ -25,8 +25,8 @@ SPEC = ROOT / "rpm" / "workloadctl.spec"
 def _body():
     """The module with comment lines stripped, so a rule quoted in a comment
     cannot satisfy an assertion about the rules."""
-    return "\n".join(l for l in CIL.read_text().splitlines()
-                     if not l.lstrip().startswith(";"))
+    return "\n".join(ln for ln in CIL.read_text().splitlines()
+                     if not ln.lstrip().startswith(";"))
 
 
 def _filecons():

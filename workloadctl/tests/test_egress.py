@@ -2210,9 +2210,9 @@ class TestElementCounterParsing(unittest.TestCase):
             # `set_name in line` would match wl_inspect_self against the
             # wl_inspect_self6 declaration too: one name is a prefix of the
             # other, and the substring test picks up both.
-            line = only(self, [l for l in text.splitlines()
-                               if l.split()[:1] == ["add"]
-                               and f" {set_name} " in l],
+            line = only(self, [ln for ln in text.splitlines()
+                               if ln.split()[:1] == ["add"]
+                               and f" {set_name} " in ln],
                         f"declaration of {set_name}")
             self.assertIn("counter", line)
 

@@ -260,8 +260,8 @@ class TestVmBaseBundle(CatalogTestBase):
         """
         shipped = (REPO_BUNDLES / "vm-base" / "cloud-init" / "user-data").read_text()
         # The example line for the share that covers the guest home.
-        home_lines = [l for l in shipped.splitlines()
-                      if "virtiofs" in l and "/home/fedora " in l]
+        home_lines = [ln for ln in shipped.splitlines()
+                      if "virtiofs" in ln and "/home/fedora " in ln]
         self.assertTrue(home_lines,
                         "vm-base no longer shows a home-share mount example; "
                         "if that is deliberate, drop this test with it")
