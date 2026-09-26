@@ -86,7 +86,23 @@ jobs:
             echo "HOMELAB_ROOT_CA secret not set; building without injected anchors"
           fi
 
+      # customs' RPM is installed into this signed image, so the build takes
+      # it by the digest whose signature verified, not by the pinned tag.
+      - name: Verify customs RPM
+        id: customs
+        run: |
+          IMAGE=$(sed -n 's/^ARG CUSTOMS_RPM=//p' hypervisor.Containerfile)
+          REPO="${IMAGE%:*}"
+          printf '{"default":[{"type":"reject"}],"transports":{"docker":{"%s":[{"type":"sigstoreSigned","keyPath":"%s","signedIdentity":{"type":"matchRepository"}}]}}}' \
+            "${REPO}" "$(pwd)/cosign.pub" > /tmp/customs-rpm-policy.json
+          sudo podman pull -q --signature-policy=/tmp/customs-rpm-policy.json "${IMAGE}" >/dev/null
+          DIGEST=$(sudo podman image inspect --format '{{.Digest}}' "${IMAGE}")
+          echo "verified: ${IMAGE} (${DIGEST})"
+          echo "ref=${REPO}@${DIGEST}" >> "$GITHUB_OUTPUT"
+
       - name: Build base hypervisor
+        env:
+          CUSTOMS_RPM: ${{ steps.customs.outputs.ref }}
         run: |
           sudo podman build \
             --pull=newer \
@@ -97,6 +113,7 @@ jobs:
             --network=host \
             --build-arg BASE_IMAGE=${REGISTRY}/fedora-bootc-minimal:${VERSION} \
             --build-arg FEDORA_VERSION=${VERSION} \
+            --build-arg CUSTOMS_RPM=${CUSTOMS_RPM} \
             -f hypervisor.Containerfile \
             -t "localhost/hypervisor-bootc:build-${VERSION}" \
             .
@@ -156,6 +173,7 @@ jobs:
         env:
           TAG: ${{ needs.setup.outputs.tag }}
           STABLE: ${{ needs.setup.outputs.stable }}
+          CUSTOMS_RPM: ${{ steps.customs.outputs.ref }}
         run: |
           IMAGE_BASE="${REGISTRY}/hypervisor-bootc"
           {
@@ -166,6 +184,7 @@ jobs:
             if [ "${VERSION}" = "${STABLE}" ]; then
               echo "- \`${IMAGE_BASE}:latest\`"
             fi
+            echo "- customs RPM: \`${CUSTOMS_RPM}\`"
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Cleanup local tags
