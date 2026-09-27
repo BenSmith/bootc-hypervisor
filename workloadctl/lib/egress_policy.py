@@ -316,12 +316,17 @@ def vm_inspect_policy(net: dict) -> dict:
 
     `hosts` is `[vm.network].hosts` unchanged.
 
-    `internal` is carried and AUTHORISES NOTHING. An `internal` entry names a
-    host that is already on a list (validation refuses one that is not), and it
-    excepts the inspector's *upstream* leg from the internal drop rather than
-    authorising a name. The listener never consults it to admit a connection:
-    the kernel's wl_internal_ok4/6 elements are the one enforcement point, and a
-    second one in userspace could disagree with them while both looked right.
+    `internal_expected` is the rendered key for the `[[vm.network].internal]`
+    entries, and it is carried and AUTHORISES NOTHING. An `internal` entry
+    names a host that is already on a list (validation refuses one that is
+    not), and it excepts the inspector's *upstream* leg from the internal drop
+    rather than authorising a name. The rendered key is `internal_expected` and
+    not `internal` because the list admits nothing and only attributes a failed
+    private-address dial: a name it holds is reported upstream unreachable, one
+    it does not is reported an internal destination. The listener never
+    consults it to admit a connection: the kernel's wl_internal_ok4/6 elements
+    are the one enforcement point, and a second one in userspace could disagree
+    with them while both looked right.
 
     `splice` is the [[vm.network.splice]] host patterns, and unlike `internal`
     it DOES decide something: a name it matches is spliced rather than
@@ -374,7 +379,7 @@ def vm_inspect_policy(net: dict) -> dict:
     return {
         "tls": net.get("tls", TLS_DEFAULT),
         "hosts": vm_allowed_hosts(net),
-        "internal": internal_hosts(net),
+        "internal_expected": internal_hosts(net),
         "splice": splice_hosts(net),
         "http2": [],
         "policy": [
@@ -426,7 +431,7 @@ def container_inspect_policy(net: dict) -> dict:
     return {
         "tls": container_effective_tls_mode(net),
         "hosts": container_allowed_hosts(net),
-        "internal": [e.host for e in container_internal_entries(net)],
+        "internal_expected": [e.host for e in container_internal_entries(net)],
         "splice": [e.host for e in container_splice_entries(net)],
         "http2": [],
         "policy": [

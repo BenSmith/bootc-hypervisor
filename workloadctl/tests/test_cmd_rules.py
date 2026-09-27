@@ -31,8 +31,8 @@ def doc(**over):
     one. Written out rather than built by calling the renderer: a test that
     generated its input from the code under test's own upstream would follow a
     mistake there into a green run here."""
-    base = {"tls": "inspect", "hosts": [], "internal": [], "splice": [],
-            "http2": [], "policy": []}
+    base = {"tls": "inspect", "hosts": [], "internal_expected": [],
+            "splice": [], "http2": [], "policy": []}
     base.update(over)
     return base
 
@@ -168,7 +168,7 @@ class TlsTreatmentTest(unittest.TestCase):
 
 class EnumerationTest(unittest.TestCase):
     def test_literals_come_from_every_key(self):
-        d = doc(hosts=["a.example.com"], internal=["b.example.com"],
+        d = doc(hosts=["a.example.com"], internal_expected=["b.example.com"],
                 splice=["c.example.com"], policy=[entry("e.example.com")])
         self.assertEqual(cmd_rules.literal_names(d),
                          ["a.example.com", "b.example.com", "c.example.com",

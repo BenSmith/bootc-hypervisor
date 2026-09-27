@@ -3041,7 +3041,7 @@ class TestContainerInspectPolicy(unittest.TestCase):
         doc = container_inspect_policy(net)
         self.assertEqual(doc["tls"], "inspect")  # a policy entry is present
         self.assertEqual(doc["hosts"], ["*.pypi.org"])
-        self.assertEqual(doc["internal"], ["db.lan"])
+        self.assertEqual(doc["internal_expected"], ["db.lan"])
         self.assertEqual(doc["splice"], ["pinned.example.com"])
         self.assertEqual(doc["http2"], [])
         self.assertEqual(doc["policy"], [

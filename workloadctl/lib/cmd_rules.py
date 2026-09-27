@@ -75,10 +75,14 @@ _WILDCARD_CHARS = "*?["
 # The keys of the policy document whose values are host patterns, and the label
 # each gets in the report. Driven by a table rather than by hand-written
 # blocks so that a key added to vm_inspect_policy() and not to this one shows up
-# as an absent column rather than as a silently narrower report.
+# as an absent column rather than as a silently narrower report. The key and
+# the label differ where the rendered document renamed one: the document
+# carries `internal_expected` (customs' name for a list that attributes a
+# private-address dial and admits nothing), while the report keeps the TOML's
+# `internal` so an operator reads the section they wrote.
 _PATTERN_KEYS = (
     ("hosts", "hosts"),
-    ("internal", "internal"),
+    ("internal_expected", "internal"),
     ("splice", "splice"),
 )
 
@@ -206,9 +210,11 @@ def explain(doc: dict, host: str) -> dict:
     `hosts` alone would print `not allowlisted` for a host the operator's file
     plainly names.
     """
-    matched = {key: [p for p in (doc.get(key) or [])
-                     if hostname_match(host, (p,))]
-               for key, _label in _PATTERN_KEYS}
+    # Keyed by label, not by document key: the report's own vocabulary is the
+    # TOML's, and `render_query` and the `--json` view read it by that name.
+    matched = {label: [p for p in (doc.get(key) or [])
+                       if hostname_match(host, (p,))]
+               for key, label in _PATTERN_KEYS}
     governing = policy_governs(host, _entries(doc))
     return {
         "host": host,

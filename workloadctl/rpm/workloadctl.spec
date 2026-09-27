@@ -45,8 +45,10 @@ Requires:       openssl
 # customs-inspect, customs-broker and customs-resolve, which the generated
 # units run, and the customs package whose published names lib/ imports
 # (tests/test_customs_seam.py). 0.3.0 is the first release whose responder
-# takes --static.
-Requires:       customs >= 0.3.0
+# takes --static; 0.4.0 is the first whose policy document names
+# internal_expected, which is the key this package's renderer writes. A lower
+# floor installs a customs that refuses the document at the inspector's start.
+Requires:       customs >= 0.4.0
 # There is deliberately NO proxy dependency here. Through rung 1 this was a hard
 # `Requires: tinyproxy`, because a VM declaring [vm.network].hosts was filtered
 # default-deny with its own proxy as the only route out. Rung 2 replaced that

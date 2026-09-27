@@ -259,8 +259,26 @@ class TestTheDocumentIsTheOneCustomsReads(unittest.TestCase):
                          ("example.com", "nas.example.com",
                           "sum.golang.org"))
         self.assertEqual(policy.tls, "inspect")
-        self.assertEqual(policy.internal, ("nas.example.com",))
+        self.assertEqual(policy.internal_expected, ("nas.example.com",))
         self.assertEqual(policy.splice, ("sum.golang.org",))
+
+    def test_the_internal_list_is_carried_under_its_new_name(self):
+        """The rendered key is `internal_expected`, not `internal`.
+
+        customs renamed it because the list admits nothing -- it only
+        attributes a failed private-address dial -- and the old name read
+        like an allow-list. A non-empty legacy key now refuses the
+        inspector's start, so a writer still emitting `internal` is not a
+        cosmetic drift; it is a workload whose inspector will not run.
+        """
+        from egress_policy import container_inspect_policy, vm_inspect_policy
+        net = {
+            "hosts": ["nas.example.com"],
+            "internal": [{"host": "nas.example.com", "reason": "nas"}],
+        }
+        for doc in (vm_inspect_policy(net), container_inspect_policy(net)):
+            self.assertEqual(doc["internal_expected"], ["nas.example.com"])
+            self.assertNotIn("internal", doc)
 
     def test_a_policy_entry_arrives_with_its_credential(self):
         from egress_policy import vm_inspect_policy
@@ -563,15 +581,16 @@ class TestTheProgramsAreCustoms(unittest.TestCase):
         self.assertEqual(BROKER_BIN, "/usr/libexec/customs/customs-broker")
 
     def test_the_spec_requires_a_customs_with_everything_used_here(self):
-        """0.3.0 is the first release whose customs-resolve takes --static.
-        A lower floor installs against an older customs, and the responder
-        then fails its start on an unrecognised flag, at the guest's first
-        query."""
+        """0.3.0 is the first release whose customs-resolve takes --static;
+        0.4.0 is the first whose policy document names internal_expected. A
+        lower floor installs against an older customs, and the responder then
+        fails its start on an unrecognised flag (at the guest's first query),
+        or the inspector refuses the rendered document (at its start)."""
         spec = (Path(REPO_ROOT) / "rpm" / "workloadctl.spec").read_text()
         minimum = re.search(
             r"(?m)^Requires:\s+customs >= (\S+)$", spec).group(1)
         self.assertGreaterEqual(
-            tuple(int(part) for part in minimum.split(".")), (0, 3, 0))
+            tuple(int(part) for part in minimum.split(".")), (0, 4, 0))
 
     def test_seed_isos_carry_customs(self):
         """A VM's seed ISO carries customs' RPM beside workloadctl's, which
