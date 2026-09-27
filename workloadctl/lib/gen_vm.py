@@ -352,15 +352,23 @@ def build_passt_netdev(name: str, uid: int, net_cfg: dict, mac: str) -> str:
         forward = f"{bind_addr}/" if bind_addr else ""
         forward += f"{host_port}:{guest_port}"
         (udp_ports if proto == "udp" else tcp_ports).append(forward)
-    # One key per entry, NOT a comma-joined value. tcp-ports/udp-ports are
-    # list-typed netdev properties (qapi/net.json:224-225), and -netdev passt
-    # goes through the traditional QemuOpts path — netdev_is_modern() returns
-    # true only for stream/dgram — where the opts visitor builds a list from
-    # *repeated occurrences of the same key* (qapi/opts-visitor.c:74-77). A
-    # comma-joined value would make QEMU read the second entry as a bare
-    # unknown option and refuse to start.
-    props += [f"tcp-ports={spec}" for spec in tcp_ports]
-    props += [f"udp-ports={spec}" for spec in udp_ports]
+    # Each forward is its OWN `-t`/`-u` argument, through QEMU's repeatable
+    # `param=` escape hatch — NOT the `tcp-ports`/`udp-ports` list properties.
+    # Those are list-typed and repeated keys do build a list, but net/passt.c
+    # then joins the list with commas and passes ONE `--tcp-ports` value (QEMU
+    # 10.1 through 11.0: `g_string_append(tcp_ports, ",")`), and passt's grammar
+    # allows at most one leading `[ADDR/]` for the whole comma list. The
+    # management forward always carries a bind address, so a joined list either
+    # inherits that address for every published port (an entry with no bind
+    # address silently binds the management address) or is refused outright:
+    # `Invalid port specifier '<addr>/<port>,<addr>/<port>'`. `param=` is
+    # appended to passt's argv verbatim, so each forward keeps its own address.
+    # The DNS fragment takes the same hatch for the same reason
+    # (passt_dns_fragment); see test_vm_passt.
+    for spec in tcp_ports:
+        props += ["param=-t", f"param={spec}"]
+    for spec in udp_ports:
+        props += ["param=-u", f"param={spec}"]
 
     # What the guest can reach on the host. `--map-host-loopback none` closes
     # the one that bites: passt's default maps the host's loopback onto the

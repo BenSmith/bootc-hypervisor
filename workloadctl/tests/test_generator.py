@@ -2347,20 +2347,35 @@ class TestGeneratorVmWorkload(unittest.TestCase):
         expected = ".".join(str((octets >> shift) & 0xFF)
                             for shift in (24, 16, 8, 0))
         svc = self._read("workload-fedora-vm.service")
-        self.assertIn(f"tcp-ports={expected}/2222:22", svc)
+        self.assertIn(f"param=-t,param={expected}/2222:22", svc)
 
-    def test_published_ports_use_one_key_each(self):
-        # tcp-ports/udp-ports are list-typed netdev properties, and -netdev
-        # passt goes through QemuOpts, where a list is built from REPEATED
-        # KEYS. A comma-joined value would make QEMU read the second entry as
-        # a bare unknown option and refuse to start.
+    def test_published_ports_are_separate_passt_arguments(self):
+        # net/passt.c joins the tcp-ports/udp-ports list with commas into ONE
+        # `--tcp-ports` value, and passt allows only one leading `[ADDR/]` for
+        # the whole comma list. So each forward has to be its own `-t`/`-u`,
+        # through QEMU's repeatable `param=` hatch — the list properties cannot
+        # express a per-entry bind address alongside the management forward.
         self._write_vm_config(
             network='ports = ["8080:80", "5353:53/udp"]\negress = "open"')
         self._run()
         svc = self._read("workload-fedora-vm.service")
-        self.assertIn("tcp-ports=8080:80", svc)
-        self.assertIn("udp-ports=5353:53", svc)
-        self.assertNotIn("tcp-ports=127.128.0.0/2222:22,8080:80", svc)
+        self.assertIn("param=-t,param=8080:80", svc)
+        self.assertIn("param=-u,param=5353:53", svc)
+        self.assertNotIn("tcp-ports=", svc)
+        self.assertNotIn("udp-ports=", svc)
+
+    def test_a_bound_published_port_keeps_its_own_passt_argument(self):
+        # The regression this fix was written for: QEMU joined the management
+        # forward and this one into a single `--tcp-ports`, passt parsed the
+        # leading `127.128.x.y/` as the bind address for the WHOLE list, and
+        # refused the rest with `Invalid port specifier '<port>,<addr>/<port>'`
+        # — the VM never created its QMP socket and timed out at 60s.
+        self._write_vm_config(
+            network='ports = ["192.168.0.10:2222:22"]\negress = "open"')
+        self._run()
+        svc = self._read("workload-fedora-vm.service")
+        self.assertIn("param=-t,param=192.168.0.10/2222:22", svc)
+        self.assertNotIn("tcp-ports=", svc)
 
     def test_passt_dns_is_deferred_to_a_prestart(self):
         # The generator runs Before=basic.target, where there is no default
