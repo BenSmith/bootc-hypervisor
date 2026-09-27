@@ -430,6 +430,16 @@ class TestBoundary(unittest.TestCase):
         rather than the mount."""
         self.assertIn("(allow init_t wlinspect_leaf_t (dir (mounton)))", _body())
 
+    def test_tmpfiles_may_create_the_record_parent(self):
+        """workloads-dirs.conf makes /var/log/workloadctl/egress at boot, and
+        the filecon labels it wlinspect_log_t as it is created. Without the
+        grant tmpfiles fails on every boot with no AVC unless dontaudit rules
+        are off, and the directory appears only when an inspector starts."""
+        self.assertIn(
+            "(allow systemd_tmpfiles_t wlinspect_log_t (dir (create)))", _body())
+        conf = (ROOT / "systemd" / "workloads-dirs.conf").read_text()
+        self.assertRegex(conf, r"(?m)^d\s+/var/log/workloadctl/egress\s")
+
     def test_both_pki_types_are_declared_as_file_types(self):
         """A type without the file_type attribute cannot be relabelled onto a
         file by setfiles, so `restorecon` silently leaves the subtree

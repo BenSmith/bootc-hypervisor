@@ -571,3 +571,14 @@
 ; Without the mounton the unit does not start at all, and the message names the
 ; ExecStartPre rather than the mount.
 (allow init_t wlinspect_log_t (dir (add_name create getattr mounton open read search setattr write)))
+
+; THE PARENT IS TMPFILES'S, created at boot by workloads-dirs.conf so that it
+; is 0711 before any inspector starts. The filecon above makes the new
+; directory wlinspect_log_t at creation, so the create is checked against that
+; type, and shipped policy grants systemd_tmpfiles_t nothing on it. Without
+; this rule tmpfiles logs "Permission denied" on every boot, and the directory
+; exists only once an inspector's LogsDirectory= has made it. Measured on a
+; KVM host under enforcing 2026-09-27 with dontaudit rules off: `create` is
+; the whole denial. Correcting the mode of an existing directory needs nothing
+; more.
+(allow systemd_tmpfiles_t wlinspect_log_t (dir (create)))
