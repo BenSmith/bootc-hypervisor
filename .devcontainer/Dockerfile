@@ -2,7 +2,11 @@
 ARG FEDORA_VERSION=44
 FROM registry.fedoraproject.org/fedora:${FEDORA_VERSION}
 
-COPY rtk-0.42.4-1.x86_64.rpm /tmp/rtk.rpm
+# rtk is optional: a checkout that does not carry the rpm still builds.
+# A COPY of a missing file fails the whole build and there is no
+# conditional COPY, so the build context directory is copied instead
+# (it always exists) and the rpm installed only if it is there.
+COPY . /tmp/devcontext/
 
 RUN dnf install -y --setopt=install_weak_deps=False \
         fd-find \
@@ -28,9 +32,9 @@ RUN dnf install -y --setopt=install_weak_deps=False \
         tar \
         uv \
         which \
-        /tmp/rtk.rpm \
+        $(ls /tmp/devcontext/rtk-*.rpm 2>/dev/null || true) \
     && dnf clean all \
-    && rm /tmp/rtk.rpm
+    && rm -rf /tmp/devcontext
 
 RUN npm install -g --ignore-scripts @earendil-works/pi-coding-agent && \
     pi install --approve git:github.com/MasuRii/pi-rtk-optimizer@d155d253cb2f1358e34e717d47a82ebccb08cb8e

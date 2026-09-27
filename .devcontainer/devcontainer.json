@@ -1,5 +1,5 @@
 {
-    "name": "pycharm-dev",
+    "name": "hypervisor",
     "build": {
         "dockerfile": "Dockerfile",
         "args": { "FEDORA_VERSION": "44" }
