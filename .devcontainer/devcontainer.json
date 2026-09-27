@@ -1,0 +1,22 @@
+{
+    "name": "pycharm-dev",
+    "build": {
+        "dockerfile": "Dockerfile",
+        "args": { "FEDORA_VERSION": "44" }
+    },
+    "containerUser": "root",
+    "remoteUser": "root",
+    "workspaceFolder": "/workspace",
+    "workspaceMount": "source=${localWorkspaceFolder},target=/workspace,type=bind",
+    "mounts": [
+        "source=jetbrains-cache,target=/root/.cache/JetBrains,type=volume",
+        "source=jetbrains-config,target=/root/.config/JetBrains,type=volume",
+        "source=jetbrains-data,target=/root/.local/share/JetBrains,type=volume",
+        "source=uv-cache,target=/root/.cache/uv,type=volume"
+    ],
+    "customizations": {
+        "jetbrains": {
+            "backend": "PyCharm"
+        }
+    }
+}
