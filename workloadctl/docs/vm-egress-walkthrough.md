@@ -227,7 +227,8 @@ Then the paths that don't work, which are the point:
 - **The guest dials `1.2.3.4:443` directly, by literal.** The redirect keys on
   the port, not the destination, so it is DNATed into the inspector anyway —
   where a TLS record with no SNI, or a byte stream that is not a handshake at
-  all, has no name to match. Dropped, and counted under *no readable name*.
+  all, has no name to match. Dropped, and counted under *no server name* or
+  *not TLS*, which customs marks suspect.
   There is nothing to opt out of: the guest never chooses whether a connection
   is inspected, so dialling by literal is caught by the rule that inspects
   everything rather than by a default deny that has to notice the evasion.

@@ -582,15 +582,17 @@ class TestTheProgramsAreCustoms(unittest.TestCase):
 
     def test_the_spec_requires_a_customs_with_everything_used_here(self):
         """0.3.0 is the first release whose customs-resolve takes --static;
-        0.4.0 is the first whose policy document names internal_expected. A
-        lower floor installs against an older customs, and the responder then
+        0.4.0 is the first whose policy document names internal_expected;
+        0.5.0 is the first that counts a nameless connection under the
+        reasons the docs here name ("not TLS", "no server name"). A lower
+        floor installs against an older customs, and the responder then
         fails its start on an unrecognised flag (at the guest's first query),
         or the inspector refuses the rendered document (at its start)."""
         spec = (Path(REPO_ROOT) / "rpm" / "workloadctl.spec").read_text()
         minimum = re.search(
             r"(?m)^Requires:\s+customs >= (\S+)$", spec).group(1)
         self.assertGreaterEqual(
-            tuple(int(part) for part in minimum.split(".")), (0, 4, 0))
+            tuple(int(part) for part in minimum.split(".")), (0, 5, 0))
 
     def test_seed_isos_carry_customs(self):
         """A VM's seed ISO carries customs' RPM beside workloadctl's, which
