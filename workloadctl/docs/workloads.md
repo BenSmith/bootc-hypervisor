@@ -955,6 +955,10 @@ create`. Containers reach each other on `localhost`. Publish ports once in the
 top-level `[network]` block. Because the pod's infra container owns the shared
 user namespace, `userns` / `extra_uidmaps` / `extra_gidmaps` are **workload-level**
 (top-level `[security]`) in pod mode — a per-container value is warned and ignored.
+Under a keep-id `userns`, a container that sets no `user` runs as the pod's
+keep-id user, whatever its image's `USER` says. Podman runs one whose image has
+no `USER` as that user anyway, but gives every `workloadctl exec` and health
+check in it root's capabilities unless the user is named.
 
 **Bridge mode** (`mode = "bridge"`) gives each container its own network
 namespace, all joined to an auto-created bridge network (`workload-<name>-net`).

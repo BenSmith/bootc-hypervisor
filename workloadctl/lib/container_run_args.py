@@ -68,18 +68,9 @@ def build_userns_args(security, uid, extra_groups, name):
         log_msg(f"WARNING: {name} uses userns=host. Container root maps to workload user. "
                 f"Container escape grants workload user privileges.", level="warning")
 
-    # Extra UID/GID maps for keep-id userns.
-    # When extra_groups or explicit maps are present, we emit +N:@N:1 flags
-    # which imply keep-id behavior.
-    # Podman 5.x treats --userns and --uidmap/--gidmap as mutually exclusive,
-    # so we must omit --userns when + prefixed maps are used.
     extra_uidmaps = security.get("extra_uidmaps", [])
     extra_gidmaps = security.get("extra_gidmaps", [])
-    needs_auto_maps = (
-        userns_mode.startswith("keep-id")
-        and (extra_groups or extra_uidmaps or extra_gidmaps)
-    )
-    if needs_auto_maps:
+    if _needs_auto_maps(security, userns_mode, extra_groups):
         # GID == UID for workload users (sysusers convention)
         gid = uid
         # Honor the optional :uid=N,gid=N suffix on keep-id, which remaps the
@@ -87,15 +78,7 @@ def build_userns_args(security, uid, extra_groups, name):
         # that ship a fixed non-root user). Without this, +N:@N:1 hardcodes the
         # in-container uid to the host workload uid, silently ignoring the
         # suffix that the non-needs_auto_maps branch would have honored.
-        target_uid = uid
-        target_gid = gid
-        if userns_mode.startswith("keep-id:"):
-            for param in userns_mode[len("keep-id:"):].split(","):
-                key, _, value = param.partition("=")
-                if key == "uid":
-                    target_uid = int(value)
-                elif key == "gid":
-                    target_gid = int(value)
+        target_uid, target_gid = _keep_id_ids(userns_mode, uid)
         # Auto-map the workload user's own UID and GID (+ prefix implies keep-id)
         args.append(f"--uidmap +{target_uid}:@{uid}:1")
         args.append(f"--gidmap +{target_gid}:@{gid}:1")
@@ -116,6 +99,55 @@ def build_userns_args(security, uid, extra_groups, name):
     else:
         args.append(f"--userns={userns_mode}")
     return args
+
+
+def _needs_auto_maps(security, userns_mode, extra_groups):
+    """True when keep-id is written as +N:@N:1 maps instead of --userns.
+
+    When extra_groups or explicit maps are present, we emit +N:@N:1 flags
+    which imply keep-id behavior.
+    Podman 5.x treats --userns and --uidmap/--gidmap as mutually exclusive,
+    so we must omit --userns when + prefixed maps are used.
+    """
+    return userns_mode.startswith("keep-id") and bool(
+        extra_groups
+        or security.get("extra_uidmaps")
+        or security.get("extra_gidmaps")
+    )
+
+
+def _keep_id_ids(userns_mode, uid):
+    """The in-container uid and gid a keep-id mode gives the workload user:
+    its own (GID == UID), or those the :uid=N,gid=N suffix names."""
+    ids = {"uid": uid, "gid": uid}
+    if userns_mode.startswith("keep-id:"):
+        for param in userns_mode[len("keep-id:"):].split(","):
+            key, _, value = param.partition("=")
+            if key in ids:
+                ids[key] = int(value)
+    return ids["uid"], ids["gid"]
+
+
+def pod_member_user(security, uid, extra_groups):
+    """The --user= a pod member that names no user is given, or None.
+
+    `security` is the top-level block, which the pod create reads. Under
+    --userns=keep-id the pod hands its keep-id user to a member that names
+    none, but podman builds that member's capabilities as root's, and a
+    `podman exec` or health check as that user holds all of them, ambient.
+    Naming the same user puts the member on podman's non-root path: the
+    user holds what [security].capabilities adds, as in single mode, where
+    keep-id names the user itself. The image's USER is not used; the
+    member's own user sets another. The +N:@N:1 maps and userns=host give
+    the pod no user, and a member that names none runs as root.
+    """
+    userns_mode = security.get("userns", "keep-id")
+    if not valid_userns_mode(userns_mode):
+        userns_mode = "keep-id"
+    if (not userns_mode.startswith("keep-id")
+            or _needs_auto_maps(security, userns_mode, extra_groups)):
+        return None
+    return "%d:%d" % _keep_id_ids(userns_mode, uid)
 
 
 def build_plain_env_args(container):
@@ -392,6 +424,11 @@ def _security_args(spec):
     container_user = container.get("container", {}).get("user", "")
     if container_user:
         args.append(f"--user={container_user}")
+    elif mode == "pod":
+        member_user = pod_member_user(config.get("security", {}), spec.uid,
+                                      extra_groups)
+        if member_user:
+            args.append(f"--user={member_user}")
 
     capabilities = container.get("security", {}).get("capabilities", [])
     for cap in capabilities:

@@ -1227,7 +1227,12 @@ image = "ghcr.io/example/workload:latest"
 
 # Optional: Override the container image's USER directive
 # Type: string (UID or username)
-# Default: (uses the image's USER — typically root or nobody)
+# Default: (uses the image's USER — typically root or nobody). In pod mode
+#   under a keep-id userns, the pod's keep-id user instead (the workload user,
+#   or the uid and gid that userns's uid=/gid= name), whatever the image's
+#   USER says. Podman runs a member whose image has no USER as that user
+#   anyway, but gives every exec and health check in it root's capabilities
+#   unless the user is named.
 # Use this when the image runs as an unprivileged user (e.g., nobody) but the
 # workload's volume directories are owned by the workload user. Common pattern:
 #   user = "0" with userns = "keep-id:uid=0,gid=0" — container root maps to the

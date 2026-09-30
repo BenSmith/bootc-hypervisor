@@ -642,6 +642,104 @@ class TestGeneratorMultiContainer(unittest.TestCase):
         self.assertIn("Requires=workload-stack-a.service workload-stack-b.service", umbrella)
 
 
+class TestPodMemberUser(unittest.TestCase):
+    """A pod member that names no user is given the pod's keep-id user.
+
+    Measured on the proving host (podman 5.8.7, 2026-09-30), with this
+    generator's flags: --userns=keep-id on `podman pod create` and no user on
+    the member, the member ran as the keep-id user (inspect: User=1000:1000)
+    with nothing in its own sets, but a plain `podman exec`, which is what
+    `workloadctl exec` and `shell` run, and a health check both held all
+    eleven of podman's default capabilities, effective and ambient, and could
+    chown. Podman had built the member's capabilities as root's. The same
+    member with --user=1000:1000 had the same uid, gid, groups and inspected
+    User, and its exec and health check held nothing, or exactly what
+    --cap-add named, as single mode does. --user=1000 alone ran it with gid 0.
+    keep-id's uid=/gid= suffixes moved the inherited user and closed the same
+    way. With the +N:@N:1 maps or userns=host the pod had no user and its
+    members ran as root, where naming a user would demote them. An image's
+    USER line kept its member off the root path, and is overridden now.
+    """
+
+    def setUp(self):
+        self.config_dir = tempfile.mkdtemp()
+        self.services_dir = tempfile.mkdtemp()
+        self.sysusers_dir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        import shutil
+        for d in (self.config_dir, self.services_dir, self.sysusers_dir):
+            shutil.rmtree(d)
+
+    def _generate(self, *, mode="pod", security=(), member=()):
+        """(member's podman run line, pod unit or None, workload uid)."""
+        lines = ["[workload]", 'name = "stack"', f'mode = "{mode}"']
+        if security:
+            lines += ["[security]", *security]
+        lines += ["[[containers]]", 'name = "a"', "[containers.container]",
+                  'image = "img-a"', *member]
+        write_config(self.config_dir, "stack", "\n".join(lines) + "\n")
+        r = run_generator(self.config_dir, self.services_dir, self.sysusers_dir)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        unit = (Path(self.services_dir) / "workload-stack-a.service").read_text()
+        run = [line for line in unit.splitlines()
+               if line.startswith("ExecStart=") and "podman run" in line]
+        self.assertEqual(len(run), 1, unit)
+        pod_path = Path(self.services_dir) / "workload-stack-pod.service"
+        pod = pod_path.read_text() if pod_path.exists() else None
+        uid = int(re.search(r"/run/user/(\d+)", unit).group(1))
+        return run[0], pod, uid
+
+    def test_a_member_runs_as_the_pods_keep_id_user(self):
+        run, pod, uid = self._generate()
+        self.assertIn("--userns=keep-id", pod)
+        self.assertEqual(re.findall(r"--user=(\S+)", run), [f"{uid}:{uid}"])
+
+    def test_keep_id_suffixes_name_the_ids_the_pod_maps(self):
+        for userns, want in (
+            ("keep-id:uid=1234", "1234:{uid}"),
+            ("keep-id:gid=1234", "{uid}:1234"),
+            ("keep-id:uid=1234,gid=5678", "1234:5678"),
+            ("keep-id:uid=0,gid=0", "0:0"),
+        ):
+            with self.subTest(userns=userns):
+                run, pod, uid = self._generate(
+                    security=[f'userns = "{userns}"'])
+                self.assertIn(f"--userns={userns}", pod)
+                self.assertEqual(re.findall(r"--user=(\S+)", run),
+                                 [want.format(uid=uid)])
+
+    def test_an_invalid_userns_is_the_pods_keep_id(self):
+        run, pod, uid = self._generate(security=['userns = "bogus"'])
+        self.assertRegex(pod, r"--userns=keep-id(?![:\w-])")
+        self.assertEqual(re.findall(r"--user=(\S+)", run), [f"{uid}:{uid}"])
+
+    def test_a_members_own_userns_does_not_move_it(self):
+        run, pod, uid = self._generate(
+            member=["[containers.security]", 'userns = "keep-id:uid=1234"'])
+        self.assertEqual(re.findall(r"--user=(\S+)", run), [f"{uid}:{uid}"])
+
+    def test_a_members_own_user_is_the_only_one(self):
+        run, _, _ = self._generate(member=['user = "node"'])
+        self.assertEqual(re.findall(r"--user=(\S+)", run), ["node"])
+
+    def test_a_pod_with_no_user_names_none(self):
+        for security in (
+            ['extra_uidmaps = ["+5:@{UID}:1"]'],
+            ['userns = "host"', "unsafe_host_userns = true"],
+        ):
+            with self.subTest(security=security):
+                run, pod, _ = self._generate(security=security)
+                self.assertNotIn("--userns=keep-id", pod)
+                self.assertNotIn("--user=", run)
+
+    def test_bridge_mode_names_none(self):
+        run, pod, _ = self._generate(mode="bridge")
+        self.assertIsNone(pod)
+        self.assertIn("--userns=keep-id", run)
+        self.assertNotIn("--user=", run)
+
+
 class TestGeneratorPlainEnvVars(unittest.TestCase):
     def setUp(self):
         self.config_dir = tempfile.mkdtemp()
