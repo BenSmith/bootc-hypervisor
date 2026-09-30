@@ -566,6 +566,57 @@ class TestTheResponderRunsOnWhatWorkloadctlWrites(unittest.TestCase):
         self.assertIn("written_at", status)
 
 
+
+class TestTheBrokerSaysItIsReady(unittest.TestCase):
+    """The broker's unit is Type=notify (gen_egress), so it is started only
+    when customs-broker, run with the generator's command, sends READY=1.
+    One that never sends it times out starting and takes the workload with
+    it; one that sends it before binding lets the unit ordered after it
+    reach a socket that is not there."""
+
+    def test_ready_once_listening(self):
+        from broker_config import broker_command, broker_credential
+
+        class Cred:
+            def __init__(self, **kw):
+                self.__dict__.update(
+                    {"auth_header": None, "auth_format": None}, **kw)
+
+        uid = 10004 + os.getpid() % 1000
+        _path, cred_id = broker_credential("web", "tok")
+        _binary, *args = broker_command(
+            "web", uid, [("api.x.test", "tok")],
+            [Cred(name="tok", placeholder="P")])
+        listen = args[args.index("--listen") + 1]
+        host, port = listen.rsplit(":", 1)
+
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d)
+        creds = Path(d, "creds")
+        creds.mkdir()
+        (creds / cred_id).write_text("secret")
+        notify = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+        self.addCleanup(notify.close)
+        notify.bind(os.path.join(d, "notify"))
+        notify.settimeout(10)
+
+        env = dict(script_env(), NOTIFY_SOCKET=os.path.join(d, "notify"),
+                   CREDENTIALS_DIRECTORY=str(creds))
+        proc = subprocess.Popen(
+            [sys.executable, str(BROKER), *args], env=env,
+            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        self.addCleanup(proc.stderr.close)
+        self.addCleanup(lambda: proc.poll() is None and proc.kill())
+        try:
+            message = notify.recv(64)
+        except TimeoutError:
+            proc.kill()
+            self.fail(f"no READY=1: {proc.stderr.read().decode()}")
+        self.assertEqual(message, b"READY=1")
+        with socket.create_connection((host, int(port)), timeout=5):
+            pass
+
+
 class TestTheProgramsAreCustoms(unittest.TestCase):
 
     def test_the_units_name_customs_programs(self):
@@ -583,11 +634,11 @@ class TestTheProgramsAreCustoms(unittest.TestCase):
     def test_the_spec_requires_a_customs_with_everything_used_here(self):
         """0.3.0 is the first release whose customs-resolve takes --static;
         0.4.0 is the first whose policy document names internal_expected;
-        0.5.0 is the first that counts a nameless connection under the
-        reasons the docs here name ("not TLS", "no server name"). A lower
-        floor installs against an older customs, and the responder then
-        fails its start on an unrecognised flag (at the guest's first query),
-        or the inspector refuses the rendered document (at its start)."""
+        0.5.0 is the first whose broker sends READY=1, which its Type=notify
+        unit waits for. A lower floor installs against an older customs, and
+        the responder then fails its start on an unrecognised flag (at the
+        guest's first query), the inspector refuses the rendered document (at
+        its start), or the broker's start times out."""
         spec = (Path(REPO_ROOT) / "rpm" / "workloadctl.spec").read_text()
         minimum = re.search(
             r"(?m)^Requires:\s+customs >= (\S+)$", spec).group(1)

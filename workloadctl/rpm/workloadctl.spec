@@ -47,9 +47,9 @@ Requires:       openssl
 # (tests/test_customs_seam.py). 0.3.0 is the first release whose responder
 # takes --static; 0.4.0 is the first whose policy document names
 # internal_expected, which is the key this package's renderer writes; 0.5.0
-# is the first that counts a nameless connection under the reasons the docs
-# name. A lower floor installs a customs that refuses the document at the
-# inspector's start.
+# is the first whose broker sends READY=1, which its Type=notify unit waits
+# for. A lower floor installs a customs that refuses the document at the
+# inspector's start, or whose broker times out starting.
 Requires:       customs >= 0.5.0
 # There is deliberately NO proxy dependency here. Through rung 1 this was a hard
 # `Requires: tinyproxy`, because a VM declaring [vm.network].hosts was filtered

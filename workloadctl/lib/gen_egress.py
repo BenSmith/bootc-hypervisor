@@ -508,7 +508,12 @@ def generate_broker_service(config, uid: int, *, before: str,
     u.set("PartOf", f"workload-{name}.service")
 
     svc = unit.section("Service")
-    svc.set("Type", "exec")
+    # The broker sends READY=1 once its socket is listening. Type=exec would
+    # call it started at the exec, while the interpreter is still loading and
+    # the credential is still being read, and what is ordered after it would
+    # then find nothing listening. The default NotifyAccess=main suffices:
+    # the notification comes from the process systemd started.
+    svc.set("Type", "notify")
     # Everything the broker needs to know about this workload, as flags, the
     # way the inspector's ExecStart= carries the inspector's: the address it
     # binds and the uid it serves (both from the uid, computed here and not

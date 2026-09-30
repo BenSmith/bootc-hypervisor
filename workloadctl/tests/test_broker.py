@@ -278,6 +278,14 @@ class TestTheGeneratedUnit(unittest.TestCase):
             "LoadCredentialEncrypted=broker-agent-example-token:"
             "/etc/credstore.encrypted/broker/agent/example-token"])
 
+    def test_it_is_started_once_the_broker_says_it_is_listening(self):
+        """Type=notify, with the broker's own READY=1 (customs 0.5.0): as
+        Type=exec the unit is started at the exec, and the unit ordered
+        after it can send the broker a request before its socket exists."""
+        unit = self.unit()
+        self.assertIn("\nType=notify\n", unit)
+        self.assertNotIn("NotifyAccess=", unit)
+
     def test_the_egress_bound_is_present_in_both_halves(self):
         """The instance's uid is not in wl_filtered, so nothing else bounds
         this leg: an allow list with no deny under it bounds nothing, and a
