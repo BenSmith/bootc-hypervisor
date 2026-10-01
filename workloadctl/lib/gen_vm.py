@@ -604,9 +604,14 @@ def generate_vm_service(config, user_name: str, uid: int, vfs_tags=None) -> str:
         "-cpu host",
     ]
 
-    # Memory: use shared memfd backend when virtiofs is in use
+    # Memory: use shared memfd backend when virtiofs is in use. QEMU's
+    # passt netdev closes one fd twice, and a GLib thread can then close
+    # whatever took that number next: the first memory backend, which
+    # QEMU creates right after the netdevs, in command-line order. Guest
+    # RAM's fd is what virtiofsd maps, so a spare backend comes first.
     if vfs_tags:
         qemu_args += [
+            "-object memory-backend-memfd,id=spare,size=1M",
             f"-object memory-backend-memfd,id=mem,size={memory_mib}M,share=on",
             f"-m {memory_mib}",
             "-numa node,memdev=mem",

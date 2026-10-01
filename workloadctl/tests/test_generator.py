@@ -2555,6 +2555,21 @@ class TestGeneratorVmWorkload(unittest.TestCase):
         self.assertIn("memory-backend-memfd", with_vfs)
         self.assertIn("size=2048M", with_vfs)
 
+    def test_a_spare_memory_backend_comes_before_guest_ram(self):
+        """The first memory backend is the one that can lose its fd.
+
+        Gate 2026-10-01: virtiofsd failed to map guest RAM ("No such
+        device") because qemu 10.2.2's passt netdev closes sv[1] twice and
+        GLib's worker thread closed the number again after the guest RAM
+        memfd reused it. A bare qemu loop under load lost it in 102 of 600
+        starts; with the spare backend first, 0 of 600.
+        """
+        self._write_vm_config(extra='volumes = ["/srv/data:/mnt/data"]')
+        self._run()
+        svc = self._read("workload-fedora-vm.service")
+        backends = re.findall(r"-object memory-backend-\w+,id=(\w+)", svc)
+        self.assertEqual(backends, ["spare", "mem"])
+
 
 class TestGeneratorContainerFlags(unittest.TestCase):
     """Cover the many optional container flags emitted into the podman run line."""
