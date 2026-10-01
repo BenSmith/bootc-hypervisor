@@ -251,6 +251,18 @@ required — DNAT from the output hook to a 127/8 destination works at its defau
 hook (dstnat, −100) runs before the filter chain (0), so the filter sees the
 translated destination and the skeleton's `oif lo` rule already accepts it.
 
+**QEMU's passt netdev can take a virtiofs VM's guest RAM descriptor.** It hands
+passt's socket to a GLib launcher, which closes it, and then closes the number
+again itself. If GLib's worker thread still holds a context whose eventfd reused
+that number, the eventfd goes, the next descriptor QEMU opens takes the number,
+and the worker's late cleanup closes that one too. Memory backends are created
+right after the netdevs, so that descriptor is guest RAM's memfd. QEMU keeps its
+own mapping, but vhost-user later hands virtiofsd whatever holds the number then,
+and virtiofsd's mmap fails with "No such device". It is a race: one gate run lost
+six virtiofs tests and the next passed them all, and a bare QEMU under load lost
+the memfd in 102 of 600 starts. The generator puts a 1 MiB spare backend first,
+which takes the number instead, and the same loop lost none in 600.
+
 ### Capture, which writes into a table it does not own
 
 `workloadctl pcap` produced more corrections than anything else here, and all of

@@ -1362,7 +1362,7 @@ The virtiofs *tag* is not spelled here: it is derived from the guest mountpoint
 because the sidecar unit name, the QEMU chardev and the guest's fstab entry all
 have to agree on it.
 
-virtiofs requires shared memory (`memory-backend-memfd`). The generator adds this automatically when volumes are configured. The host path is served by a `virtiofsd` sidecar service (`workload-<name>-virtiofs-<tag>.service`) started before the VM.
+virtiofs requires shared memory (`memory-backend-memfd`). The generator adds this automatically when volumes are configured, behind a 1 MiB spare backend that keeps guest RAM's descriptor safe from QEMU's passt netdev (ADR 006, "What running it corrected"). The host path is served by a `virtiofsd` sidecar service (`workload-<name>-virtiofs-<tag>.service`) started before the VM.
 
 **Everything in the share belongs to `_wl-<name>` on the host, whatever the guest
 says.** The sidecar maps the guest's primary user (uid 1000) to the workload user
