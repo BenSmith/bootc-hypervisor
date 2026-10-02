@@ -230,10 +230,20 @@ jobs:
           # signed image, so the checksum is the pin. Re-pin with `just update-cosy`.
           sha256sum -c cosy.sha256
 
+      # The negativo17 driver comes from the published image, not negativo17.org
+      # (negativo17-rpms.Containerfile). Absent or unsigned fails the job; run
+      # publish-negativo-rpms for this Fedora version.
+      - name: Resolve negativo17 packages
+        id: nvidia
+        if: matrix.variant.name == 'nvidia-negativo17'
+        run: |
+          echo "ref=$(bash .forgejo/scripts/verified-ref.sh "${REGISTRY}/negativo-rpms:${VERSION}")" >> "$GITHUB_OUTPUT"
+
       - name: Build variant
         env:
           IMAGE: ${{ matrix.variant.image }}
           CONTAINERFILE: ${{ matrix.variant.containerfile }}
+          NVIDIA_RPMS: ${{ steps.nvidia.outputs.ref }}
         run: |
           sudo podman build \
             --pull=newer \
@@ -242,6 +252,7 @@ jobs:
             --cap-add=all \
             --ipc=host \
             --build-arg BASE=${REGISTRY}/hypervisor-bootc:${VERSION} \
+            ${NVIDIA_RPMS:+--build-arg NVIDIA_RPMS=${NVIDIA_RPMS}} \
             -f "${CONTAINERFILE}" \
             -t "localhost/${IMAGE}:build-${VERSION}" \
             .

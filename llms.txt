@@ -76,6 +76,8 @@ fedora-bootc-minimal.Containerfile        Minimal bootc base (Podman 4 compatibl
 hypervisor-amd.Containerfile              AMD GPU variant
 hypervisor-nvidia-rpmfusion.Containerfile NVIDIA RPMFusion variant
 hypervisor-nvidia-negativo17.Containerfile NVIDIA negativo17 variant
+negativo17-rpms.Containerfile             negativo17's driver packages as an image (Forgejo builds install from it)
+negativo17/                               its package list and negativo17's pinned signing key
 
 workloadctl/                              Workload management system (see workloadctl/llms.txt)
 

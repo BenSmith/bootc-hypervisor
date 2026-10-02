@@ -1,0 +1,121 @@
+# Operator-triggered: fetch negativo17's NVIDIA driver packages once, verify
+# them against negativo17's key, and publish them as a signed image,
+# registry.local/negativo-rpms:<fedora> (and :<fedora>-<driver>). The Forgejo
+# hypervisor builds install the negativo17 variant's driver from that image
+# instead of from negativo17.org — see negativo17-rpms.Containerfile for why.
+#
+# The driver those builds ship is the one last published here. Run this to take
+# a new negativo17 release, and when the variant's kmod stage stops building
+# against a new Fedora kernel.
+name: publish-negativo-rpms
+
+on:
+  workflow_dispatch:
+    inputs:
+      versions_override:
+        description: 'JSON array of Fedora versions, e.g. [44] (empty = supported in fedora-versions.yml)'
+        required: false
+        default: ''
+        type: string
+      seed:
+        description: 'Image holding RPMs at /repo to use instead of downloading them, e.g. registry.local/negativo-rpms-seed:44 (empty = download all)'
+        required: false
+        default: ''
+        type: string
+
+concurrency:
+  group: publish-negativo-rpms
+  cancel-in-progress: false
+
+env:
+  REGISTRY: registry.local
+
+jobs:
+  setup:
+    runs-on: native
+    outputs:
+      versions: ${{ steps.r.outputs.versions }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: r
+        run: |
+          command -v yq >/dev/null || sudo dnf install -y yq
+          if [ -n "${{ inputs.versions_override }}" ]; then
+            echo "versions=${{ inputs.versions_override }}"
+          else
+            echo "versions=$(yq -o=json -I=0 '.supported' fedora-versions.yml)"
+          fi >> "$GITHUB_OUTPUT"
+
+  publish:
+    needs: setup
+    runs-on: native
+    # The fetch is paced by negativo17's per-connection cap, not by the runner.
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        fedora_version: ${{ fromJson(needs.setup.outputs.versions) }}
+    env:
+      VERSION: ${{ matrix.fedora_version }}
+      SEED: ${{ inputs.seed }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Build
+        run: |
+          # --no-cache: the fetch RUN's text never changes, so a cached layer
+          # would republish the last download instead of negativo17's current
+          # packages. A seed only saves downloads; every RPM is still checked
+          # against negativo17's key (see the Containerfile).
+          sudo podman build \
+            --pull=newer \
+            --no-cache \
+            --build-arg FEDORA_VERSION=${VERSION} \
+            ${SEED:+--build-arg SEED=${SEED}} \
+            -f negativo17-rpms.Containerfile \
+            -t "localhost/negativo-rpms:build-${VERSION}" \
+            .
+
+      - name: Push and sign
+        run: |
+          IMAGE_BASE="${REGISTRY}/negativo-rpms"
+          ctr=$(sudo podman create "localhost/negativo-rpms:build-${VERSION}" none)
+          DRIVER=$(sudo podman cp "${ctr}:/repo/VERSION" - | tar -xO)
+          sudo podman rm "${ctr}" >/dev/null
+          [ -n "${DRIVER}" ] || { echo "::error::no /repo/VERSION in the built image"; exit 1; }
+
+          # Sign at push — see docs/ci-image-signing.md. Key from the runner's
+          # systemd credentials; the job fails if they are not sealed.
+          CREDS=/run/credentials/forgejo-runner.service
+          if ! sudo test -s "${CREDS}/cosign-key"; then
+            echo "::error::no signing credential at ${CREDS}/cosign-key — refusing to push unsigned. Run the seal-signing-key workflow, then re-run this one."
+            exit 1
+          fi
+          SIGN_ARGS=(--sign-by-sigstore-private-key "${CREDS}/cosign-key"
+                     --sign-passphrase-file "${CREDS}/cosign-pass")
+
+          sudo podman tag "localhost/negativo-rpms:build-${VERSION}" "${IMAGE_BASE}:${VERSION}-${DRIVER}"
+          sudo podman push "${SIGN_ARGS[@]}" --digestfile /tmp/digest.txt "${IMAGE_BASE}:${VERSION}-${DRIVER}"
+          DIGEST=$(cat /tmp/digest.txt)
+          # The floating tag is copied from the signed digest within the same
+          # repository, so that digest's signature covers it.
+          sudo skopeo copy "docker://${IMAGE_BASE}@${DIGEST}" "docker://${IMAGE_BASE}:${VERSION}"
+          # What the hypervisor builds will resolve: fail here, not there.
+          bash .forgejo/scripts/verified-ref.sh "${IMAGE_BASE}:${VERSION}" >/dev/null
+          {
+            echo "### negativo-rpms, Fedora ${VERSION}: driver ${DRIVER}"
+            echo "- \`${IMAGE_BASE}:${VERSION}-${DRIVER}\`"
+            echo "- \`${IMAGE_BASE}:${VERSION}\`"
+            echo "- digest \`${DIGEST}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Cleanup local tags
+        if: always()
+        run: |
+          sudo podman untag "localhost/negativo-rpms:build-${VERSION}" 2>/dev/null || true
+          for ref in $(sudo podman images --format '{{.Repository}}:{{.Tag}}' \
+                         --filter "reference=${REGISTRY}/negativo-rpms:${VERSION}-*"); do
+            sudo podman untag "$ref" || true
+          done
+          sudo podman image prune -f || true

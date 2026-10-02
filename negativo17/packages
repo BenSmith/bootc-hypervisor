@@ -1,0 +1,14 @@
+# The packages hypervisor-nvidia-negativo17.Containerfile asks dnf for that
+# negativo17's fedora-nvidia repo carries. negativo17-rpms.Containerfile
+# publishes these plus everything in that repo they require, recursively.
+# A name the Containerfile installs from negativo17 but missing here fails its
+# dnf step with "No match for argument", not silently.
+akmod-nvidia
+libnvidia-fbc
+libnvidia-ml
+nvidia-driver
+nvidia-driver-cuda
+nvidia-driver-cuda-libs
+nvidia-driver-selinux
+nvidia-modprobe
+nvidia-persistenced

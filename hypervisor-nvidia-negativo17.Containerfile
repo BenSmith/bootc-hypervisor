@@ -1,5 +1,16 @@
 ARG BASE=ghcr.io/bensmith/hypervisor-bootc:latest
 ARG BASE_DIGEST=""
+# Where the negativo17 packages come from. Unset, they come from negativo17.org.
+# The Forgejo builds pass the verified digest of registry.local/negativo-rpms
+# (negativo17-rpms.Containerfile): a dnf repository at /repo, which the two
+# install steps below bind-mount and point fedora-nvidia at for that one
+# command. The shipped fedora-nvidia.repo is the same either way.
+ARG NVIDIA_RPMS=nvidia-rpms-none
+
+FROM scratch AS nvidia-rpms-none
+COPY negativo17/packages /none
+
+FROM ${NVIDIA_RPMS} AS nvidia-rpms
 
 # Stage 1: Build the NVIDIA kernel module RPM
 FROM ${BASE}${BASE_DIGEST:+@${BASE_DIGEST}} AS kmod-builder
@@ -7,8 +18,13 @@ FROM ${BASE}${BASE_DIGEST:+@${BASE_DIGEST}} AS kmod-builder
 RUN curl -s -L https://negativo17.org/repos/fedora-nvidia.repo \
     -o /etc/yum.repos.d/fedora-nvidia.repo
 
-RUN KERNEL_VERSION=$(rpm -q kernel --qf '%{version}-%{release}.%{arch}\n' | tail -1) && \
-    dnf install --setopt=install_weak_deps=False -y \
+RUN --mount=type=bind,from=nvidia-rpms,target=/tmp/nvidia-rpms \
+    if [ -d /tmp/nvidia-rpms/repo/repodata ]; then \
+        set -- --setopt=fedora-nvidia.baseurl=file:///tmp/nvidia-rpms/repo \
+               --setopt=fedora-nvidia.gpgkey=file:///tmp/nvidia-rpms/repo/RPM-GPG-KEY-slaanesh; \
+    fi && \
+    KERNEL_VERSION=$(rpm -q kernel --qf '%{version}-%{release}.%{arch}\n' | tail -1) && \
+    dnf install "$@" --setopt=install_weak_deps=False -y \
         akmod-nvidia \
         "kernel-devel-${KERNEL_VERSION}" && \
     dnf clean all
@@ -40,8 +56,13 @@ COPY security/selinux-store-copyup /usr/libexec/hypervisor-build/selinux-store-c
 COPY security/selinux-store-verify /usr/libexec/hypervisor-build/selinux-store-verify
 
 # Install NVIDIA drivers and tools, headless
-RUN /usr/libexec/hypervisor-build/selinux-store-copyup && \
-    dnf install --setopt=install_weak_deps=False -y \
+RUN --mount=type=bind,from=nvidia-rpms,target=/tmp/nvidia-rpms \
+    if [ -d /tmp/nvidia-rpms/repo/repodata ]; then \
+        set -- --setopt=fedora-nvidia.baseurl=file:///tmp/nvidia-rpms/repo \
+               --setopt=fedora-nvidia.gpgkey=file:///tmp/nvidia-rpms/repo/RPM-GPG-KEY-slaanesh; \
+    fi && \
+    /usr/libexec/hypervisor-build/selinux-store-copyup && \
+    dnf install "$@" --setopt=install_weak_deps=False -y \
     nvidia-container-toolkit \
     nvidia-driver \
     nvidia-driver-cuda \
