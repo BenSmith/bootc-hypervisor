@@ -209,12 +209,6 @@ class TestGeneratedUnits(unittest.TestCase):
             config, "_wl-web", UID)
         cls.address = resolve_address(UID)
 
-    def test_the_service_turns_the_user_site_off(self):
-        """As the workload user, site.py would stat a dir under the
-        workload's home, which wlresolve_t may not traverse."""
-        self.assertIn("Environment=PYTHONNOUSERSITE=1",
-                      self.service.splitlines())
-
     def test_both_transports_are_bound(self):
         """UDP alone leaves a client that opened TCP for its own reasons
         hanging, with nothing to diagnose from."""

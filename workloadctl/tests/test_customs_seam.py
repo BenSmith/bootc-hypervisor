@@ -392,6 +392,15 @@ class TestTheGeneratorHandsCustomsItsFlags(unittest.TestCase):
             "--status": resolve_status_path("web"),
         })
 
+    def test_the_responder_runs_with_the_user_site_off(self):
+        """ExecStart= runs the program itself, so its shebang is the only
+        thing keeping site.py from statting a site-packages dir under the
+        workload's home, which wlresolve_t may not traverse
+        (security/workload-resolve.cil). customs 0.5.1 is the first whose
+        shebang carries -s; the spec's floor is held to that."""
+        shebang = RESOLVE.read_text().splitlines()[0]
+        self.assertRegex(shebang, r"^#!\S*python3\S*(\s+-\w*s\w*)\b")
+
     def test_the_responder_takes_each_handed_flag_and_requires_no_other(self):
         taken = _program_flags(RESOLVE)
         self.assertEqual(set(taken), RESOLVE_HANDED | RESOLVE_WITHHELD)

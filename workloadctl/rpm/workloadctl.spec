@@ -48,9 +48,12 @@ Requires:       openssl
 # takes --static; 0.4.0 is the first whose policy document names
 # internal_expected, which is the key this package's renderer writes; 0.5.0
 # is the first whose broker sends READY=1, which its Type=notify unit waits
-# for. A lower floor installs a customs that refuses the document at the
-# inspector's start, or whose broker times out starting.
-Requires:       customs >= 0.5.0
+# for; 0.5.1 is the first whose programs run with the user site off, which
+# keeps the responder's site.py out of the workload's home under
+# wlresolve_t. A lower floor installs a customs that refuses the document at
+# the inspector's start, whose broker times out starting, or whose responder
+# is denied at every start.
+Requires:       customs >= 0.5.1
 # There is deliberately NO proxy dependency here. Through rung 1 this was a hard
 # `Requires: tinyproxy`, because a VM declaring [vm.network].hosts was filtered
 # default-deny with its own proxy as the only route out. Rung 2 replaced that
