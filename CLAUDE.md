@@ -42,7 +42,7 @@ python3 -m unittest tests.test_workloads.SomeClass.test_method
 
 # the suite imports moatery: installed (its RPM), or a checkout named by
 # MOATERY_CHECKOUT, whose libexec/ then stands in for /usr/libexec/moatery
-MOATERY_CHECKOUT=../../customs just test
+MOATERY_CHECKOUT=../../moatery just test
 just moatery-rpm          # the RPM hypervisor.Containerfile pins, from its image
 
 # --- image builds (root, requires podman; *-local skip the registry push) ---
