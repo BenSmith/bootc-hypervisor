@@ -160,14 +160,6 @@ CA_REL = "state/ca/egress-ca.crt"
 STATUS_INTERVAL = 30.0
 STATUS_SETTLE = STATUS_INTERVAL + 6
 
-# Denials the inspect module documents as deliberately NOT granted: Python
-# probing whether stdout is a tty, and two `search` denials that are the domain
-# boundary working (it must not read the workload's certs or state tree).
-# Excluded by tcontext so that a NEW denial still fails the check -- filtering
-# on "any denial" would make this assertion permanently red and therefore
-# ignored.
-EXPECTED_DENIAL_TCONTEXTS = ("init_t", "cert_t", "container_file_t")
-
 # The domain each producer is expected to run in; naming it here is the
 # assertion, not a description of the host.
 EXPECTED_DOMAINS = {
@@ -937,12 +929,6 @@ def audit_denials(mark, needles):
     for ln in blob.splitlines():
         if "denied" not in ln or not any(n in ln for n in needles):
             continue
-        tctx = ""
-        for tok in ln.split():
-            if tok.startswith("tcontext="):
-                tctx = tok
-        if any(f":{t}:" in tctx for t in EXPECTED_DENIAL_TCONTEXTS):
-            continue
         out.append(ln)
     return out
 
@@ -1058,12 +1044,15 @@ def status_files(mark):
                f"sum={sum(reasons.values())} dropped="
                f"{dispositions.get('dropped')} {reasons}")
 
-    denials = audit_denials(mark, ("wlinspect_t", "wlresolve_t"))
+    # The clock keeper too: it ticks in both guests while the rig runs, and
+    # its startup probes are the ones that once logged every minute.
+    denials = audit_denials(mark, ("wlinspect_t", "wlresolve_t", "wlclock_t"))
     # Named separately from the file checks: a missing file WITH denials is a
     # policy gap, a missing file without them is something else, and the two
     # want different next steps.
-    record("no unexpected denials for the producer domains", not denials,
-           "none beyond the documented residuals" if not denials
+    record("no denials for the producer domains or the clock keeper",
+           not denials,
+           "none" if not denials
            else f"{len(denials)}: {denials[0][:200]}")
     return dispositions
 

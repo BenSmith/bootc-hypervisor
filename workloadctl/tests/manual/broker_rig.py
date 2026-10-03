@@ -177,25 +177,6 @@ AUDIT_LOG = Path("/var/log/audit/audit.log")
 # listener counts a dead broker, and the guest gets a 502 that names the broker.
 INSPECT_DOMAIN = "wlinspect_t"
 
-# The ONE denial security/workload-inspect.cil deliberately does not grant, and
-# the reason it is excluded here by SHAPE rather than the domain being dropped
-# from the check: it is Python asking whether its stdout -- the journal socket
-# inherited from init -- is a tty, the answer is "no" either way, and the module
-# says in as many words that the run is green with it denied so granting it
-# would widen the domain for nothing. It fires six times at every listener
-# start. Anything else in this domain still fails the assertion, which is the
-# point: a denial on the broker dial is SILENT, and a check that had been
-# widened to "wlinspect_t is noisy, ignore it" could not see it.
-UNGRANTED_TARGET = "tcontext=system_u:system_r:init_t:s0"
-UNGRANTED_CLASS = "tclass=unix_stream_socket"
-UNGRANTED_PERMS = ("{ getattr }", "{ ioctl }")
-
-
-def is_known_ungranted(line):
-    return (UNGRANTED_TARGET in line and UNGRANTED_CLASS in line
-            and any(p in line for p in UNGRANTED_PERMS))
-
-
 @dataclass(frozen=True)
 class Arm:
     name: str
@@ -1049,14 +1030,11 @@ def selinux(since):
             continue
         if INSPECT_DOMAIN not in line and "customs-broker" not in line:
             continue
-        if is_known_ungranted(line):
-            continue
         denials.append(line[-300:])
     record(f"no {INSPECT_DOMAIN} or broker denial during this run",
            not denials,
            "\n      ".join(denials) if denials
-           else "0 unexplained AVCs since the run started (the documented "
-                "stdout probe is excluded by shape, not by domain)")
+           else "0 AVCs since the run started")
 
 
 # --- teardown ---------------------------------------------------------------

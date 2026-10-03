@@ -273,6 +273,17 @@ if __name__ == "__main__":
     unittest.main()
 
 
+class TestTheResidualDenial(unittest.TestCase):
+    def test_the_tty_probe_is_dontaudited_and_not_granted(self):
+        """Python asking whether stdout is a tty: denied, and not logged on
+        every start. Granting it would widen the domain for nothing."""
+        body = _body()
+        self.assertRegex(body, r"\(dontaudit\s+wlinspect_t\s+init_t\s+"
+                               r"\(unix_stream_socket\s+\(getattr ioctl\)\)\)")
+        self.assertNotRegex(body, r"\(allow\s+wlinspect_t\s+init_t\s+"
+                                  r"\(unix_stream_socket\s+\([^)]*(getattr|ioctl)")
+
+
 class TestBoundary(unittest.TestCase):
     """The filesystem boundary is what the separate domain is FOR.
 

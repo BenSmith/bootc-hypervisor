@@ -95,12 +95,13 @@
 ; the first gate — but the accept path is still a gate behind a
 ; gate, so the last rules only appear once the earlier ones are granted.
 ;
-; ONE RESIDUAL DENIAL IS DELIBERATELY NOT GRANTED
+; ONE RESIDUAL DENIAL IS DELIBERATELY NOT GRANTED, AND IS DONTAUDIT'D
 ;
-; A run with dontaudit disabled still logs it, and the run is green WITH it
-; denied — so granting it would widen the domain for nothing. An entry leaves
-; this list only when the domain acquires a real reason for it, never because
-; a harvest shows it merely being attempted.
+; The run is green WITH it denied — so granting it would widen the domain for
+; nothing. An entry leaves this list only when the domain acquires a real
+; reason for it, never because a harvest shows it merely being attempted.
+; It is dontaudit'd so that every start does not log it; `semodule -DB`
+; brings it back for a harvest.
 ;
 ;   getattr, ioctl(TCGETS) on init_t:unix_stream_socket   Python probing
 ;     whether its stdout is a tty. The answer is "no" either way. The audit
@@ -164,6 +165,8 @@
 ; stdout/stderr to the journal — the log line per connection is the whole of
 ; this rung's output.
 (allow wlinspect_t init_t (unix_stream_socket (read write)))
+; The residual tty probe from the header: denied, and not logged.
+(dontaudit wlinspect_t init_t (unix_stream_socket (getattr ioctl)))
 
 ; The inherited listening sockets, and this is the rule the design guessed
 ; wrong. The guess was that the fds carry init_t and the domain needs

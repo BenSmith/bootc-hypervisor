@@ -98,6 +98,32 @@ class TestWhatItIsNot(unittest.TestCase):
         self.assertNotRegex(_body(), r"wlclock_t\s+self\s+\((tcp|udp)_socket")
 
 
+class TestStartupProbes(unittest.TestCase):
+    """The interpreter's startup probes stay denied and stop being logged.
+    The keeper ticks once a minute per VM, so an audited residual floods
+    audit.log on a VM host and rotates real denials out of it."""
+
+    def test_the_tty_probe_is_dontaudited_and_not_granted(self):
+        body = _body()
+        self.assertRegex(body, r"\(dontaudit\s+wlclock_t\s+init_t\s+"
+                               r"\(unix_stream_socket\s+\(getattr ioctl\)\)\)")
+        self.assertNotRegex(body, r"\(allow\s+wlclock_t\s+init_t\s+"
+                                  r"\(unix_stream_socket\s+\([^)]*(getattr|ioctl)")
+
+    def test_the_openssl_config_probe_is_dontaudited_and_not_granted(self):
+        body = _body()
+        self.assertRegex(body, r"\(dontaudit\s+wlclock_t\s+cert_t\s+\(dir\s+\(search\)\)\)")
+        self.assertNotRegex(body, r"\(allow\s+wlclock_t\s+cert_t\b")
+
+    def test_the_user_site_probe_is_not_made(self):
+        """`-s` on the shebang, so site.py never stats the workload's home --
+        nothing to deny, so nothing here may grant or hide it."""
+        keeper = ROOT / "libexec" / "workload-vm-clock"
+        self.assertEqual(keeper.read_text().splitlines()[0],
+                         "#!/usr/bin/python3 -s")
+        self.assertNotRegex(_body(), r"wlclock_t\s+container_file_t")
+
+
 class TestPackaging(unittest.TestCase):
     def test_the_spec_installs_loads_and_removes_the_module(self):
         spec = SPEC.read_text()

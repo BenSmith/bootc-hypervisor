@@ -133,6 +133,28 @@ class TestRuntimeDirectory(unittest.TestCase):
             r"\(allow\s+wlresolve_t\s+qemu_var_run_t\s+\(file\s+\([^)]*read")
 
 
+class TestStartupProbes(unittest.TestCase):
+    """The interpreter's startup probes stay denied and stop being logged,
+    so every responder start does not add to audit.log."""
+
+    def test_the_tty_probe_is_dontaudited_and_not_granted(self):
+        body = _body()
+        self.assertRegex(body, r"\(dontaudit\s+wlresolve_t\s+init_t\s+"
+                               r"\(unix_stream_socket\s+\(getattr ioctl\)\)\)")
+        self.assertNotRegex(body, r"\(allow\s+wlresolve_t\s+init_t\s+"
+                                  r"\(unix_stream_socket\s+\([^)]*(getattr|ioctl)")
+
+    def test_the_openssl_config_probe_is_dontaudited_and_not_granted(self):
+        body = _body()
+        self.assertRegex(body, r"\(dontaudit\s+wlresolve_t\s+cert_t\s+\(dir\s+\(search\)\)\)")
+        self.assertNotRegex(body, r"\(allow\s+wlresolve_t\s+cert_t\b")
+
+    def test_the_user_site_probe_is_neither_granted_nor_hidden(self):
+        """The unit's PYTHONNOUSERSITE=1 stops it being made; if that line
+        went, the denial must show in audit.log rather than be hidden."""
+        self.assertNotRegex(_body(), r"wlresolve_t\s+container_file_t")
+
+
 class TestPackaging(unittest.TestCase):
     def test_the_spec_installs_loads_and_removes_the_module(self):
         spec = SPEC.read_text()

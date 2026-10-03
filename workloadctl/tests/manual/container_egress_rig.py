@@ -556,14 +556,6 @@ RECORD_ROOT = Path("/var/log/workloadctl/egress")
 LOG_ID_FIELD = "id"          # egress_record.LOG_ID_FIELD
 AUDIT_LOG = Path("/var/log/audit/audit.log")
 
-# The one already-documented, deliberately-ungranted denial (see
-# security/workload-inspect.cil, "ONE RESIDUAL DENIAL IS DELIBERATELY NOT
-# GRANTED"): wlinspect_t probing init_t's unix_stream_socket for tty-ness on
-# stdout. Harmless, and a green run stays green with it denied -- so it is
-# filtered out by shape rather than by suppressing the whole check.
-KNOWN_AVC = re.compile(r"scontext=\S*wlinspect_t\S*.*tcontext=\S*init_t\S*"
-                       r".*tclass=unix_stream_socket")
-
 # S1's bound. A missing cgroup exemption in either table does not error: the
 # re-dial is filtered or redirected into the listener itself, and the symptom
 # is a request that eventually times out. Anything that completes well inside
@@ -1274,7 +1266,7 @@ def latest_for(name, host, wait=6.0, path=None):
 
 
 def audit_since(marker):
-    """AVC lines newer than a byte offset into audit.log, minus the known one."""
+    """AVC lines newer than a byte offset into audit.log."""
     if not AUDIT_LOG.exists():
         return []
     with AUDIT_LOG.open("rb") as fh:
@@ -1284,13 +1276,11 @@ def audit_since(marker):
     for line in tail.splitlines():
         if "avc:  denied" not in line:
             continue
-        if KNOWN_AVC.search(line):
-            continue
-        if "ceg-" not in line and "wlinspect" not in line:
+        if not any(n in line for n in ("ceg-", "wlinspect_t", "wlresolve_t")):
             # Unrelated host noise. Narrow rather than absent: a denial that
-            # names neither this rig's workloads nor the inspector domain is
-            # not this rig's to report, and reporting it makes every run on a
-            # busy host read as a failure.
+            # names neither this rig's workloads nor the inspector's or the
+            # responder's domain is not this rig's to report, and reporting it
+            # makes every run on a busy host read as a failure.
             continue
         out.append(line)
     return out
@@ -3725,7 +3715,7 @@ def check_audit(marker):
         skip("audit.log clean", f"host is {mode!r}, not Enforcing")
         return
     denials = audit_since(marker)
-    record("no AVC beyond the one deliberately not granted",
+    record("no AVC in the inspector, the responder or the workloads",
            not denials,
            f"{len(denials)} denial(s); first: {denials[0][:110]}" if denials
            else "clean")

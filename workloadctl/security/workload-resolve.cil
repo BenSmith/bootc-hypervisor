@@ -74,7 +74,7 @@
 ; stdout/stderr to the journal.
 (allow wlresolve_t init_t (unix_stream_socket (read write)))
 
-; DELIBERATELY NOT GRANTED. Three denials appear in an enforcing run and all
+; DELIBERATELY NOT GRANTED. Three probes appear in an enforcing run and all
 ; three are the interpreter starting up, not the responder working. Each is
 ; silent -- the probe's failure is indistinguishable from a negative answer --
 ; so the run is green with them denied, and granting any of them would widen
@@ -92,11 +92,17 @@
 ;     /var/lib/workloads/<name> because the unit sets User= to the workload
 ;     user, so the probe crosses /var/lib/workloads. There is no user
 ;     site-packages dir to find, and one must never be on this path anyway.
+;     The generated unit sets PYTHONNOUSERSITE=1, so the probe is not made.
 ;   search on cert_t:dir ("pki")                  libcrypto reading its
 ;     OPENSSLDIR config, pulled in transitively: the customs package imports
 ;     hashlib. This domain terminates no TLS and verifies nothing, so the
 ;     trust store is not its to read -- contrast the inspector, which cannot
 ;     work without it.
+;
+; The two still attempted are DONTAUDIT'D: denied, and not logged on every
+; start. `semodule -DB` brings them back for a harvest.
+(dontaudit wlresolve_t init_t (unix_stream_socket (getattr ioctl)))
+(dontaudit wlresolve_t cert_t (dir (search)))
 
 ; The inherited listening sockets, created by init_t in this domain. Both
 ; transports, for the reason in the header.

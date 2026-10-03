@@ -58,20 +58,31 @@
 
 ; DELIBERATELY NOT GRANTED, on the sibling modules' rule: an entry leaves this
 ; list only when the domain acquires a real reason for it, never because a
-; harvest shows it being attempted. All three are the interpreter starting up
-; and each fails silently. Measured 2026-09-20 with `semodule -DB` on two
-; enforcing hosts (TSC and hpet) across two full clock_rig runs: these three
-; and NOTHING else, with every tick reaching the agent and the skewed guest
-; repaired in the domain.
+; harvest shows it being attempted. Both are the interpreter starting up and
+; each fails silently. Measured 2026-09-20 with `semodule -DB` on two
+; enforcing hosts (TSC and hpet) across two full clock_rig runs: these, the
+; user-site probe below, and NOTHING else, with every tick reaching the agent
+; and the skewed guest repaired in the domain.
 ;
 ;   getattr, ioctl on init_t:unix_stream_socket   Python asking whether its
 ;     stdout is a tty.
-;   search on container_file_t:dir ("workloads")  site.py stat'ing
-;     $HOME/.local/lib/pythonX.Y/site-packages; $HOME is the workload's
-;     home because the unit sets User= to the workload user.
 ;   search on cert_t:dir ("pki")                  libcrypto reading its
 ;     OPENSSLDIR config, pulled in through hashlib. This domain terminates
 ;     no TLS and verifies nothing.
+;
+; Both are DONTAUDIT'D, not merely ungranted. The keeper runs once a minute
+; per VM, so an audited residual is three lines a minute per VM forever, and
+; on a VM host that volume rotates real denials out of audit.log within a
+; day or two. dontaudit keeps them denied and stops the logging; harvest with
+; `semodule -DB` as above, which brings them back.
+;
+; The third startup probe is not attempted at all: site.py stat'ing
+; $HOME/.local/lib/pythonX.Y/site-packages, a search on container_file_t:dir
+; ("workloads") because the unit sets User= to the workload user and $HOME is
+; that user's home under /var/lib/workloads. The keeper's `-s` shebang turns
+; the user site off, so there is no probe to deny or to hide.
+(dontaudit wlclock_t init_t (unix_stream_socket (getattr ioctl)))
+(dontaudit wlclock_t cert_t (dir (search)))
 
 ; The guest agent socket: search the VM's runtime directory, write the socket
 ; node, connect to QEMU's end of it. `search` only on the directory -- the

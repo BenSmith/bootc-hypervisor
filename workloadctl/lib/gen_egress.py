@@ -796,6 +796,11 @@ def generate_resolve_service(config, user_name: str, uid: int) -> str:
     binary, *args = resolve_command(name, uid)
     svc.add("ExecStart", " ".join(
         [binary] + [a if a.startswith("--") else dq(a) for a in args]))
+    # No user site: as the workload user, site.py would stat a
+    # site-packages dir under the workload's home, which wlresolve_t may not
+    # traverse (security/workload-resolve.cil), and nothing there belongs on
+    # this program's path anyway.
+    svc.add("Environment", "PYTHONNOUSERSITE=1")
     svc.blank()
     # Narrower than the inspector on both axes, and the address families are
     # the load-bearing half: this program must contain no call that could
