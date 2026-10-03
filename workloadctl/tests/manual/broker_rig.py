@@ -73,7 +73,10 @@ WHAT THE HOST-SIDE SCAFFOLDING COSTS, AND WHY IT IS HONEST
 The broker's upstream is `https://<the Host>` with no override -- deliberately,
 so a policy-matched path cannot be prefixed on the way out -- so the provider
 has to answer at that name on 443. The rig therefore writes ONE /etc/hosts entry
-and binds 127.0.0.1:443, and removes both at teardown. The stub's certificate is
+and serves the stub on 443 at an address inside a network namespace of its own,
+reached over a veth, and removes all of it at teardown. Not the host's own
+443: a VM host usually has a reverse proxy there, and a rig that needs it free
+cannot run on the hosts it most needs to. The stub's certificate is
 handed to each broker instance through SSL_CERT_FILE in a drop-in rather than
 installed into the host's trust store: the trust decision stays the
 broker's, made the way it always is, and this rig does not
@@ -90,6 +93,7 @@ import json
 import os
 import re
 import shutil
+import socket
 import subprocess
 import sys
 import time
@@ -126,6 +130,15 @@ BROKER_BIN = Path("/usr/libexec/customs/customs-broker")
 # resolver is not consulted for it -- the /etc/hosts line this rig writes is.
 PROVIDER = "provider.wlbrk.test"
 PROVIDER_PORT = 443       # not configurable: `upstream` is https://<host>
+# Where the stub answers: the far side of a veth into a namespace of the rig's
+# own, so the host's 443 is never needed. Not container_egress_rig's subnet, so
+# the two rigs' fixtures cannot collide. The address is in wl_internal4, which
+# costs nothing here: the broker is not in wl_filtered, and the inspector never
+# dials the origin of a brokered host -- see toml_for's internal-entry note.
+NETNS = "brk-rig"
+VETH_HOST, VETH_NS = "brk-rig0", "brk-rig1"
+HOST_V4 = "10.99.97.1"
+PROVIDER_ADDR = "10.99.97.30"
 # Never written into any config. It exists to be a Host no broker instance has
 # a row for, which is the whole of claim 2.
 UNKNOWN_HOST = "elsewhere.wlbrk.test"
@@ -230,6 +243,7 @@ children: list[subprocess.Popen] = []
 # Everything this rig wrote outside its own directory, so teardown removes what
 # it created and nothing else.
 hosts_line_written = False
+fixtures_built = False
 dropins_written: list[Path] = []
 
 
@@ -321,9 +335,9 @@ def preflight():
     say("== preflight ==")
     if os.geteuid() != 0:
         sys.exit("run as root: it enables workloads, seals credentials and "
-                 "binds 443")
+                 "builds a network namespace")
     for tool in ("workloadctl", "qemu-system-x86_64", "qemu-img", "openssl",
-                 "setpriv", "ss", "passt"):
+                 "setpriv", "ss", "ip", "passt"):
         if run(["sh", "-c", f"command -v {tool}"], check=False).returncode != 0:
             sys.exit(f"missing {tool}")
     if not Path("/dev/kvm").exists():
@@ -331,13 +345,21 @@ def preflight():
     if not os.access(BROKER_BIN, os.X_OK):
         sys.exit(f"missing {BROKER_BIN} — it ships in the customs RPM, "
                  f"which the workloadctl RPM requires")
-    # A stale listener takes traffic that should have gone to a process this run
-    # started, and the result reads as a fault in whatever is downstream of it.
-    busy = run(["ss", "-lntH", f"sport = :{PROVIDER_PORT}"], check=False)
-    if busy.stdout.strip():
-        sys.exit(f"something already listens on :{PROVIDER_PORT} — the stub "
-                 f"provider must answer there, because `upstream` is "
-                 f"https://{PROVIDER} with no port to override:\n{busy.stdout}")
+    # A leftover namespace may still hold a stub from an earlier run, which
+    # would take traffic meant for this run's and read as a fault downstream.
+    if NETNS in run(["ip", "netns", "list"], check=False).stdout.split():
+        sys.exit(f"network namespace {NETNS} is left over from an earlier run; "
+                 f"remove it (`ip netns del {NETNS}; ip link del {VETH_HOST}`)")
+    if run(["ip", "link", "show", VETH_HOST], check=False).returncode == 0:
+        sys.exit(f"link {VETH_HOST} is left over from an earlier run; remove "
+                 f"it (`ip link del {VETH_HOST}`)")
+    # The veth's subnet must be the host's only route to PROVIDER_ADDR, or the
+    # broker's dial goes somewhere this rig did not build.
+    taken = run(["ip", "-4", "-o", "addr", "show", "to", f"{HOST_V4}/24"],
+                check=False).stdout
+    if taken.strip():
+        sys.exit(f"{HOST_V4}/24 is already in use on this host; pick another "
+                 f"subnet for HOST_V4 and PROVIDER_ADDR:\n{taken}")
     for arm in ARMS:
         if (Path("/etc/workloads.d") / arm.name).exists():
             sys.exit(f"/etc/workloads.d/{arm.name} already exists — a previous "
@@ -345,7 +367,7 @@ def preflight():
     if HOSTS_MARK in HOSTS_FILE.read_text():
         sys.exit(f"{HOSTS_FILE} still carries this rig's line from an earlier "
                  f"run; remove the line marked {HOSTS_MARK!r}")
-    say(f"  ok: toolchain, /dev/kvm, :{PROVIDER_PORT} free, no leftovers")
+    say(f"  ok: toolchain, /dev/kvm, {HOST_V4}/24 free, no leftovers")
 
 
 def fetch_base_image():
@@ -420,14 +442,49 @@ def make_stub_cert():
     return cert, key
 
 
+def fixtures_up():
+    """A veth into NETNS, with PROVIDER_ADDR on the far side."""
+    global fixtures_built
+    run(["ip", "netns", "add", NETNS])
+    fixtures_built = True
+    run(["ip", "link", "add", VETH_HOST, "type", "veth", "peer", "name", VETH_NS])
+    run(["ip", "link", "set", VETH_NS, "netns", NETNS])
+    run(["ip", "addr", "add", f"{HOST_V4}/24", "dev", VETH_HOST])
+    run(["ip", "link", "set", VETH_HOST, "up"])
+    run(["ip", "-n", NETNS, "link", "set", "lo", "up"])
+    run(["ip", "-n", NETNS, "addr", "add", f"{PROVIDER_ADDR}/24", "dev", VETH_NS])
+    run(["ip", "-n", NETNS, "link", "set", VETH_NS, "up"])
+    say(f"  namespace {NETNS}: stub address {PROVIDER_ADDR} via {VETH_HOST}")
+
+
+def fixtures_down():
+    # Deleting the namespace takes VETH_NS with it; the host side goes
+    # separately, since it outlives a pair that was created but never moved.
+    if not fixtures_built:
+        return
+    run(["ip", "netns", "del", NETNS], check=False)
+    run(["ip", "link", "del", VETH_HOST], check=False)
+    say(f"  removed namespace {NETNS}")
+
+
 def start_stub(rigdir, cert, key):
     log = open(RIG / "stub.log", "w")
+    # `ip netns exec` execs the stub, so the pid is the stub's own and
+    # await_listener can still match it.
     stub = subprocess.Popen(
-        [sys.executable, str(rigdir / "stub_upstream.py"),
+        ["ip", "netns", "exec", NETNS,
+         sys.executable, str(rigdir / "stub_upstream.py"),
          str(PROVIDER_PORT), str(cert), str(key)],
-        stdout=log, stderr=log)
+        stdout=log, stderr=log, env=dict(os.environ, STUB_BIND=PROVIDER_ADDR))
     children.append(stub)
     await_listener("stub provider", PROVIDER_PORT, stub, RIG / "stub.log")
+    # Listening in the namespace is half of it; the broker dials from the
+    # host's, so the veth has to carry the connection too.
+    try:
+        socket.create_connection((PROVIDER_ADDR, PROVIDER_PORT), timeout=5).close()
+    except OSError as exc:
+        sys.exit(f"stub listens in {NETNS} but {PROVIDER_ADDR}:{PROVIDER_PORT} "
+                 f"is unreachable from the host: {exc}")
 
 
 def await_listener(label, port, proc, logfile):
@@ -450,7 +507,8 @@ def await_listener(label, port, proc, logfile):
             say(f"--- {label} died (rc={proc.returncode}) ---")
             say(logfile.read_text()[-2000:])
             sys.exit(f"{label} exited before it listened")
-        held = run(["ss", "-lntpH", f"sport = :{port}"], check=False).stdout
+        held = run(["ip", "netns", "exec", NETNS,
+                    "ss", "-lntpH", f"sport = :{port}"], check=False).stdout
         if f"pid={proc.pid}," in held:
             say(f"  {label} listening on :{port} (pid {proc.pid})")
             return
@@ -475,9 +533,9 @@ def write_hosts_entry():
     """
     global hosts_line_written
     with HOSTS_FILE.open("a") as fh:
-        fh.write(f"127.0.0.1 {PROVIDER}  {HOSTS_MARK}\n")
+        fh.write(f"{PROVIDER_ADDR} {PROVIDER}  {HOSTS_MARK}\n")
     hosts_line_written = True
-    say(f"  {HOSTS_FILE}: 127.0.0.1 {PROVIDER}")
+    say(f"  {HOSTS_FILE}: {PROVIDER_ADDR} {PROVIDER}")
 
 
 def remove_hosts_entry():
@@ -1027,6 +1085,7 @@ def teardown():
         subprocess.run(["systemctl", "daemon-reload"],
                        capture_output=True, text=True, timeout=120)
     remove_hosts_entry()
+    fixtures_down()
 
 
 def main():
@@ -1050,6 +1109,7 @@ def main():
         for arm in ARMS:
             write_trust_dropin(arm, cert)
         run(["systemctl", "daemon-reload"], timeout=120)
+        fixtures_up()
         start_stub(rigdir, cert, key)
         seal_material()
         deploy()

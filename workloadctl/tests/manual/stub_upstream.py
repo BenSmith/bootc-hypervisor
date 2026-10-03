@@ -14,12 +14,11 @@ import ssl
 import sys
 
 PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 19999
-# The address to bind. Loopback by default, which is what broker_rig
-# wants: its broker dials the stub from the same host. A CONTAINER
-# cannot be served that way -- inside the container 127.0.0.1 is the
-# container's own loopback, so a stub on the host's is unreachable and
-# the packet never meets the host nftables the row is about. The
-# container rig therefore binds a routable address in its namespace.
+# The address to bind. Both rigs set it to a routable address in a
+# namespace of their own: the host's loopback 443 is often taken (a VM
+# host runs a reverse proxy there), and inside a container 127.0.0.1 is
+# the container's own loopback, so a stub on the host's is unreachable
+# and the packet never meets the host nftables the row is about.
 BIND = os.environ.get("STUB_BIND", "127.0.0.1")
 # TLS, because the broker refuses a plaintext upstream and is right to: that
 # leg is the one carrying the real credential. Serving it here means the rig

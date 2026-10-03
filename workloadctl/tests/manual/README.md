@@ -126,8 +126,11 @@ keeps one workload's caller out of the other's credential. Both refusals are
 **What the host-side scaffolding costs.** The broker's upstream is
 `https://<the Host>` with no override — deliberately, so a policy-matched path
 cannot be prefixed on the way out — so the provider has to answer at that name
-on 443. The rig writes one `/etc/hosts` line, binds `127.0.0.1:443`, and removes
-both at teardown. The stub's certificate is handed to each broker instance
+on 443. The rig writes one `/etc/hosts` line and serves the stub on 443 at
+`10.99.97.30`, inside a network namespace of its own reached over a veth, and
+removes all of it at teardown. It used to bind the host's `127.0.0.1:443`,
+which a VM host running a reverse proxy already holds, so the rig could not
+run on one. The stub's certificate is handed to each broker instance
 through `SSL_CERT_FILE` in a drop-in rather than installed into the host trust
 store: the trust decision stays the broker's, made the way it always is, and the rig leaves no trust anchor behind on a
 machine it borrowed. Nothing about the path under test is weakened — the drop-in
@@ -143,7 +146,11 @@ row measures something); it carries no secret (it is on a world-readable unit,
 so this has to be true rather than arranged); and `ExecStartPre` is empty and
 the runtime directory absent.
 
-**Last green 2026-09-21, all 41 rows, on a KVM host under enforcing, against
+**Last green 2026-10-03, all 41 rows, under enforcing on a VM host running
+production workloads and a reverse proxy on 443**, against the customs 0.5.0
+RPM, and the first run with the stub in its own namespace. Before that
+**2026-09-21, all
+41 rows, on a KVM host under enforcing, against
 the installed RPM** (broker-flags: the first run in which the broker started
 from the generator's `ExecStart=` flags, with the four guard rows above; both
 arms' keys arrived at the stub, `x-api-key` for the default convention and
