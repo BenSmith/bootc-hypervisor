@@ -295,7 +295,7 @@ def drive_traffic():
         # That is not a defect in the probe: reaching the upstream at all is
         # what proves the host was ADMITTED, and the contrast with the unlisted
         # probe's 403 below is the assertion. Whether a permitted request is
-        # permitted and a forbidden one forbidden is customs' rigs' question,
+        # permitted and a forbidden one forbidden is moatery's rigs' question,
         # on a stub origin built to answer it; this rig owns the reporting.
         ("governed-permitted", f"https://{GOVERNED}/v1/ping"),
         ("governed-denied", f"https://{GOVERNED}/v9/ping"),

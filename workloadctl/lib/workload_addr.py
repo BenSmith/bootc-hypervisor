@@ -42,7 +42,7 @@ UID_MAX = 52948
 # `[vm.network].ports`. Most of these rows sit in one; the nflog group is not
 # an address and sits in none, which is why the reservation fields are
 # optional. "Plane" is deliberately NOT the word for any of this: in this
-# codebase a plane is which port a record arrived on (customs.egress_plane,
+# codebase a plane is which port a record arrived on (moatery.egress_plane,
 # and the user-visible `--plane tls`), and one word for two unrelated things
 # is how a v6 range went unchecked for a whole rung.
 #
@@ -162,9 +162,9 @@ UID_INSPECT = UidDerived("inspector address", INSPECT_ADDR_BASE,
                             RESERVATION_INSPECT4, RESERVATION_INSPECT6)
 
 
-# The inspector, customs', the socket unit's ExecStart. Named here so the
+# The inspector, moatery's, the socket unit's ExecStart. Named here so the
 # unit and the program's installed path stay one place apart.
-INSPECT_LISTENER_BIN = "/usr/libexec/customs/customs-inspect"
+INSPECT_LISTENER_BIN = "/usr/libexec/moatery/moat-inspect"
 
 # VM workloads have no bridge. passt terminates the guest's stack in userspace
 # and re-originates its traffic as ordinary host sockets owned by the workload's
@@ -397,9 +397,9 @@ RESOLVE_PORT = 53
 # vm_network_config.resolve_static.
 RESOLVE_STATIC_FILE = "resolve-static.json"
 
-# The responder, customs', the resolve service's ExecStart; see
+# The responder, moatery's, the resolve service's ExecStart; see
 # INSPECT_LISTENER_BIN.
-RESOLVE_LISTENER_BIN = "/usr/libexec/customs/customs-resolve"
+RESOLVE_LISTENER_BIN = "/usr/libexec/moatery/moat-resolve"
 
 
 def resolve_address(uid: int) -> str:

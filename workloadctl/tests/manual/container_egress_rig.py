@@ -63,7 +63,7 @@ WHAT IT MEASURES, and the failure each row exists to catch:
          reads SSL_CERT_FILE. A JVM reads none of them.
 
  10. S11: A FILTERED CONTAINER ASKS ITS OWN RESPONDER (check_container_
-     responder, and rows in the pod and bridge sections). customs-resolve on
+     responder, and rows in the pod and bridge sections). moat-resolve on
      127.130.x.y through pasta's --dns-host: the first lookup at start, the
      synthesised and static answers, AAAA withheld, the count, and a
      nameserver the container picks for itself being unreachable.
@@ -297,7 +297,7 @@ def _resolve_status(name):
 def check_container_responder():
     """S11: does a filtered container ask its own responder, and only it?
 
-    A triggered single-mode container on pasta gets customs-resolve on
+    A triggered single-mode container on pasta gets moat-resolve on
     127.130.x.y, and `--dns-host` on its `--network=` points pasta's
     forwarder at it. Every row that fetches by name ABOVE this one already
     went through it -- so what this section adds is what those cannot see:
@@ -306,7 +306,7 @@ def check_container_responder():
     the static map, and that a nameserver the container picks for itself is
     not reachable at all.
 
-    THE FIXTURE IS A REAL RESOLVER. customs-resolve again, in the fixture
+    THE FIXTURE IS A REAL RESOLVER. moat-resolve again, in the fixture
     namespace, answering every name with FIXTURE_ANSWER. The control row
     proves an unfiltered container reaches it and gets that answer, so the
     filtered row's failure to is the drop and not a dead fixture.
@@ -437,7 +437,7 @@ def check_container_responder():
                f"container's hosts file, which podman builds from the "
                f"host's; nslookup asks the responder")
 
-    # A nameserver the container picks for itself. customs-resolve as the
+    # A nameserver the container picks for itself. moat-resolve as the
     # fixture, in the namespace, so the control's answer is a real one.
     run(["ip", "-n", NETNS, "addr", "add", f"{DNS_ADDR}/24", "dev", VETH_NS],
         check=False)
@@ -447,7 +447,7 @@ def check_container_responder():
     fixture = subprocess.Popen(
         ["ip", "netns", "exec", NETNS, "systemd-socket-activate",
          "--datagram", "-l", f"{DNS_ADDR}:{DNS_PORT}",
-         "/usr/libexec/customs/customs-resolve", "--name", "ceg-fixture",
+         "/usr/libexec/moatery/moat-resolve", "--name", "ceg-fixture",
          "--address", FIXTURE_ANSWER, "--policy", str(tmp / "policy.json"),
          "--static", str(tmp / "static.json"),
          "--status", str(tmp / "status.json")],
@@ -2220,7 +2220,7 @@ def check_cross_workload_gap():
         with no [network] table and an ordinary shell all fail to be, so all
         three went straight through.
       - the listener refuses a caller whose uid is not the workload's own,
-        root included, via customs.peer_identity.
+        root included, via moatery.peer_identity.
 
     Not reaching it is therefore the assertion. A REACHED here is a real
     regression in one of those two layers, and reaching it was never only a

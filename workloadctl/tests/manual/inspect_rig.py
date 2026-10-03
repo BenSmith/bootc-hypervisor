@@ -63,8 +63,8 @@ restart.
 
 WHAT THE DOMAIN CHECKS ARE FOR
 
-customs-inspect carries a filecon and a type_transition, so it
-should be wlinspect_t; customs-resolve likewise, wlresolve_t
+moat-inspect carries a filecon and a type_transition, so it
+should be wlinspect_t; moat-resolve likewise, wlresolve_t
 (security/workload-resolve.cil). Without its module it entrypoints bin_t from
 init_t with nothing to retype it and runs unconfined -- a process terminating
 guest-supplied DNS packets, outside the boundary wlinspect_t exists to draw,
@@ -251,7 +251,7 @@ def preflight():
     if Path("/proc/self/uid_map").read_text().split()[1] != "0":
         sys.exit("run as root")
     for p in (BASE_IMAGE, Path("/usr/libexec/workloadctl/workload-vm-inspect"),
-              Path("/usr/libexec/customs/customs-inspect")):
+              Path("/usr/libexec/moatery/moat-inspect")):
         if not p.exists():
             sys.exit(f"missing {p}")
     if not Path("/dev/kvm").exists():

@@ -3,7 +3,7 @@
 ;
 ; WHY THIS MODULE EXISTS AT ALL
 ;
-; The responder is customs', /usr/libexec/customs/customs-resolve. With no
+; The responder is moatery's, /usr/libexec/moatery/moat-resolve. With no
 ; filecon for it, it is bin_t like everything under libexec/: bin_t carries
 ; entry_type, systemd's own transition rules take it from there, and the
 ; running service reports scontext=unconfined_service_t. NOTHING fails, so a
@@ -30,7 +30,7 @@
 ;     `semodule -DB` or converge one rule short of working, with an empty audit
 ;     log and a systemd error naming no SELinux concept.
 ;   * the script is the entrypoint, not the interpreter, and the filecon names
-;     ONE file rather than globbing /usr/libexec/customs — customs-broker is
+;     ONE file rather than globbing /usr/libexec/moatery — moat-broker is
 ;     there too, and holds a key this domain must never reach.
 ;   * the script is exec'd from init_t, and what the DOMAIN needs on the
 ;     interpreter is `execute map` on bin_t -- NOT execute_no_trans, and not
@@ -60,7 +60,7 @@
 (typeattributeset file_type (wlresolve_exec_t))
 (typeattributeset exec_type (wlresolve_exec_t))
 (typeattributeset entry_type (wlresolve_exec_t))
-(filecon "/usr/libexec/customs/customs-resolve" file (system_u object_r wlresolve_exec_t ((s0) (s0))))
+(filecon "/usr/libexec/moatery/moat-resolve" file (system_u object_r wlresolve_exec_t ((s0) (s0))))
 
 (typetransition init_t wlresolve_exec_t process wlresolve_t)
 (allow init_t wlresolve_exec_t (file (getattr open read execute map)))
@@ -94,7 +94,7 @@
 ;     site-packages dir to find, and one must never be on this path anyway.
 ;     The generated unit sets PYTHONNOUSERSITE=1, so the probe is not made.
 ;   search on cert_t:dir ("pki")                  libcrypto reading its
-;     OPENSSLDIR config, pulled in transitively: the customs package imports
+;     OPENSSLDIR config, pulled in transitively: the moatery package imports
 ;     hashlib. This domain terminates no TLS and verifies nothing, so the
 ;     trust store is not its to read -- contrast the inspector, which cannot
 ;     work without it.

@@ -123,7 +123,7 @@ BROKER_PORT = 8081                          # workload_addr.BROKER_INSTANCE_PORT
 # The installed broker and the installed everything else. `just rpm-install`
 # refreshes them; a green run then means the PACKAGE is right, which is the
 # claim worth making.
-BROKER_BIN = Path("/usr/libexec/customs/customs-broker")
+BROKER_BIN = Path("/usr/libexec/moatery/moat-broker")
 
 # The name the guests dial and the broker resolves. `.test` is reserved
 # (RFC 6761) so it can never collide with a real record, and the host's own
@@ -324,7 +324,7 @@ def preflight():
     if not Path("/dev/kvm").exists():
         sys.exit("no /dev/kvm")
     if not os.access(BROKER_BIN, os.X_OK):
-        sys.exit(f"missing {BROKER_BIN} — it ships in the customs RPM, "
+        sys.exit(f"missing {BROKER_BIN} — it ships in the moatery RPM, "
                  f"which the workloadctl RPM requires")
     # A leftover namespace may still hold a stub from an earlier run, which
     # would take traffic meant for this run's and read as a fault downstream.
@@ -1028,7 +1028,7 @@ def selinux(since):
         m = re.search(r"\bmsg=audit\((\d+)", line)
         if m and float(m.group(1)) < since:
             continue
-        if INSPECT_DOMAIN not in line and "customs-broker" not in line:
+        if INSPECT_DOMAIN not in line and "moat-broker" not in line:
             continue
         denials.append(line[-300:])
     record(f"no {INSPECT_DOMAIN} or broker denial during this run",

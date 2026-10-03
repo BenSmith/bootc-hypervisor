@@ -1,7 +1,7 @@
 """The container-side credential broker instance (Phase 2 of container egress parity).
 
 There is no second broker here, and that is the design rather than an
-economy. customs-broker, the unit generator, the broker's command
+economy. moat-broker, the unit generator, the broker's command
 line, the run-file entry and the nftables carve-out are all the VM ones,
 reached from the container branch with substrate-specific values passed in.
 So most of what this file asserts is that the two callers produce the SAME

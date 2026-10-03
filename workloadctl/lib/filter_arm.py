@@ -56,7 +56,7 @@ from egress_policy import (
     container_uses_resolve, resolve_static, resolve_static_path,
     vm_uses_resolve,
 )
-from customs.egress_status import clear_status
+from moatery.egress_status import clear_status
 from helper_main import log, run
 from nft import purge_uid_elements
 from nft_constants import NFT_BIN, NFT_SKELETON

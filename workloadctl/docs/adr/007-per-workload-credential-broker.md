@@ -4,8 +4,8 @@
 ([ADR 008](008-transparent-egress-inspection.md)), which is what dials the broker.
 Amended 2026-09-21: the instance's configuration is its command line, not a
 file — see the note under decision 8 and the third detail that bites.
-Amended 2026-09-26: the broker and the listener are customs' programs
-(`customs-broker`, `customs-inspect`), which workloadctl requires; the
+Amended 2026-09-26: the broker and the listener are moatery's programs
+(`moat-broker`, `moat-inspect`), which workloadctl requires; the
 `lib/` and `libexec/` paths below are where they lived when this was decided.
 
 ## Context
@@ -155,7 +155,7 @@ than only requests to one endpoint.
    `--placeholder`/`--auth-header`/`--auth-format`), the broker compares the
    caller's uid to the one it was given, and its process imports nothing that
    reads a workload's config or resolves a user (a closure test held it;
-   the broker is customs' since, and its closure test is there). What the file was chosen for — never
+   the broker is moatery's since, and its closure test is there). What the file was chosen for — never
    serving a previous boot's credential set — was never its property: it held
    no material, and `LoadCredentialEncrypted=` decrypts afresh at every start
    regardless. What is genuinely given up is the per-start cross-check a

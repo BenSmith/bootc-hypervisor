@@ -18,7 +18,7 @@ with the map, asserted below by its absence.
 """
 
 import importlib
-from tests import CUSTOMS_LIBEXEC, load_script
+from tests import MOATERY_LIBEXEC, load_script
 
 # `lib/` reaches sys.path via tests/__init__, so this import follows it.
 import vm_default_seed
@@ -37,7 +37,7 @@ from broker_config import (BROKER_BIN, vm_broker_command,
 import inspect_arm
 from nft_elements import internal_ok_elements
 from vm_validate import validate_vm_network
-from customs import broker_profiles
+from moatery import broker_profiles
 from workload_addr import BROKER_INSTANCE_PORT, UID_MIN, broker_listen_address
 import ipaddress
 
@@ -279,7 +279,7 @@ class TestTheGeneratedUnit(unittest.TestCase):
             "/etc/credstore.encrypted/broker/agent/example-token"])
 
     def test_it_is_started_once_the_broker_says_it_is_listening(self):
-        """Type=notify, with the broker's own READY=1 (customs 0.5.0): as
+        """Type=notify, with the broker's own READY=1 (moatery 0.5.0): as
         Type=exec the unit is started at the exec, and the unit ordered
         after it can send the broker a request before its socket exists."""
         unit = self.unit()
@@ -612,7 +612,7 @@ import os
 import socket
 import threading
 
-from customs.egress_record import (
+from moatery.egress_record import (
     DROP_BROKER_UNREACHABLE,
     DROP_REASONS,
     DROP_UNREACHABLE,
@@ -621,13 +621,13 @@ from customs.egress_record import (
     Where,
 )
 from egress_policy import vm_inspect_policy_text
-from customs.inspect_document import VmPolicyEntry
-from customs.inspect_policy import Policy, load_policy
-from customs import egress_relay
-from customs.egress_upstream import Upstream
-from customs import inspect_http
-from customs.inspect_listener import Listener
-from customs.inspect_http import serve_cleartext
+from moatery.inspect_document import VmPolicyEntry
+from moatery.inspect_policy import Policy, load_policy
+from moatery import egress_relay
+from moatery.egress_upstream import Upstream
+from moatery import inspect_http
+from moatery.inspect_listener import Listener
+from moatery.inspect_http import serve_cleartext
 import inspect_figures
 
 CIL = Path(__file__).resolve().parent.parent / "security" / "workload-inspect.cil"
@@ -638,7 +638,7 @@ _LISTENER_MOD = None
 def listener_mod():
     global _LISTENER_MOD
     if _LISTENER_MOD is None:
-        _LISTENER_MOD = load_script(CUSTOMS_LIBEXEC / "customs-inspect")
+        _LISTENER_MOD = load_script(MOATERY_LIBEXEC / "moat-inspect")
     return _LISTENER_MOD
 
 
@@ -1117,7 +1117,7 @@ class TestTheBrokerEndpointComesFromTheUid(unittest.TestCase):
         names neither the address function nor the port constant. A dial that
         derived either would be one workloadctl-shaped assumption back inside
         the inspector."""
-        from customs import egress_upstream
+        from moatery import egress_upstream
         source = Path(egress_upstream.__file__).read_text()
         self.assertNotIn("broker_listen_address", source)
         self.assertNotIn("BROKER_INSTANCE_PORT", source)

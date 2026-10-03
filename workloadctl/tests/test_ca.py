@@ -19,7 +19,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from customs.egress_ca import (CA_BACKDATE_SECONDS, CA_CERT_NAME, CA_KEY_NAME,
+from moatery.egress_ca import (CA_BACKDATE_SECONDS, CA_CERT_NAME, CA_KEY_NAME,
                        CA_VALIDITY_DAYS, ca_cert_path, ca_dir,
                        ca_key_path, ca_openssl_argv, ca_subject,
                        leaf_dir)
@@ -27,7 +27,7 @@ from customs.egress_ca import (CA_BACKDATE_SECONDS, CA_CERT_NAME, CA_KEY_NAME,
 
 # `lib/` reaches sys.path via tests/__init__, so this import follows it.
 import ensure_common
-from tests import CUSTOMS_CHECKOUT, CUSTOMS_LIBEXEC
+from tests import MOATERY_CHECKOUT, MOATERY_LIBEXEC
 import vm_default_seed
 
 HAVE_OPENSSL = shutil.which("openssl") is not None
@@ -189,13 +189,13 @@ class TestGeneratorIsIdempotent(unittest.TestCase):
         mod.os.chown = lambda *a, **k: None
         self.addCleanup(setattr, mod, "workload_state_dir", self._orig_state)
         self.addCleanup(setattr, mod.os, "chown", self._orig_chown)
-        # The mint is customs' program: the checkout's, when one is named,
+        # The mint is moatery's program: the checkout's, when one is named,
         # which then has to find the checkout's package too.
         patches = [mock.patch.object(mod, "CA_MINT_BIN",
-                                     str(CUSTOMS_LIBEXEC / "customs-mint-ca"))]
-        if CUSTOMS_CHECKOUT:
+                                     str(MOATERY_LIBEXEC / "moat-mint-ca"))]
+        if MOATERY_CHECKOUT:
             patches.append(mock.patch.dict(
-                os.environ, {"PYTHONPATH": CUSTOMS_CHECKOUT}))
+                os.environ, {"PYTHONPATH": MOATERY_CHECKOUT}))
         for patch in patches:
             patch.start()
             self.addCleanup(patch.stop)
@@ -267,7 +267,7 @@ class TestGeneratorIsIdempotent(unittest.TestCase):
                                side_effect=FileNotFoundError("no such file")):
             with self.assertRaises(RuntimeError) as ctx:
                 self.mod.generate_egress_ca(self.pw, "myvm")
-        self.assertIn("customs-mint-ca", str(ctx.exception))
+        self.assertIn("moat-mint-ca", str(ctx.exception))
 
     def test_openssl_failing_raises_rather_than_returning_quietly(self):
         # A silent failure here yields a filtered VM with no CA, which does not

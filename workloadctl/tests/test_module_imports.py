@@ -197,10 +197,10 @@ class TestASharedModuleIsNotShadowedByItsCaller(unittest.TestCase):
         "lib/run_files.py": ("workload_lib",),
         "lib/container_network_config.py": ("config_parser", "credential_entries"),
         "lib/broker_config.py": ("credential_entries", "container_network_config"),
-        "lib/credential_entries.py": ("customs.broker_profiles",),
+        "lib/credential_entries.py": ("moatery.broker_profiles",),
         "lib/container_validate.py": ("container_network_config",),
         "lib/egress_policy.py": ("container_network_config",
-                                  "customs.inspect_document"),
+                                  "moatery.inspect_document"),
         "lib/cmd_egress.py": ("egress_record_query",),
         "lib/substrate_vm.py": ("vm_guest_reach",),
         "lib/pcap_vm_tap.py": ("pcap", "pcap_file"),
@@ -268,7 +268,7 @@ class TestANameIsImportedFromTheModuleThatDefinesIt(unittest.TestCase):
     hold the name. Two shapes slip past it:
 
       * a name the module BOTH uses and republishes. egress_policy imported
-        config_parser.normalise_hostname because its own matcher calls it, and
+        config_parser.normalize_hostname because its own matcher calls it, and
         five other files then imported it from egress_policy. Every one of
         them read as a normal import and the unused-import scan had nothing
         to report.
@@ -279,7 +279,7 @@ class TestANameIsImportedFromTheModuleThatDefinesIt(unittest.TestCase):
         everything.
 
     What both cost is the same thing NO_RE_EXPORTS exists to prevent -- a
-    reader who finds `egress_policy.normalise_hostname` cannot tell which
+    reader who finds `egress_policy.normalize_hostname` cannot tell which
     module owns it, and `mock.patch` on the wrong one rebinds a copy. Asking
     the question from the importing side needs no list of suspect modules: a
     module either defines the name or it is passing on someone else's.
@@ -371,9 +371,9 @@ class TestANameIsImportedFromTheModuleThatDefinesIt(unittest.TestCase):
 
     def test_the_check_would_see_a_pass_through(self):
         """Measured, not reasoned: the exact shape found in egress_policy."""
-        body = ast.parse("from config_parser import normalise_hostname\n"
-                         "normalise_hostname = normalise_hostname\n").body
-        self.assertIn("normalise_hostname", self._module_level_names(body))
+        body = ast.parse("from config_parser import normalize_hostname\n"
+                         "normalize_hostname = normalize_hostname\n").body
+        self.assertIn("normalize_hostname", self._module_level_names(body))
         self.assertEqual(
             self._module_level_names(
                 ast.parse("from config_parser import x\n").body), set())

@@ -33,15 +33,15 @@ import deployment
 from config_parser import workload_root_dir
 from workload_lib import workload_state_dir, workload_data_dir
 from run_files import workload_env_dir
-from customs.egress_ca import (
+from moatery.egress_ca import (
     ca_cert_path, ca_dir, denial_dir, leaf_dir, ca_key_path,
 )
 from config_parser import SOCKET_DIR
 
-# customs' CA mint: the one place the CA's openssl invocation and its
+# moatery's CA mint: the one place the CA's openssl invocation and its
 # refusals live, so the inspector that signs with the CA and the step that
 # makes it cannot disagree about what a CA is.
-CA_MINT_BIN = "/usr/libexec/customs/customs-mint-ca"
+CA_MINT_BIN = "/usr/libexec/moatery/moat-mint-ca"
 
 
 def log(msg):
@@ -362,14 +362,14 @@ def generate_egress_ca(pw, name: str):
         )
     except OSError as exc:
         raise RuntimeError(
-            f"customs-mint-ca (egress CA) could not run: {exc}") from exc
+            f"moat-mint-ca (egress CA) could not run: {exc}") from exc
     if result.returncode != 0:
         # Both streams, as _ssh_keygen reports them: a program that could
         # not start says so on either, and one of them is empty.
         said = " / ".join(s.strip() for s in (result.stdout, result.stderr)
                           if s.strip())
         raise RuntimeError(
-            f"customs-mint-ca (egress CA) failed: "
+            f"moat-mint-ca (egress CA) failed: "
             f"{said or f'no output, exit {result.returncode}'}")
 
     os.chown(key_path, pw.pw_uid, pw.pw_gid)

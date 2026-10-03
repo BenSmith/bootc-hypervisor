@@ -150,7 +150,7 @@ class TestStartupProbes(unittest.TestCase):
         self.assertNotRegex(body, r"\(allow\s+wlresolve_t\s+cert_t\b")
 
     def test_the_user_site_probe_is_neither_granted_nor_hidden(self):
-        """customs-resolve's `-s` shebang stops it being made; if that
+        """moat-resolve's `-s` shebang stops it being made; if that
         went, the denial must show in audit.log rather than be hidden."""
         self.assertNotRegex(_body(), r"wlresolve_t\s+container_file_t")
 

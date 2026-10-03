@@ -13,11 +13,11 @@ Installed to /usr/libexec/workloadctl/vm_egress_validate.py.
 
 from broker_config import VmCredential
 from config_parser import validate_host_pattern
-from customs.inspect_document import (
+from moatery.inspect_document import (
     TLS_DEFAULT,
     TLS_MODES,
     hostname_match,
-    normalise_hostname,
+    normalize_hostname,
     patterns_overlap,
     VmPolicyEntry,
 )
@@ -451,7 +451,7 @@ def _validate_policy(net: dict, splice_hosts, egress: str,
     # A copy-paste a reader will assume does something.
     seen: dict = {}
     for entry in entries:
-        key = (normalise_hostname(entry.host),
+        key = (normalize_hostname(entry.host),
                None if entry.methods is None else tuple(sorted(set(entry.methods))),
                None if entry.paths is None else tuple(sorted(set(entry.paths))),
                entry.credential)
@@ -500,7 +500,7 @@ def _validate_apex_coverage(hosts, entries, key: str, consequence: str, *,
     named = [e for e in entries if e]
     for apex in literal:
         wildcard = f"*.{apex}"
-        if not any(normalise_hostname(e) == normalise_hostname(wildcard)
+        if not any(normalize_hostname(e) == normalize_hostname(wildcard)
                    for e in named):
             continue
         if not self_allowlisting and not any(

@@ -37,23 +37,24 @@ Recommends:     udica
 Requires:       passt
 Requires:       nftables
 # The `openssl` command line, not just the library: cmd_secret shells out to
-# it. The egress CA and its leaves are minted by customs' programs, which
+# it. The egress CA and its leaves are minted by moatery's programs, which
 # require it themselves.
 # openssl-libs arrives with half the base system; the CLI does not.
 Requires:       openssl
 # The egress inspector, the credential broker and the DNS responder:
-# customs-inspect, customs-broker and customs-resolve, which the generated
-# units run, and the customs package whose published names lib/ imports
-# (tests/test_customs_seam.py). 0.3.0 is the first release whose responder
+# moat-inspect, moat-broker and moat-resolve, which the generated
+# units run, and the moatery package whose published names lib/ imports
+# (tests/test_moatery_seam.py). 0.3.0 is the first release whose responder
 # takes --static; 0.4.0 is the first whose policy document names
 # internal_expected, which is the key this package's renderer writes; 0.5.0
 # is the first whose broker sends READY=1, which its Type=notify unit waits
 # for; 0.5.1 is the first whose programs run with the user site off, which
 # keeps the responder's site.py out of the workload's home under
-# wlresolve_t. A lower floor installs a customs that refuses the document at
+# wlresolve_t. A lower floor installs a moatery that refuses the document at
 # the inspector's start, whose broker times out starting, or whose responder
-# is denied at every start.
-Requires:       customs >= 0.5.1
+# is denied at every start. 0.6.0 is the first named moatery, with the
+# programs these units run under /usr/libexec/moatery.
+Requires:       moatery >= 0.6.0
 # There is deliberately NO proxy dependency here. Through rung 1 this was a hard
 # `Requires: tinyproxy`, because a VM declaring [vm.network].hosts was filtered
 # default-deny with its own proxy as the only route out. Rung 2 replaced that
@@ -271,7 +272,7 @@ install -dm 0755 %{buildroot}%{_sysconfdir}/workloads.d
 # timer, not enabled on its own.
 #
 # No broker unit is listed. Each workload that declares a credential gets
-# workload-<name>-broker.service, running customs-broker, written by the
+# workload-<name>-broker.service, running moat-broker, written by the
 # generator into /run at boot — a generated unit, so there is nothing for a
 # preset to apply to and nothing here to enable.
 %post
@@ -397,25 +398,25 @@ if [ -x /usr/sbin/semodule ]; then
         restorecon /usr/bin/tinyproxy 2>/dev/null || :
     fi
 fi
-# The egress inspector's domain, on the same terms. The inspector is customs',
+# The egress inspector's domain, on the same terms. The inspector is moatery's,
 # installed before this package (Requires:), so its file already carries a
 # label and needs the restorecon. The filecon names ONE file under
-# /usr/libexec/customs, not the directory: the broker is there too, and holds
+# /usr/libexec/moatery, not the directory: the broker is there too, and holds
 # the key the inspector must never read (see the module header).
 if [ -x /usr/sbin/semodule ] && [ -f %{_datadir}/workloadctl/workload-inspect.cil ]; then
     if semodule -i %{_datadir}/workloadctl/workload-inspect.cil 2>/dev/null; then
-        restorecon /usr/libexec/customs/customs-inspect 2>/dev/null || :
+        restorecon /usr/libexec/moatery/moat-inspect 2>/dev/null || :
     fi
 fi
 # The synthesising responder's domain, on the same terms and for the same
 # reason the inspector has one: it parses guest-supplied wire format. Without
 # this module the program is bin_t, systemd's own rules run it as
-# unconfined_service_t, and NOTHING fails (see the module header). customs is
+# unconfined_service_t, and NOTHING fails (see the module header). moatery is
 # installed before this package, so its file already carries a label, and a
 # freshly loaded filecon does not retroactively touch it.
 if [ -x /usr/sbin/semodule ] && [ -f %{_datadir}/workloadctl/workload-resolve.cil ]; then
     if semodule -i %{_datadir}/workloadctl/workload-resolve.cil 2>/dev/null; then
-        restorecon /usr/libexec/customs/customs-resolve 2>/dev/null || :
+        restorecon /usr/libexec/moatery/moat-resolve 2>/dev/null || :
     fi
 fi
 # The clock keeper's domain, on the same terms: it parses what the guest's
@@ -489,9 +490,9 @@ if [ $1 -eq 0 ]; then
         semodule -r workload-vm 2>/dev/null || :
         restorecon /usr/libexec/virtiofsd 2>/dev/null || :
         semodule -r workload-inspect 2>/dev/null || :
-        restorecon /usr/libexec/customs/customs-inspect 2>/dev/null || :
+        restorecon /usr/libexec/moatery/moat-inspect 2>/dev/null || :
         semodule -r workload-resolve 2>/dev/null || :
-        restorecon /usr/libexec/customs/customs-resolve 2>/dev/null || :
+        restorecon /usr/libexec/moatery/moat-resolve 2>/dev/null || :
         semodule -r workload-clock 2>/dev/null || :
         restorecon /usr/libexec/workloadctl/workload-vm-clock 2>/dev/null || :
     fi

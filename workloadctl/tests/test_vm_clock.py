@@ -186,7 +186,7 @@ class TestTheSkewCheck(_ClockCase):
     def test_the_threshold_is_inside_the_backdate(self):
         # If it were not, the guard could pass on a guest whose next leaf is
         # already invalid -- the whole failure this unit removes.
-        from customs import egress_ca
+        from moatery import egress_ca
         self.assertLess(vm_clock.CLOCK_SKEW_THRESHOLD_SECONDS,
                         egress_ca.CA_BACKDATE_SECONDS)
 

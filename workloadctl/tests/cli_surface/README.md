@@ -90,9 +90,9 @@ so they never touch a long-lived host (and can't trip host-persistence races
 like UID recycling). Two fidelity modes, selected by `--target=vm:<mode>`:
 
 - **dev** (`vm:dev`) — a cached Fedora Cloud image + the local workloadctl RPM,
-  rsynced in and `just rpm-install`ed after customs' RPM, which it requires
-  (`WLRT_CUSTOMS_RPM`, default `/usr/share/workloadctl/customs.rpm`; `just
-  customs-rpm` fetches the pinned one). Fast; the default.
+  rsynced in and `just rpm-install`ed after moatery's RPM, which it requires
+  (`WLRT_MOATERY_RPM`, default `/usr/share/workloadctl/moatery.rpm`; `just
+  moatery-rpm` fetches the pinned one). Fast; the default.
 - **gate** (`vm:gate`) — the *real* hypervisor bootc image, built via
   bootc-image-builder and booted under swtpm (emulated TPM2). Highest fidelity;
   exercises the shipped image and the TPM-backed secret path.

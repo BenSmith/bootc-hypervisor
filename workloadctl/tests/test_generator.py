@@ -3434,7 +3434,7 @@ class TestGeneratorContainerEgress(unittest.TestCase):
         socket_unit = self.read("workload-web-inspect.socket")
         self.assertIn("workload-container-inspect up", socket_unit)
         inspect_service = self.read("workload-web-inspect.service")
-        self.assertIn("/usr/libexec/customs/customs-inspect", inspect_service)
+        self.assertIn("/usr/libexec/moatery/moat-inspect", inspect_service)
 
     def test_pod_mode_arms_the_filter_before_any_member_starts(self):
         """The arming must precede the containers, not merely exist.

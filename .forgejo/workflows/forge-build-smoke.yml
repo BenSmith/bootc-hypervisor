@@ -49,18 +49,18 @@ jobs:
           skopeo inspect "docker://${REGISTRY}/fedora-bootc-minimal:${VERSION}" >/dev/null
           echo "registry reachable"
 
-      # customs' RPM is installed into this signed image, so the build takes
+      # moatery's RPM is installed into this signed image, so the build takes
       # it by the digest whose signature verified, not by the pinned tag.
-      - name: Verify customs RPM
-        id: customs
+      - name: Verify moatery RPM
+        id: moatery
         working-directory: workloadctl
         run: |
-          ref=$(sudo just customs-rpm-ref)
+          ref=$(sudo just moatery-rpm-ref)
           echo "ref=${ref}" >> "$GITHUB_OUTPUT"
 
       - name: Build base hypervisor
         env:
-          CUSTOMS_RPM: ${{ steps.customs.outputs.ref }}
+          MOATERY_RPM: ${{ steps.moatery.outputs.ref }}
         run: |
           sudo podman build \
             --pull=newer \
@@ -71,7 +71,7 @@ jobs:
             --network=host \
             --build-arg BASE_IMAGE=${REGISTRY}/fedora-bootc-minimal:${VERSION} \
             --build-arg FEDORA_VERSION=${VERSION} \
-            --build-arg CUSTOMS_RPM=${CUSTOMS_RPM} \
+            --build-arg MOATERY_RPM=${MOATERY_RPM} \
             -f hypervisor.Containerfile \
             -t "localhost/hypervisor-bootc:smoke-${VERSION}" \
             .

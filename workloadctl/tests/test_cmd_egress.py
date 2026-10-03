@@ -46,12 +46,12 @@ from egress_record_query import (
     group_by_connection, group_is_partial, parse_when, read_records,
     resolve_id, resolve_reason, resolve_status, select,
 )
-from customs.egress_record import (
+from moatery.egress_record import (
     LOG_ID_FIELD,
     LOG_REQ_FIELD,
     RECORD_FIELDS,
 )
-from customs.egress_plane import PLANES, plane_for_port
+from moatery.egress_plane import PLANES, plane_for_port
 
 
 def _rec(**overrides):

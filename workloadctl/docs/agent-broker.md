@@ -1,6 +1,6 @@
 # The credential broker
 
-`customs-broker`, from customs — why workloadctl runs it, what it refuses to
+`moat-broker`, from moatery — why workloadctl runs it, what it refuses to
 do, how it knows which sandbox is calling, and how to run it.
 
 A sandboxed coding agent never receives a provider API key. It calls the
@@ -301,7 +301,7 @@ was chosen for, never serving a previous boot's credential set, is
 and the file held none. So the reader, the writer, the helper binary, the
 `ExecStartPre` and the runtime directory went, and the broker's process now
 imports nothing that reads a workload's config or knows what a uid is called
-(customs' closure test; `tests/test_customs_seam.py` holds the generated
+(moatery's closure test; `tests/test_moatery_seam.py` holds the generated
 command to the program's flags).
 
 A request therefore goes: guest → passt (re-originates as the workload uid) →
@@ -443,9 +443,9 @@ nothing to check.
 
 ## 10. Running it
 
-The broker ships in the customs RPM, which workloadctl's requires, and
+The broker ships in the moatery RPM, which workloadctl's requires, and
 therefore in the hypervisor image: the program at
-`/usr/libexec/customs/customs-broker`, and this file under
+`/usr/libexec/moatery/moat-broker`, and this file under
 `/usr/share/doc/workloadctl/`.
 
 **There is no unit to enable and no config to edit.** There is no host-wide
@@ -488,7 +488,7 @@ What the generator writes for that, on `workload-agent-vm-broker.service`
 (one line, wrapped here; every value is quoted for a systemd Exec line):
 
 ```
-ExecStart=/usr/libexec/customs/customs-broker --name "agent-vm"
+ExecStart=/usr/libexec/moatery/moat-broker --name "agent-vm"
     --listen "127.129.0.7:8081" --caller-uid "10007"
     --host "api.anthropic.com=broker-agent-vm-anthropic"
     --placeholder "broker-agent-vm-anthropic=sk-ant-placeholder-not-a-real-key"
@@ -623,11 +623,11 @@ variable by hand, because `NODE_EXTRA_CA_CERTS` appends and `SSL_CERT_FILE`
 replaces.
 
 For local development the program takes the same flags and falls back to
-`CUSTOMS_BROKER_SECRET` for every credential, logging a warning. Name your own
+`MOATERY_BROKER_SECRET` for every credential, logging a warning. Name your own
 uid as the caller, since a request from your own login is otherwise a 403:
 
 ```bash
-CUSTOMS_BROKER_SECRET='sk-...' /usr/libexec/customs/customs-broker \
+MOATERY_BROKER_SECRET='sk-...' /usr/libexec/moatery/moat-broker \
     --name dev --listen 127.0.0.1:8081 --caller-uid "$(id -u)" \
     --host api.anthropic.com=anthropic
 ```

@@ -111,7 +111,7 @@ from egress_policy import (
     container_inspect_policy_text, inspect_policy_path, inspect_status_path,
     internal_hosts, vm_inspect_policy_text, vm_uses_inspect,
 )
-from customs.egress_status import clear_status
+from moatery.egress_status import clear_status
 from helper_main import log, run
 from nft import (add_listener_addresses, purge_internal_exemptions,
                  remove_listener_addresses)

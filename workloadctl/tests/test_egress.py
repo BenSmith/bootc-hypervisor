@@ -21,7 +21,7 @@ import io
 from contextlib import redirect_stderr
 
 from diagnose_probe import PROBE
-from customs.egress_plane import PLANES
+from moatery.egress_plane import PLANES
 from nft_elements import vm_filter_commands, filter_delete_command
 from netfilter_state import (
     CONNTRACK_PRESSURE, conntrack_occupancy, nft_drop_counter,
@@ -2455,7 +2455,7 @@ class TestRung2Schema(unittest.TestCase):
         anything, and the property it gives -- one name checked per connection
         -- is weaker rather than wrong.
         """
-        from customs.inspect_document import TLS_DEFAULT, TLS_MODES
+        from moatery.inspect_document import TLS_DEFAULT, TLS_MODES
         self.assertEqual(TLS_DEFAULT, "inspect")
         self.assertIn(TLS_DEFAULT, TLS_MODES)
         self.assertIn("splice", TLS_MODES)
@@ -3988,7 +3988,7 @@ class TestRung6PolicyDocument(unittest.TestCase):
         """Asserted in BOTH directions, because only the second half fails if
         the key is emitted unconditionally."""
         from egress_policy import vm_inspect_policy_text
-        from customs.inspect_document import inspect_policy_digest
+        from moatery.inspect_document import inspect_policy_digest
         bare = inspect_policy_digest(vm_inspect_policy_text(self._net(None)))
         with_cred = inspect_policy_digest(
             vm_inspect_policy_text(self._net("tok")))

@@ -23,12 +23,12 @@ Installed to /usr/libexec/workloadctl/gen_egress.py.
 
 from workload_lib import workload_state_dir, dq, uq
 from run_files import GENERATED_BY
-from customs.egress_plane import PLANES
+from moatery.egress_plane import PLANES
 from egress_policy import (
     inspect_logs_directory, inspect_policy_path, inspect_record_path,
     inspect_status_path, resolve_static_path,
 )
-from customs.egress_ca import denial_dir, leaf_dir
+from moatery.egress_ca import denial_dir, leaf_dir
 from nft_elements import (
     inspect_cgroup_command, inspect_cgroup_filter_command, resolve_status_path,
 )
@@ -54,7 +54,7 @@ def generate_inspect_socket(config, user_name: str, uid: int, *,
     workload-container-inspect). It has no default: the caller is the
     substrate, and a default would make this module name one of them. D6's
     "the binary does not change" is about the LISTENER
-    (customs-inspect, ExecStart below in
+    (moat-inspect, ExecStart below in
     generate_inspect_service) -- the arming helper is not that binary.
 
     The listener is a systemd socket unit, not a process that opens its own
@@ -241,14 +241,14 @@ def inspect_listener_command(name: str, uid: int) -> list:
     """The listener's argv: the binary and the five values it is handed.
 
     THIS IS WHERE THE INSPECTOR AND WORKLOADCTL MEET, and it is the only
-    place. The inspector (customs-inspect, from the customs package) knows
+    place. The inspector (moat-inspect, from the moatery package) knows
     nothing about workloads -- not where one keeps its policy, its state, its
     counters or its record, and not what a uid becomes. Each of those is a
     fact about how workloadctl lays out a host, computed HERE from the name
     and uid the generator already holds, and written into ExecStart= as a
     flag. The entrypoint parses; it derives nothing, so a third substrate
-    writes a unit, not a program. tests/test_customs_seam.py asserts that
-    this command names every one of the five and that customs-inspect takes
+    writes a unit, not a program. tests/test_moatery_seam.py asserts that
+    this command names every one of the five and that moat-inspect takes
     each.
 
     The broker pair is computed from the uid with the same function the
@@ -710,13 +710,13 @@ def generate_resolve_socket(config, user_name: str, uid: int) -> str:
 
 
 def resolve_command(name: str, uid: int) -> list:
-    """The responder's argv: customs-resolve and the values it is handed.
+    """The responder's argv: moat-resolve and the values it is handed.
 
-    The same seam as gen_egress.inspect_listener_command: customs-resolve
+    The same seam as gen_egress.inspect_listener_command: moat-resolve
     knows nothing about workloads, so where this one's lists, static map and
     counters live, and what its uid makes the inspector's address, are
     computed here and written into ExecStart= as flags.
-    tests/test_customs_seam.py holds this command to the program's flags.
+    tests/test_moatery_seam.py holds this command to the program's flags.
 
     `--address` is the inspector's, not the responder's: every
     synthesised A points the workload at the listener its 80 and 443 are

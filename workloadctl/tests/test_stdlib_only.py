@@ -3,7 +3,7 @@
 
 workloadctl runs against the system python3 with no venv, no package manager and
 no third-party deps: `rpm/workloadctl.spec` declares `Requires: python3 >= 3.14`
-plus system tools, and one Python library, customs -- the egress inspector and
+plus system tools, and one Python library, moatery -- the egress inspector and
 credential broker, an RPM of its own that is stdlib-only in turn. That is what
 lets the RPM install onto a bootc host — where `pip` is not an option and every
 Python dependency would have to become another layered RPM.
@@ -35,7 +35,7 @@ RUNTIME_DIRS = ("bin", "lib", "generators", "libexec")
 # The Python packages the spec requires, by the name they are imported as, and
 # the Requires: that brings each in.
 DEPENDENCIES = {
-    "customs": "customs",
+    "moatery": "moatery",
 }
 
 # Modules that are neither stdlib nor a checked-in sibling, but are legitimately

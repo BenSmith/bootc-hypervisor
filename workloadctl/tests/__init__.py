@@ -13,10 +13,10 @@ use :func:`load_script`. Subprocess launches of those scripts need the same lib
 path handed down in the child env -- use :func:`script_env`.
 
 The egress inspector, the credential broker and the DNS responder are
-customs': its package (``import customs``) and its programs, which the
+moatery's: its package (``import moatery``) and its programs, which the
 generator names. Installed,
-the package is in site-packages and the programs in ``/usr/libexec/customs``;
-``CUSTOMS_CHECKOUT`` names a customs checkout to use instead, for a host that
+the package is in site-packages and the programs in ``/usr/libexec/moatery``;
+``MOATERY_CHECKOUT`` names a moatery checkout to use instead, for a host that
 has not installed it.
 """
 
@@ -50,23 +50,23 @@ for _dir in (LIB_DIR, str(TESTS_DIR)):
     if _dir not in sys.path:
         sys.path.insert(0, _dir)
 
-CUSTOMS_CHECKOUT = os.environ.get("CUSTOMS_CHECKOUT")
+MOATERY_CHECKOUT = os.environ.get("MOATERY_CHECKOUT")
 # Absolute, and written back: it reaches subprocesses through PYTHONPATH and
 # the inherited environment, and some of those run with another cwd, where a
 # relative checkout path names a different directory.
-if CUSTOMS_CHECKOUT:
-    CUSTOMS_CHECKOUT = str(Path(CUSTOMS_CHECKOUT).resolve())
-    os.environ["CUSTOMS_CHECKOUT"] = CUSTOMS_CHECKOUT
+if MOATERY_CHECKOUT:
+    MOATERY_CHECKOUT = str(Path(MOATERY_CHECKOUT).resolve())
+    os.environ["MOATERY_CHECKOUT"] = MOATERY_CHECKOUT
 # Right after lib/, as script_env() orders it for a child: ahead of
-# site-packages, so that on a host with customs installed this process and
-# its children import the same customs -- the checkout's, whose programs
-# CUSTOMS_LIBEXEC names.
-if CUSTOMS_CHECKOUT and CUSTOMS_CHECKOUT not in sys.path:
-    sys.path.insert(sys.path.index(LIB_DIR) + 1, CUSTOMS_CHECKOUT)
-# The directory customs' programs are read from: the installed one, or the
+# site-packages, so that on a host with moatery installed this process and
+# its children import the same moatery -- the checkout's, whose programs
+# MOATERY_LIBEXEC names.
+if MOATERY_CHECKOUT and MOATERY_CHECKOUT not in sys.path:
+    sys.path.insert(sys.path.index(LIB_DIR) + 1, MOATERY_CHECKOUT)
+# The directory moatery's programs are read from: the installed one, or the
 # checkout's own.
-CUSTOMS_LIBEXEC = (Path(CUSTOMS_CHECKOUT) / "libexec" if CUSTOMS_CHECKOUT
-                   else Path("/usr/libexec/customs"))
+MOATERY_LIBEXEC = (Path(MOATERY_CHECKOUT) / "libexec" if MOATERY_CHECKOUT
+                   else Path("/usr/libexec/moatery"))
 
 
 def load_script(relpath, name=None):
@@ -110,7 +110,7 @@ def script_env(**overrides):
     """
     env = os.environ.copy()
     env["PYTHONPATH"] = os.pathsep.join(
-        [LIB_DIR] + ([CUSTOMS_CHECKOUT] if CUSTOMS_CHECKOUT else []))
+        [LIB_DIR] + ([MOATERY_CHECKOUT] if MOATERY_CHECKOUT else []))
     env["NO_COLOR"] = "1"
     env.update({key: str(value) for key, value in overrides.items()})
     return env

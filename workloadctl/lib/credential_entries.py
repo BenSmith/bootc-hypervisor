@@ -16,7 +16,7 @@ Installed to /usr/libexec/workloadctl/credential_entries.py.
 import re
 import string
 
-from customs.broker_profiles import BROKER_DEFAULT_AUTH_FORMAT, BROKER_DEFAULT_AUTH_HEADER
+from moatery.broker_profiles import BROKER_DEFAULT_AUTH_FORMAT, BROKER_DEFAULT_AUTH_HEADER
 
 
 def parse_credential_entries(net: dict, credential_cls) -> list:

@@ -7,7 +7,7 @@
 ; wlproxy_t was defined by two things the inspector does not share: the binary
 ; it entrypointed (/usr/bin/tinyproxy) and a filesystem boundary drawn at
 ; /run/workload-vm/<name>. The inspector is a Python script,
-; /usr/libexec/customs/customs-inspect, and its sockets are opened by init, so
+; /usr/libexec/moatery/moat-inspect, and its sockets are opened by init, so
 ; nothing about the shape transferred. Rung 2 deleted wlproxy_t entirely; nothing moved here,
 ; because there was nothing in it that this domain lacked.
 ;
@@ -31,7 +31,7 @@
 ;
 ; ONE FILE, NOT A GLOB
 ;
-; The filecon names a single path. /usr/libexec/customs holds customs-broker
+; The filecon names a single path. /usr/libexec/moatery holds moat-broker
 ; too, which reads the provider key this domain must never reach. A glob
 ; over that directory would make every program in it an entrypoint into this
 ; domain — the same class of silent over-reach as the /usr/sbin symlink trap
@@ -40,7 +40,7 @@
 ; and entry_type, which is exactly why the retype is necessary rather than a
 ; bin_t:file entrypoint.
 ;
-; The modules it imports are the customs package in site-packages, lib_t,
+; The modules it imports are the moatery package in site-packages, lib_t,
 ; which the base policy's read and lib_t's execute/map cover as they cover the
 ; stdlib.
 ;
@@ -141,7 +141,7 @@
 (typeattributeset file_type (wlinspect_exec_t))
 (typeattributeset exec_type (wlinspect_exec_t))
 (typeattributeset entry_type (wlinspect_exec_t))
-(filecon "/usr/libexec/customs/customs-inspect" file (system_u object_r wlinspect_exec_t ((s0) (s0))))
+(filecon "/usr/libexec/moatery/moat-inspect" file (system_u object_r wlinspect_exec_t ((s0) (s0))))
 
 ; Straight out of systemd, like wlproxy_t and unlike QEMU: the module declares
 ; the transition itself, so the unit's ExecStart is the plain script path.
@@ -321,7 +321,7 @@
 ; --- caller identification -------------------------------------------------
 ;
 ; The listener refuses a connection whose peer uid is not this workload's own
-; (customs.peer_identity). Identifying a TCP peer means reading the kernel's
+; (moatery.peer_identity). Identifying a TCP peer means reading the kernel's
 ; socket table -- SO_PEERCRED is AF_UNIX-only and says nothing here -- so the
 ; domain needs /proc/net/tcp and /proc/net/tcp6.
 ;

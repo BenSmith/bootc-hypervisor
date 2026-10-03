@@ -32,7 +32,7 @@ from workload_lib import (
 )
 from egress_policy import vm_uses_inspect
 from workload_addr import UID_MAX, UID_MIN, inspect_address
-from customs.egress_ca import ca_cert_path
+from moatery.egress_ca import ca_cert_path
 from guest_ca import CA_BUNDLE_PATH, CA_ENV_VARS
 from broker_config import vm_credential_env
 from config_parser import SOCKET_DIR
@@ -150,16 +150,16 @@ def _decrypt_systemd_credential(name: str) -> str:
     )
 
 
-BUNDLED_RPMS = ("workloadctl.rpm", "customs.rpm")
+BUNDLED_RPMS = ("workloadctl.rpm", "moatery.rpm")
 
 
 def _bundle_rpms(seed_dir: Path) -> bool:
-    """Copy workloadctl's RPM and customs', which it requires, into seed_dir
+    """Copy workloadctl's RPM and moatery's, which it requires, into seed_dir
     for in-VM installation.
 
     Uses the copies the hypervisor image build caches under
     /usr/share/workloadctl, so the ISO is self-contained. Both or neither:
-    workloadctl's RPM cannot install without customs'.
+    workloadctl's RPM cannot install without moatery's.
     """
     cached = [Path(f"/usr/share/workloadctl/{name}") for name in BUNDLED_RPMS]
     missing = [str(path) for path in cached if not path.exists()]
@@ -171,7 +171,7 @@ def _bundle_rpms(seed_dir: Path) -> bool:
 
     for name, path in zip(BUNDLED_RPMS, cached):
         shutil.copy2(path, seed_dir / name)
-    ensure_common.log("  Bundled workloadctl and customs RPMs (cached copies)")
+    ensure_common.log("  Bundled workloadctl and moatery RPMs (cached copies)")
     return True
 
 
@@ -683,7 +683,7 @@ def build_cloud_init_iso(pw, config: dict, name: str, config_path: Path | None =
     finally:
         os.close(fd)
 
-    # For VM workloads: bundle workloadctl's and customs' RPMs so the
+    # For VM workloads: bundle workloadctl's and moatery's RPMs so the
     # bootstrap can install them directly from the cdrom.
     if vm_cfg:
         _bundle_rpms(seed_dir)

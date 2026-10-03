@@ -63,7 +63,7 @@ jobs:
       WLRT_CACHE: /var/cache/wlrt
       # dev mode installs it in the guest before workloadctl, which requires
       # it; gate's image already carries it.
-      WLRT_CUSTOMS_RPM: /var/cache/wlrt/customs.rpm
+      WLRT_MOATERY_RPM: /var/cache/wlrt/moatery.rpm
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -123,10 +123,10 @@ jobs:
           rm -rf workloadctl/tests/runtime/.cache
           ln -s "$WLRT_CACHE" workloadctl/tests/runtime/.cache
 
-      - name: Fetch customs RPM
+      - name: Fetch moatery RPM
         if: steps.kvm.outputs.available == 'true'
         working-directory: workloadctl
-        run: sudo just customs-rpm "$WLRT_CUSTOMS_RPM"
+        run: sudo just moatery-rpm "$WLRT_MOATERY_RPM"
 
       - name: Reap stale harness VMs
         if: steps.kvm.outputs.available == 'true'

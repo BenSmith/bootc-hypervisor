@@ -57,7 +57,7 @@ from egress_policy import (
     inspect_policy_path,
     vm_uses_inspect,
 )
-from customs.inspect_document import (
+from moatery.inspect_document import (
     TLS_DEFAULT,
     TLS_MODES,
     VmPolicyEntry,
@@ -77,7 +77,7 @@ _WILDCARD_CHARS = "*?["
 # blocks so that a key added to vm_inspect_policy() and not to this one shows up
 # as an absent column rather than as a silently narrower report. The key and
 # the label differ where the rendered document renamed one: the document
-# carries `internal_expected` (customs' name for a list that attributes a
+# carries `internal_expected` (moatery's name for a list that attributes a
 # private-address dial and admits nothing), while the report keeps the TOML's
 # `internal` so an operator reads the section they wrote.
 _PATTERN_KEYS = (

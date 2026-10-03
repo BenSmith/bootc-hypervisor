@@ -26,15 +26,15 @@ jobs:
           python3 --version
           just --version
 
-      # workloadctl requires customs, and the unit suite imports it. The
+      # workloadctl requires moatery, and the unit suite imports it. The
       # version is the one hypervisor.Containerfile pins, taken from the
-      # signed image customs' own workflow pushes.
-      - name: Install customs
+      # signed image moatery's own workflow pushes.
+      - name: Install moatery
         working-directory: workloadctl
         run: |
-          sudo just customs-rpm /tmp/customs.rpm
-          sudo dnf install -y /tmp/customs.rpm
-          sudo rm -f /tmp/customs.rpm
+          sudo just moatery-rpm /tmp/moatery.rpm
+          sudo dnf install -y /tmp/moatery.rpm
+          sudo rm -f /tmp/moatery.rpm
 
       # The unit suite runs as a non-root user, exactly as it does on the gate
       # host (tp). Run as root on this runner, the suite writes real

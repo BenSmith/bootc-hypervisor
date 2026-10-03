@@ -36,8 +36,8 @@ def _filecons():
 
 class TestFilecon(unittest.TestCase):
     def test_no_filecon_globs_the_libexec_directory(self):
-        """A glob over /usr/libexec/customs would make every program there
-        an entrypoint into this domain -- including customs-broker, which
+        """A glob over /usr/libexec/moatery would make every program there
+        an entrypoint into this domain -- including moat-broker, which
         holds the key. Nothing would fail; the domain would just be enterable
         from four more programs.
 

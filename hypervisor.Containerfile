@@ -6,19 +6,19 @@ ARG BASE_IMAGE=ghcr.io/bensmith/fedora-bootc-minimal:latest
 # Every caller passes it explicitly (justfile + CI workflows); the default
 # tracks current stable.
 ARG FEDORA_VERSION=44
-# customs' RPM as an image (FROM scratch, /customs.rpm), signed and pushed by
-# customs' own workflow. workloadctl requires it: the unit suite below imports
+# moatery's RPM as an image (FROM scratch, /moatery.rpm), signed and pushed by
+# moatery's own workflow. workloadctl requires it: the unit suite below imports
 # it, and the final image installs it and caches it for VM seed ISOs. Bump
-# with the spec's `Requires: customs >=`. The tag is what gets verified:
-# builds pass the signed digest it resolves to (`just customs-rpm-ref` in
+# with the spec's `Requires: moatery >=`. The tag is what gets verified:
+# builds pass the signed digest it resolves to (`just moatery-rpm-ref` in
 # workloadctl/), and building from the bare tag skips the signature check.
-ARG CUSTOMS_RPM=registry.local/customs-rpm:0.5.1
+ARG MOATERY_RPM=registry.local/moatery-rpm:0.6.0
 
-FROM ${CUSTOMS_RPM} AS customs
+FROM ${MOATERY_RPM} AS moatery
 
 FROM fedora:${FEDORA_VERSION} AS rpm-builder
 COPY workloadctl/ /workloadctl/
-COPY --from=customs /customs.rpm /tmp/customs.rpm
+COPY --from=moatery /moatery.rpm /tmp/moatery.rpm
 # openssl is the CLI, not the library: the test suite mints a CA and its leaves
 # by shelling out to it (tests/test_ca.py among them),
 # and the fedora base image ships openssl-libs without it. Absent, `just test`
@@ -26,7 +26,7 @@ COPY --from=customs /customs.rpm /tmp/customs.rpm
 # happens to have it.
 RUN dnf install -y --nodocs --setopt=install_weak_deps=False \
         rpm-build python3 just systemd-rpm-macros python3-rpm-macros openssl \
-        /tmp/customs.rpm && \
+        /tmp/moatery.rpm && \
     dnf clean all && \
     cd /workloadctl && \
     rm -rf rpmbuild && \
@@ -398,11 +398,11 @@ RUN if [ "$ENABLE_PASSWORDLESS_SUDO" = "true" ]; then \
     fi
 
 # Install workload provisioning system, built from source in the rpm-builder
-# stage, and customs, which it requires. Both RPMs are also cached at a known
+# stage, and moatery, which it requires. Both RPMs are also cached at a known
 # path so workload-ensure-user can bundle them into VM cloud-init ISOs at
 # runtime.
 COPY --from=rpm-builder /workloadctl/rpmbuild/RPMS/noarch/ /tmp/wl-rpms/
-COPY --from=customs /customs.rpm /tmp/customs.rpm
+COPY --from=moatery /moatery.rpm /tmp/moatery.rpm
 # Exactly one RPM, asserted out loud. The release is timestamped, so the only way
 # to name it is a glob — and a glob that matches several expands to a list that
 # `dnf install` would happily take, silently installing whichever came last and
@@ -416,10 +416,10 @@ RUN /usr/libexec/hypervisor-build/selinux-store-copyup && \
         ls -l /tmp/wl-rpms >&2; \
         exit 1; \
     fi && \
-    dnf install -y "$1" /tmp/customs.rpm && \
+    dnf install -y "$1" /tmp/moatery.rpm && \
     install -Dpm 0644 "$1" /usr/share/workloadctl/workloadctl.rpm && \
-    install -Dpm 0644 /tmp/customs.rpm /usr/share/workloadctl/customs.rpm && \
-    rm -rf /tmp/wl-rpms /tmp/customs.rpm && \
+    install -Dpm 0644 /tmp/moatery.rpm /usr/share/workloadctl/moatery.rpm && \
+    rm -rf /tmp/wl-rpms /tmp/moatery.rpm && \
     dnf clean all
 
 # The tinyproxy sysusers fragment is gone, and its absence has a reason.

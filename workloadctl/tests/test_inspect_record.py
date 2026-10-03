@@ -1,7 +1,7 @@
 """Where workloadctl keeps the inspector's per-request record.
 
 The record itself -- the join key on every line, the one JSON object per
-request -- is customs' and tested there. What is workloadctl's is where
+request -- is moatery's and tested there. What is workloadctl's is where
 the file goes: a per-workload directory under a root tmpfiles creates,
 named to the unit as its LogsDirectory, labelled for SELinux, and rotated
 by logrotate.

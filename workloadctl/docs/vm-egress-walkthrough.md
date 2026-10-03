@@ -228,7 +228,7 @@ Then the paths that don't work, which are the point:
   the port, not the destination, so it is DNATed into the inspector anyway —
   where a TLS record with no SNI, or a byte stream that is not a handshake at
   all, has no name to match. Dropped, and counted under *no server name* or
-  *not TLS*, which customs marks suspect.
+  *not TLS*, which moatery marks suspect.
   There is nothing to opt out of: the guest never chooses whether a connection
   is inspected, so dialling by literal is caught by the rule that inspects
   everything rather than by a default deny that has to notice the evasion.
@@ -459,7 +459,7 @@ Two things bound what rule 16 now admits, and neither is rule 16:
   listener. So root reaching the socket by hand was never a supported path,
   and root's manual probe landing in a workload's egress records was the
   second half of the same defect the guard fixed. The check reads the kernel's
-  socket table (`customs.peer_identity`, shared with the broker) rather
+  socket table (`moatery.peer_identity`, shared with the broker) rather
   than `SO_PEERCRED`, which is AF_UNIX-only and says nothing about the peer of
   a TCP connection. It fails **soft**: a lookup that cannot name the owner
   admits the connection and increments `caller_unresolved` in the status file,

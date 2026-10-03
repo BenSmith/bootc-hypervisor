@@ -68,12 +68,12 @@ _GATE_IMAGE = os.environ.get("WLRT_GATE_IMAGE",
                              "registry.local/hypervisor-bootc:latest")
 _BIB_IMAGE = "quay.io/centos-bootc/bootc-image-builder:latest"
 
-# dev mode installs customs in the guest before workloadctl, which requires
-# it and which no repository the guest knows carries. `just customs-rpm`
+# dev mode installs moatery in the guest before workloadctl, which requires
+# it and which no repository the guest knows carries. `just moatery-rpm`
 # fetches the version hypervisor.Containerfile pins; a hypervisor host has it
 # cached at the default.
-_CUSTOMS_RPM = Path(os.environ.get("WLRT_CUSTOMS_RPM",
-                                   "/usr/share/workloadctl/customs.rpm"))
+_MOATERY_RPM = Path(os.environ.get("WLRT_MOATERY_RPM",
+                                   "/usr/share/workloadctl/moatery.rpm"))
 
 
 def missing_prereqs(mode: str) -> list[str]:
@@ -600,7 +600,7 @@ def _start_swtpm(run_dir: Path) -> Path:
 # ---------------------------------------------------------------------------
 
 def _deploy(target: VMTarget, key_path: Path, port: int) -> None:
-    """Rsync the local tree and customs' RPM into the guest, install customs,
+    """Rsync the local tree and moatery's RPM into the guest, install moatery,
     and `just rpm-install` the tree.
 
     Mirrors conftest._deploy_workloadctl, but supplies rsync an explicit `-e
@@ -626,19 +626,19 @@ def _deploy(target: VMTarget, key_path: Path, port: int) -> None:
     if r.returncode != 0:
         raise RuntimeError(f"rsync into guest failed:\n{r.stderr}")
     r = subprocess.run(
-        ["rsync", "-e", ssh_transport, str(_CUSTOMS_RPM),
-         f"{target.dest}:clitest-src/customs.rpm"],
+        ["rsync", "-e", ssh_transport, str(_MOATERY_RPM),
+         f"{target.dest}:clitest-src/moatery.rpm"],
         capture_output=True, text=True)
     if r.returncode != 0:
-        raise RuntimeError(f"rsync of {_CUSTOMS_RPM} into guest failed:\n"
+        raise RuntimeError(f"rsync of {_MOATERY_RPM} into guest failed:\n"
                            f"{r.stderr}")
     cu = target.run(
-        ["bash", "-c", "sudo dnf install -y ~/clitest-src/customs.rpm"],
+        ["bash", "-c", "sudo dnf install -y ~/clitest-src/moatery.rpm"],
         sudo=False, check=False, timeout=600,
     )
     if cu.rc != 0:
         raise RuntimeError(
-            f"customs install failed in guest (rc={cu.rc}):\n"
+            f"moatery install failed in guest (rc={cu.rc}):\n"
             f"{cu.stdout[-2000:]}\n{cu.stderr[-2000:]}"
         )
 
@@ -687,10 +687,10 @@ def launch(mode: str, *, mem_mib: int = 2048, vcpus: int = 2,
     missing = missing_prereqs(mode)
     if missing:
         raise RuntimeError(f"missing runtime prerequisites: {', '.join(missing)}")
-    if mode == "dev" and deploy and not _CUSTOMS_RPM.is_file():
+    if mode == "dev" and deploy and not _MOATERY_RPM.is_file():
         raise RuntimeError(
-            f"no customs RPM at {_CUSTOMS_RPM}: set WLRT_CUSTOMS_RPM, or "
-            "fetch it with `just customs-rpm`")
+            f"no moatery RPM at {_MOATERY_RPM}: set WLRT_MOATERY_RPM, or "
+            "fetch it with `just moatery-rpm`")
 
     RUN_ROOT.mkdir(parents=True, exist_ok=True)
     run_dir = Path(tempfile.mkdtemp(prefix=RUN_PREFIX, dir=RUN_ROOT))

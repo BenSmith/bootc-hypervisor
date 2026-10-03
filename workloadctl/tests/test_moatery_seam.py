@@ -1,17 +1,17 @@
-"""Where workloadctl meets customs, held from workloadctl's side.
+"""Where workloadctl meets moatery, held from workloadctl's side.
 
 The egress inspector, the credential broker and the DNS responder are
-customs' programs: workloadctl writes the policy document the inspector
+moatery's programs: workloadctl writes the policy document the inspector
 reads, the static map the responder reads, and the units whose ExecStart=
 hands each program its flags, reads the responder's status file, and
-imports a published set of names. customs' own suite holds its side of each of these (its
+imports a published set of names. moatery's own suite holds its side of each of these (its
 test_interface and test_closure); what can drift unseen is the half
 written here, since a document key the reader ignores, a flag the program
-does not take, or a name customs does not publish all fail at a workload's
+does not take, or a name moatery does not publish all fail at a workload's
 start or at import, long after the generator ran.
 
-The programs are read from tests.CUSTOMS_LIBEXEC: the installed directory,
-or a checkout's when CUSTOMS_CHECKOUT is set.
+The programs are read from tests.MOATERY_LIBEXEC: the installed directory,
+or a checkout's when MOATERY_CHECKOUT is set.
 """
 
 import ast
@@ -30,45 +30,45 @@ import unittest
 from unittest import mock
 from pathlib import Path
 
-from customs.inspect_policy import Policy, load_policy
-from tests import CUSTOMS_CHECKOUT, CUSTOMS_LIBEXEC, REPO_ROOT, script_env
+from moatery.inspect_policy import Policy, load_policy
+from tests import MOATERY_CHECKOUT, MOATERY_LIBEXEC, REPO_ROOT, script_env
 
-# customs' interface document, "Imported names": what customs keeps stable
+# moatery's interface document, "Imported names": what moatery keeps stable
 # for workloadctl. Copied, not read, because an install without docs has no
-# interface document to read; customs' test_interface holds the list to
+# interface document to read; moatery's test_interface holds the list to
 # its code.
 PUBLISHED = {
-    "customs.broker_profiles": {
+    "moatery.broker_profiles": {
         "BROKER_DEFAULT_AUTH_FORMAT", "BROKER_DEFAULT_AUTH_HEADER"},
-    "customs.egress_ca": {
+    "moatery.egress_ca": {
         "CA_DIR_NAME", "DENIAL_DIR_NAME", "LEAF_DIR_NAME", "ca_cert_path",
         "ca_dir", "ca_key_path", "ca_openssl_argv", "denial_dir",
         "leaf_dir"},
-    "customs.egress_mint": {"pem_fingerprint"},
-    "customs.egress_plane": {"CLEARTEXT", "PLANES", "TLS"},
-    "customs.egress_record": {
+    "moatery.egress_mint": {"pem_fingerprint"},
+    "moatery.egress_plane": {"CLEARTEXT", "PLANES", "TLS"},
+    "moatery.egress_record": {
         "DROP_BROKER_UNREACHABLE", "DROP_MISDIRECTED",
         "DROP_MISDIRECTED_LISTED", "DROP_NOT_HTTP", "DROP_NOT_HTTP_POLICY",
         "DROP_REASONS", "LOG_ID_FIELD", "LOG_REQ_FIELD", "RECORD_DECISIONS",
         "RECORD_MODES"},
-    "customs.egress_status": {
+    "moatery.egress_status": {
         "BoundedCounts", "OTHER_KEY", "STATUS_TOP_N", "clear_status",
         "write_status"},
-    "customs.inspect_document": {
+    "moatery.inspect_document": {
         "INSPECT_DIGEST_KEY", "TLS_DEFAULT", "TLS_MODES", "VmPolicyEntry",
         "hostname_control_character", "hostname_match",
-        "inspect_policy_digest", "normalise_hostname", "patterns_overlap",
+        "inspect_policy_digest", "normalize_hostname", "patterns_overlap",
         "policy_governs"},
-    "customs.sd_listen": {"NotSocketActivated",
+    "moatery.sd_listen": {"NotSocketActivated",
                           "inherited_listening_sockets"},
 }
 
-INSPECT = CUSTOMS_LIBEXEC / "customs-inspect"
-BROKER = CUSTOMS_LIBEXEC / "customs-broker"
-RESOLVE = CUSTOMS_LIBEXEC / "customs-resolve"
-MINT = CUSTOMS_LIBEXEC / "customs-mint-ca"
+INSPECT = MOATERY_LIBEXEC / "moat-inspect"
+BROKER = MOATERY_LIBEXEC / "moat-broker"
+RESOLVE = MOATERY_LIBEXEC / "moat-resolve"
+MINT = MOATERY_LIBEXEC / "moat-mint-ca"
 
-# customs' interface document, "The responder's status file": the keys
+# moatery's interface document, "The responder's status file": the keys
 # workloadctl may read from it. Copied for the reason PUBLISHED is.
 RESOLVE_STATUS_PUBLISHED = frozenset({
     ("queries", "synthesised"), ("queries", "static"), ("queries", "nodata"),
@@ -76,7 +76,7 @@ RESOLVE_STATUS_PUBLISHED = frozenset({
     ("written_at",)})
 
 # The inspector's flags the generator hands, exactly: one per value the
-# inspector must be told and cannot derive. customs-inspect takes two more,
+# inspector must be told and cannot derive. moat-inspect takes two more,
 # --caller-uid and --netns-pid, for placements workloadctl does not use.
 INSPECT_HANDED = frozenset({
     "--name",       # a label: the CA subject and the log lines
@@ -107,7 +107,7 @@ BROKER_HANDED = BROKER_REQUIRED | {
     "--placeholder", "--auth-header", "--auth-format"}
 
 # Keys the document carries that the reader has no field for. `http2` is
-# always empty: customs relays no HTTP/2 and refuses a list naming a host,
+# always empty: moatery relays no HTTP/2 and refuses a list naming a host,
 # and the key stays so every workload's policy digest is unchanged.
 DOCUMENT_ONLY = frozenset({"http2"})
 # Reader fields no document carries: the digest is the status file's.
@@ -156,57 +156,57 @@ class TestTheScannerSeesTheTree(unittest.TestCase):
         self.assertTrue(_program_flags(BROKER)["--listen"])
         self.assertFalse(_program_flags(RESOLVE)["--static"])
 
-    def test_one_customs_is_under_test(self):
+    def test_one_moatery_is_under_test(self):
         """This process, a child launched with script_env(), and the
-        programs read from CUSTOMS_LIBEXEC are one customs. With a checkout
-        named on a host that also has customs installed, a checkout behind
+        programs read from MOATERY_LIBEXEC are one moatery. With a checkout
+        named on a host that also has moatery installed, a checkout behind
         site-packages splits them: the imports here are the installed
         release, the programs and the children the checkout."""
         import subprocess
         import sys
 
-        import customs
-        here = Path(customs.__file__).resolve()
+        import moatery
+        here = Path(moatery.__file__).resolve()
         child = subprocess.run(
-            [sys.executable, "-c", "import customs; print(customs.__file__)"],
+            [sys.executable, "-c", "import moatery; print(moatery.__file__)"],
             capture_output=True, text=True, check=True, env=script_env(),
             cwd="/")
         self.assertEqual(Path(child.stdout.strip()).resolve(), here)
-        if CUSTOMS_CHECKOUT:
-            self.assertEqual(here.parent.parent, Path(CUSTOMS_CHECKOUT))
-            self.assertEqual(CUSTOMS_LIBEXEC, Path(CUSTOMS_CHECKOUT) / "libexec")
+        if MOATERY_CHECKOUT:
+            self.assertEqual(here.parent.parent, Path(MOATERY_CHECKOUT))
+            self.assertEqual(MOATERY_LIBEXEC, Path(MOATERY_CHECKOUT) / "libexec")
 
     def test_the_import_scan_finds_imports(self):
         found = [p for p, text in _shipped_sources()
-                 if "from customs.inspect_document import" in text]
+                 if "from moatery.inspect_document import" in text]
         self.assertGreater(len(found), 5)
 
 
-class TestWorkloadctlImportsOnlyWhatCustomsPublishes(unittest.TestCase):
+class TestWorkloadctlImportsOnlyWhatMoateryPublishes(unittest.TestCase):
 
-    def test_every_name_imported_from_customs_is_published(self):
-        """A name customs does not publish is one it may rename in any
+    def test_every_name_imported_from_moatery_is_published(self):
+        """A name moatery does not publish is one it may rename in any
         release, and the rename is an ImportError in workloadctl."""
         unpublished = []
         for path, text in _shipped_sources():
             for node in ast.walk(ast.parse(text)):
                 if isinstance(node, ast.Import):
                     for alias in node.names:
-                        if alias.name.split(".")[0] == "customs":
+                        if alias.name.split(".")[0] == "moatery":
                             unpublished.append((path.name, alias.name))
                 if not isinstance(node, ast.ImportFrom) or not node.module:
                     continue
-                if node.module == "customs":
+                if node.module == "moatery":
                     unpublished.extend(
-                        (path.name, f"customs.{a.name}") for a in node.names)
-                elif node.module.startswith("customs."):
+                        (path.name, f"moatery.{a.name}") for a in node.names)
+                elif node.module.startswith("moatery."):
                     for alias in node.names:
                         if alias.name not in PUBLISHED.get(node.module, ()):
                             unpublished.append(
                                 (path.name, f"{node.module}.{alias.name}"))
         self.assertEqual(unpublished, [])
 
-    def test_every_published_name_is_in_customs(self):
+    def test_every_published_name_is_in_moatery(self):
         import importlib
         for module, names in PUBLISHED.items():
             mod = importlib.import_module(module)
@@ -215,8 +215,8 @@ class TestWorkloadctlImportsOnlyWhatCustomsPublishes(unittest.TestCase):
                     self.assertTrue(hasattr(mod, name))
 
 
-class TestTheDocumentIsTheOneCustomsReads(unittest.TestCase):
-    """Both renderers against customs' reader, not against a literal:
+class TestTheDocumentIsTheOneMoateryReads(unittest.TestCase):
+    """Both renderers against moatery's reader, not against a literal:
     load_policy reads by key and ignores what it does not know, so a key
     written and never read loads clean and authorises nothing."""
 
@@ -265,7 +265,7 @@ class TestTheDocumentIsTheOneCustomsReads(unittest.TestCase):
     def test_the_internal_list_is_carried_under_its_new_name(self):
         """The rendered key is `internal_expected`, not `internal`.
 
-        customs renamed it because the list admits nothing -- it only
+        moatery renamed it because the list admits nothing -- it only
         attributes a failed private-address dial -- and the old name read
         like an allow-list. A non-empty legacy key now refuses the
         inspector's start, so a writer still emitting `internal` is not a
@@ -307,7 +307,7 @@ class TestTheDocumentIsTheOneCustomsReads(unittest.TestCase):
             self._load({**doc, "http2": ["a.example"]})
 
 
-class TestTheGeneratorHandsCustomsItsFlags(unittest.TestCase):
+class TestTheGeneratorHandsMoateryItsFlags(unittest.TestCase):
 
     def test_the_inspector_is_handed_every_value(self):
         from egress_policy import (
@@ -396,7 +396,7 @@ class TestTheGeneratorHandsCustomsItsFlags(unittest.TestCase):
         """ExecStart= runs the program itself, so its shebang is the only
         thing keeping site.py from statting a site-packages dir under the
         workload's home, which wlresolve_t may not traverse
-        (security/workload-resolve.cil). customs 0.5.1 is the first whose
+        (security/workload-resolve.cil). moatery 0.5.1 is the first whose
         shebang carries -s; the spec's floor is held to that."""
         shebang = RESOLVE.read_text().splitlines()[0]
         self.assertRegex(shebang, r"^#!\S*python3\S*(\s+-\w*s\w*)\b")
@@ -410,7 +410,7 @@ class TestTheGeneratorHandsCustomsItsFlags(unittest.TestCase):
 class TestTheResponderStatusIsReadByPublishedKeys(unittest.TestCase):
 
     def test_every_figure_read_is_a_published_key(self):
-        """A key customs does not publish is one it may rename, and a
+        """A key moatery does not publish is one it may rename, and a
         figure read from a missing key reads 0 -- a legal value, so the
         rename shows as a quiet responder."""
         from inspect_figures import FIGURES, NAMES
@@ -421,7 +421,7 @@ class TestTheResponderStatusIsReadByPublishedKeys(unittest.TestCase):
 
 
 class TestTheCaMintIsHandedItsFlags(unittest.TestCase):
-    """generate_egress_ca runs customs-mint-ca: a flag it does not take is
+    """generate_egress_ca runs moat-mint-ca: a flag it does not take is
     a workload that cannot start, found at the first boot of a filtered
     one."""
 
@@ -451,7 +451,7 @@ class TestTheCaMintIsHandedItsFlags(unittest.TestCase):
         self.assertEqual(argv[0], ensure_common.CA_MINT_BIN)
         self.assertEqual(Path(argv[0]).name, MINT.name)
         self.assertEqual(Path(argv[0]).parent,
-                         Path("/usr/libexec/customs"))
+                         Path("/usr/libexec/moatery"))
         flags = {argv[i]: argv[i + 1] for i in range(1, len(argv), 2)}
         self.assertEqual(flags, {"--name": "web", "--state-dir": str(state)})
 
@@ -499,7 +499,7 @@ def _addresses(reply):
 
 
 class TestTheResponderRunsOnWhatWorkloadctlWrites(unittest.TestCase):
-    """customs-resolve started with the generator's command, on the
+    """moat-resolve started with the generator's command, on the
     inspector policy and static map workloadctl renders, and asked over a
     real socket. The rows above hold the flags and the keys one at a time;
     this is the only one that sees what the program makes of the files."""
@@ -578,7 +578,7 @@ class TestTheResponderRunsOnWhatWorkloadctlWrites(unittest.TestCase):
 
 class TestTheBrokerSaysItIsReady(unittest.TestCase):
     """The broker's unit is Type=notify (gen_egress), so it is started only
-    when customs-broker, run with the generator's command, sends READY=1.
+    when moat-broker, run with the generator's command, sends READY=1.
     One that never sends it times out starting and takes the workload with
     it; one that sends it before binding lets the unit ordered after it
     reach a socket that is not there."""
@@ -626,39 +626,40 @@ class TestTheBrokerSaysItIsReady(unittest.TestCase):
             pass
 
 
-class TestTheProgramsAreCustoms(unittest.TestCase):
+class TestTheProgramsAreMoatery(unittest.TestCase):
 
-    def test_the_units_name_customs_programs(self):
-        """The generated units run customs' programs by the path its RPM
+    def test_the_units_name_moatery_programs(self):
+        """The generated units run moatery's programs by the path its RPM
         installs them at, and the spec requires that RPM."""
         from broker_config import BROKER_BIN
         from workload_addr import (
             INSPECT_LISTENER_BIN, RESOLVE_LISTENER_BIN)
         self.assertEqual(INSPECT_LISTENER_BIN,
-                         "/usr/libexec/customs/customs-inspect")
+                         "/usr/libexec/moatery/moat-inspect")
         self.assertEqual(RESOLVE_LISTENER_BIN,
-                         "/usr/libexec/customs/customs-resolve")
-        self.assertEqual(BROKER_BIN, "/usr/libexec/customs/customs-broker")
+                         "/usr/libexec/moatery/moat-resolve")
+        self.assertEqual(BROKER_BIN, "/usr/libexec/moatery/moat-broker")
 
-    def test_the_spec_requires_a_customs_with_everything_used_here(self):
-        """0.3.0 is the first release whose customs-resolve takes --static;
+    def test_the_spec_requires_a_moatery_with_everything_used_here(self):
+        """0.3.0 is the first release whose moat-resolve takes --static;
         0.4.0 is the first whose policy document names internal_expected;
         0.5.0 is the first whose broker sends READY=1, which its Type=notify
-        unit waits for. A lower floor installs against an older customs, and
+        unit waits for; 0.6.0 is the first named moatery, the package the
+        units' paths and lib/'s imports name. A lower floor installs against an older moatery, and
         the responder then fails its start on an unrecognised flag (at the
         guest's first query), the inspector refuses the rendered document (at
         its start), or the broker's start times out."""
         spec = (Path(REPO_ROOT) / "rpm" / "workloadctl.spec").read_text()
         minimum = re.search(
-            r"(?m)^Requires:\s+customs >= (\S+)$", spec).group(1)
+            r"(?m)^Requires:\s+moatery >= (\S+)$", spec).group(1)
         self.assertGreaterEqual(
-            tuple(int(part) for part in minimum.split(".")), (0, 5, 0))
+            tuple(int(part) for part in minimum.split(".")), (0, 6, 0))
 
-    def test_seed_isos_carry_customs(self):
-        """A VM's seed ISO carries customs' RPM beside workloadctl's, which
+    def test_seed_isos_carry_moatery(self):
+        """A VM's seed ISO carries moatery's RPM beside workloadctl's, which
         its bootstrap cannot install alone."""
         from ensure_vm import BUNDLED_RPMS
-        self.assertIn("customs.rpm", BUNDLED_RPMS)
+        self.assertIn("moatery.rpm", BUNDLED_RPMS)
 
 
 CONTAINERFILE = Path(REPO_ROOT).parent / "hypervisor.Containerfile"
@@ -666,28 +667,28 @@ CONTAINERFILE = Path(REPO_ROOT).parent / "hypervisor.Containerfile"
 
 @unittest.skipUnless(CONTAINERFILE.is_file(),
                      "image half not present (standalone workloadctl checkout)")
-class TestTheImageInstallsCustoms(unittest.TestCase):
+class TestTheImageInstallsMoatery(unittest.TestCase):
 
-    def test_the_pinned_customs_satisfies_the_spec(self):
-        """The hypervisor image takes customs' RPM from the image its build
+    def test_the_pinned_moatery_satisfies_the_spec(self):
+        """The hypervisor image takes moatery's RPM from the image its build
         pins, installs it in the stage that runs this suite and in the
         image, and caches it for VM seed ISOs. The pinned tag satisfies the
         spec's minimum, or the image's `dnf install` refuses workloadctl."""
         spec = (Path(REPO_ROOT) / "rpm" / "workloadctl.spec").read_text()
         minimum = re.search(
-            r"(?m)^Requires:\s+customs >= (\S+)$", spec).group(1)
+            r"(?m)^Requires:\s+moatery >= (\S+)$", spec).group(1)
         containerfile = CONTAINERFILE.read_text()
         pinned = re.search(
-            r"(?m)^ARG CUSTOMS_RPM=\S+:(\S+)$", containerfile).group(1)
+            r"(?m)^ARG MOATERY_RPM=\S+:(\S+)$", containerfile).group(1)
 
         def version(text):
             return tuple(int(part) for part in text.split("."))
 
         self.assertGreaterEqual(version(pinned), version(minimum))
-        self.assertIn("FROM ${CUSTOMS_RPM} AS customs", containerfile)
+        self.assertIn("FROM ${MOATERY_RPM} AS moatery", containerfile)
         self.assertEqual(containerfile.count(
-            "COPY --from=customs /customs.rpm /tmp/customs.rpm"), 2)
-        self.assertIn("/usr/share/workloadctl/customs.rpm", containerfile)
+            "COPY --from=moatery /moatery.rpm /tmp/moatery.rpm"), 2)
+        self.assertIn("/usr/share/workloadctl/moatery.rpm", containerfile)
 
 if __name__ == "__main__":
     unittest.main()

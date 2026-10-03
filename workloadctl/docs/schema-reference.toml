@@ -1894,7 +1894,7 @@ ports = ["8080:80", "8443:443"]
 # DNS IS ANSWERED ON THE HOST, BY THIS WORKLOAD'S OWN RESPONDER, and never
 # forwarded. A triggered container in single or pod mode on pasta (the default
 # network) gets the same synthesising responder a filtered VM does:
-# customs-resolve on 127.130.x.y, reached through pasta's `--dns-host`, which
+# moat-resolve on 127.130.x.y, reached through pasta's `--dns-host`, which
 # the generator adds to `--network=`. Every A query, for any name, is
 # answered with this workload's inspector address, and everything else --
 # AAAA included -- with no records, as for a VM. (pasta can copy the

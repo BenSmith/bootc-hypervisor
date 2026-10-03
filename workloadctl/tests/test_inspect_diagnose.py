@@ -26,12 +26,12 @@ from diagnose_probe import PROBE
 from diagnose_inspect import (
     _binding_fragments, _named_hosts, _not_http_fragments,
 )
-from customs.egress_record import (
+from moatery.egress_record import (
     DROP_MISDIRECTED, DROP_MISDIRECTED_LISTED, DROP_NOT_HTTP,
     DROP_NOT_HTTP_POLICY, DROP_REASONS, PER_HOST_REASONS,
 )
 import inspect_figures as figures_mod
-from customs.egress_status import OTHER_KEY
+from moatery.egress_status import OTHER_KEY
 
 
 

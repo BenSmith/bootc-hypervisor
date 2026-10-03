@@ -2,7 +2,7 @@
 
 The record is one JSON object per line in
 `/var/log/workloadctl/egress/<name>/requests.log`, written by
-the inspector (customs-inspect) and rotated into gzipped generations
+the inspector (moat-inspect) and rotated into gzipped generations
 beside it. This module turns an operator's filters into a selection over
 those lines -- parsing the times, resolving the filter values against the
 closed vocabularies in egress_record, walking the generations, and grouping
@@ -46,8 +46,8 @@ import json
 import re
 from pathlib import Path
 
-from customs.inspect_document import hostname_match
-from customs.egress_record import DROP_REASONS, LOG_ID_FIELD, LOG_REQ_FIELD
+from moatery.inspect_document import hostname_match
+from moatery.egress_record import DROP_REASONS, LOG_ID_FIELD, LOG_REQ_FIELD
 
 # `id=<hex>` as a journal line spells it, or the bare hex on its own. Built
 # from the constant rather than from a literal, so a rename of the listener's

@@ -3,7 +3,7 @@ cmd_egress — read back the per-request record the inspector writes.
 
 Rung 5 T2. The record itself is T1's: one JSON object per line in
 `/var/log/workloadctl/egress/<name>/requests.log`, `0600` under a `0700`
-directory, written by the inspector (customs-inspect). The selection over
+directory, written by the inspector (moat-inspect). The selection over
 it -- times, filter values, generations, grouping -- is egress_record_query;
 this module is the refusal for a workload with no inspector, the rendering,
 and the exit code. The refusal is the only substrate-shaped thing here, since
@@ -30,13 +30,13 @@ from pathlib import Path
 import cli_log
 from cmd_validate import load_config_or_exit
 from substrate import get_substrate
-from customs.egress_record import (
+from moatery.egress_record import (
     LOG_ID_FIELD,
     LOG_REQ_FIELD,
     RECORD_DECISIONS,
     RECORD_MODES,
 )
-from customs.egress_plane import PLANES
+from moatery.egress_plane import PLANES
 from egress_policy import inspect_record_dir, inspect_record_path
 from egress_record_query import (
     EgressUsage,

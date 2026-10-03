@@ -1,10 +1,10 @@
 """The synthesising responder, from workloadctl's side.
 
-The responder is customs' customs-resolve, and its wire behaviour is held by
-customs' own suite. What is workloadctl's is everything it is handed: the
+The responder is moatery's moat-resolve, and its wire behaviour is held by
+moatery's own suite. What is workloadctl's is everything it is handed: the
 uid-derived address it listens on, the predicate deciding which workloads get
 one, the static map it answers `allow`-by-name destinations from, and the
-units that run it. tests/test_customs_seam.py runs the program on what this
+units that run it. tests/test_moatery_seam.py runs the program on what this
 side writes.
 
 A static-map miss sends an `allow`-by-name destination to a port the inspector
@@ -116,7 +116,7 @@ class TestPredicate(unittest.TestCase):
 
 
 class TestStaticMap(unittest.TestCase):
-    """What the arming path writes for customs-resolve --static to read."""
+    """What the arming path writes for moat-resolve --static to read."""
 
     def test_an_address_form_allow_entry_is_not_in_the_map(self):
         """`allow` by address names no hostname, so there is nothing to answer
@@ -368,7 +368,7 @@ class TestGeneratedUnits(unittest.TestCase):
         self.assertIn("User=_wl-web", self.service.splitlines())
         self.assertIn("Group=_wl-web", self.service.splitlines())
 
-    def test_the_service_execs_customs_resolve_with_its_flags(self):
+    def test_the_service_execs_moatery_resolve_with_its_flags(self):
         inspect = inspect_address(UID)
         self.assertIn(
             f'ExecStart={RESOLVE_LISTENER_BIN} --name "web"'

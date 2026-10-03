@@ -102,7 +102,7 @@ credential:
 flowchart TD
   IS["workload-web-inspect.socket<br/>binds 198.18.1.4:8080 / :8443"]
   RS["workload-web-resolve.socket<br/>binds 127.130.0.4:53"]
-  ISVC["workload-web-inspect.service<br/>customs-inspect"]
+  ISVC["workload-web-inspect.service<br/>moat-inspect"]
   RSVC["workload-web-resolve.service"]
   BR["workload-web-broker.service<br/>DynamicUser, 127.129.0.4:8081"]
   HEAD["head unit<br/>VM: workload-web.service<br/>container single: the container unit<br/>pod/bridge: -pod / -net unit"]
@@ -242,23 +242,23 @@ uid-keyed element builders take nothing but a uid.
 ```mermaid
 flowchart TB
   subgraph shared["Shared, byte-for-byte"]
-    LST["customs-inspect<br/>TLS termination, SNI/Host policy, broker dial"]
+    LST["moat-inspect<br/>TLS termination, SNI/Host policy, broker dial"]
     NFT2["inet workload_filter + inet workload_proxy skeletons"]
-    BRK["customs-broker — told everything on its ExecStart="]
-    PI["customs.peer_identity — caller identified by the uid owning the far end"]
+    BRK["moat-broker — told everything on its ExecStart="]
+    PI["moatery.peer_identity — caller identified by the uid owning the far end"]
   end
 
   subgraph vm["VM"]
     VT["[vm.network] hosts / allow / policy / credential"]
     VA["workload-vm-inspect + workload-vm-filter"]
-    VR["customs-resolve — synthesising DNS responder"]
+    VR["moat-resolve — synthesising DNS responder"]
     VE["egress = filtered/open, default-deny for the uid"]
   end
 
   subgraph ct["Container"]
     CT["[network] hosts / allow / policy / credential"]
     CA["workload-container-inspect + workload-container-filter"]
-    CN["customs-resolve through pasta --dns-host (not bridge mode)"]
+    CN["moat-resolve through pasta --dns-host (not bridge mode)"]
     CE["no egress key: presence of a trigger IS the statement"]
   end
 
@@ -282,17 +282,17 @@ Both substrates read the *same* policy document shape and run the same listener,
 which is why the brokered path needed one implementation and two arming scripts.
 
 The listener holds that property by construction, not by convention: the
-inspector (customs' `customs-inspect`, `customs.inspect_listener` and their
+inspector (moatery's `moat-inspect`, `moatery.inspect_listener` and their
 closure) knows nothing about either substrate, or about workloads at
 all. It is handed a policy document, a state directory, a status file, a
 record file and a broker `(address, port)` as flags on its command line, and
-customs' closure test asserts its closure contains no config
+moatery's closure test asserts its closure contains no config
 grammar, no `workload_lib`, no `vm_defs`, no `qmp` and nothing that turns a
 uid into an address. The generator (`gen_egress.inspect_listener_command`) is
 the one place those values are derived from the workload name and uid, and
 it writes them onto the unit's `ExecStart=`. The document's vocabulary (the
 hostname rule, the TLS modes, a policy entry and how entries govern, the
-digest keys) is `customs.inspect_document`, imported by the renderer and the
+digest keys) is `moatery.inspect_document`, imported by the renderer and the
 reader alike, so a third substrate would write the same document and a unit
 starting the same binary with different answers to the same five questions.
 
@@ -331,7 +331,7 @@ Properties that follow from the picture, each of which is load-bearing:
   environment variable would be exactly the step an attacker-influenced agent
   can undo.
 - Callers are identified by **the uid owning the far end of the connection**
-  (`customs.peer_identity`, shared with the inspector's listener). One instance
+  (`moatery.peer_identity`, shared with the inspector's listener). One instance
   per workload, so the uid is an assertion rather than a route: a resolved
   caller that is not the configured one is a 403 on a connection that should
   have been impossible to open.
@@ -345,7 +345,7 @@ Properties that follow from the picture, each of which is load-bearing:
   credentialed policy entry and the per-credential placeholder and auth
   convention, all computed by the generator and written onto the unit; no
   config file, no `ExecStartPre`, no TOML in its process and no passwd lookup
-  (customs' closure test). The line holds nothing the workload does
+  (moatery's closure test). The line holds nothing the workload does
   not already hold — its own hosts, its own placeholders, its own uid — and
   the seal names it carries are the ones the same unit's
   `LoadCredentialEncrypted=` lines spell. The material is decrypted into a

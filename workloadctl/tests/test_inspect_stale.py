@@ -38,14 +38,14 @@ import diagnose_inspect
 from diagnose_inspect import (
     CA_EXPIRY_WARN_DAYS, INSPECT_DIGEST_SHORT, inspect_digest_short,
 )
-from customs import inspect_policy
+from moatery import inspect_policy
 from egress_policy import vm_inspect_policy_text
-from customs.inspect_document import (
+from moatery.inspect_document import (
     INSPECT_DIGEST_KEY,
     inspect_policy_digest,
 )
-from customs.inspect_listener import Listener
-from customs.inspect_policy import Policy, load_policy
+from moatery.inspect_listener import Listener
+from moatery.inspect_policy import Policy, load_policy
 
 UID = 10001
 NET = {"hosts": ["example.com"], "egress": "filtered"}

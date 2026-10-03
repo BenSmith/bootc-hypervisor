@@ -14,7 +14,7 @@ import re
 import socket
 from typing import NamedTuple
 
-from customs.egress_plane import CLEARTEXT, TLS
+from moatery.egress_plane import CLEARTEXT, TLS
 from workload_addr import allow_reserved_reason
 
 # --- `allow`: the address-scoped bypass, now a table with a reason ---

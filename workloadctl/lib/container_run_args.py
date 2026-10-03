@@ -26,7 +26,7 @@ from workload_lib import (
     workload_state_dir, expand_volume_path, expand_workload_tokens, dq,
     selinux_type_name,
 )
-from customs.egress_ca import ca_cert_path
+from moatery.egress_ca import ca_cert_path
 from guest_ca import CA_ENV_VARS, CA_BUNDLE_PATH
 from broker_config import container_uses_credentials
 from egress_policy import container_uses_resolve

@@ -147,7 +147,7 @@ so this has to be true rather than arranged); and `ExecStartPre` is empty and
 the runtime directory absent.
 
 **Last green 2026-10-03, all 41 rows, under enforcing on a VM host running
-production workloads and a reverse proxy on 443**, against the customs 0.5.0
+production workloads and a reverse proxy on 443**, against the moatery 0.5.0
 RPM, and the first run with the stub in its own namespace. Before that
 **2026-09-21, all
 41 rows, on a KVM host under enforcing, against
@@ -425,9 +425,9 @@ Loud, at least, unlike the status write. Note that no sibling grant includes
 `rename`, which `os.replace` needs — copying `workload-proxy.cil`'s block
 verbatim gives a half-grant that reaches the replace and fails there.
 
-**Domains.** `customs-inspect` has a filecon and a
+**Domains.** `moat-inspect` has a filecon and a
 `type_transition` and should be `wlinspect_t`. The responder (then
-`workload-vm-resolve`, now customs' `customs-resolve`) had
+`workload-vm-resolve`, now moatery's `moat-resolve`) had
 neither, so it entrypointed `bin_t` from `init_t` with nothing to retype it and
 ran in PID 1's own domain — a process terminating guest-supplied DNS packets,
 outside the boundary `wlinspect_t` exists to draw. Measured on the host, it ran as
@@ -706,7 +706,7 @@ serves `api.example.com`, so the governed probes end 502 at the dial rather
 than as policy decisions — and that is the signal, not a flaw: reaching the
 upstream at all is what proves the host was admitted, while the unlisted probe
 never gets that far and is refused at the allowlist with a 403. Whether a
-permitted request is permitted and a forbidden one forbidden is customs'
+permitted request is permitted and a forbidden one forbidden is moatery's
 rigs' question, against a stub origin built to answer it.
 
 **The unlisted probe uses `--resolve`, not DNS.** The synthesising resolver
@@ -811,7 +811,7 @@ was waiting on has landed, and it was "close it", so the probe asserts.**
 Two layers now stop it, and the rig requires both to hold. `workload_filter`
 drops a non-root packet aimed at a live inspector address that is not the
 sender's own (`@wl_inspect_live`), and the listener refuses a caller whose uid
-is not the workload's own — root included — through `customs.peer_identity`,
+is not the workload's own — root included — through `moatery.peer_identity`,
 which reads the kernel's socket table because `SO_PEERCRED` is AF_UNIX-only
 and says nothing about a TCP peer. A `REACHED` line is a regression in one of
 those two.
@@ -990,7 +990,7 @@ saying "add an allow entry".
 
 `check_container_responder`, plus two rows each in the pod and bridge
 sections. A triggered single or pod container on pasta resolves through
-customs-resolve on its own `127.130.x.y`, reached by pasta's `--dns-host`. S10
+moat-resolve on its own `127.130.x.y`, reached by pasta's `--dns-host`. S10
 still stands for bridge mode, which aardvark-dns answers, and for the uid's
 own port-53 dials. It found two product defects, and every unit test passed
 over both:
@@ -1020,7 +1020,7 @@ host's, so a name the rig put in `/etc/hosts` is answered there and the
 responder is never asked. That is also reported as a gap: such a name is
 neither synthesised nor counted.
 
-**The outside-resolver row has a real resolver behind it.** customs-resolve
+**The outside-resolver row has a real resolver behind it.** moat-resolve
 again, in the fixture namespace, answering a fixed address; the unfiltered
 container getting that answer is the control that makes the filtered one's
 timeout a drop.

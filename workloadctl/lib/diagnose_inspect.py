@@ -16,23 +16,23 @@ from container_network_config import (
     container_uses_inspect,
 )
 from diagnose_probe import PROBE
-from customs.egress_ca import ca_cert_path
-from customs.egress_mint import pem_fingerprint
-from customs.egress_plane import CLEARTEXT, TLS
+from moatery.egress_ca import ca_cert_path
+from moatery.egress_mint import pem_fingerprint
+from moatery.egress_plane import CLEARTEXT, TLS
 from egress_policy import inspect_policy_path, vm_uses_inspect
-from customs.inspect_document import (
+from moatery.inspect_document import (
     INSPECT_DIGEST_KEY,
     inspect_policy_digest,
     TLS_DEFAULT,
 )
-from customs.egress_record import (
+from moatery.egress_record import (
     DROP_BROKER_UNREACHABLE,
     DROP_MISDIRECTED,
     DROP_MISDIRECTED_LISTED,
     DROP_NOT_HTTP,
     DROP_NOT_HTTP_POLICY,
 )
-from customs.egress_status import OTHER_KEY
+from moatery.egress_status import OTHER_KEY
 from inspect_figures import read_inspect_status
 from netfilter_state import (
     nft_element_counter, nft_set_elements, owned_elements,

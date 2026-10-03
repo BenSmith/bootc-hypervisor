@@ -3,10 +3,10 @@
 
 One per declaring workload, per ADR 007. This is the generator side: which
 workloads get an instance, what it is told, and the argv the unit's
-ExecStart= carries. What customs-broker makes of those flags at startup is
-customs'. A writer and a reader that each spell the flags drift, and a flag
+ExecStart= carries. What moat-broker makes of those flags at startup is
+moatery's. A writer and a reader that each spell the flags drift, and a flag
 emitted here and not taken there is a broker that refuses to start, so
-tests/test_customs_seam.py pins the command against the program's parser.
+tests/test_moatery_seam.py pins the command against the program's parser.
 
 IT WAS A DOCUMENT. broker_command replaces render_broker_config, which
 rendered a broker.toml that write_instance_config -- the unit's ExecStartPre,
@@ -46,9 +46,9 @@ from secrets_template import credential_path, CREDSTORE_DIR
 from egress_policy import vm_policy_entries
 
 
-# The program the generated unit runs, customs': one instance per workload,
+# The program the generated unit runs, moatery's: one instance per workload,
 # generated; there is no host-wide unit for an operator to enable.
-BROKER_BIN = "/usr/libexec/customs/customs-broker"
+BROKER_BIN = "/usr/libexec/moatery/moat-broker"
 
 
 # --- The credential table, and the blocks that name one ---

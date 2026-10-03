@@ -44,7 +44,7 @@ from dataclasses import dataclass
 from typing import Callable
 
 from egress_policy import inspect_status_path
-from customs.inspect_document import INSPECT_DIGEST_KEY
+from moatery.inspect_document import INSPECT_DIGEST_KEY
 from nft_elements import resolve_status_path
 
 # Group keys. A group is present or absent as a whole, because what makes it

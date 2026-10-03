@@ -42,8 +42,8 @@ from container_network_config import (
     container_splice_entries,
     container_uses_inspect,
 )
-from customs.inspect_document import (
-    TLS_DEFAULT, VmPolicyEntry, normalise_hostname,
+from moatery.inspect_document import (
+    TLS_DEFAULT, VmPolicyEntry, normalize_hostname,
 )
 from vm_defs import EGRESS_DEFAULT, vm_allowed_hosts
 from workload_addr import RESOLVE_STATIC_FILE
@@ -199,7 +199,7 @@ def resolve_static_path(name: str) -> str:
 def resolve_static(resolved) -> dict[str, list[str]]:
     """The responder's static map for one workload: name to addresses.
 
-    The `allow`-by-name entries, which customs-resolve answers from this map
+    The `allow`-by-name entries, which moat-resolve answers from this map
     instead of with the inspector's address. Without it a synthesised answer
     sends every named non-80/443 destination -- an SSH forge, a registry, an
     internal API -- to a port the inspector does not serve, which presents as
@@ -219,7 +219,7 @@ def resolve_static(resolved) -> dict[str, list[str]]:
             continue
         # Normalised on the way in, so two spellings of one name cannot
         # become two entries.
-        key = normalise_hostname(entry.host)
+        key = normalize_hostname(entry.host)
         for addr in addresses:
             text = str(addr)
             if text not in static.setdefault(key, []):
@@ -233,7 +233,7 @@ INSPECT_STATUS_FILE = "inspect-status.json"
 def inspect_status_path(name: str) -> str:
     """Where one workload's inspector writes its counters.
 
-    Two status files rather than one, and customs' egress_status carries the
+    Two status files rather than one, and moatery's egress_status carries the
     argument: the responder is a separate socket-activated process, and two
     processes atomically replacing one path leaves only the last writer's
     figures, silently.
@@ -414,7 +414,7 @@ def container_inspect_policy(net: dict) -> dict:
     """The inspector's policy document for one container workload.
 
     Same JSON shape as vm_inspect_policy (lib/egress_policy.py) -- D6: the
-    listener binary (customs-inspect) does not change between
+    listener binary (moat-inspect) does not change between
     substrates, so whichever wrote the file, it reads the same keys. `http2`
     is always empty, as it is for a VM. `tls` is the EFFECTIVE mode (container_effective_tls_mode),
     not the literal key, since the container schema computes it per the

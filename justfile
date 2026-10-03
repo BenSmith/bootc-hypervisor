@@ -160,14 +160,14 @@ build-base: sync-cosy
   # enforcing policy CI does. policy-local.json belongs to build-base-local only.
   sed -e 's|__REGISTRY_NAMESPACE__|bensmith|g' \
       policy-hypervisor.json.template > policy.json
-  # customs' RPM by the digest whose signature verified, not by the tag.
-  customs_rpm=$(just -f workloadctl/justfile customs-rpm-ref)
+  # moatery's RPM by the digest whose signature verified, not by the tag.
+  moatery_rpm=$(just -f workloadctl/justfile moatery-rpm-ref)
   http_proxy={{proxy}} https_proxy={{proxy}} \
   podman build \
     --env=http_proxy={{proxy}} --env=https_proxy={{proxy}} \
     --build-arg BASE_IMAGE=ghcr.io/bensmith/fedora-bootc-minimal:{{fedora_version}} \
     --build-arg FEDORA_VERSION={{fedora_version}} \
-    --build-arg CUSTOMS_RPM="$customs_rpm" \
+    --build-arg MOATERY_RPM="$moatery_rpm" \
     -t localhost/hypervisor-bootc:{{fedora_version}}-{{tag}} \
     -t localhost/hypervisor-bootc:{{fedora_version}} \
     -t localhost/hypervisor-bootc:latest \
@@ -184,11 +184,11 @@ build-base-local: sync-cosy
   # is not the base, so it swaps an early stage for the bootc minimal and
   # leaves the real base at the ARG default -- a registry pull. Same knob
   # build-base uses, pointed at the local minimal.
-  customs_rpm=$(just -f workloadctl/justfile customs-rpm-ref)
+  moatery_rpm=$(just -f workloadctl/justfile moatery-rpm-ref)
   http_proxy={{proxy}} https_proxy={{proxy}} \
   podman build \
     --network=host \
-    --build-arg CUSTOMS_RPM="$customs_rpm" \
+    --build-arg MOATERY_RPM="$moatery_rpm" \
     --build-arg BASE_IMAGE=localhost/fedora-bootc-minimal:{{fedora_version}} \
     --build-arg FEDORA_VERSION={{fedora_version}} \
     --build-arg ENABLE_PASSWORDLESS_SUDO=true \

@@ -1150,7 +1150,7 @@ class TestBuildCloudInitIsoTemplateMode(unittest.TestCase):
         result; it did, at column 0, in a document cloud-init can no longer
         parse at all.
         """
-        from customs.egress_ca import ca_cert_path
+        from moatery.egress_ca import ca_cert_path
         # `workload_state_dir` is mocked to self.home for the duration of the
         # build, so this is where _read_vm_egress_ca will look.
         cert = ca_cert_path(self.home)
@@ -2529,7 +2529,7 @@ class TestReadSshPubkey(unittest.TestCase):
 
 
 class TestBundleRpms(unittest.TestCase):
-    """workloadctl's RPM requires customs', so the seed ISO carries both or
+    """workloadctl's RPM requires moatery's, so the seed ISO carries both or
     neither: a guest handed workloadctl's alone fails at dnf, not at the
     warning that says why."""
 
@@ -2552,16 +2552,16 @@ class TestBundleRpms(unittest.TestCase):
     def test_copies_both_when_both_cached(self):
         with tempfile.TemporaryDirectory() as tmp:
             result, seed_dir = self._bundle(
-                tmp, ("workloadctl.rpm", "customs.rpm"))
+                tmp, ("workloadctl.rpm", "moatery.rpm"))
             self.assertTrue(result)
             self.assertEqual(
                 (seed_dir / "workloadctl.rpm").read_bytes(),
                 b"workloadctl.rpm")
             self.assertEqual(
-                (seed_dir / "customs.rpm").read_bytes(), b"customs.rpm")
+                (seed_dir / "moatery.rpm").read_bytes(), b"moatery.rpm")
 
     def test_copies_neither_when_one_is_missing(self):
-        for present in ("workloadctl.rpm", "customs.rpm"):
+        for present in ("workloadctl.rpm", "moatery.rpm"):
             with self.subTest(present=present), \
                     tempfile.TemporaryDirectory() as tmp:
                 result, seed_dir = self._bundle(tmp, (present,))

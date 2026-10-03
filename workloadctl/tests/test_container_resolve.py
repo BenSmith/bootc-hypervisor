@@ -1,11 +1,11 @@
 """The synthesising responder for a filtered container.
 
-A filtered container resolves through the same customs-resolve a filtered VM
+A filtered container resolves through the same moat-resolve a filtered VM
 does, reached the same way: podman starts pasta with `--dns-forward`, and
 the workload's `--network=` adds `--dns-host` pointing that address at the
 responder. What is asserted here is the container half -- which workloads
 get one, the pasta option, and the units that bind and start it. The
-program's own behaviour is customs', and the static map's is in
+program's own behaviour is moatery's, and the static map's is in
 tests/test_vm_resolve.py and tests/test_egress.py.
 
 The failure every row here stands against is silent: a responder generated
@@ -127,7 +127,7 @@ class TestASingleContainer(_Generated):
 
     def test_both_responder_units_are_generated(self):
         self.assertIn("ListenDatagram=", self.unit("-resolve.socket"))
-        self.assertIn("customs-resolve", self.unit("-resolve.service"))
+        self.assertIn("moat-resolve", self.unit("-resolve.service"))
 
     def test_the_container_is_pointed_at_it(self):
         self.assertIn('--network="pasta:--dns-host,127.130.',
