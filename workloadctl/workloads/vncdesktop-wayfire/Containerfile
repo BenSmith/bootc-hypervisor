@@ -19,10 +19,10 @@ RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
     dbus-daemon \
     drm_info \
     eglinfo \
+    fd-find \
     ffmpegthumbnailer \
     fira-code-fonts \
     firefox \
-    fn-find \
     foot \
     git \
     google-noto-color-emoji-fonts \
