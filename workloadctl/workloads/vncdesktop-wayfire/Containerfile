@@ -22,15 +22,18 @@ RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
     ffmpegthumbnailer \
     fira-code-fonts \
     firefox \
+    fn-find \
     foot \
     git \
     google-noto-color-emoji-fonts \
     google-noto-sans-fonts \
+    google-noto-sans-symbols-2-fonts \
     grim \
     gvfs \
     hostname \
     htop \
     imv \
+    jq \
     just \
     less \
     librsvg2 \
@@ -43,7 +46,10 @@ RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
     mpv \
     nano \
     neovim \
+    openssl \
     procps-ng \
+    ripgrep \
+    rpm-build \
     rsync \
     slurp \
     sudo \
