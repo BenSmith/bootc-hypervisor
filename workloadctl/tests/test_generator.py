@@ -5,6 +5,7 @@ Runs the generator with temp directories and validates the output files.
 No root required — all paths are overridden via env vars and argv.
 """
 
+import json
 import os
 import re
 import subprocess
@@ -19,6 +20,7 @@ from covhelper import python_cmd
 
 import gen_common
 import gen_run
+from workload_seccomp import derived_profile
 from tests import REPO_ROOT, load_script, script_env
 
 GENERATOR = str(REPO_ROOT / "generators" / "workload-generate")
@@ -29,12 +31,18 @@ def _load_generator_module():
     return load_script("generators/workload-generate")
 
 
-def run_generator(config_dir, services_dir, sysusers_dir):
+# The baseline the generator derives a workload's seccomp profile from.
+SECCOMP_BASELINE = REPO_ROOT / "seccomp-workload-baseline.json"
+
+
+def run_generator(config_dir, services_dir, sysusers_dir,
+                  seccomp_baseline=SECCOMP_BASELINE):
     """Run the generator and return the CompletedProcess."""
     env = script_env(
         WORKLOAD_CONFIG_DIR=config_dir,
         SYSUSERS_DIR=sysusers_dir,
         WORKLOAD_GENERATE_LOG_STDERR="1",
+        WORKLOAD_SECCOMP_BASELINE=seccomp_baseline,
     )
     return subprocess.run(
         python_cmd(GENERATOR, str(services_dir)),
@@ -2625,6 +2633,52 @@ class TestGeneratorContainerFlags(unittest.TestCase):
         self.assertIn("--security-opt=seccomp=/custom.json", svc)
         # baseline is suppressed when the workload provides its own seccomp
         self.assertNotIn("seccomp=", svc.replace("seccomp=/custom.json", ""))
+
+    def test_seccomp_allow_runs_it_under_a_profile_derived_beside_the_units(
+            self):
+        svc, _ = self._gen("""
+            [security]
+            seccomp_allow = ["ptrace", "process_vm_readv"]
+        """)
+        self.assertIn("--security-opt=seccomp=/run/systemd/system/"
+                      "workload-app.seccomp.json", svc)
+        self.assertNotIn("seccomp-workload-baseline.json", svc)
+        profile = json.loads((Path(self.services_dir)
+                              / "workload-app.seccomp.json").read_text())
+        self.assertEqual(
+            profile, derived_profile(json.loads(SECCOMP_BASELINE.read_text()),
+                                     ["process_vm_readv", "ptrace"]))
+
+    def test_without_seccomp_allow_there_is_no_derived_profile(self):
+        svc, _ = self._gen("")
+        self.assertIn("--security-opt=seccomp=/usr/share/containers/"
+                      "seccomp-workload-baseline.json", svc)
+        self.assertFalse((Path(self.services_dir)
+                          / "workload-app.seccomp.json").exists())
+
+    def test_a_derived_profile_that_cannot_be_rendered_leaves_no_unit(self):
+        """No main unit rather than one naming a missing profile, or a stale
+        one a run before left behind."""
+        stale = Path(self.services_dir) / "workload-app.seccomp.json"
+        stale.write_text("{}")
+        write_config(self.config_dir, "app", """\
+            [workload]
+            name = "app"
+
+            [container]
+            image = "myapp"
+
+            [security]
+            seccomp_allow = ["ptrace"]
+        """)
+        result = run_generator(self.config_dir, self.services_dir,
+                               self.sysusers_dir,
+                               seccomp_baseline=Path(self.config_dir) / "no")
+        self.assertEqual(result.returncode, 0)
+        self.assertFalse((Path(self.services_dir)
+                          / "workload-app.service").exists())
+        self.assertFalse(stale.exists())
+        self.assertIn("cannot render its seccomp profile", result.stderr)
 
     def test_security_opt_expands_instance_tokens(self):
         """A bundle points at a per-instance file via ${WORKLOAD_*} rather than

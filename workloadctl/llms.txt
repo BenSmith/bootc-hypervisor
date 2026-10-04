@@ -421,7 +421,7 @@ Workloads are defined in `/etc/workloads.d/<name>/workload.toml`. Key sections:
 - `[setup]` — required_files that must exist before enable
 - `[secrets]` — file-mounted systemd credentials
 - `[devices]` — generic device passthrough, GPU (amd/nvidia), input, audio, virtualization flags
-- `[security]` — userns mode (keep-id, host), extra_groups, capabilities, seccomp profile, `selinux_policy`
+- `[security]` — userns mode (keep-id, host), extra_groups, capabilities, seccomp profile (`seccomp_allow` adds syscalls to the baseline, rendered beside the units as `workload-<name>.seccomp.json`), `selinux_policy`
 - `[network]` — mode (pasta/host/none/custom), ports, DNS
 - `[resources]` — cpu-quota, cpu-weight, memory-max, memory-high, io-weight, tasks-max, shm-size, service_type (default: `exec`)
 - `[volumes]` — host:container path mappings

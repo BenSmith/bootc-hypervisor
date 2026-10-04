@@ -16,6 +16,7 @@ from container_network_config import container_uses_inspect
 from egress_policy import (
     container_uses_resolve, vm_uses_resolve, vm_uses_inspect,
 )
+from workload_seccomp import derived_profile_name, seccomp_allow
 from workload_lib import (
     RUN_SYSTEMD_SYSTEM, WORKLOADCTL_VERSION, virtiofs_tags,
     workload_config_path, workload_service_name,
@@ -67,10 +68,12 @@ class WorkloadRunFile:
     """One file a workload owns, tagged so every caller can filter one list.
 
     kind  — which tree + removal lifecycle it belongs to:
-            'unit' | 'wants-symlink' | 'sysusers' | 'dropin' | 'env-file'.
+            'unit' | 'wants-symlink' | 'sysusers' | 'dropin' | 'seccomp' |
+            'env-file'.
     role  — which unit family, for callers that want a specific member:
             'main' | 'setup' | 'build' | 'pod' | 'net' | 'container' |
-            'virtiofs' | 'sysusers' | 'dropin' | 'env' | 'secrets'.
+            'virtiofs' | 'sysusers' | 'dropin' | 'seccomp' | 'env' |
+            'secrets'.
     emitted — True iff the generator writes this file for THIS config (the
             emitted view). False marks the removable-only superset entries
             (-pod/-net listed for non-matching modes) and the runtime-written
@@ -256,6 +259,14 @@ def workload_run_files(config) -> list[WorkloadRunFile]:
             container_uses_credentials(config.config),
         ))
 
+    # The derived seccomp profile, listed for every container workload so
+    # disabling one that dropped seccomp_allow still removes it.
+    if not config.is_vm:
+        files.append(WorkloadRunFile(
+            run / derived_profile_name(name), "seccomp", "seccomp",
+            bool(seccomp_allow(config.config)),
+        ))
+
     # Runtime-written env tree — never produced by the generator (emitted False),
     # removed only on --purge. .secrets is over-listed per container (missing_ok).
     files.append(WorkloadRunFile(env / f"workload-{name}.env", "env-file", "env", False))
@@ -310,6 +321,9 @@ RUN_TREE_SCANS: list[RunTreeScan] = [
     RunTreeScan("unit", "workload-*.service", content=True, name_filtered=True),
     RunTreeScan("unit", "workload-*.socket", content=True, name_filtered=True),
     RunTreeScan("sysusers", "workload-*.conf", content=True, name_filtered=True),
+    RunTreeScan(
+        "seccomp", "workload-*.seccomp.json", content=True, name_filtered=True
+    ),
     RunTreeScan(
         "wants-symlink",
         "multi-user.target.wants/workload-*.service",

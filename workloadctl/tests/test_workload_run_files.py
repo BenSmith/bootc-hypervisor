@@ -84,6 +84,13 @@ name = "{name}"
 image = "example.com/test:latest"
 """
 
+# A workload adding syscalls to the baseline: the one shape that emits the
+# derived seccomp profile.
+SECCOMP_TOML = SINGLE_TOML + """
+[security]
+seccomp_allow = ["ptrace"]
+"""
+
 POD_TOML = """\
 [workload]
 name = "{name}"
@@ -289,6 +296,9 @@ class TestCurrentDestructiveGolden(unittest.TestCase):
                 # unit unlinked rather than left behind holding material
                 # nothing selects. This fixture declares none.
                 'workload-app-broker.service',
+                # deliberate superset: a workload that drops seccomp_allow
+                # has its derived profile unlinked. This fixture has none.
+                'workload-app.seccomp.json',
             })
 
     def test_pod(self):
@@ -309,6 +319,8 @@ class TestCurrentDestructiveGolden(unittest.TestCase):
                 'workload-stack-resolve.service',
                 # deliberate superset (P2-4), as in test_single:
                 'workload-stack-broker.service',
+                # deliberate superset, as in test_single:
+                'workload-stack.seccomp.json',
             })
 
     def test_vm(self):
@@ -536,8 +548,8 @@ class TestRunTreeScansCoverRunFiles(unittest.TestCase):
         emitted_kinds = set()
         fake_pw = collections.namedtuple('pw', 'pw_uid')(12345)
         for toml, name in (
-            (SINGLE_TOML, 'app'), (POD_TOML, 'stack'),
-            (BRIDGE_TOML, 'mesh'), (VM_TOML, 'forge'),
+            (SINGLE_TOML, 'app'), (SECCOMP_TOML, 'debug'),
+            (POD_TOML, 'stack'), (BRIDGE_TOML, 'mesh'), (VM_TOML, 'forge'),
         ):
             with _Config(toml, name) as config:
                 # Force the with-user branch so the UID-keyed drop-in is included.

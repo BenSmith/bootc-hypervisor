@@ -254,9 +254,9 @@ sudo workloadctl enable <workload>
 ### 9. Syscall blocked by seccomp profile
 
 **Symptoms:**
-- `Operation not permitted` in logs at startup
+- `Function not implemented` or `Operation not permitted` in logs, at startup or when a tool runs
 - Container exits immediately with code 1 (not 125/126 — this is the application, not podman)
-- Error message references a specific operation: `ptrace: Operation not permitted`, `bpf: Operation not permitted`, etc.
+- Error message references a specific operation: `ptrace: Function not implemented`, `bpf: Operation not permitted`, etc.
 - Workload starts fine with `seccomp=unconfined` but fails normally
 
 **Cause:**
@@ -264,12 +264,21 @@ All workloads run with a hardened seccomp profile (`/usr/share/containers/seccom
 
 The blocked syscalls are: `ptrace`, `bpf`, `perf_event_open`, `process_vm_readv`, `process_vm_writev`, `keyctl`.
 
+Which error a blocked call gives says which rule refused it. A syscall the profile never names falls to its default and fails with `Function not implemented` (ENOSYS), as if the kernel lacked it: `ptrace`, `process_vm_readv`, `process_vm_writev` and `keyctl`. One it denies by name, or behind a capability the container lacks, fails with `Operation not permitted` (EPERM): `bpf`, `perf_event_open`, `setns`. An EPERM from a call the profile allows is SELinux's, not seccomp's.
+
 **Confirm seccomp is the cause:**
 ```bash
 # Test with seccomp disabled - if it starts, seccomp is blocking something
 sudo workloadctl incant <name> -- \
   run --rm --security-opt seccomp=unconfined <image>
 ```
+
+**Fix — allow just the syscalls it needs:**
+```toml
+[security]
+seccomp_allow = ["ptrace", "process_vm_readv", "process_vm_writev"]
+```
+The rest of the baseline still applies; see `seccomp_allow` in the schema reference.
 
 **Fix — use the system default (less strict):**
 ```toml

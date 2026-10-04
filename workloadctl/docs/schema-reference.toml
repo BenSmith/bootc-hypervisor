@@ -1635,12 +1635,36 @@ virtualization = true
 # podman as a literal string.
 #
 #   # Read a seccomp profile the setup script wrote beside this workload.toml
+#   # (to add syscalls to the baseline, use seccomp_allow below instead)
 #   security_opt = ["seccomp=${WORKLOAD_INSTANCE_DIR}/seccomp.json"]
 #
 # An unknown ${WORKLOAD_*} token drops the whole option with a warning rather
 # than blocking boot; a dropped seccomp= falls back to the baseline profile.
 #
 # security_opt = []
+
+# Optional: Syscalls to allow on top of the seccomp baseline
+# Type: array of syscall names
+# Default: [] (the baseline, /usr/share/containers/seccomp-workload-baseline.json)
+#
+# The generator writes /run/systemd/system/workload-<name>.seccomp.json beside
+# the units: the baseline installed at that moment, each name taken out of
+# every entry that denies, gates or filters it and allowed outright. It is
+# rebuilt whenever the units are, so a baseline an RPM update ships reaches it
+# at the next boot or `enable`; until then `drift` and `doctor` report it.
+# A pet container keeps the profile it was created with until `recreate`.
+#
+# Workload-level: one profile serves every container of the workload, so it
+# is refused under [containers.security]. Also refused beside a seccomp=
+# security_opt (which replaces the baseline), with privileged = true (which
+# runs under no profile) and on a VM.
+#
+# Example: a debugger (gdb, lldb, CLion) in a dev container
+#   seccomp_allow = ["ptrace", "process_vm_readv", "process_vm_writev"]
+#
+# SELinux gates ptrace as well; see selinux_policy below.
+#
+# seccomp_allow = []
 
 # Optional: Ship a per-workload SELinux type
 # Type: bool

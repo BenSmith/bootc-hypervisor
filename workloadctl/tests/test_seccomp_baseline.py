@@ -4,15 +4,23 @@
 Every non-privileged workload runs under this profile, so a malformed or
 self-contradicting file breaks every container on the host at once — and it fails
 at `podman run` time, far from the edit that caused it. Nothing else in the suite
-looks at the file's contents.
+looks at the file's contents. A workload's [security] seccomp_allow derives
+a profile from it, and the same checks hold every derived one.
 """
 import json
+import re
 import unittest
 
 from tests import REPO_ROOT
+from workload_seccomp import derived_profile
 
 PROFILE = REPO_ROOT / "seccomp-workload-baseline.json"
 SPEC = REPO_ROOT / "rpm" / "workloadctl.spec"
+TROUBLESHOOTING = REPO_ROOT.parent / "docs" / "TROUBLESHOOTING.md"
+WORKLOADS = REPO_ROOT / "docs" / "workloads.md"
+
+ENOSYS_TEXT = "Function not implemented"
+EPERM_TEXT = "Operation not permitted"
 
 # The futex2 syscalls. glibc currently probes and falls back to `futex` when
 # these are denied, which is why blocking them was invisible; a release that
@@ -20,10 +28,9 @@ SPEC = REPO_ROOT / "rpm" / "workloadctl.spec"
 FUTEX2 = {"futex_requeue", "futex_wait", "futex_waitv", "futex_wake"}
 
 
-class TestSeccompBaseline(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        cls.profile = json.loads(PROFILE.read_text())
+class ProfileChecks:
+    """What every profile a workload runs under must hold: the baseline, and
+    each derived from it by [security] seccomp_allow."""
 
     def _entries(self, action):
         return [s for s in self.profile["syscalls"] if s["action"] == action]
@@ -79,6 +86,29 @@ class TestSeccompBaseline(unittest.TestCase):
             undone |= allowed & set(s["names"])
         self.assertEqual(undone, set())
 
+    def test_futex2_family_is_allowed(self):
+        """Denying futex2 while allowing `futex` gains nothing — the same
+        synchronisation capability is already reachable — and diverges from
+        upstream containers-common."""
+        allowed = self._ungated_allow_names()
+        self.assertLessEqual(FUTEX2, allowed)
+        self.assertIn("futex", allowed)
+        self.assertIn("futex_time64", allowed)
+
+    def test_names_within_each_entry_are_sorted(self):
+        """These lists are maintained by hand and diffed against upstream;
+        sorted order is what keeps that diff readable."""
+        for s in self.profile["syscalls"]:
+            names = s["names"]
+            self.assertEqual(names, sorted(names),
+                             f"unsorted names in a {s['action']} entry")
+
+
+class TestSeccompBaseline(ProfileChecks, unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.profile = json.loads(PROFILE.read_text())
+
     def test_setns_is_only_reachable_with_cap_sys_admin(self):
         """This profile is deliberately stricter than upstream containers-common
         here: upstream lists `setns` in both the plain allow list and the
@@ -115,23 +145,6 @@ class TestSeccompBaseline(unittest.TestCase):
                          "expected both halves of the CAP_SYS_ADMIN gate")
         self.assertEqual(halves["includes"], halves["excludes"])
 
-    def test_futex2_family_is_allowed(self):
-        """Denying futex2 while allowing `futex` gains nothing — the same
-        synchronisation capability is already reachable — and diverges from
-        upstream containers-common."""
-        allowed = self._ungated_allow_names()
-        self.assertLessEqual(FUTEX2, allowed)
-        self.assertIn("futex", allowed)
-        self.assertIn("futex_time64", allowed)
-
-    def test_names_within_each_entry_are_sorted(self):
-        """These lists are maintained by hand and diffed against upstream;
-        sorted order is what keeps that diff readable."""
-        for s in self.profile["syscalls"]:
-            names = s["names"]
-            self.assertEqual(names, sorted(names),
-                             f"unsorted names in a {s['action']} entry")
-
     def test_generator_and_rpm_agree_on_where_it_lands(self):
         """The generator points every unit at an absolute path; the spec is what
         puts the file there. A rename that touches one and not the other yields
@@ -140,12 +153,135 @@ class TestSeccompBaseline(unittest.TestCase):
         # by path; when the container generators moved to gen_container the
         # regex found nothing, which is the same reading it would give for a
         # constant that had genuinely been deleted.
-        from container_run_args import SECCOMP_BASELINE as baseline
+        from workload_seccomp import SECCOMP_BASELINE as baseline
         self.assertEqual(baseline.rsplit("/", 1)[-1], PROFILE.name)
         spec = SPEC.read_text()
         installed = baseline.replace("/usr/share", "%{_datadir}")
         self.assertIn(installed, spec,
                       f"{installed} is not installed by the spec")
+
+    def test_the_docs_name_the_error_each_blocked_syscall_gives(self):
+        """A syscall the baseline never names falls to defaultErrnoRet, 38:
+        gdb in a stock workload prints 'ptrace: Function not implemented',
+        and docs promising 'Operation not permitted' send the reader looking
+        for the wrong layer. Measured 2026-10-04, a container per profile on
+        a Fedora 44 host, each syscall called with an argument the kernel
+        itself rejects, so the errno tells which layer refused:
+
+            syscall            podman default    baseline   baseline + ptrace
+            ptrace             ESRCH (kernel)    ENOSYS     ESRCH (kernel)
+            process_vm_readv   0 (kernel)        ENOSYS     0 (kernel)
+            keyctl             EOPNOTSUPP        ENOSYS     ENOSYS
+            setns(-1, 0)       EBADF (kernel)    EPERM      EPERM
+        """
+        doc = _section(TROUBLESHOOTING.read_text(),
+                       "### 9. Syscall blocked by seccomp profile")
+        listed = re.search(r"The blocked syscalls are: (.*)", doc).group(1)
+        names = re.findall(r"`([a-z0-9_]+)`", listed)
+        self.assertTrue(names, "TROUBLESHOOTING.md §9 lists no syscalls")
+        guide = _section(WORKLOADS.read_text(), "### Seccomp Filtering")
+        for n in names:
+            errno = _errno_for_an_uncapable_container(self.profile, n)
+            with self.subTest(syscall=n, errno=errno):
+                self.assertIn(errno, (1, 38), "allowed, yet listed as blocked")
+                text = ENOSYS_TEXT if errno == 38 else EPERM_TEXT
+                self.assertIn(text, doc)
+                row = re.search(rf"^\| `{n[:10]}.*$", guide, re.M)
+                self.assertIsNotNone(row, f"workloads.md has no row for {n}")
+                self.assertIn(text, row.group(0))
+
+
+def _errno_for_an_uncapable_container(profile, name):
+    """The errno the profile returns for `name` in a container with no
+    added capabilities, or None if it is allowed: an ungated entry decides
+    first, then a capability gate's deny half, then the default."""
+    for s in profile["syscalls"]:
+        if name in s["names"] and not s.get("includes") \
+                and not s.get("excludes") and not s.get("args"):
+            if s["action"] == "SCMP_ACT_ALLOW":
+                return None
+            return s.get("errnoRet", profile["defaultErrnoRet"])
+    for s in profile["syscalls"]:
+        if name in s["names"] and s.get("excludes") \
+                and s["action"] == "SCMP_ACT_ERRNO":
+            return s.get("errnoRet", profile["defaultErrnoRet"])
+    return profile["defaultErrnoRet"]
+
+
+def _section(text, heading):
+    """From `heading` to the next heading of the same or a higher level."""
+    level = len(heading) - len(heading.lstrip("#"))
+    start = text.index(heading)
+    rest = text[start + len(heading):]
+    end = re.search(rf"^#{{1,{level}}} ", rest, re.M)
+    return text[start:start + len(heading) + (end.start() if end else
+                                              len(rest))]
+
+
+def _restricted_names(profile):
+    """Every name an entry of `profile` restricts: in a deny, behind a gate
+    or an argument filter."""
+    return sorted({n for s in profile["syscalls"]
+                   if s["action"] != "SCMP_ACT_ALLOW" or s.get("includes")
+                   or s.get("excludes") or s.get("args")
+                   for n in s["names"]})
+
+
+class TestAProfileAllowingEveryRestrictedName(ProfileChecks,
+                                              unittest.TestCase):
+    """The hardest seccomp_allow: every name the baseline denies, gates or
+    filters by argument, at once. Each must come out of its entries, gate
+    pairs included, or the derived profile breaks a check above."""
+
+    @classmethod
+    def setUpClass(cls):
+        baseline = json.loads(PROFILE.read_text())
+        cls.profile = derived_profile(baseline, _restricted_names(baseline))
+
+
+class TestAProfileAllowingTheDebuggersCalls(ProfileChecks,
+                                            unittest.TestCase):
+    """What a debugger needs: ptrace and process_vm_*, which the baseline
+    leaves to its default errno."""
+
+    @classmethod
+    def setUpClass(cls):
+        baseline = json.loads(PROFILE.read_text())
+        cls.profile = derived_profile(
+            baseline, ["process_vm_readv", "process_vm_writev", "ptrace"])
+
+
+class TestDerivedProfile(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.baseline = json.loads(PROFILE.read_text())
+
+    def test_each_restricted_name_is_allowed_by_one_entry_alone(self):
+        """One name at a time: it appears in exactly one entry, an
+        unconditional allow, and every other name keeps its entries."""
+        for name in _restricted_names(self.baseline):
+            with self.subTest(name=name):
+                profile = derived_profile(self.baseline, [name])
+                holding = [s for s in profile["syscalls"]
+                           if name in s["names"]]
+                self.assertEqual(holding, [{"names": [name],
+                                            "action": "SCMP_ACT_ALLOW"}])
+                rest = [dict(s, names=[n for n in s["names"] if n != name])
+                        for s in self.baseline["syscalls"]]
+                self.assertEqual(profile["syscalls"][:-1],
+                                 [s for s in rest if s["names"]])
+
+    def test_everything_but_the_syscalls_is_the_baselines(self):
+        profile = derived_profile(self.baseline, ["ptrace"])
+        self.assertEqual({k: v for k, v in profile.items()
+                          if k != "syscalls"},
+                         {k: v for k, v in self.baseline.items()
+                          if k != "syscalls"})
+
+    def test_the_baseline_is_not_changed(self):
+        before = json.dumps(self.baseline)
+        derived_profile(self.baseline, _restricted_names(self.baseline))
+        self.assertEqual(json.dumps(self.baseline), before)
 
 
 if __name__ == "__main__":

@@ -3222,17 +3222,26 @@ All workloads run with a hardened seccomp profile that restricts which kernel sy
 
 **What's blocked (beyond the podman default):**
 
-| Syscall | Why |
-|---------|-----|
-| `ptrace` | Inspect or control other processes; container escape vector |
-| `bpf` | Load eBPF programs; can read kernel memory, bypass LSM policies |
-| `perf_event_open` | Performance counters; side-channel leakage between containers |
-| `process_vm_readv/writev` | Read/write another process's memory directly |
-| `keyctl` | Kernel keyring manipulation |
+| Syscall | Why | Fails with |
+|---------|-----|------------|
+| `ptrace` | Inspect or control other processes; container escape vector | `Function not implemented` (ENOSYS) |
+| `bpf` | Load eBPF programs; can read kernel memory, bypass LSM policies | `Operation not permitted` (EPERM) |
+| `perf_event_open` | Performance counters; side-channel leakage between containers | `Operation not permitted` (EPERM) |
+| `process_vm_readv/writev` | Read/write another process's memory directly | `Function not implemented` (ENOSYS) |
+| `keyctl` | Kernel keyring manipulation | `Function not implemented` (ENOSYS) |
 
-Most service containers (web servers, databases, media servers) never call these syscalls. If your workload does, you'll see `Operation not permitted` errors at startup — see the [troubleshooting guide](../../docs/TROUBLESHOOTING.md) for diagnosis steps.
+A syscall the profile never mentions falls to its default, ENOSYS, as if the kernel lacked it: gdb prints `ptrace: Function not implemented`. One it names in a deny entry, or behind a capability the container lacks, gets EPERM. Most service containers (web servers, databases, media servers) never call these syscalls. If yours does, see the [troubleshooting guide](../../docs/TROUBLESHOOTING.md) for diagnosis steps.
 
-**Override for workloads that need a blocked syscall:**
+**Allow a blocked syscall, and keep the rest of the baseline:**
+```toml
+[security]
+# A debugger in a dev container:
+seccomp_allow = ["ptrace", "process_vm_readv", "process_vm_writev"]
+```
+
+The generator writes `/run/systemd/system/workload-<name>.seccomp.json` beside the units — the baseline installed at that moment, with those names allowed — and rebuilds it with them, so a baseline an RPM update ships reaches the workload at the next boot or `enable`, and `drift`/`doctor` report the profile until then. One profile serves every container of the workload.
+
+**Replace the baseline:**
 ```toml
 [security]
 # Use the less-strict podman default instead:

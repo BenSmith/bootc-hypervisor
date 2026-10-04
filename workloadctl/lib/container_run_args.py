@@ -5,8 +5,9 @@ the flags gen_container writes into ExecStart, plus the userns mapping
 `podman pod create` shares. Pure string work from the parsed TOML: nothing
 here does I/O, because it all runs on the boot path.
 
-SECCOMP_BASELINE lives here rather than in gen_common because it is a podman
-argument; a VM never applies one.
+The seccomp profile a container runs under is named here, because it is a
+podman argument and a VM never applies one; workload_seccomp says which
+profile that is and renders the derived one.
 
 Installed to /usr/libexec/workloadctl/container_run_args.py.
 """
@@ -24,7 +25,7 @@ from container_network_config import (
 )
 from workload_lib import (
     workload_state_dir, expand_volume_path, expand_workload_tokens, dq,
-    selinux_type_name,
+    selinux_type_name, RUN_SYSTEMD_SYSTEM,
 )
 from moatery.egress_ca import ca_cert_path
 from guest_ca import CA_ENV_VARS, CA_BUNDLE_PATH
@@ -34,10 +35,9 @@ from workload_addr import resolve_address
 from secrets_template import SECRET_PATTERN, validate_env_key
 from gen_common import log_msg, _external_host_path
 from validation import valid_userns_mode
-
-# Baseline seccomp profile applied to all workloads unless overridden via security_opt
-
-SECCOMP_BASELINE = "/usr/share/containers/seccomp-workload-baseline.json"
+from workload_seccomp import (
+    SECCOMP_BASELINE, derived_profile_name, seccomp_allow,
+)
 
 
 def get_group_gid(group_name):
@@ -471,9 +471,14 @@ def _security_args(spec):
         args.append(f"--security-opt=label=type:{selinux_type_name(name)}")
 
     # Apply baseline seccomp profile unless the workload overrides it or uses --privileged
-    # (--privileged disables seccomp anyway; adding it would just be noise)
+    # (--privileged disables seccomp anyway; adding it would just be noise).
+    # [security] seccomp_allow swaps in the derived profile the generator
+    # writes beside the units.
     if not privileged and not any(opt.startswith("seccomp=") for opt in security_opts):
-        args.append(f"--security-opt=seccomp={SECCOMP_BASELINE}")
+        profile = SECCOMP_BASELINE
+        if seccomp_allow(config):
+            profile = RUN_SYSTEMD_SYSTEM / derived_profile_name(name)
+        args.append(f"--security-opt=seccomp={profile}")
 
     if privileged:
         log_msg(f"WARNING: {name} uses privileged=true. "

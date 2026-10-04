@@ -42,6 +42,9 @@ from gen_container_heads import (
     generate_umbrella_service,
 )
 from unit_file import Unit
+from workload_seccomp import (
+    baseline_source, render_derived_profile, seccomp_allow,
+)
 
 
 def resolve_auto_gpu(name=None):
@@ -637,6 +640,22 @@ def generate_container_workload(config, user_name: str, uid: int) -> bool:
 
     # Main service: Requires+After setup service so User= is resolvable
     containers = normalize_containers(config)
+
+    # The derived seccomp profile, from the baseline installed now: a
+    # workload whose profile cannot be rendered gets no main unit rather
+    # than one naming a missing or stale file.
+    allowed = seccomp_allow(config)
+    if allowed:
+        profile_file = paths[("seccomp", "seccomp")][0]
+        try:
+            profile_file.write_text(render_derived_profile(allowed))
+        except (OSError, ValueError) as e:
+            profile_file.unlink(missing_ok=True)
+            log_msg(f"  Skipping {name}: cannot render its seccomp profile "
+                    f"from {baseline_source()}: {e}", level="err")
+            return False
+        log_msg(f"  Created seccomp profile (baseline + "
+                f"{', '.join(allowed)})")
 
     if mode == "single":
         service_content = generate_system_service(config, containers[0], user_name, uid)

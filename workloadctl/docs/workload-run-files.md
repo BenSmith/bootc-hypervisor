@@ -36,7 +36,7 @@ callers slice the set differently along each:
   removes" is *not* the whole owned set — it is the owned set minus the env-tree files.
 
 A durable helper therefore tags each entry with enough to reconstruct every view:
-its `kind` (`unit` / `wants-symlink` / `sysusers` / `dropin` / `env-file`) determines
+its `kind` (`unit` / `wants-symlink` / `sysusers` / `dropin` / `seccomp` / `env-file`) determines
 both its tree and its removal lifecycle, and a per-config **emitted** flag separates
 files that exist for *this* config from the over-listed topology superset (see the
 lifecycle note under "The set").
@@ -62,6 +62,7 @@ lifecycle note under "The set").
 | `/run/systemd/system/workload-<name>-inspect.socket` + `-inspect.service` | VM workloads whose egress is inspected (`uses_inspect`). Enumerated for every VM regardless, on the superset rule below |
 | `/run/systemd/system/workload-<name>-resolve.socket` + `-resolve.service` | the synthesising responder — a VM that is inspected **and** has `resolver` not `"none"` (`vm_uses_resolve`), or a container that is inspected, not in bridge mode, on pasta (`container_uses_resolve`). Same superset rule, for every workload |
 | `/run/systemd/system/workload-<name>-broker.service` | VM workloads declaring `[[vm.network.credential]]` material and inspected (`vm_uses_credentials`). Same superset rule |
+| `/run/systemd/system/workload-<name>.seccomp.json` | the derived seccomp profile — a container workload whose `[security]` names `seccomp_allow`: the baseline installed when the generator ran, with those syscalls allowed. Not a unit; the containers' `--security-opt=seccomp=` names it. Listed for every container workload, on the superset rule below |
 | `/run/systemd/system/workload-<name>-proxy.service` | **Nothing emits this.** A cleanup entry, listed only so that a host carrying this unit from an earlier install has something that knows its name and can unlink it. `emitted=False` always. Deletable once no host has one |
 
 The socket/service pairs are listed unconditionally on purpose: a workload that
