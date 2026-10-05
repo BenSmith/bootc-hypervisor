@@ -12,7 +12,7 @@ ARG FEDORA_VERSION=44
 # with the spec's `Requires: moatery >=`. The tag is what gets verified:
 # builds pass the signed digest it resolves to (`just moatery-rpm-ref` in
 # workloadctl/), and building from the bare tag skips the signature check.
-ARG MOATERY_RPM=registry.local/moatery-rpm:0.6.0
+ARG MOATERY_RPM=registry.local/moatery-rpm:0.7.1
 
 FROM ${MOATERY_RPM} AS moatery
 
