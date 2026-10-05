@@ -160,6 +160,9 @@ class TestSeccompBaseline(ProfileChecks, unittest.TestCase):
         self.assertIn(installed, spec,
                       f"{installed} is not installed by the spec")
 
+    @unittest.skipUnless(
+        TROUBLESHOOTING.is_file(),
+        "image half not present (standalone workloadctl checkout)")
     def test_the_docs_name_the_error_each_blocked_syscall_gives(self):
         """A syscall the baseline never names falls to defaultErrnoRet, 38:
         gdb in a stock workload prints 'ptrace: Function not implemented',
