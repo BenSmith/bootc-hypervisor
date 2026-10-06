@@ -4,6 +4,12 @@
 # picks up tests/test_integration.py and tests/test_unit_oracle.py with no
 # recipe change.
 #
+# In Fedora, because workloadctl requires moatery and the suite imports it:
+# the version hypervisor.Containerfile pins, from moatery's Copr repository
+# with its signature checked. The suite runs as a user rather than root, as
+# on the forge (.forgejo/workflows/workloadctl.yml): as root it writes real
+# /var/lib/workloads trees that its SELinux label checks then read.
+#
 # The `github.server_url == 'https://github.com'` guard keeps the mirrored
 # Forgejo runner from also executing this job; Forgejo has its own
 # .forgejo/workflows/workloadctl.yml for the same fast suite.
@@ -14,11 +20,15 @@ on:
   pull_request:
     paths:
       - 'workloadctl/**'
+      - 'hypervisor.Containerfile'
+      - 'moatery-copr/**'
       - '.github/workflows/workloadctl-test.yml'
   push:
     branches: [main]
     paths:
       - 'workloadctl/**'
+      - 'hypervisor.Containerfile'
+      - 'moatery-copr/**'
       - '.github/workflows/workloadctl-test.yml'
 
 concurrency:
@@ -29,22 +39,32 @@ jobs:
   test:
     if: ${{ github.server_url == 'https://github.com' }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    container: registry.fedoraproject.org/fedora:44
+    timeout-minutes: 20
     steps:
+      - name: Tooling
+        run: >-
+          dnf install -y git just python3 openssl systemd zstd
+          openssh-clients logrotate util-linux
+
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install just
+      - name: Install moatery
+        working-directory: workloadctl
         run: |
-          curl --proto '=https' --tlsv1.2 -sSf https://just.systems/install.sh \
-            | sudo bash -s -- --to /usr/local/bin
-          just --version
-          python3 --version
+          just moatery-rpm /tmp/moatery.rpm
+          dnf install -y /tmp/moatery.rpm
+
+      - name: A user to run as
+        run: |
+          useradd -m ci
+          chown -R ci: "$GITHUB_WORKSPACE"
 
       - name: Lint (py_compile)
         working-directory: workloadctl
-        run: just lint
+        run: runuser -u ci -- just lint
 
       - name: Unit + integration tests
         working-directory: workloadctl
-        run: just test
+        run: runuser -u ci -- just test

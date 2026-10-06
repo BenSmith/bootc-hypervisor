@@ -176,7 +176,7 @@ GitHub Actions (`.github/workflows/`) and a mirrored Forgejo runner (`.forgejo/w
 
 workloadctl has its own test workflows separate from the image builds:
 
-- `workloadctl-test.yml` (GitHub) — **PR gate**: lint + `just test` (unit + integration) on every PR/push touching `workloadctl/`. No VM, no secrets.
+- `workloadctl-test.yml` (GitHub) — **PR gate**: lint + `just test` (unit + integration) on every PR/push touching `workloadctl/` or the moatery pin, in a Fedora container with the pinned moatery from Copr, as a non-root user. No VM, no secrets.
 - `workloadctl-runtime.yml` (Forgejo only) — **cadence gate, not a PR gate**: `just test-runtime` (`WLRT_MODE=dev`, then `gate`; boots a harness-owned VM), scheduled weekly (Tue) and on `workflow_dispatch`. It skips cleanly without `/dev/kvm` and runs on a `native` runner (the git VM, per the container-in-container note above) with a persistent image cache.
 
 <!-- rtk-instructions v2 -->
