@@ -12,7 +12,7 @@ ARG FEDORA_VERSION=44
 # ISOs. Bump with the spec's `Requires: moatery >=`. `just build-base-local`
 # with MOATERY_LOCAL replaces the stage with a named build context, moatery,
 # holding a local build's RPM as /moatery.rpm.
-ARG MOATERY_VERSION=0.7.2
+ARG MOATERY_VERSION=0.7.3
 
 FROM fedora:${FEDORA_VERSION} AS moatery
 ARG MOATERY_VERSION
