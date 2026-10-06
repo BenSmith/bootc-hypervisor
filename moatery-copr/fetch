@@ -4,7 +4,8 @@
 # The RPM is noarch, so the one chroot serves every Fedora the images build
 # on. dnf download checks no signature: rpmkeys does, in a keyring of its
 # own, and _pkgverify_level makes it refuse an unsigned package, which plain
-# -K passes on its digests.
+# -K passes on its digests. --refresh, because a version released since
+# dnf last cached this repository's metadata is otherwise not found.
 set -euo pipefail
 [ "$#" -eq 2 ] || { echo "usage: $0 VERSION DEST" >&2; exit 2; }
 version=$1
@@ -13,7 +14,7 @@ repo=https://download.copr.fedorainfracloud.org/results/benjamin-coder-smith/moa
 key=$(dirname "$(realpath "$0")")/pubkey.gpg
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
-dnf download -q --arch=noarch --destdir="$work/rpms" \
+dnf download -q --refresh --arch=noarch --destdir="$work/rpms" \
   --repofrompath="moatery,$repo" --repo=moatery "moatery-$version"
 set -- "$work"/rpms/*.rpm
 if [ "$#" -ne 1 ] || [ ! -f "$1" ]; then
