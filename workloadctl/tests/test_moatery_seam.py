@@ -707,5 +707,20 @@ class TestTheImageInstallsMoatery(unittest.TestCase):
         self.assertIn("--define '_pkgverify_level signature' -K", fetch)
         self.assertIn('install -m 0644 "$1" "$dest"', fetch)
 
+    def test_a_local_moatery_stands_in_for_the_copr_stage(self):
+        """build-base-local's MOATERY_LOCAL hands podman a build context
+        named as the Containerfile's moatery stage, holding moatery.rpm
+        where the stage puts /moatery.rpm. podman then takes the context
+        for every --from=moatery and does not build the stage (seen with
+        podman 5.8.7, 2026-10-06); a context of any other name is ignored
+        and the image quietly gets the Copr release."""
+        containerfile = CONTAINERFILE.read_text()
+        justfile = (CONTAINERFILE.parent / "justfile").read_text()
+        stage = re.search(
+            r"(?m)^FROM \S+ AS (moatery)$", containerfile).group(1)
+        self.assertIn(f'--build-context "{stage}=$context"', justfile)
+        self.assertIn('"$context/moatery.rpm"', justfile)
+        self.assertIn(f"COPY --from={stage} /moatery.rpm", containerfile)
+
 if __name__ == "__main__":
     unittest.main()

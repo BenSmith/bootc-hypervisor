@@ -173,16 +173,40 @@ build-base: sync-cosy
     -t ghcr.io/bensmith/hypervisor-bootc:latest \
     -f hypervisor.Containerfile .
 
+# MOATERY_LOCAL=PATH puts a local moatery in the image in place of the Copr
+# release hypervisor.Containerfile pins: PATH is a moatery checkout, whose
+# `just rpm-image` builds and tests the RPM in a container, or an RPM. An
+# environment variable, not a parameter, so it reaches this recipe through
+# build-all-local and aio-local.
 build-base-local: sync-cosy
   #!/usr/bin/env bash
   set -euo pipefail
   cp policy-local.json policy.json
+  # A named build context called moatery stands in for the Containerfile's
+  # moatery stage, which then is not built.
+  moatery=()
+  if [ -n "${MOATERY_LOCAL:-}" ]; then
+    context=$(mktemp -d)
+    trap 'rm -rf "$context"' EXIT
+    if [ -d "$MOATERY_LOCAL" ]; then
+      (cd "$MOATERY_LOCAL" && just rpm-image)
+      image="localhost/moatery-rpm:$(cat "$MOATERY_LOCAL/VERSION")"
+      ctr=$(podman create "$image" none)
+      podman cp "$ctr:/moatery.rpm" "$context/moatery.rpm"
+      podman rm -f "$ctr" >/dev/null
+    else
+      cp "$MOATERY_LOCAL" "$context/moatery.rpm"
+    fi
+    echo "moatery from $MOATERY_LOCAL: $(rpm -qp "$context/moatery.rpm")"
+    moatery=(--build-context "moatery=$context")
+  fi
   # BASE_IMAGE, not --from: --from overrides the build's FIRST stage, which
   # is not the base, so it swaps an early stage for the bootc minimal and
   # leaves the real base at the ARG default -- a registry pull. Same knob
   # build-base uses, pointed at the local minimal.
   http_proxy={{proxy}} https_proxy={{proxy}} \
   podman build \
+    "${moatery[@]}" \
     --network=host \
     --build-arg BASE_IMAGE=localhost/fedora-bootc-minimal:{{fedora_version}} \
     --build-arg FEDORA_VERSION={{fedora_version}} \

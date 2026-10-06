@@ -9,7 +9,9 @@ ARG FEDORA_VERSION=44
 # moatery's RPM, from its Copr repository, signature checked against the
 # project's key (moatery-copr/fetch). workloadctl requires it: the unit suite
 # below imports it, and the final image installs it and caches it for VM seed
-# ISOs. Bump with the spec's `Requires: moatery >=`.
+# ISOs. Bump with the spec's `Requires: moatery >=`. `just build-base-local`
+# with MOATERY_LOCAL replaces the stage with a named build context, moatery,
+# holding a local build's RPM as /moatery.rpm.
 ARG MOATERY_VERSION=0.7.2
 
 FROM fedora:${FEDORA_VERSION} AS moatery

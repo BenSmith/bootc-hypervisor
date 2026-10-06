@@ -47,6 +47,7 @@ just moatery-rpm          # the RPM hypervisor.Containerfile pins, from Copr
 
 # --- image builds (root, requires podman; *-local skip the registry push) ---
 just build-base-local                 # hypervisor-bootc from local minimal
+MOATERY_LOCAL=../moatery just build-base-local  # moatery from a checkout (or an RPM)
 just build-nvidia-rpmfusion-local
 just build-all-local
 just build-iso-base                    # installer ISO
