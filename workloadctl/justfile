@@ -218,38 +218,15 @@ rpm-install: rpm-build
   echo "Installing ${rpm}"
   sudo dnf install -y --allowerasing "$rpm"
 
-# The image hypervisor.Containerfile pins for moatery's RPM, its signature
-# verified against the repo's cosign.pub, printed as repo@digest. Every
-# consumer takes this ref rather than the tag, so what it installs is what
-# was signed, not whatever the tag names by the time it pulls. Signatures
-# are registry attachments, so the host needs use-sigstore-attachments for
-# the registry (registries.d/registry-local.yaml; the hypervisor image and
-# the runners carry it).
-moatery-rpm-ref:
-  #!/usr/bin/env bash
-  set -euo pipefail
-  image=$(sed -n 's/^ARG MOATERY_RPM=//p' ../hypervisor.Containerfile)
-  [ -n "$image" ] || { echo "no ARG MOATERY_RPM in hypervisor.Containerfile" >&2; exit 1; }
-  repo="${image%:*}"
-  policy=$(mktemp)
-  trap 'rm -f "$policy"' EXIT
-  printf '{"default":[{"type":"reject"}],"transports":{"docker":{"%s":[{"type":"sigstoreSigned","keyPath":"%s","signedIdentity":{"type":"matchRepository"}}]}}}' \
-    "$repo" "$(realpath ../cosign.pub)" > "$policy"
-  podman pull -q --signature-policy="$policy" "$image" >/dev/null
-  digest=$(podman image inspect "$image" \
-    | python3 -c 'import json, sys; print(json.load(sys.stdin)[0]["Digest"])')
-  echo "verified: $image ($digest)" >&2
-  echo "$repo@$digest"
-
-# moatery's RPM, which workloadctl's requires, out of the verified image
-# (FROM scratch, /moatery.rpm), to DEST.
+# moatery's RPM, which workloadctl's requires, at the version
+# hypervisor.Containerfile pins, from Copr with its signature checked
+# (../moatery-copr/fetch, which the image build runs too), to DEST.
 moatery-rpm dest="moatery.rpm":
   #!/usr/bin/env bash
   set -euo pipefail
-  ref=$({{just_executable()}} -f {{justfile()}} moatery-rpm-ref)
-  ctr=$(podman create "$ref" none)
-  trap 'podman rm -f "$ctr" >/dev/null' EXIT
-  podman cp "$ctr:/moatery.rpm" "{{dest}}"
+  version=$(sed -n 's/^ARG MOATERY_VERSION=//p' ../hypervisor.Containerfile)
+  [ -n "$version" ] || { echo "no ARG MOATERY_VERSION in hypervisor.Containerfile" >&2; exit 1; }
+  ../moatery-copr/fetch "$version" "{{dest}}"
   rpm -qp "{{dest}}"
 
 # Remove old build artifacts

@@ -27,8 +27,8 @@ jobs:
           just --version
 
       # workloadctl requires moatery, and the unit suite imports it. The
-      # version is the one hypervisor.Containerfile pins, taken from the
-      # signed image moatery's own workflow pushes.
+      # version is the one hypervisor.Containerfile pins, from moatery's Copr
+      # repository with its signature checked.
       - name: Install moatery
         working-directory: workloadctl
         run: |

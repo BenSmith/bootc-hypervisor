@@ -129,18 +129,8 @@ jobs:
             echo "HOMELAB_ROOT_CA secret not set; building without injected anchors"
           fi
 
-      # moatery's RPM is installed into this signed image, so the build takes
-      # it by the digest whose signature verified, not by the pinned tag.
-      - name: Verify moatery RPM
-        id: moatery
-        working-directory: workloadctl
-        run: |
-          ref=$(sudo just moatery-rpm-ref)
-          echo "ref=${ref}" >> "$GITHUB_OUTPUT"
-
       - name: Build base hypervisor
         env:
-          MOATERY_RPM: ${{ steps.moatery.outputs.ref }}
           VERSION: ${{ matrix.fedora_version }}
         run: |
           sudo podman build \
@@ -152,7 +142,6 @@ jobs:
             --network=host \
             --build-arg BASE_IMAGE=${REGISTRY}/fedora-bootc-minimal:${VERSION} \
             --build-arg FEDORA_VERSION=${VERSION} \
-            --build-arg MOATERY_RPM=${MOATERY_RPM} \
             -f hypervisor.Containerfile \
             -t "localhost/hypervisor-bootc:build-${VERSION}" \
             .

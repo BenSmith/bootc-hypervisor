@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+# moatery's RPM at VERSION, from its Copr repository, to DEST, refused
+# unless it is signed by the project's key beside this script (pubkey.gpg).
+# The RPM is noarch, so the one chroot serves every Fedora the images build
+# on. dnf download checks no signature: rpmkeys does, in a keyring of its
+# own, and _pkgverify_level makes it refuse an unsigned package, which plain
+# -K passes on its digests.
+set -euo pipefail
+[ "$#" -eq 2 ] || { echo "usage: $0 VERSION DEST" >&2; exit 2; }
+version=$1
+dest=$2
+repo=https://download.copr.fedorainfracloud.org/results/benjamin-coder-smith/moatery/fedora-44-x86_64/
+key=$(dirname "$(realpath "$0")")/pubkey.gpg
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+dnf download -q --arch=noarch --destdir="$work/rpms" \
+  --repofrompath="moatery,$repo" --repo=moatery "moatery-$version"
+set -- "$work"/rpms/*.rpm
+if [ "$#" -ne 1 ] || [ ! -f "$1" ]; then
+  echo "expected exactly one moatery-$version RPM, got $#:" >&2
+  ls -l "$work/rpms" >&2
+  exit 1
+fi
+keyring=(--define '_keyring fs' --define "_keyringpath $work/keys"
+         --define "_dbpath $work/keys")
+rpmkeys "${keyring[@]}" --import "$key"
+rpmkeys "${keyring[@]}" --define '_pkgverify_level signature' -K "$1"
+install -m 0644 "$1" "$dest"

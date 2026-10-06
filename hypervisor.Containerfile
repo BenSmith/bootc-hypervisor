@@ -6,15 +6,17 @@ ARG BASE_IMAGE=ghcr.io/bensmith/fedora-bootc-minimal:latest
 # Every caller passes it explicitly (justfile + CI workflows); the default
 # tracks current stable.
 ARG FEDORA_VERSION=44
-# moatery's RPM as an image (FROM scratch, /moatery.rpm), signed and pushed by
-# moatery's own workflow. workloadctl requires it: the unit suite below imports
-# it, and the final image installs it and caches it for VM seed ISOs. Bump
-# with the spec's `Requires: moatery >=`. The tag is what gets verified:
-# builds pass the signed digest it resolves to (`just moatery-rpm-ref` in
-# workloadctl/), and building from the bare tag skips the signature check.
-ARG MOATERY_RPM=registry.local/moatery-rpm:0.7.1
+# moatery's RPM, from its Copr repository, signature checked against the
+# project's key (moatery-copr/fetch). workloadctl requires it: the unit suite
+# below imports it, and the final image installs it and caches it for VM seed
+# ISOs. Bump with the spec's `Requires: moatery >=`.
+ARG MOATERY_VERSION=0.7.2
 
-FROM ${MOATERY_RPM} AS moatery
+FROM fedora:${FEDORA_VERSION} AS moatery
+ARG MOATERY_VERSION
+COPY moatery-copr/ /tmp/moatery-copr/
+RUN /tmp/moatery-copr/fetch "${MOATERY_VERSION}" /moatery.rpm && \
+    rm -rf /tmp/moatery-copr
 
 FROM fedora:${FEDORA_VERSION} AS rpm-builder
 COPY workloadctl/ /workloadctl/

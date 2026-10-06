@@ -335,12 +335,13 @@ first boot.
 ## Install
 
 workloadctl requires moatery, the egress inspector and credential broker its
-filtered workloads run behind. Install its RPM first; `just moatery-rpm`
-fetches the version the hypervisor image pins.
+filtered workloads run behind. Install it first, from its Copr repository
+(`just moatery-rpm` fetches the version the hypervisor image pins).
 
 ```bash
+sudo dnf copr enable benjamin-coder-smith/moatery
+sudo dnf install moatery
 cd workloadctl
-sudo dnf install ./moatery.rpm
 rpmbuild -bb --define "_topdir $(pwd)/rpmbuild" \
   --define "_sourcedir $(pwd)" rpm/workloadctl.spec
 sudo dnf install rpmbuild/RPMS/noarch/workloadctl-*.rpm

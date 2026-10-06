@@ -670,25 +670,42 @@ CONTAINERFILE = Path(REPO_ROOT).parent / "hypervisor.Containerfile"
 class TestTheImageInstallsMoatery(unittest.TestCase):
 
     def test_the_pinned_moatery_satisfies_the_spec(self):
-        """The hypervisor image takes moatery's RPM from the image its build
-        pins, installs it in the stage that runs this suite and in the
-        image, and caches it for VM seed ISOs. The pinned tag satisfies the
-        spec's minimum, or the image's `dnf install` refuses workloadctl."""
+        """The hypervisor image fetches moatery's RPM at the version its
+        build pins, installs it in the stage that runs this suite and in the
+        image, and caches it for VM seed ISOs. The pinned version satisfies
+        the spec's minimum, or the image's `dnf install` refuses
+        workloadctl."""
         spec = (Path(REPO_ROOT) / "rpm" / "workloadctl.spec").read_text()
         minimum = re.search(
             r"(?m)^Requires:\s+moatery >= (\S+)$", spec).group(1)
         containerfile = CONTAINERFILE.read_text()
         pinned = re.search(
-            r"(?m)^ARG MOATERY_RPM=\S+:(\S+)$", containerfile).group(1)
+            r"(?m)^ARG MOATERY_VERSION=(\S+)$", containerfile).group(1)
 
         def version(text):
             return tuple(int(part) for part in text.split("."))
 
         self.assertGreaterEqual(version(pinned), version(minimum))
-        self.assertIn("FROM ${MOATERY_RPM} AS moatery", containerfile)
+        self.assertIn('/tmp/moatery-copr/fetch "${MOATERY_VERSION}" '
+                      "/moatery.rpm", containerfile)
         self.assertEqual(containerfile.count(
             "COPY --from=moatery /moatery.rpm /tmp/moatery.rpm"), 2)
         self.assertIn("/usr/share/workloadctl/moatery.rpm", containerfile)
+
+    def test_the_fetch_refuses_what_the_project_key_did_not_sign(self):
+        """dnf download checks no signature, so the fetch's rpmkeys is the
+        only check between Copr and the image. It reads the key committed
+        beside it, and _pkgverify_level makes it refuse an unsigned package,
+        which `rpmkeys -K` alone passes on its digests (both seen
+        2026-10-06: a package signed by another key and an unsigned one,
+        each served from a local repository, were refused)."""
+        copr = CONTAINERFILE.parent / "moatery-copr"
+        fetch = (copr / "fetch").read_text()
+        self.assertTrue((copr / "pubkey.gpg").read_text().startswith(
+            "-----BEGIN PGP PUBLIC KEY BLOCK-----"))
+        self.assertIn('/pubkey.gpg', fetch)
+        self.assertIn("--define '_pkgverify_level signature' -K", fetch)
+        self.assertIn('install -m 0644 "$1" "$dest"', fetch)
 
 if __name__ == "__main__":
     unittest.main()
