@@ -177,7 +177,7 @@ GitHub Actions (`.github/workflows/`) and a mirrored Forgejo runner (`.forgejo/w
 workloadctl has its own test workflows separate from the image builds:
 
 - `workloadctl-test.yml` (GitHub) — **PR gate**: lint + `just test` (unit + integration) on every PR/push touching `workloadctl/`. No VM, no secrets.
-- `workloadctl-runtime.yml` (GitHub + mirrored Forgejo) — **cadence gate, not a PR gate**: `just test-runtime` (`WLRT_MODE=dev`, boots a harness-owned VM), scheduled weekly (GitHub Mon, Forgejo Tue) and on `workflow_dispatch`. Both skip cleanly without `/dev/kvm`; the Forgejo mirror runs on a `native` runner (the git VM, per the container-in-container note above) with a persistent image cache.
+- `workloadctl-runtime.yml` (Forgejo only) — **cadence gate, not a PR gate**: `just test-runtime` (`WLRT_MODE=dev`, then `gate`; boots a harness-owned VM), scheduled weekly (Tue) and on `workflow_dispatch`. It skips cleanly without `/dev/kvm` and runs on a `native` runner (the git VM, per the container-in-container note above) with a persistent image cache.
 
 <!-- rtk-instructions v2 -->
 # RTK (Rust Token Killer) - Token-Optimized Commands

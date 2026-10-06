@@ -7,10 +7,9 @@
 #                            qcow2 by bootc-image-builder, booted with a
 #                            swtpm-backed vTPM (B1b) — the shipped artifact
 #                            under nested KVM.
-# Mirror of .github/workflows/workloadctl-runtime.yml, but the gate rung is
-# Forgejo-only: it needs registry.local (homelab-internal) and privileged BIB,
-# neither of which a GitHub-hosted runner can reach. This is a CADENCE gate,
-# not a PR gate: schedule + manual dispatch only.
+# Forgejo only: the gate rung needs registry.local (homelab-internal) and
+# privileged BIB, neither of which a GitHub-hosted runner can reach. This is a
+# CADENCE gate, not a PR gate: schedule + manual dispatch only.
 #
 # The two fidelities are sequential steps of a single job, not a `strategy.matrix`:
 # Forgejo expands a matrix into independent jobs and dispatches them all at once
@@ -45,9 +44,8 @@ name: workloadctl runtime
 on:
   workflow_dispatch:
   schedule:
-    # Weekly, Tuesday 03:00 UTC — offset from the GitHub-hosted runtime rung
-    # (Monday) and the Sat/Sun image builds, so failures are attributable and
-    # the gate image is freshly built.
+    # Weekly, Tuesday 03:00 UTC — offset from the Sat/Sun image builds, so
+    # failures are attributable and the gate image is freshly built.
     - cron: '0 3 * * 2'
 
 jobs:

@@ -128,10 +128,11 @@ docs/
   ideas.md                                Scratch list, not a plan of record
 
 .github/workflows/                        build-minimal-bootc.yml (weekly Sat), build-hypervisor.yml (weekly Sun),
-                                          workloadctl-test.yml (PR gate), workloadctl-runtime.yml (weekly Mon)
-.forgejo/workflows/                       Mirrors of the above (minimal Sun, hypervisor Mon, runtime Tue) plus three
-                                          Forgejo-only: seal-signing-key.yml, build-workload-images.yml,
-                                          build-hypervisor-f44-quick.yml. No drift check between the forges.
+                                          workloadctl-test.yml (PR gate)
+.forgejo/workflows/                       Mirrors of the above (minimal Sun, hypervisor Mon) plus four Forgejo-only:
+                                          workloadctl-runtime.yml (weekly Tue), seal-signing-key.yml,
+                                          build-workload-images.yml, build-hypervisor-f44-quick.yml. No drift
+                                          check between the forges.
 .forgejo/scripts/ci-workload-images.py    Builds workload images from the checked-out tree via workloadctl's own
                                           lib/imagebuild.py; `list` feeds the CI matrix
 
