@@ -39,7 +39,9 @@ jobs:
       stable: ${{ steps.r.outputs.stable }}
       rechunker: ${{ steps.r.outputs.rechunker }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - id: r
         run: |
           curl -fsSL https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 \
@@ -75,7 +77,9 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
       - name: Resolve build parameters
         id: params
@@ -91,9 +95,9 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Free disk space
-        uses: jlumbroso/free-disk-space@main
+        uses: jlumbroso/free-disk-space@ceedf095f4ec1a097402bc6bd80831f2e1a6fde6  # v2.0.0
         with:
-          tool-cache: true
+          preinstalled-runtimes: true
           android: true
           dotnet: true
           haskell: true
@@ -285,7 +289,9 @@ jobs:
 
       - name: Checkout repository
         if: steps.gate.outputs.build == 'true'
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
       - name: Render policy.json
         if: steps.gate.outputs.build == 'true'
@@ -297,9 +303,9 @@ jobs:
 
       - name: Free disk space
         if: steps.gate.outputs.build == 'true'
-        uses: jlumbroso/free-disk-space@main
+        uses: jlumbroso/free-disk-space@ceedf095f4ec1a097402bc6bd80831f2e1a6fde6  # v2.0.0
         with:
-          tool-cache: true
+          preinstalled-runtimes: true
           android: true
           dotnet: true
           haskell: true

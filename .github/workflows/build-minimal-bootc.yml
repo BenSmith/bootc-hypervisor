@@ -37,7 +37,9 @@ jobs:
       stable: ${{ steps.r.outputs.stable }}
       rechunker: ${{ steps.r.outputs.rechunker }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - id: r
         run: |
           curl -fsSL https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 \
@@ -68,7 +70,9 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
       - name: Resolve build parameters
         id: params
