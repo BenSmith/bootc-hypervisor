@@ -42,16 +42,14 @@ jobs:
           persist-credentials: false
       - id: r
         run: |
-          curl -fsSL https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 \
-            -o /usr/local/bin/yq && chmod +x /usr/local/bin/yq
           if [ -n "${{ inputs.versions_override }}" ]; then
             echo "versions=${{ inputs.versions_override }}"
           else
-            echo "versions=$(yq -o=json -I=0 '.supported' fedora-versions.yml)"
+            echo "versions=$(sh fedora-versions.sh supported)"
           fi >> "$GITHUB_OUTPUT"
           {
-            echo "stable=$(yq '.stable' fedora-versions.yml)"
-            echo "rechunker=$(yq '.rechunker' fedora-versions.yml)"
+            echo "stable=$(sh fedora-versions.sh stable)"
+            echo "rechunker=$(sh fedora-versions.sh rechunker)"
           } >> "$GITHUB_OUTPUT"
 
   build:

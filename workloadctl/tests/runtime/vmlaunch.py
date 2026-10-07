@@ -107,11 +107,6 @@ def missing_prereqs(mode: str) -> list[str]:
 
 def resolve_fedora_version() -> int:
     """Read `stable:` from fedora-versions.yml (the project's single source)."""
-    if shutil.which("yq"):
-        r = subprocess.run(["yq", ".stable", str(FEDORA_VERSIONS)],
-                           capture_output=True, text=True)
-        if r.returncode == 0 and r.stdout.strip().isdigit():
-            return int(r.stdout.strip())
     m = re.search(r'^stable:\s*(\d+)', FEDORA_VERSIONS.read_text(), re.M)
     if not m:
         raise RuntimeError(f"could not resolve stable Fedora version from {FEDORA_VERSIONS}")

@@ -4,16 +4,14 @@ proxy := env_var_or_default('HTTP_PROXY', '')
 build_dir := env_var_or_default('BUILD_DIR', '/var/tmp/hypervisor-build')
 local_registry := 'registry.local'
 tag := `date +%Y%m%d-%H%M`
-# Both backticks below fall back to sed because `just` evaluates every variable
-# in the file before running *any* recipe, and the default arm of
-# env_var_or_default() is evaluated even when the variable is set. So a missing
-# `yq` takes down recipes that never touch these values — `install-hooks`,
-# `test`, everything delegating into workloadctl/ — and exporting
-# FEDORA_VERSION does not get you out of it. `yq` stays the primary reader; the
-# sed arm reads the same file, so there is still one source of truth.
-fedora_version := env_var_or_default('FEDORA_VERSION', `yq '.stable' fedora-versions.yml 2>/dev/null || sed -n 's/^stable:[[:space:]]*\([^[:space:]#]*\).*/\1/p' fedora-versions.yml`)
+# fedora-versions.sh reads fedora-versions.yml, the one source of truth.
+# `just` evaluates every variable before running any recipe, the default arm
+# of env_var_or_default() included, so a file it refuses is named on stderr
+# and leaves the value empty rather than taking down recipes that never use
+# it (`install-hooks`, `test`, everything delegating into workloadctl/).
+fedora_version := env_var_or_default('FEDORA_VERSION', `sh fedora-versions.sh stable || true`)
 # Pinned rechunker image tag, same source of truth the CI workflows read.
-rechunker := env_var_or_default('RECHUNKER', `yq '.rechunker' fedora-versions.yml 2>/dev/null || sed -n 's/^rechunker:[[:space:]]*\([^[:space:]#]*\).*/\1/p' fedora-versions.yml`)
+rechunker := env_var_or_default('RECHUNKER', `sh fedora-versions.sh rechunker || true`)
 
 # Rechunk an image in user storage (copies to root, rechunks, copies back)
 _rechunk image:

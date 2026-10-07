@@ -39,11 +39,10 @@ jobs:
       - uses: actions/checkout@v4
       - id: r
         run: |
-          command -v yq >/dev/null || sudo dnf install -y yq
           if [ -n "${{ inputs.versions_override }}" ]; then
             echo "versions=${{ inputs.versions_override }}"
           else
-            echo "versions=$(yq -o=json -I=0 '.supported' fedora-versions.yml)"
+            echo "versions=$(sh fedora-versions.sh supported)"
           fi >> "$GITHUB_OUTPUT"
 
   publish:

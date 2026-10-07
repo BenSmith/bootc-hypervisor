@@ -36,13 +36,12 @@ jobs:
       - uses: actions/checkout@v4
       - id: r
         run: |
-          command -v yq >/dev/null || sudo dnf install -y yq
           # stable/rechunker still come from the single source of truth so the
           # :latest / :negativo17 floating tags are pushed when 44 is stable.
           # One dated tag shared by base + variants for this run.
           {
-            echo "stable=$(yq '.stable' fedora-versions.yml)"
-            echo "rechunker=$(yq '.rechunker' fedora-versions.yml)"
+            echo "stable=$(sh fedora-versions.sh stable)"
+            echo "rechunker=$(sh fedora-versions.sh rechunker)"
             echo "tag=$(date +%Y%m%d-%H%M)"
           } >> "$GITHUB_OUTPUT"
 

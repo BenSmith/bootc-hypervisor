@@ -20,7 +20,7 @@ fedora-bootc-minimal (built from upstream Fedora bootc manifests)
       └── hypervisor-amd
 ```
 
-`fedora-versions.yml` is the single source of truth for which Fedora versions build and which is `:latest`/`stable`. The root `justfile` `{{tag}}` and `{{fedora_version}}` are derived from it (via `yq`).
+`fedora-versions.yml` is the single source of truth for which Fedora versions build and which is `:latest`/`stable`. The root `justfile` `{{tag}}` and `{{fedora_version}}` are derived from it (via `fedora-versions.sh`).
 
 ## Common commands
 
