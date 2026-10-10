@@ -199,6 +199,9 @@ RUN /usr/libexec/hypervisor-build/selinux-store-copyup && \
     firewalld \
     fwupd \
     git-core \
+    google-noto-color-emoji-fonts \
+    google-noto-sans-fonts \
+    google-noto-sans-symbols-2-fonts \
     grub2 \
     grub2-efi-x64 \
     hdparm \
